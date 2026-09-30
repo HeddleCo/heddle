@@ -38,9 +38,19 @@ use repo::{CollaborationStore, Repository};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::HostedClient,
-    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
+    client::{
+        HostedClient,
+        replication_report::{DeliveredCommand, ReplicationReport, issue_from_error},
+    },
+    hosted_runtime::hosted::{
+        HostedDiscussion, HostedDiscussionTurn, HostedResolution, discussion_command_ids,
+    },
 };
+
+/// Attach the delivered command's IDs to a failed delivery.
+fn delivered(signed: &SignedRecord) -> Result<DeliveredCommand> {
+    Ok(DeliveredCommand(discussion_command_ids(signed)?))
+}
 
 /// Deterministic namespace for idempotency keys of operations materialized
 /// from hosted discussions, so every clone derives the same `CollabOpId`.
@@ -287,10 +297,11 @@ async fn publish_authored_append(
         save_mirror(repo.heddle_dir(), mirror)?;
         signed
     };
+    let command = delivered(&signed)?;
     client
         .publish_append_discussion_operation(signed)
         .await
-        .map_err(Into::into)
+        .map_err(|error| anyhow::Error::new(error).context(command))
 }
 
 /// The single resolving operation at the discussion's causal frontier.
@@ -410,9 +421,11 @@ async fn publish_authored_resolution(
             (signed, expected_version)
         }
     };
+    let command = delivered(&signed)?;
     client
         .publish_resolve_discussion_operation(signed, expected_version)
         .await
+        .map_err(|error| anyhow::Error::new(error).context(command))
         .with_context(|| format!("resolve hosted discussion for {local_id}"))?;
     mark_published(mirror)?;
     save_mirror(repo.heddle_dir(), mirror)?;
@@ -421,27 +434,26 @@ async fn publish_authored_resolution(
 
 /// Publish every supported locally authored discussion anchor through the
 /// hosted `CollaborationService`. The durable signed record is saved before
-/// delivery. Per-discussion failures are collected and returned as an explicit
-/// incomplete replication result after other discussions have been attempted.
+/// delivery. Every discussion is attempted; each one the service does not
+/// hold afterwards is reported with why, rather than failing the others.
 pub async fn push_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     default_thread_ref: &str,
-) -> Result<usize> {
+) -> Result<ReplicationReport> {
+    let mut report = ReplicationReport::default();
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     let materialized = store
         .materialize()
         .context("materialize local discussions")?;
     if materialized.discussions.is_empty() {
-        return Ok(0);
+        return Ok(report);
     }
     let self_attr = repo.get_attribution().ok();
 
     let _guard = lock_mirror_write(repo.heddle_dir())?;
     let mut mirror = load_mirror(repo.heddle_dir())?;
-    let mut synced = 0usize;
-    let mut incomplete = Vec::new();
 
     for (discussion_id, discussion) in &materialized.discussions {
         let result = push_one(
@@ -460,25 +472,22 @@ pub async fn push_discussions(
         // some turns may already be on the server — so a retry resumes cleanly.
         save_mirror(repo.heddle_dir(), &mirror)?;
         match result {
-            Ok(true) => synced += 1,
+            Ok(true) => report.accepted += 1,
             Ok(false) => {}
             Err(error) => {
                 client.warn(
                     "hosted_discussion_sync_failed",
                     format!("hosted discussion {discussion_id}: {error:#}"),
                 );
-                incomplete.push(format!("{discussion_id}: {error:#}"));
+                report.issues.push(issue_from_error(
+                    Some(discussion_id.to_string()),
+                    None,
+                    &error,
+                ));
             }
         }
     }
-
-    if !incomplete.is_empty() {
-        return Err(anyhow!(
-            "hosted discussion replication incomplete: {}",
-            incomplete.join("; ")
-        ));
-    }
-    Ok(synced)
+    Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -579,9 +588,11 @@ async fn push_one(
                 save_mirror(repo.heddle_dir(), mirror)?;
                 signed
             };
+            let command = delivered(&signed)?;
             let mut hosted = client
                 .publish_open_discussion_operation(signed)
                 .await
+                .map_err(|error| anyhow::Error::new(error).context(command))
                 .with_context(|| format!("open hosted discussion for {local_id}"))?;
             let server_id = hosted.id.clone();
             let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
@@ -2084,14 +2095,15 @@ mod tests {
         assert_eq!(
             push_discussions(&repo, &mut client, "acme/widgets", "main")
                 .await
-                .unwrap(),
+                .unwrap()
+                .accepted,
             1
         );
         assert_eq!(
             push_discussions(&repo, &mut client, "acme/widgets", "main")
                 .await
                 .unwrap(),
-            0,
+            ReplicationReport::default(),
             "mirrored native operations must not be sent again"
         );
 
@@ -2194,7 +2206,8 @@ mod tests {
         assert_eq!(
             push_discussions(&source, &mut client, "acme/widgets", "feature/provenance",)
                 .await
-                .unwrap(),
+                .unwrap()
+                .accepted,
             4
         );
         let mut source_signed: Vec<Vec<u8>> =

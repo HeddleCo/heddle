@@ -36,7 +36,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     attachments::{context_root_for_state, put_context_attachment},
-    client::HostedClient,
+    client::{
+        HostedClient,
+        replication_report::{
+            CommandIds, DeliveredCommand, FailedRevision, ReplicationIssue, ReplicationIssueKind,
+            ReplicationReport, StaleRevisionPending, classify_error, issue_from_error,
+        },
+    },
+    hosted_runtime::hosted::context_command_ids,
 };
 
 // =========================================================================
@@ -73,6 +80,28 @@ struct ContextMirrorEntry {
     /// revision identity. Retries decode and resend these bytes unchanged.
     #[serde(default)]
     native_operations: Vec<PreparedContextOperation>,
+    /// Set when the service refused one of this annotation's revisions as
+    /// stale. Until the author refreshes and revises explicitly, push sends
+    /// nothing for the annotation: resending the refused bytes cannot
+    /// succeed, and re-signing them against the moved frontier would silently
+    /// overwrite the concurrent change the refusal exists to surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stale_rejection: Option<StaleContextRejection>,
+    /// Revisions refused as stale and then replaced by an explicit revision.
+    /// They stay in local history and are never sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_only_revisions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StaleContextRejection {
+    /// The revision the service refused.
+    revision_id: String,
+    /// Every local revision still unsent when the refusal arrived. Only a
+    /// revision authored after it counts as the author's explicit revision.
+    unsent_revisions: Vec<String>,
+    client_operation_id: String,
+    signed_operation_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -312,9 +341,11 @@ async fn publish_native_context_revision(
         save_mirror(heddle_dir, mirror)?;
         (signed, expected_version)
     };
+    let command = context_command_ids(&signed, &client_operation_id)?;
     client
         .publish_native_context_record(signed, expected_version, client_operation_id)
-        .await?;
+        .await
+        .map_err(|error| anyhow::Error::new(error).context(DeliveredCommand(command)))?;
     Ok(())
 }
 
@@ -328,31 +359,34 @@ fn hosted_attribution(username: Option<&str>) -> Option<String> {
 // Push
 // =========================================================================
 
-/// Publish local annotations we authored to the hosted `RepositoryService`.
+/// Publish local annotations we authored to the hosted collaboration
+/// service. Every annotation is attempted; each one the service does not hold
+/// afterwards is reported with why, rather than failing the others.
 pub async fn push_context(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     thread_ref: &str,
-) -> Result<usize> {
+) -> Result<ReplicationReport> {
+    let mut report = ReplicationReport::default();
     let Some(head_id) = repo.head().context("resolve repository head")? else {
-        return Ok(0);
+        return Ok(report);
     };
     let Some(head_state) = repo
         .store()
         .get_state(&head_id)
         .context("load head state")?
     else {
-        return Ok(0);
+        return Ok(report);
     };
     let Some(context_root) = context_root_for_state(repo, &head_state)? else {
-        return Ok(0);
+        return Ok(report);
     };
     let entries = repo
         .list_context_entries(&context_root, None)
         .context("enumerate local context annotations")?;
     if entries.is_empty() {
-        return Ok(0);
+        return Ok(report);
     }
 
     // The collaboration ContextDraft/ContextRevision contract has no audience
@@ -382,8 +416,6 @@ pub async fn push_context(
 
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let mut mirror = load_mirror(&heddle_dir)?;
-    let mut synced = 0usize;
-    let mut incomplete = Vec::new();
     for entry in &entries {
         for annotation in &entry.blob.annotations {
             let result = push_one(
@@ -400,25 +432,35 @@ pub async fn push_context(
             .await;
             save_mirror(&heddle_dir, &mirror)?;
             match result {
-                Ok(true) => synced += 1,
-                Ok(false) => {}
+                Ok(pushed) => {
+                    if pushed.changed {
+                        report.accepted += 1;
+                    }
+                    report.issues.extend(pushed.superseded);
+                }
                 Err(error) => {
                     client.warn(
                         "hosted_context_sync_failed",
                         format!("hosted context {}: {error:#}", annotation.annotation_id),
                     );
-                    incomplete.push(format!("{}: {error:#}", annotation.annotation_id));
+                    report.issues.push(issue_from_error(
+                        Some(annotation.annotation_id.clone()),
+                        None,
+                        &error,
+                    ));
                 }
             }
         }
     }
-    if !incomplete.is_empty() {
-        anyhow::bail!(
-            "hosted context replication incomplete: {}",
-            incomplete.join("; ")
-        );
-    }
-    Ok(synced)
+    Ok(report)
+}
+
+/// What pushing one annotation did.
+struct PushedAnnotation {
+    /// The service accepted a create or at least one revision.
+    changed: bool,
+    /// Stale-refused revisions the author replaced by an explicit revision.
+    superseded: Vec<ReplicationIssue>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,7 +474,7 @@ async fn push_one(
     self_local_attr: Option<&str>,
     server_ann_ids: &HashSet<String>,
     mirror: &mut HostedContextMirror,
-) -> Result<bool> {
+) -> Result<PushedAnnotation> {
     // ---- 1. Resolve the server annotation id. ----
     let mut created = false;
     let server_id = if let Some(sid) =
@@ -525,7 +567,10 @@ async fn push_one(
     )
     .await?;
 
-    Ok(created || pushed > 0)
+    Ok(PushedAnnotation {
+        changed: created || pushed.accepted > 0,
+        superseded: pushed.superseded,
+    })
 }
 
 /// Create a fresh annotation server-side, returning `(server_annotation_id,
@@ -588,15 +633,28 @@ async fn create_on_server(
 }
 
 fn is_operation_id_conflict(error: &impl std::fmt::Display) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
+    // The alternate form includes every cause beneath delivery context.
+    let text = format!("{error:#}").to_ascii_lowercase();
     text.contains("names another command")
         || text.contains("names a different command")
         || text.contains("reused with a different request")
         || text.contains("operation_id_reused")
 }
 
-/// Forward local revisions the server does not yet hold. Returns the count
-/// actually pushed. Author-aware recovery links each minted server revision id.
+/// Revisions forwarded for one annotation.
+struct ForwardedRevisions {
+    accepted: usize,
+    superseded: Vec<ReplicationIssue>,
+}
+
+/// Forward local revisions the server does not yet hold. Author-aware
+/// recovery links each minted server revision id.
+///
+/// A revision the service refused as stale is never resent and never
+/// re-signed on its own. The author refreshes (pull links every hosted
+/// revision), compares, and authors an explicit revision; that revision is
+/// then signed against the refreshed frontier while the refused ones stay in
+/// local history only.
 #[allow(clippy::too_many_arguments)]
 async fn sync_revisions_push(
     client: &mut HostedClient,
@@ -608,32 +666,24 @@ async fn sync_revisions_push(
     annotation: &Annotation,
     self_local_attr: Option<&str>,
     mirror: &mut HostedContextMirror,
-) -> Result<usize> {
-    let mut server_rev_ids: HashSet<String> = fetch_history(client, repo_path, server_id)
+) -> Result<ForwardedRevisions> {
+    let server_rev_ids: HashSet<String> = fetch_history(client, repo_path, server_id)
         .await?
         .into_iter()
         .map(|rev| rev.revision_id)
         .collect();
-    let linked_local: HashSet<String> = mirror
-        .repos
-        .get(repo_path)
-        .and_then(|m| {
-            m.annotations
-                .iter()
-                .find(|e| e.local_id == annotation.annotation_id)
-        })
-        .map(|entry| {
-            entry
-                .revision_links
-                .iter()
-                .map(|l| l.local.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    let entry = get_or_create_entry(mirror, repo_path, &annotation.annotation_id).clone();
+    let linked_local: HashSet<String> = entry
+        .revision_links
+        .iter()
+        .map(|link| link.local.clone())
+        .collect();
 
-    let mut pushed = 0usize;
+    let mut unsent: Vec<&AnnotationRevision> = Vec::new();
     for revision in &annotation.revisions {
-        if linked_local.contains(&revision.revision_id) {
+        if linked_local.contains(&revision.revision_id)
+            || entry.local_only_revisions.contains(&revision.revision_id)
+        {
             continue;
         }
         if server_rev_ids.contains(&revision.revision_id) {
@@ -656,6 +706,59 @@ async fn sync_revisions_push(
                 revision.revision_id
             );
         }
+        unsent.push(revision);
+    }
+
+    let mut superseded = Vec::new();
+    if let Some(rejection) = entry.stale_rejection.clone() {
+        let linked_server: HashSet<String> =
+            get_or_create_entry(mirror, repo_path, &annotation.annotation_id)
+                .revision_links
+                .iter()
+                .map(|link| link.server.clone())
+                .collect();
+        let refreshed = server_rev_ids.is_subset(&linked_server);
+        let explicit = unsent
+            .iter()
+            .any(|revision| !rejection.unsent_revisions.contains(&revision.revision_id));
+        let command = CommandIds {
+            client_operation_id: rejection.client_operation_id.clone(),
+            signed_operation_id: rejection.signed_operation_id.clone(),
+        };
+        if !(refreshed && explicit) {
+            return Err(anyhow::Error::new(StaleRevisionPending {
+                revision_id: rejection.revision_id.clone(),
+                command,
+                refreshed,
+            })
+            .context(format!("revise hosted annotation {server_id}")));
+        }
+        let (refused, explicit): (Vec<_>, Vec<_>) = unsent
+            .into_iter()
+            .partition(|revision| rejection.unsent_revisions.contains(&revision.revision_id));
+        unsent = explicit;
+        let entry = get_or_create_entry(mirror, repo_path, &annotation.annotation_id);
+        for revision in refused {
+            entry
+                .local_only_revisions
+                .push(revision.revision_id.clone());
+            superseded.push(ReplicationIssue {
+                record_id: Some(annotation.annotation_id.clone()),
+                revision_id: Some(revision.revision_id.clone()),
+                kind: ReplicationIssueKind::Superseded,
+                command: (revision.revision_id == rejection.revision_id).then(|| command.clone()),
+                message: format!(
+                    "revision {} was refused as stale and replaced by an explicit revision; it stays in local history",
+                    revision.revision_id
+                ),
+            });
+        }
+        entry.stale_rejection = None;
+        save_mirror(heddle_dir, mirror)?;
+    }
+
+    let mut accepted = 0usize;
+    for (index, revision) in unsent.iter().enumerate() {
         let anchor = native_context_anchor(target, &annotation.scope, revision)?;
         let supersedes = annotation
             .supersedes_annotation_id
@@ -663,7 +766,7 @@ async fn sync_revisions_push(
             .map(|value| uuid::Uuid::parse_str(value.trim_start_matches("ann-")))
             .transpose()
             .context("superseded context id is not a UUID")?;
-        publish_native_context_revision(
+        let published = publish_native_context_revision(
             client,
             repo_path,
             thread_ref,
@@ -676,8 +779,26 @@ async fn sync_revisions_push(
             supersedes,
             revise_op_id(repo_path, server_id, &revision.revision_id),
         )
-        .await
-        .with_context(|| format!("revise hosted annotation {server_id}"))?;
+        .await;
+        if let Err(error) = published {
+            if classify_error(&error) == ReplicationIssueKind::StaleVersion
+                && let Some(delivered) = error.downcast_ref::<DeliveredCommand>()
+            {
+                get_or_create_entry(mirror, repo_path, &annotation.annotation_id).stale_rejection =
+                    Some(StaleContextRejection {
+                        revision_id: revision.revision_id.clone(),
+                        unsent_revisions: unsent[index..]
+                            .iter()
+                            .map(|revision| revision.revision_id.clone())
+                            .collect(),
+                        client_operation_id: delivered.0.client_operation_id.clone(),
+                        signed_operation_id: delivered.0.signed_operation_id.clone(),
+                    });
+            }
+            return Err(error
+                .context(FailedRevision(revision.revision_id.clone()))
+                .context(format!("revise hosted annotation {server_id}")));
+        }
 
         add_revision_link(
             mirror,
@@ -686,10 +807,12 @@ async fn sync_revisions_push(
             revision.revision_id.clone(),
             revision.revision_id.clone(),
         );
-        server_rev_ids.insert(revision.revision_id.clone());
-        pushed += 1;
+        accepted += 1;
     }
-    Ok(pushed)
+    Ok(ForwardedRevisions {
+        accepted,
+        superseded,
+    })
 }
 
 // =========================================================================
@@ -1549,8 +1672,9 @@ mod tests {
         let pushed = push_context(&repo, &mut client, "acme/widgets", "main")
             .await
             .unwrap();
+        assert!(pushed.complete(), "{pushed:?}");
         assert_eq!(
-            pushed, 1,
+            pushed.accepted, 1,
             "Applied PutContext must adopt even when Observe history is empty"
         );
         let mirror = load_mirror(repo.heddle_dir()).unwrap();
@@ -1571,7 +1695,7 @@ mod tests {
             push_context(&repo, &mut client, "acme/widgets", "main")
                 .await
                 .unwrap(),
-            0
+            ReplicationReport::default()
         );
         assert!(warnings.warnings().is_empty());
 

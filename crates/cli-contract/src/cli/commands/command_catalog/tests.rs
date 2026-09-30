@@ -779,6 +779,44 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert!(!merge.agent_may_fill);
 }
 
+/// heddle#1904: after a stale refusal the recovery names the annotation and
+/// leaves only the explicit revision's body to the author.
+#[test]
+fn explicit_context_revision_template_fills_only_the_body() {
+    let action = "heddle context edit 01a0f01a-cb64-724e-a8f5-4c9753c3371c --body <text>";
+    validate_recommended_action(action).expect("explicit revision action validates");
+    let template = recommended_action_template(action).expect("explicit revision template");
+    assert_eq!(
+        template.argv_template,
+        vec![
+            "heddle",
+            "context",
+            "edit",
+            "01a0f01a-cb64-724e-a8f5-4c9753c3371c",
+            "--body",
+            "<text>"
+        ]
+    );
+    assert_eq!(template.required_inputs, vec!["text"]);
+    assert!(template.agent_may_fill);
+    let argv: Vec<String> = template
+        .argv_template
+        .iter()
+        .map(|arg| {
+            if arg == "<text>" {
+                "reconciled".to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect();
+    Cli::try_parse_from(&argv).expect("filled explicit revision parses");
+    assert!(
+        recommended_action_template("heddle context edit <annotation> --body <text>").is_none(),
+        "the annotation is never left for the caller to guess"
+    );
+}
+
 #[test]
 fn presence_recommended_action_templates_generate_parseable_nested_commands() {
     for action in [
