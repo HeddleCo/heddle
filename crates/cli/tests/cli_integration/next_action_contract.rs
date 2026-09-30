@@ -598,6 +598,68 @@ fn sync_conflicting_stale_thread_emits_runnable_resolve_breadcrumb() {
     drop(checkout_owner);
 }
 
+#[test]
+fn ready_during_unresolved_merge_matches_status_recovery() {
+    let (main, checkout_owner, execution_path) = setup_managed_thread("feature/ready-conflict");
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("base.txt"), "thread change\n").unwrap();
+    heddle(&["capture", "-m", "thread edit"], Some(checkout)).unwrap();
+    std::fs::write(main.path().join("base.txt"), "main change\n").unwrap();
+    heddle(&["capture", "-m", "main edit"], Some(main.path())).unwrap();
+    let sync = json(
+        &[
+            "sync",
+            "--thread",
+            "feature/ready-conflict",
+            "--output",
+            "json",
+        ],
+        main.path(),
+    );
+    assert_eq!(sync["status"], "blocked", "{sync}");
+    let status = json(&["status", "--output", "json"], checkout);
+    assert_eq!(status["operation"]["kind"], "merge", "{status}");
+    let next = status["operation"]["next_action"]
+        .as_str()
+        .expect("merge recovery action");
+    assert_eq!(next, "heddle continue");
+    let conflicted = std::fs::read(checkout.join("base.txt")).unwrap();
+    let head = Repository::open(checkout).unwrap().head().unwrap();
+
+    for args in [
+        vec!["ready"],
+        vec!["ready", "-m", "do not capture conflict markers"],
+        vec!["ready", "--output", "json"],
+        vec!["ready", "--output", "json-compact"],
+    ] {
+        let output = heddle_output(&args, Some(checkout)).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "{args:?}: exit {:?}\nstdout: {}\nstderr: {stderr}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(output.status.code(), Some(65), "{stderr}");
+        assert!(
+            stderr.contains(next),
+            "ready must match status advice {next}: {stderr}"
+        );
+        assert!(stderr.contains("heddle resolve --list"), "{stderr}");
+        if args.contains(&"--output") {
+            let error: Value = serde_json::from_str(&stderr).expect("typed JSON refusal");
+            assert_eq!(error["kind"], "merge_in_progress", "{error}");
+            assert_eq!(error["primary_command"], next, "{error}");
+            assert!(output.stdout.is_empty());
+        }
+        assert_eq!(
+            std::fs::read(checkout.join("base.txt")).unwrap(),
+            conflicted
+        );
+        assert_eq!(Repository::open(checkout).unwrap().head().unwrap(), head);
+    }
+    drop(checkout_owner);
+}
+
 /// heddle#1461: the default checkout thread is named `main` and has a ref
 /// but often no ThreadManager record. `heddle sync` must treat that as the
 /// current / default thread, not `Thread 'main' not found`.

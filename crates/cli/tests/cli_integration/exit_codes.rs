@@ -53,6 +53,31 @@ fn init_repo() -> TempDir {
     temp
 }
 
+#[cfg(feature = "client")]
+#[test]
+fn review_show_without_hosted_upstream_has_typed_recovery() {
+    let temp = init_repo();
+    for format in ["text", "json"] {
+        let output =
+            heddle_output(&["review", "show", "--output", format], Some(temp.path())).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "review show --output {format}: exit {:?}\n{stderr}",
+            output.status.code()
+        );
+        assert_eq!(output.status.code(), Some(78), "{stderr}");
+        assert!(stderr.contains("hosted upstream"), "{stderr}");
+        assert!(stderr.contains("heddle push"), "{stderr}");
+        if format != "text" {
+            let error: serde_json::Value =
+                serde_json::from_str(&stderr).expect("typed JSON refusal");
+            assert_eq!(error["kind"], "no_hosted_upstream", "{error}");
+            assert!(error["primary_command_template"].is_object(), "{error}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+}
+
 /// Run `git <args>` in `dir` under an isolated environment, asserting success.
 fn git(args: &[&str], dir: &Path) {
     git_hermetic(args, dir);

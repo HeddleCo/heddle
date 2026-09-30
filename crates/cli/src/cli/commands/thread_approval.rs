@@ -43,10 +43,7 @@ fn resolve_review_remote(repo: &Repository, choice: &RemoteChoiceArgs) -> Result
 }
 
 fn require_hosted_repo(repo: &Repository) -> Result<()> {
-    ensure!(
-        repo.hosted_enabled(),
-        "Thread review requires a repository linked to a Heddle hosted upstream. Configure [hosted] in .heddle/config.toml or run this in a hosted-enabled repository."
-    );
+    ensure!(repo.hosted_enabled(), RecoveryAdvice::no_hosted_upstream());
     Ok(())
 }
 

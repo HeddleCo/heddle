@@ -80,6 +80,64 @@ fn flags_invalid_workspace_value() {
 }
 
 #[test]
+fn flags_nonexistent_undo_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    let md = write_file(temp.path(), "drift.md", "Run `heddle undo --preview`.\n");
+    let output = heddle_output(
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let report = doctor_docs_json_failure(&output);
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["kind"] == "unknown_flag"
+                && issue["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("--preview"))),
+        "{report}"
+    );
+}
+
+#[test]
+fn undo_documentation_matches_live_cli_flags() {
+    let temp = TempDir::new().expect("tempdir");
+    let md = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/undo.md");
+    let output = heddle_output(
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    eprintln!(
+        "undo docs: exit {:?}\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn flags_unknown_verb_and_subverb() {
     let temp = TempDir::new().expect("tempdir");
     let md = write_file(
