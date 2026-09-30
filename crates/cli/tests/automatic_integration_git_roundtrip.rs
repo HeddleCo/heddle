@@ -108,11 +108,25 @@ fn roundtrip(workflow: Workflow) {
     run(home.path(), &a, &["land"]);
     if workflow != Workflow::Single {
         if workflow == Workflow::Manual {
+            // Landing `a` restacks the stale sibling `b`, which materializes
+            // the conflicting merge in b's checkout. `ready` must refuse with
+            // the same continuation advice `status` gives (#1896): a typed
+            // stderr envelope, exit 65, and nothing on stdout.
+            let status = run(home.path(), &b, &["--output", "json", "status"]);
+            let status: serde_json::Value =
+                serde_json::from_slice(&status.stdout).expect("status JSON");
+            assert_eq!(status["operation"]["kind"], "merge", "{status}");
+            let next = status["operation"]["next_action"]
+                .as_str()
+                .expect("merge recovery action");
             let ready = heddle(home.path(), &b, &["--output", "json", "ready"]);
-            assert!(!ready.status.success(), "conflicting ready must fail");
-            let value: serde_json::Value =
-                serde_json::from_slice(&ready.stdout).expect("ready JSON");
-            assert_eq!(value["status"], "blocked", "{value}");
+            let stderr = String::from_utf8_lossy(&ready.stderr);
+            assert_eq!(ready.status.code(), Some(65), "{stderr}");
+            assert!(ready.stdout.is_empty(), "{stderr}");
+            let error: serde_json::Value =
+                serde_json::from_slice(&ready.stderr).expect("typed ready refusal");
+            assert_eq!(error["kind"], "merge_in_progress", "{error}");
+            assert_eq!(error["primary_command"], next, "{error}");
             fs::write(b.join("app.py"), MERGED).expect("manual resolution");
             run(home.path(), &b, &["resolve", "app.py"]);
             run(home.path(), &b, &["continue"]);
