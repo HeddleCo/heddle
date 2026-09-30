@@ -9,7 +9,7 @@ use api::heddle::api::{
 pub fn thread_section_page_sizes(
     request: &ObserveThreadRequest,
     default_max_items: u32,
-) -> Result<[u32; 4], CallFailure> {
+) -> Result<[u32; 4], Box<CallFailure>> {
     let options = request.observe.clone().unwrap_or_default();
     let max_items = options
         .budget
@@ -46,11 +46,11 @@ pub fn thread_section_page_sizes(
     for (index, page) in pages.into_iter().enumerate() {
         let page = page.unwrap_or_default();
         if !active[index] && (page.size != 0 || !page.after_page.is_empty()) {
-            return Err(CallFailure {
+            return Err(Box::new(CallFailure {
                 code: CallFailureCode::InvalidArgument as i32,
                 message: "pagination requires its Thread section".into(),
                 error: None,
-            });
+            }));
         }
         if active[index] {
             sizes[index] = if page.size == 0 {
@@ -70,11 +70,11 @@ pub fn thread_section_page_sizes(
             .any(|(&active, size)| active && size == 0)
         || sizes[1] > 256
     {
-        return Err(CallFailure {
+        return Err(Box::new(CallFailure {
             code: CallFailureCode::ResourceExhausted as i32,
             message: "Thread section pages exceed shared item budget".into(),
             error: None,
-        });
+        }));
     }
     Ok(sizes)
 }

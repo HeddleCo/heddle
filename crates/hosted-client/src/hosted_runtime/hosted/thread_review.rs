@@ -61,7 +61,9 @@ impl HostedClient {
                         ],
                         pages: Some(contract::ThreadPages {
                             reviews: Some(contract::PageRequest {
-                                size: 128,
+                                // Let weft divide its advertised ReadBudget after
+                                // section overhead (observation.rs::Query::new).
+                                size: 0,
                                 after_page: after_page.clone(),
                             }),
                             ..Default::default()
@@ -260,6 +262,17 @@ mod tests {
         server.await.expect("native hosted server");
         let snapshot = result.expect("review request must satisfy weft's shared item budget");
         assert_eq!(snapshot.overview.name, "feature");
+        // The fixture has more rows than one admitted page. Every verb must
+        // follow the section cursor and preserve all original decisions.
+        let ids: Vec<_> = snapshot
+            .decisions
+            .iter()
+            .map(|decision| decision.r#ref.as_ref().expect("record ref").id.clone())
+            .collect();
+        let expected: Vec<_> = (1..=65)
+            .map(|id| uuid::Uuid::from_u128(id).to_string())
+            .collect();
+        assert_eq!(ids, expected);
         assert_eq!(
             snapshot.overview.landing_assessment.is_some(),
             target.is_some()
