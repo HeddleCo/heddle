@@ -23,6 +23,12 @@ use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
 use tokio::task::JoinHandle;
 
+const PUBLICATION_FRAME_BYTES: usize = 512 * 1024;
+const ORIGINAL_BATCH_BYTES: usize = 256 * 1024;
+const ORIGINAL_BATCH_OPERATIONS: usize = 128;
+const PUBLICATION_OPERATIONS: usize = 10_000;
+const PUBLICATION_METADATA_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug, Default)]
 pub struct PublicationCapture {
     pub import_requests: Vec<v2::ImportSourceRequest>,
@@ -1385,7 +1391,7 @@ async fn serve_publication(
                     checkpoint: Some(checkpoint.clone()),
                     budget: Some(v2::ReadBudget {
                         max_items: 10_000,
-                        max_frame_bytes: 64 * 1024,
+                        max_frame_bytes: PUBLICATION_FRAME_BYTES as u32,
                         max_snapshot_bytes: 16 * 1024 * 1024,
                     }),
                     ..Default::default()
@@ -1395,6 +1401,8 @@ async fn serve_publication(
     )
     .await;
 
+    let mut original_bytes = 0usize;
+    let mut operation_count = 0usize;
     let mut accepted = PublicationCapture {
         revision: open.revision.clone(),
         ..Default::default()
@@ -1402,6 +1410,58 @@ async fn serve_publication(
     loop {
         let frame: v2::PublishContentClientFrame = read_message(&mut recv, &mut buffered).await;
         assert_eq!(frame.client_operation_id, opening.client_operation_id);
+        let failure = if frame.encoded_len() > PUBLICATION_FRAME_BYTES {
+            Some("publication frame budget exceeded")
+        } else {
+            match &frame.body {
+                Some(v2::publish_content_client_frame::Body::ThreadGenesis(genesis)) => {
+                    original_bytes += genesis.encoded_len();
+                    (genesis.encoded_len() > ORIGINAL_BATCH_BYTES)
+                        .then_some("publication original metadata budget exceeded")
+                }
+                Some(v2::publish_content_client_frame::Body::Operations(batch)) => {
+                    original_bytes += batch.encoded_len();
+                    operation_count += batch.operations.len();
+                    if batch.operations.is_empty()
+                        || batch.operations.len() > ORIGINAL_BATCH_OPERATIONS
+                        || batch.authority_admissions.len() > ORIGINAL_BATCH_OPERATIONS
+                    {
+                        Some("original authority batch exceeds bounds")
+                    } else if batch.encoded_len() > ORIGINAL_BATCH_BYTES {
+                        Some("publication original metadata budget exceeded")
+                    } else {
+                        thread_api::authority_admission::match_batch(batch)
+                            .err()
+                            .map(|_| "invalid original authority batch")
+                    }
+                }
+                _ => None,
+            }
+        };
+        let failure = failure.or_else(|| {
+            if operation_count > PUBLICATION_OPERATIONS {
+                Some("publication operation budget exceeded")
+            } else if original_bytes > PUBLICATION_METADATA_BYTES {
+                Some("publication original metadata budget exceeded")
+            } else {
+                None
+            }
+        });
+        if let Some(message) = failure {
+            send.write_chunk(
+                api::framing::encode_stream_failure(&api::heddle::api::common::CallFailure {
+                    code: api::heddle::api::common::CallFailureCode::InvalidArgument as i32,
+                    message: message.into(),
+                    ..Default::default()
+                })
+                .expect("encode publication failure")
+                .into(),
+            )
+            .await
+            .expect("write publication failure");
+            send.finish().expect("finish rejected publication");
+            return;
+        }
         match frame.body {
             Some(v2::publish_content_client_frame::Body::ThreadGenesis(genesis)) => {
                 assert!(accepted.thread_genesis.replace(genesis).is_none());
@@ -1559,7 +1619,7 @@ async fn serve_fetch(
                 checkpoint: Some(checkpoint.clone()),
                 budget: Some(v2::ReadBudget {
                     max_items: 10_000,
-                    max_frame_bytes: 64 * 1024,
+                    max_frame_bytes: PUBLICATION_FRAME_BYTES as u32,
                     max_snapshot_bytes: 16 * 1024 * 1024,
                 }),
                 full_closure_available: true,
