@@ -186,6 +186,14 @@ wasm.initSync({ module: wasmBytes });
 const packageMetadata = JSON.parse(
   readFileSync(path.join(repositoryRoot, "npm", "package.json"), "utf8"),
 );
+const generatedMetadata = JSON.parse(
+  readFileSync(path.join(bindingRoot, "package.json"), "utf8"),
+);
+if (generatedMetadata.version !== packageMetadata.version) {
+  throw new Error(
+    `Cargo/WASM version ${generatedMetadata.version} != npm version ${packageMetadata.version}`,
+  );
+}
 if (wasm.verifierVersion() !== packageMetadata.version) {
   throw new Error(
     `binding version ${wasm.verifierVersion()} != package version ${packageMetadata.version}`,

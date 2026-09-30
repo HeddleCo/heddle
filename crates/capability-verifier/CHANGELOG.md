@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Version capability-verifier and its npm/WASM package with the workspace (0.27.2); require every publishable crate to inherit the workspace version.
+- Bump the workspace to 0.27.2 because the dependency-version guard requires an increase for updated capability-verifier requirements.
+
 ## [0.23.0](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.22.0...heddleco-capability-verifier-v0.23.0) - 2026-09-30
 
 ### Changed
