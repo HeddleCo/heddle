@@ -14,6 +14,8 @@ pub mod discussion_sync;
 pub mod human_signature;
 pub mod local_sync;
 #[cfg(feature = "client")]
+pub mod replication_report;
+#[cfg(feature = "client")]
 pub mod repo_events;
 
 pub use config::ClientConfig;

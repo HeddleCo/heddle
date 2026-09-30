@@ -34,7 +34,13 @@ pub struct PublicationCapture {
     pub index_data: Vec<u8>,
     pub started: Vec<v2::ThreadOverview>,
     pub evidence: Vec<v2::RecordEvidenceRequest>,
+    /// Context commands the service accepted.
     pub contexts: Vec<v2::PutContextRequest>,
+    /// Every context command delivered, accepted or not.
+    pub context_attempts: Vec<v2::PutContextRequest>,
+    /// Drop the next context command before applying it, as a transport
+    /// failure would, so the client must redeliver its prepared record.
+    pub interrupt_next_context: bool,
     pub discussions: Vec<v2::OpenDiscussionRequest>,
     pub appends: Vec<v2::AppendDiscussionRequest>,
     pub resolutions: Vec<v2::ResolveDiscussionRequest>,
@@ -284,8 +290,20 @@ async fn serve_call(
                     id: fixture.spool.to_string(),
                 };
                 let entity = if let Some(name) = thread_name {
+                    let started = fixture
+                        .captured
+                        .lock()
+                        .expect("started Threads")
+                        .started
+                        .iter()
+                        .find(|thread| thread.name == name)
+                        .and_then(|thread| thread.r#ref.as_ref())
+                        .and_then(|reference| reference.id.as_ref())
+                        .map(|id| id.value.clone());
                     let thread_id = if name == fixture.thread_name {
                         fixture.thread_id.clone()
+                    } else if let Some(started) = started {
+                        started
                     } else {
                         assert_eq!(name, "main", "fixture's landing target");
                         vec![24; 32]
@@ -507,33 +525,7 @@ async fn serve_call(
                     decode_request_frame(&request).expect("context frame").body,
                 )
                 .expect("context request");
-                thread_api::collaboration::verify(
-                    body.signed_operation.as_ref().expect("signed context"),
-                )
-                .expect("verify context");
-                fixture
-                    .captured
-                    .lock()
-                    .expect("capture context")
-                    .contexts
-                    .push(body.clone());
-                write_unary(
-                    &mut send,
-                    &v2::MutationResponse {
-                        receipt: Some(v2::MutationReceipt {
-                            client_operation_id: body.client_operation_id,
-                            endpoint: Some(v2::EndpointRef {
-                                kind: v2::EndpointKind::Weft as i32,
-                                public_key: server_key,
-                            }),
-                            outcome: Some(v2::mutation_receipt::Outcome::Applied(
-                                v2::Applied::default(),
-                            )),
-                            ..Default::default()
-                        }),
-                    },
-                )
-                .await;
+                admit_context(&mut send, &fixture, body, server_key).await;
             }
             other => panic!("unexpected hosted unary method: {other}"),
         },
@@ -787,6 +779,168 @@ async fn admit_discussion(
     .await;
 }
 
+/// One accepted context revision, keyed the way Weft partitions it: by the
+/// Thread its signed scope names.
+struct AcceptedContext {
+    thread: objects::object::ContentHash,
+    id: objects::object::ContentHash,
+    parents: std::collections::BTreeSet<objects::object::ContentHash>,
+    context: uuid::Uuid,
+}
+
+fn accepted_context(signed: &v2::SignedRecord) -> AcceptedContext {
+    let operation = thread_api::collaboration::verify(signed).expect("verify context original");
+    let context = operation
+        .context_revision()
+        .expect("decode context revision")
+        .expect("context original");
+    AcceptedContext {
+        thread: operation.thread,
+        id: operation.id().expect("context operation id"),
+        parents: operation.parents.clone(),
+        context: context.id,
+    }
+}
+
+/// Weft's `heads()`: the current frontier of one context within one Thread.
+/// A context RecordRef is bound to a single Thread, so the same record has
+/// no frontier at all in any other Thread.
+fn context_heads(
+    capture: &PublicationCapture,
+    thread: objects::object::ContentHash,
+    context: uuid::Uuid,
+) -> (Vec<objects::object::ContentHash>, Vec<u8>) {
+    let accepted: Vec<_> = capture
+        .contexts
+        .iter()
+        .filter_map(|request| request.signed_operation.as_ref())
+        .map(accepted_context)
+        .filter(|record| record.thread == thread && record.context == context)
+        .collect();
+    let mut heads: Vec<_> = accepted
+        .iter()
+        .filter(|record| {
+            !accepted
+                .iter()
+                .any(|child| child.parents.contains(&record.id))
+        })
+        .map(|record| record.id)
+        .collect();
+    heads.sort();
+    let version = heads.iter().flat_map(|id| id.as_bytes().to_vec()).collect();
+    (heads, version)
+}
+
+/// Admit a context command with Weft's order of checks: dedup on the command
+/// ID, the thread-scoped expected-version check, the record's Thread binding,
+/// then causal parents. Nothing is recorded on rejection.
+async fn admit_context(
+    send: &mut iroh::endpoint::SendStream,
+    fixture: &Fixture,
+    body: v2::PutContextRequest,
+    server_key: Vec<u8>,
+) {
+    use api::heddle::api::common::CallFailureCode;
+    let signed = body.signed_operation.clone().expect("signed context");
+    let record = accepted_context(&signed);
+    let failure = {
+        let mut capture = fixture.captured.lock().expect("context admission");
+        capture.context_attempts.push(body.clone());
+        let replay = capture
+            .contexts
+            .iter()
+            .find(|previous| previous.client_operation_id == body.client_operation_id)
+            .map(|previous| previous.signed_operation.as_ref() == Some(&signed));
+        let (heads, version) = context_heads(&capture, record.thread, record.context);
+        let parents: std::collections::BTreeSet<_> = heads.iter().copied().collect();
+        let bound_elsewhere = capture
+            .contexts
+            .iter()
+            .filter_map(|request| request.signed_operation.as_ref())
+            .map(accepted_context)
+            .any(|other| other.context == record.context && other.thread != record.thread);
+        let known_parents = capture
+            .contexts
+            .iter()
+            .filter_map(|request| request.signed_operation.as_ref())
+            .map(accepted_context)
+            .filter(|other| other.thread == record.thread)
+            .map(|other| other.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        (if std::mem::take(&mut capture.interrupt_next_context) {
+            Some((CallFailureCode::Unavailable, "context delivery interrupted"))
+        } else if let Some(identical) = replay {
+            (!identical).then_some((
+                CallFailureCode::FailedPrecondition,
+                "operation ID names another command",
+            ))
+        } else if body.expected_version.is_empty() {
+            (!heads.is_empty() || !record.parents.is_empty()).then_some((
+                CallFailureCode::AlreadyExists,
+                "context already exists; use observed version",
+            ))
+        } else if body.expected_version != version
+            || parents != record.parents
+            || heads.len() != record.parents.len()
+        {
+            Some((
+                CallFailureCode::Aborted,
+                "context changed; refresh before revising",
+            ))
+        } else {
+            None
+        })
+        .or_else(|| {
+            bound_elsewhere.then_some((
+                CallFailureCode::Internal,
+                "collaboration RecordRef is bound to another Thread",
+            ))
+        })
+        .or_else(|| {
+            (!record.parents.is_subset(&known_parents)).then_some((
+                CallFailureCode::FailedPrecondition,
+                "operation requires accepted causal parents",
+            ))
+        })
+        .or_else(|| {
+            if replay.is_none() {
+                capture.contexts.push(body.clone());
+            }
+            None
+        })
+    };
+    if let Some((code, message)) = failure {
+        send.write_all(
+            &api::framing::encode_failure_response(&api::heddle::api::common::CallFailure {
+                code: code as i32,
+                message: message.into(),
+                ..Default::default()
+            })
+            .expect("context failure"),
+        )
+        .await
+        .expect("context rejection");
+        return;
+    }
+    write_unary(
+        send,
+        &v2::MutationResponse {
+            receipt: Some(v2::MutationReceipt {
+                client_operation_id: body.client_operation_id,
+                endpoint: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                    v2::Applied::default(),
+                )),
+                ..Default::default()
+            }),
+        },
+    )
+    .await;
+}
+
 fn decode_discussion(signed: &v2::SignedRecord) -> objects::object::DecodedCollaborationOperation {
     let operation = thread_api::collaboration::verify(signed).expect("verify original");
     let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
@@ -917,6 +1071,37 @@ fn collaboration_payloads(
                 ));
             }
         }
+    }
+    // A requested context projects its current frontier within the Thread
+    // the record is bound to, as Weft's view does.
+    for requested in &request.contexts {
+        let Some(latest) = capture
+            .contexts
+            .iter()
+            .filter_map(|context| context.signed_operation.as_ref())
+            .map(accepted_context)
+            .rfind(|record| record.context.to_string() == requested.id)
+        else {
+            continue;
+        };
+        let (heads, version) = context_heads(&capture, latest.thread, latest.context);
+        payloads.push(Payload::Context(v2::ContextRecord {
+            r#ref: Some(v2::RecordRef {
+                spool: Some(v2::SpoolRef {
+                    id: fixture.spool.to_string(),
+                }),
+                id: latest.context.to_string(),
+            }),
+            version,
+            causal_id: latest.id.as_bytes().to_vec(),
+            causal_parents: latest
+                .parents
+                .iter()
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
+            causal_heads: heads.iter().map(|id| id.as_bytes().to_vec()).collect(),
+            ..Default::default()
+        }));
     }
     payloads
 }
@@ -1195,6 +1380,8 @@ async fn serve_publication(
                     accepted.started = std::mem::take(&mut capture.started);
                     accepted.evidence = std::mem::take(&mut capture.evidence);
                     accepted.contexts = std::mem::take(&mut capture.contexts);
+                    accepted.context_attempts = std::mem::take(&mut capture.context_attempts);
+                    accepted.interrupt_next_context = capture.interrupt_next_context;
                     accepted.discussions = std::mem::take(&mut capture.discussions);
                     accepted.appends = std::mem::take(&mut capture.appends);
                     accepted.resolutions = std::mem::take(&mut capture.resolutions);

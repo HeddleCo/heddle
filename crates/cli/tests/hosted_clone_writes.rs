@@ -333,12 +333,15 @@ fn assert_push_succeeded(fixture: &Fixture, path: &Path) {
 }
 
 /// Push once, expecting source and context to land and only the discussion
-/// replication to fail; the partial status must say so.
+/// replication to fail; the partial status must say so. A lost receipt is
+/// safe to resend unchanged, which exit code 75 declares.
 fn assert_push_discussions_failed(fixture: &Fixture, path: &Path, reason: &str) {
     let output = fixture.output_at(path, &["--output", "json", "push", "origin"]);
     let result: Value = serde_json::from_slice(&output.stdout).expect("partial result");
     println!("push exit {:?}: {result}", output.status.code());
-    assert_eq!(output.status.code(), Some(65));
+    assert_eq!(output.status.code(), Some(75));
+    assert_eq!(result["discussions"]["unsent"][0]["kind"], "transient");
+    assert_eq!(result["discussions"]["unsent"][0]["retry_unchanged"], true);
     assert_eq!(result["status"], "partial");
     assert_eq!(result["source"]["status"], "succeeded");
     assert_eq!(result["context"]["status"], "succeeded");
@@ -992,6 +995,38 @@ async fn discussion_failure_keeps_push_partial_after_source_success() {
             .discussion_operations
             .is_empty()
     );
+    // heddle#1904: the service refused the signed command itself. Retrying
+    // it unchanged cannot help, and the operation IDs are kept.
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let discussion = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view")
+        .discussions
+        .keys()
+        .next()
+        .expect("discussion")
+        .to_string();
+    let item = &result["discussions"]["unsent"][0];
+    assert_eq!(item["record_id"], discussion.as_str());
+    assert_eq!(item["kind"], "invalid_command", "{result}");
+    assert_eq!(item["retry_unchanged"], false);
+    let command = item["client_operation_id"]
+        .as_str()
+        .expect("command ID")
+        .to_string();
+    assert!(item["signed_operation_id"].as_str().is_some());
+    assert_eq!(result["context"]["unsent"], Value::Null);
+    let show = format!("heddle discuss show {discussion}");
+    assert_eq!(result["next_action"], show.as_str());
+    assert_eq!(json_recovery_commands(&result), vec![show.clone()]);
+    assert_human_agrees(&fixture, &fixture.clone, &result, 65);
+    let (_, again) = push_json(&fixture, &fixture.clone);
+    assert_eq!(
+        again["discussions"]["unsent"][0]["client_operation_id"],
+        command.as_str(),
+        "a retry keeps the signed command's ID"
+    );
     fixture
         .captured
         .lock()
@@ -1107,5 +1142,365 @@ async fn fresh_clone_ci_rejects_another_spool_remote() {
     assert_eq!(error["kind"], "ci_record_spool_mismatch");
     assert!(other.captured.lock().expect("evidence").evidence.is_empty());
     other.close().await;
+    fixture.close().await;
+}
+
+/// Run `push origin` for its JSON result and exit code.
+fn push_json(fixture: &Fixture, path: &Path) -> (Option<i32>, Value) {
+    let output = fixture.output_at(path, &["--output", "json", "push", "origin"]);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "push JSON: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    println!("push exit {:?}: {result}", output.status.code());
+    (output.status.code(), result)
+}
+
+/// The `Next:` action and every `recovery:` command a human push printed.
+fn push_human(fixture: &Fixture, path: &Path) -> (Option<i32>, Option<String>, Vec<String>) {
+    let output = fixture.output_at(path, &["push", "origin"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "human push exit {:?}\nstdout: {stdout}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let next = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Next: "))
+        .map(str::to_string);
+    let recovery = stdout
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("recovery: "))
+        .map(str::to_string)
+        .collect();
+    (output.status.code(), next, recovery)
+}
+
+/// Every recovery command JSON gives, in surface then record order.
+fn json_recovery_commands(result: &Value) -> Vec<String> {
+    ["discussions", "context"]
+        .iter()
+        .flat_map(|surface| {
+            ["unsent", "local_only"].iter().flat_map(move |list| {
+                result[surface][list]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+        })
+        .flat_map(|item| {
+            item["recovery_commands"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|command| command.as_str().expect("recovery command").to_string())
+        .collect()
+}
+
+/// Human and JSON output of the same partial push name the same next action
+/// and the same bounded recovery, and exit alike.
+fn assert_human_agrees(fixture: &Fixture, path: &Path, json: &Value, exit: i32) {
+    let (code, next, recovery) = push_human(fixture, path);
+    assert_eq!(code, Some(exit));
+    assert_eq!(next.as_deref(), json["next_action"].as_str());
+    assert_eq!(recovery, json_recovery_commands(json));
+}
+
+/// A JSON action template's argv, less the executable path the renderer
+/// substitutes for `heddle`.
+fn argv_after_executable(template: &Value) -> Vec<String> {
+    template["argv_template"]
+        .as_array()
+        .expect("argv template")
+        .iter()
+        .skip(1)
+        .map(|arg| arg.as_str().expect("argv").to_string())
+        .collect()
+}
+
+/// Verify a captured context request's original and return it.
+fn context_operation(
+    request: &api::heddle::api::v1alpha2::PutContextRequest,
+) -> objects::object::thread_replication::ThreadOperation {
+    thread_api::collaboration::verify(request.signed_operation.as_ref().expect("signed context"))
+        .expect("verified context")
+}
+
+fn only_context_id(fixture: &Fixture, checkout: &Path, path: &str) -> String {
+    let ids: Vec<String> = context_get(fixture, checkout, path, None)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(ids.len(), 1, "one annotation on {path}: {ids:?}");
+    ids.into_iter().next().expect("annotation id")
+}
+
+/// heddle#1904: a context record is bound to the Thread it was first
+/// published in. A child Thread revising it after a resolve, an edit and a
+/// file move must extend that bound frontier, not be refused as stale when
+/// nothing else wrote to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_thread_revision_extends_the_bound_context_frontier() {
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "context",
+        "set",
+        "--path",
+        "example.py",
+        "--symbol",
+        "amount",
+        "--body",
+        "amount is cents",
+    ]);
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--symbol",
+        "amount",
+        "--thread",
+        "main",
+        "--body",
+        "why cents?",
+    ]);
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let discussion = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view")
+        .discussions
+        .keys()
+        .next()
+        .expect("discussion")
+        .to_string();
+    fixture.run(&[
+        "discuss",
+        "resolve",
+        &discussion,
+        "--mode",
+        "dismiss",
+        "--reason",
+        "answered in context",
+    ]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let annotation = only_context_id(&fixture, &fixture.clone, "example.py");
+
+    let path = fixture.run(&["start", "feature", "--print-cd-path"]);
+    let feature = PathBuf::from(path.trim());
+    fixture.run_at(
+        &feature,
+        &[
+            "context",
+            "edit",
+            &annotation,
+            "--body",
+            "amount is integer cents",
+        ],
+    );
+    std::fs::rename(feature.join("example.py"), feature.join("pricing.py")).expect("move file");
+    fixture.run_at(&feature, &["capture", "-m", "move pricing"]);
+    assert_push_succeeded(&fixture, &feature);
+
+    let capture = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(capture.contexts.len(), 2, "create, then one revision");
+    let created = context_operation(&capture.contexts[0]);
+    let revised = context_operation(&capture.contexts[1]);
+    assert_eq!(
+        created.thread.as_bytes().as_slice(),
+        fixture.thread_id.as_bytes().as_slice(),
+        "the record was first published on main"
+    );
+    assert_eq!(
+        revised.thread, created.thread,
+        "the child Thread's revision extends the Thread the record is bound to"
+    );
+    assert_eq!(
+        revised.parents,
+        std::collections::BTreeSet::from([created.id().expect("created id")]),
+        "and is parented on the observed frontier"
+    );
+    fixture.close().await;
+}
+
+/// heddle#1904: the source is accepted but a context revision is not. The
+/// push reports each surface independently with a bounded recovery that JSON
+/// and human output agree on. A genuinely concurrent writer is still refused,
+/// an unchanged retry sends nothing, and refresh -> compare -> explicit
+/// revision recovers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_failures_report_recovery_and_concurrent_writer_stays_rejected() {
+    let fixture = Fixture::new().await;
+    fixture.run(&["context", "set", "--path", "example.py", "--body", "v1"]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let annotation = only_context_id(&fixture, &fixture.clone, "example.py");
+    fixture.run(&["context", "edit", &annotation, "--body", "from clone"]);
+
+    // Interrupted in flight: resending the identical signed revision is safe.
+    fixture
+        .captured
+        .lock()
+        .expect("interrupt")
+        .interrupt_next_context = true;
+    let (code, transient) = push_json(&fixture, &fixture.clone);
+    assert_eq!(code, Some(75), "only a retry-safe failure remains");
+    assert_eq!(transient["status"], "partial");
+    assert_eq!(transient["success"], false);
+    assert_eq!(transient["pushed"], true);
+    assert_eq!(transient["source"]["status"], "succeeded");
+    assert_eq!(transient["discussions"]["status"], "succeeded");
+    assert_eq!(transient["context"]["status"], "failed");
+    let item = &transient["context"]["unsent"][0];
+    assert_eq!(item["record_id"], annotation.as_str());
+    assert_eq!(item["kind"], "transient");
+    assert_eq!(item["retry_unchanged"], true);
+    let client_operation_id = item["client_operation_id"]
+        .as_str()
+        .expect("client operation ID")
+        .to_string();
+    let signed_operation_id = item["signed_operation_id"]
+        .as_str()
+        .expect("signed operation ID")
+        .to_string();
+    assert_eq!(
+        json_recovery_commands(&transient),
+        vec!["heddle push origin --thread main"],
+        "{transient}"
+    );
+    assert_eq!(
+        argv_after_executable(&item["recovery_action_templates"][0]),
+        ["push", "origin", "--thread", "main"]
+    );
+    // Re-running `push` is never a push's next action (the self-loop rule);
+    // exit 75 and `retry_unchanged` carry the retry instead.
+    assert_eq!(transient["next_action"], Value::Null);
+    fixture
+        .captured
+        .lock()
+        .expect("interrupt")
+        .interrupt_next_context = true;
+    assert_human_agrees(&fixture, &fixture.clone, &transient, 75);
+
+    // Another checkout revises the same annotation first.
+    let other = fixture._temp.path().join("concurrent-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "clone",
+            &fixture.remote(),
+            other.to_str().expect("other checkout"),
+        ],
+    );
+    fixture.run_at(
+        &other,
+        &["context", "edit", &annotation, "--body", "from concurrent"],
+    );
+    assert_push_succeeded(&fixture, &other);
+    let accepted = fixture.captured.lock().expect("capture").contexts.len();
+    assert_eq!(accepted, 2, "v1 and the concurrent revision");
+
+    // The retained revision was signed against the old frontier: refused.
+    let (code, stale) = push_json(&fixture, &fixture.clone);
+    assert_eq!(code, Some(65));
+    assert_eq!(stale["status"], "partial");
+    assert_eq!(stale["pushed"], true);
+    assert_eq!(stale["context"]["status"], "failed");
+    let item = &stale["context"]["unsent"][0];
+    assert_eq!(item["kind"], "stale_version", "{stale}");
+    assert_eq!(
+        item["revision_id"],
+        transient["context"]["unsent"][0]["revision_id"]
+    );
+    assert!(item["revision_id"].is_string());
+    assert_eq!(item["retry_unchanged"], false);
+    assert_eq!(
+        item["client_operation_id"],
+        client_operation_id.as_str(),
+        "the operation IDs are kept"
+    );
+    assert_eq!(item["signed_operation_id"], signed_operation_id.as_str());
+    let recovery = vec![
+        "heddle pull origin".to_string(),
+        format!("heddle context history {annotation}"),
+        format!("heddle context edit {annotation} --body <text>"),
+    ];
+    assert_eq!(json_recovery_commands(&stale), recovery);
+    assert_eq!(stale["next_action"], "heddle pull origin");
+    assert_eq!(stale["recommended_action"], "heddle pull origin");
+    assert_eq!(
+        argv_after_executable(&stale["next_action_template"]),
+        ["pull", "origin"]
+    );
+    assert_eq!(
+        fixture.captured.lock().expect("capture").contexts.len(),
+        accepted,
+        "a stale revision never lands"
+    );
+
+    // Retrying unchanged cannot help and sends nothing.
+    let attempts = fixture
+        .captured
+        .lock()
+        .expect("attempts")
+        .context_attempts
+        .len();
+    assert_human_agrees(&fixture, &fixture.clone, &stale, 65);
+    let (_, again) = push_json(&fixture, &fixture.clone);
+    assert_eq!(again["context"]["unsent"][0]["kind"], "stale_version");
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("attempts")
+            .context_attempts
+            .len(),
+        attempts,
+        "an unchanged retry redelivers nothing"
+    );
+
+    // Refresh, compare, then revise explicitly.
+    fixture.run(&["pull", "origin"]);
+    let history: Value = serde_json::from_str(&fixture.run(&[
+        "--output",
+        "json",
+        "context",
+        "history",
+        &annotation,
+    ]))
+    .expect("history JSON");
+    let contents: Vec<&str> = history["revisions"]
+        .as_array()
+        .expect("revisions")
+        .iter()
+        .map(|revision| revision["content"].as_str().expect("content"))
+        .collect();
+    assert!(contents.contains(&"from concurrent"), "{contents:?}");
+    fixture.run(&["context", "edit", &annotation, "--body", "reconciled"]);
+    let (code, recovered) = push_json(&fixture, &fixture.clone);
+    assert_eq!(code, Some(0), "{recovered}");
+    assert_eq!(recovered["status"], "pushed");
+    assert_eq!(recovered["context"]["status"], "succeeded");
+    let superseded = &recovered["context"]["local_only"][0];
+    assert_eq!(superseded["kind"], "superseded");
+    assert_eq!(superseded["record_id"], annotation.as_str());
+    let capture = fixture.captured.lock().expect("capture").clone();
+    let bodies: Vec<String> = capture
+        .contexts
+        .iter()
+        .map(|request| request.context.as_ref().expect("draft").content.clone())
+        .collect();
+    assert_eq!(bodies, vec!["v1", "from concurrent", "reconciled"]);
+    let concurrent = context_operation(&capture.contexts[1]);
+    let reconciled = context_operation(&capture.contexts[2]);
+    assert_eq!(
+        reconciled.parents,
+        std::collections::BTreeSet::from([concurrent.id().expect("concurrent id")]),
+        "the explicit revision extends the refreshed frontier"
+    );
     fixture.close().await;
 }

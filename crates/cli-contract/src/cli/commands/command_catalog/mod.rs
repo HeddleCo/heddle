@@ -4489,6 +4489,30 @@ fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
         return Some(template);
     }
     match argv.as_slice() {
+        // An explicit revision of one named annotation: only its body is
+        // authored by the caller.
+        [heddle, context, edit, annotation, body_flag, body]
+            if heddle == "heddle"
+                && context == "context"
+                && edit == "edit"
+                && !is_placeholder_arg(annotation)
+                && body_flag == "--body"
+                && is_placeholder_arg(body) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "context".to_string(),
+                    "edit".to_string(),
+                    annotation.clone(),
+                    "--body".to_string(),
+                    body.clone(),
+                ],
+                vec![placeholder_input_name(body)],
+                true,
+            ))
+        }
         [heddle, clone, remote, path]
             if heddle == "heddle" && clone == "clone" && is_placeholder_arg(path) =>
         {

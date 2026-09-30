@@ -7,6 +7,14 @@ pub(crate) fn print_next(action: &str) {
     print_bold_action("Next", action, 0);
 }
 
+/// `Next:` for a command that must stay runnable as printed: record IDs
+/// are shown in full rather than abbreviated for reading.
+pub(crate) fn print_next_exact(action: &str) {
+    if !action.trim().is_empty() {
+        println!("Next: {}", style::bold(action));
+    }
+}
+
 pub(crate) fn format_next(action: &str) -> Option<String> {
     format_bold_action("Next", action, 0)
 }
