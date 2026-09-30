@@ -807,13 +807,6 @@ const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
-const CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
-    supports_json: false,
-    supports_op_id: false,
-    json_kind: "none",
-    ..CONFIG_MUTATION
-};
-
 const NETWORK_CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
     supports_json: false,
     supports_op_id: false,
@@ -1664,7 +1657,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["auth", "derive-agent"],
-        feature_gated(user_scoped(CONFIG_MUTATION_TEXT), "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(CONFIG_MUTATION_NO_OP_ID),
+                    &["auth derive-agent"],
+                ),
+                &[json_discriminator(
+                    Some("auth derive-agent"),
+                    "output_kind",
+                    "auth_derive_agent",
+                )],
+            ),
+            "client",
+        ),
     ),
     entry(
         &["auth", "create-service-token"],

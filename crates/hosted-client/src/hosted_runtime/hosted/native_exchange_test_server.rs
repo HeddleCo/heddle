@@ -15,6 +15,7 @@ use api::{
     heddle::api::v1alpha2 as v2,
     method_descriptor,
 };
+use base64::Engine as _;
 use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
@@ -39,6 +40,7 @@ struct Fixture {
     owner_genesis: v2::SignedSpoolOwnerGenesis,
     owner: v2::OwnerState,
     captured: Arc<Mutex<PublicationCapture>>,
+    scope_path: Option<String>,
 }
 
 pub(crate) async fn start(
@@ -46,6 +48,21 @@ pub(crate) async fn start(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
+    start_with_scope(spool, thread_name, thread_id, None).await
+}
+
+/// Scope admission uses the same shared verifier and canonical resource fact as Weft.
+/// Each fixture represents one resolved spool; account ownership has no resource.
+pub(crate) async fn start_with_scope(
+    spool: uuid::Uuid,
+    thread_name: impl Into<String>,
+    thread_id: [u8; 32],
+    scoped: Option<(String, CallContextFactory)>,
+) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
+    let (scope_path, client_context) = match scoped {
+        Some((path, context)) => (Some(path), Some(context)),
+        None => (None, None),
+    };
     let captured = Arc::new(Mutex::new(PublicationCapture::default()));
     let owner_signer = Ed25519Signer::generate().expect("hosted test owner");
     let recovery = Ed25519Signer::generate().expect("hosted test recovery owner");
@@ -94,6 +111,7 @@ pub(crate) async fn start(
         owner_genesis,
         owner,
         captured: Arc::clone(&captured),
+        scope_path,
     };
 
     let server = Endpoint::builder(presets::Minimal)
@@ -126,12 +144,14 @@ pub(crate) async fn start(
         .await
         .expect("hosted client endpoint");
     let client_signer = Ed25519Signer::generate().expect("hosted test client signer");
-    let context = CallContextFactory::default()
-        .with_signing_key_pem(
-            &client_signer.to_pem().expect("hosted test client key"),
-            "principal:test",
-        )
-        .expect("hosted test call context");
+    let context = client_context.unwrap_or(
+        CallContextFactory::default()
+            .with_signing_key_pem(
+                &client_signer.to_pem().expect("hosted test client key"),
+                "principal:test",
+            )
+            .expect("hosted test call context"),
+    );
     let client = HostedClient::connect_addr_with_context(endpoint, server_addr, context)
         .await
         .expect("connect hosted test client");
@@ -145,7 +165,7 @@ async fn serve_call(
     server_key: Vec<u8>,
 ) {
     let mut request = Vec::new();
-    let (method, prelude_len) = loop {
+    let (method, context, prelude_len) = loop {
         let chunk = recv
             .read_chunk(api::framing::MAX_CONTROL_BODY + 6)
             .await
@@ -155,13 +175,49 @@ async fn serve_call(
         if let Some((prelude, consumed)) =
             decode_request_prelude(&request).expect("decode request prelude")
         {
-            break (prelude.method.to_string(), consumed);
+            break (prelude.method.to_string(), prelude.context, consumed);
         }
     };
     let streaming = method_descriptor(&method)
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
         .expect("registered hosted method");
+    if let Some(path) = fixture.scope_path.as_deref() {
+        let root = biscuit_auth::KeyPair::from(
+            &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
+                .expect("fixture root"),
+        );
+        let operation = method.rsplit('/').next().expect("method name");
+        let resource = match operation {
+            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" | "ObserveOwnership" => None,
+            _ => Some(("spool", path)),
+        };
+        let token = base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability);
+        if let Err(error) = biscuit_verifier::verify_at_with_resource(
+            &token,
+            &[root.public()],
+            &[],
+            operation,
+            resource,
+            chrono::Utc::now(),
+        ) {
+            println!("scope admission refused {operation} on {resource:?}: {error}");
+            let failure = api::heddle::api::common::CallFailure {
+                code: api::heddle::api::common::CallFailureCode::Unauthenticated as i32,
+                message: "invalid or revoked bearer capability".into(),
+                ..Default::default()
+            };
+            let bytes = if streaming == StreamingShape::Unary {
+                api::framing::encode_failure_response(&failure)
+            } else {
+                api::framing::encode_stream_failure(&failure)
+            }
+            .expect("scope failure");
+            send.write_all(&bytes).await.expect("scope rejection");
+            send.finish().expect("scope response");
+            return;
+        }
+    }
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => match method.as_str() {
             "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" => {
@@ -174,6 +230,9 @@ async fn serve_call(
                     implemented_methods: vec![
                         "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
+                        "/heddle.api.v1alpha2.IdentityService/GetIdentity".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                         "/heddle.api.v1alpha2.SyncService/Fetch".into(),
                     ],
@@ -227,6 +286,25 @@ async fn serve_call(
                             coverage: v2::Coverage::Complete as i32,
                             ..Default::default()
                         }],
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.IdentityService/GetIdentity" => {
+                write_unary(
+                    &mut send,
+                    &v2::GetIdentityResponse {
+                        identity: Some(v2::PrincipalRecord {
+                            id: "principal-test".into(),
+                            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                            ..Default::default()
+                        }),
+                        current_credential: Some(v2::CurrentCredentialRecord {
+                            thread_control_authority: vec![7; 32],
+                            acting_agent_id: "scoped-writer".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
                     },
                 )
                 .await;
