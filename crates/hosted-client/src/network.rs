@@ -114,7 +114,7 @@ pub async fn authenticated_keepalive() -> anyhow::Result<()> {
         Some(server.clone()),
         HostedAuthMode::CredentialFallback,
     )?;
-    let mut client = session
+    let client = session
         .connect_outbound(&server)
         .await
         .map_err(|error| anyhow::anyhow!(error))

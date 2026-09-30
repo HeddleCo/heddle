@@ -3472,11 +3472,7 @@ fn expected_action_argv_json(
                 argv.join(" ")
             )
         });
-    serde_json::json!(
-        std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
-            .chain(argv.into_iter().skip(1))
-            .collect::<Vec<_>>()
-    )
+    heddle_argv_json(argv.into_iter().skip(1))
 }
 
 fn is_display_only_action(action: &str) -> bool {
@@ -6937,7 +6933,7 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .unwrap_or_else(|_| panic!("command catalog JSON should parse: {json}"));
     assert_eq!(
         parsed["executable_path"],
-        env!("CARGO_BIN_EXE_heddle"),
+        canonical_path_string(Path::new(env!("CARGO_BIN_EXE_heddle"))),
         "catalog should tell agents which binary produced replayable argv: {json}"
     );
     let commands = parsed["commands"]

@@ -17,6 +17,7 @@ use api::{
     heddle::api::v1alpha2 as v2,
     method_descriptor,
 };
+use base64::Engine as _;
 use crypto::{Ed25519Signer, Signer};
 use hosted_client::hosted_runtime::hosted::{CallContextFactory, HostedClient};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -33,6 +34,8 @@ const PUBLICATION_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub struct PublicationCapture {
     pub import_requests: Vec<v2::ImportSourceRequest>,
     pub calls: Vec<String>,
+    /// Run Weft's shared verifier with request-time operation/resource facts.
+    pub enforce_scope: bool,
     pub revision: Option<v2::RevisionRef>,
     pub thread_genesis: Option<v2::ThreadGenesisRecord>,
     pub operations: Vec<v2::ReplicationOperations>,
@@ -275,7 +278,7 @@ async fn serve_call(
     server_key: Vec<u8>,
 ) {
     let mut request = Vec::new();
-    let (method, prelude_len) = loop {
+    let (method, context, prelude_len) = loop {
         let chunk = recv
             .read_chunk(api::framing::MAX_CONTROL_BODY + 6)
             .await
@@ -285,7 +288,7 @@ async fn serve_call(
         if let Some((prelude, consumed)) =
             decode_request_prelude(&request).expect("decode request prelude")
         {
-            break (prelude.method.to_string(), consumed);
+            break (prelude.method.to_string(), prelude.context, consumed);
         }
     };
     fixture
@@ -298,6 +301,49 @@ async fn serve_call(
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
         .expect("registered hosted method");
+    if fixture
+        .captured
+        .lock()
+        .expect("scope enforcement")
+        .enforce_scope
+    {
+        let root = biscuit_auth::KeyPair::from(
+            &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
+                .expect("fixture root"),
+        );
+        let operation = method.rsplit('/').next().expect("method name");
+        // The fixture serves one canonical spool. Like Weft, caller identity
+        // and account ownership carry no spool resource fact.
+        let resource = match operation {
+            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" | "ObserveOwnership" => None,
+            _ => Some(("spool", "spool/acme")),
+        };
+        let token = base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability);
+        if let Err(error) = heddle_biscuit_verifier::verify_at_with_resource(
+            &token,
+            &[root.public()],
+            &[],
+            operation,
+            resource,
+            chrono::Utc::now(),
+        ) {
+            println!("scope admission refused {operation}: {error}");
+            let failure = api::heddle::api::common::CallFailure {
+                code: api::heddle::api::common::CallFailureCode::Unauthenticated as i32,
+                message: "invalid or revoked bearer capability".into(),
+                ..Default::default()
+            };
+            let bytes = if streaming == StreamingShape::Unary {
+                api::framing::encode_failure_response(&failure)
+            } else {
+                api::framing::encode_stream_failure(&failure)
+            }
+            .expect("scope failure");
+            send.write_all(&bytes).await.expect("scope rejection");
+            send.finish().expect("scope response");
+            return;
+        }
+    }
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => match method.as_str() {
             "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" => {

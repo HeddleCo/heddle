@@ -14,10 +14,9 @@ use std::{
 use api::heddle::api::{
     common::StateId as ApiStateId,
     v1alpha2::{
-        self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode,
-        ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, PageRequest, RevisionRef,
-        SpoolRef, ThreadOverview, ThreadQuery, ThreadRef, TransferSelection, identity_event,
-        revision_ref, thread_list_event, thread_query,
+        self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode, ObserveOptions,
+        ObserveThreadsRequest, PageRequest, RevisionRef, SpoolRef, ThreadOverview, ThreadQuery,
+        ThreadRef, TransferSelection, revision_ref, thread_list_event, thread_query,
     },
 };
 use crypto::{Signer as _, thread_operation::SignedOperation};
@@ -358,57 +357,25 @@ impl HostedClient {
     pub(super) async fn current_creator_authority(
         &self,
     ) -> Result<(Uuid, Vec<u8>, Option<String>), ProtocolError> {
-        let owner = self.current_owner_state().await?;
-        let owner_id = Uuid::parse_str(
-            &owner
-                .owner
-                .as_ref()
-                .ok_or_else(|| ProtocolError::InvalidState("current owner identity absent".into()))?
-                .id,
-        )
-        .map_err(native_error)?;
-        let remote = self.native().await.map_err(native_error)?;
-        let mut observation = remote
-            .observe::<rpc::IdentityServiceObserveIdentity>(
-                ObserveIdentityRequest {
-                    include_current_credential: true,
-                    observe: Some(once_observe()),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await
-            .map_err(native_error)?;
-        let batch = observation
-            .next_commit()
-            .await
-            .map_err(native_error)?
-            .ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "identity observation ended without a checkpoint".into(),
-                )
-            })?;
-        let (authority, agent_id) = batch
-            .changes
-            .into_iter()
-            .find_map(|change| match change {
-                identity_event::Payload::CurrentCredential(credential)
-                    if !credential.thread_control_authority.is_empty() =>
-                {
-                    let agent_id = if credential.acting_agent_id.is_empty() {
-                        None
-                    } else {
-                        Some(credential.acting_agent_id)
-                    };
-                    Some((credential.thread_control_authority, agent_id))
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "current credential has no portable Thread control authority".into(),
-                )
-            })?;
+        // Thread authorship belongs to the caller's account. Ownership history
+        // is a different view and a spool-scoped credential cannot read it
+        // without a resource. Use the caller-bound identity snapshot instead.
+        let identity = self.get_identity().await?;
+        let principal = identity
+            .identity
+            .ok_or_else(|| ProtocolError::InvalidState("current caller identity absent".into()))?;
+        let owner_id = Uuid::parse_str(&principal.account_id).map_err(native_error)?;
+        let credential = identity
+            .current_credential
+            .ok_or_else(|| ProtocolError::InvalidState("current credential absent".into()))?;
+        if credential.thread_control_authority.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "current credential has no portable Thread control authority".into(),
+            ));
+        }
+        let agent_id =
+            (!credential.acting_agent_id.is_empty()).then_some(credential.acting_agent_id);
+        let authority = credential.thread_control_authority;
         Ok((owner_id, authority, agent_id))
     }
 
@@ -1766,6 +1733,184 @@ mod tests {
         .with_intent(intent);
         repo.store().put_state(&state).expect("state");
         state
+    }
+
+    #[tokio::test]
+    async fn scoped_agent_pushes_only_to_its_spool() {
+        use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
+        use config::credentials::{self, ServerCredential};
+
+        use crate::hosted_runtime::{auth::derive_agent, device_flow::AgentTemplate};
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _isolated_home = native_repo();
+        let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
+        replica.bind_local_name("main").expect("main binding");
+        let state = snapshot(
+            &repo,
+            vec![replica.genesis().expect("genesis").base],
+            "agent work",
+        );
+        record_hosted_capture(
+            &repo,
+            &replica,
+            state.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect("signed capture");
+        let root = biscuit_auth::KeyPair::from(
+            &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
+                .expect("root"),
+        );
+        let parent = biscuit_auth::Biscuit::builder()
+            .fact(r#"user("scoped-test")"#)
+            .expect("user")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("proof")
+            .fact(r#"session("scoped-session")"#)
+            .expect("session")
+            .fact("expires_at(2030-01-01T00:00:00Z)")
+            .expect("expiry")
+            .build_v1(&root)
+            .expect("root token")
+            .to_base64()
+            .expect("parent");
+        let parent = ServerCredential {
+            mint_root_attachment: None,
+            token: parent,
+            subject: "scoped-test".into(),
+            device_id: None,
+            credential_id: None,
+            private_key_pem: Some(signer.to_pem().expect("parent PEM")),
+            expires_at: Some("2030-01-01T00:00:00Z".into()),
+        };
+        let derive_context = |template| {
+            credentials::store_server_credential("scope.test", parent.clone()).expect("parent");
+            derive_agent(
+                "scope.test",
+                Some("scoped-writer".into()),
+                3600,
+                vec!["spool:acme/widgets".into()],
+                Vec::new(),
+                template,
+                None,
+            )
+            .expect("derive agent");
+            let child = credentials::get_server_credential("scope.test")
+                .expect("keystore")
+                .expect("child");
+            super::super::CallContextFactory::default()
+                .with_bearer_capability(child.token.into_bytes())
+                .with_signing_key_pem(
+                    child.private_key_pem.as_deref().expect("child PEM"),
+                    "principal:scoped-test",
+                )
+                .expect("child context")
+        };
+        let context = derive_context(None);
+        let (mut client, server, captured) =
+            super::super::native_exchange_test_server::start_with_scope(
+                spool,
+                "main",
+                *replica.thread_id().as_bytes(),
+                Some(("spool/acme/widgets".into(), context.clone())),
+            )
+            .await;
+        let result = client
+            .push_profiled(
+                &repo,
+                "acme/widgets",
+                state.id(),
+                "main",
+                false,
+                "scoped-push".into(),
+            )
+            .await;
+        assert!(result.expect("scoped push").0.success);
+        client.close().await;
+        server.await.expect("server finished");
+        assert_eq!(
+            captured.lock().expect("published").revision,
+            Some(revision_ref(
+                &SpoolRef {
+                    id: spool.to_string()
+                },
+                state.id()
+            ))
+        );
+        println!("scoped agent published its signed capture to spool/acme/widgets");
+
+        let (mut other, server, captured) =
+            super::super::native_exchange_test_server::start_with_scope(
+                Uuid::from_u128(99),
+                "main",
+                *replica.thread_id().as_bytes(),
+                Some(("spool/other".into(), context)),
+            )
+            .await;
+        let result = other
+            .push_profiled(
+                &repo,
+                "other",
+                state.id(),
+                "main",
+                false,
+                "wrong-spool".into(),
+            )
+            .await;
+        other.close().await;
+        server.await.expect("other server finished");
+        assert!(
+            result
+                .expect_err("other spool denied")
+                .to_string()
+                .contains("invalid or revoked bearer capability")
+        );
+        assert!(captured.lock().expect("other published").revision.is_none());
+
+        let (mut reader, server, captured) =
+            super::super::native_exchange_test_server::start_with_scope(
+                spool,
+                "main",
+                *replica.thread_id().as_bytes(),
+                Some((
+                    "spool/acme/widgets".into(),
+                    derive_context(Some(AgentTemplate::Reviewer)),
+                )),
+            )
+            .await;
+        reader
+            .observe_thread_overviews("acme/widgets")
+            .await
+            .expect("reviewer reads its spool");
+        let result = reader
+            .push_profiled(
+                &repo,
+                "acme/widgets",
+                state.id(),
+                "main",
+                false,
+                "reader-push".into(),
+            )
+            .await;
+        reader.close().await;
+        server.await.expect("reader server finished");
+        assert!(
+            result
+                .expect_err("reviewer push denied")
+                .to_string()
+                .contains("invalid or revoked bearer capability")
+        );
+        assert!(
+            captured
+                .lock()
+                .expect("reader published")
+                .revision
+                .is_none()
+        );
     }
 
     #[test]

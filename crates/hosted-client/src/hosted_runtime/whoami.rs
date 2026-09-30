@@ -517,7 +517,10 @@ mod tests {
                 .any(|call| call.ends_with("/ObserveIdentity") || call.ends_with("/ListSpools")),
             "{calls:?}"
         );
-        assert_eq!(observed.identity.account_id, "account-1");
+        assert_eq!(
+            observed.identity.account_id,
+            uuid::Uuid::from_bytes([9; 16]).to_string()
+        );
         assert_eq!(
             lock.as_ref().map(|lock| lock.cap_bytes),
             Some(5_000_000_000)

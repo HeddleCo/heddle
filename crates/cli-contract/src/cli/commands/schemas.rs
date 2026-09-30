@@ -46,8 +46,8 @@ use super::{
             SessionListOutput,
         },
         auth::{
-            AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
-            GrantCreateOutput, GrantDeleteOutput, GrantListOutput, PromoteOutput,
+            AgentAccountCreatedOutput, AuthDeriveAgentOutput, AuthLogoutOutput, AuthStatusOutput,
+            AuthTrustOutput, GrantCreateOutput, GrantDeleteOutput, GrantListOutput, PromoteOutput,
             ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, WhoamiOutput,
         },
         thread::{
@@ -181,6 +181,7 @@ schema_registry! {
     (&["auth login"], AgentAccountCreatedOutput),
     (&["auth logout"], AuthLogoutOutput),
     (&["auth status"], AuthStatusOutput),
+    (&["auth derive-agent"], AuthDeriveAgentOutput),
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),
     (&["whoami"], WhoamiOutput),
     (&["promote"], PromoteOutput),

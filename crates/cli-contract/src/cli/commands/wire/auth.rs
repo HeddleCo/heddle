@@ -8,6 +8,27 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
+/// Metadata for an offline agent delegation. Secret material stays in the
+/// keystore or exported credential file.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "AuthDeriveAgentSchema")]
+pub struct AuthDeriveAgentOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub agent_id: String,
+    pub server: String,
+    pub parent_source: String,
+    pub expires_at: String,
+    pub template: Option<String>,
+    /// Null inherits the parent's operation ceiling.
+    pub allowed_operations: Option<Vec<String>>,
+    /// Empty adds no resource restriction to the parent.
+    pub scopes: Vec<String>,
+    pub rendered_scope: Option<String>,
+    pub installed: bool,
+    pub credential_path: Option<std::path::PathBuf>,
+}
+
 /// JSON payload for `heddle promote`.
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "PromoteSchema")]
