@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Portable, serializable cache entry and fail-closed comparison.
 
-use crypto::{CiVerdictBody, Conclusion};
+use crypto::{CI_VERDICT_BODY_SCHEMA_VERSION, CiVerdictBody, Conclusion};
 use serde::{Deserialize, Serialize};
 
 use super::key::CacheKey;
 use crate::model::{AttemptRecord, CheckResult};
 
 /// Schema version of [`ResultCacheEntry`]. Bump when the bytes change.
-pub const RESULT_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const RESULT_CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// A portable cached check result, bound to env, inputs, and check identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +121,7 @@ impl ResultCacheEntry {
 
     pub(super) fn is_valid_for(&self, key: &CacheKey, check_name: &str) -> bool {
         self.schema_version == RESULT_CACHE_SCHEMA_VERSION
+            && self.body.schema_version == CI_VERDICT_BODY_SCHEMA_VERSION
             && self.env_digest == key.env_digest
             && self.input_digests == key.input_digests
             && self.definition_digest == key.definition_digest

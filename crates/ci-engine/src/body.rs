@@ -9,7 +9,7 @@ use crypto::{
     Execution, FailureDetail, Outcome, Repro,
 };
 
-use crate::model::ExecutionContext;
+use crate::{env::VERDICT_ENV_ALLOWLIST, model::ExecutionContext};
 
 pub(crate) struct BodyInputs<'a> {
     pub(crate) conclusion: Conclusion,
@@ -70,7 +70,12 @@ pub(crate) fn build_body(
         log: None,
         repro: Repro {
             command: check.command.clone(),
-            env: inputs.environment.clone(),
+            env: inputs
+                .environment
+                .iter()
+                .filter(|(name, _)| VERDICT_ENV_ALLOWLIST.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
             image: None,
             services,
         },

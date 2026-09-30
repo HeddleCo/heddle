@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use super::body_details::{Execution, LogRef, Outcome, Repro};
 
 /// Current canonical [`CiVerdictBody`] schema version.
-pub const CI_VERDICT_BODY_SCHEMA_VERSION: u32 = 1;
+/// Schema 2 makes runner environment runtime-only. Schema 1 is rejected rather
+/// than reusing or publishing evidence containing private runner details.
+pub const CI_VERDICT_BODY_SCHEMA_VERSION: u32 = 2;
 
 /// The complete conclusion-bearing content of a CI verdict.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +38,7 @@ pub struct CiVerdictBody {
     /// Finalized log reference; log bytes are never inlined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<LogRef>,
-    /// Exact local reproduction recipe.
+    /// Portable reproduction recipe without the runner's private environment.
     pub repro: Repro,
     /// Canonical CheckSet digest used with `check.node_id` for authoritative gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]

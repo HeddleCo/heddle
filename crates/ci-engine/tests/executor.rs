@@ -56,6 +56,59 @@ fn sh(name: &str, script: &str) -> Check {
 }
 
 #[test]
+fn completed_and_skipped_verdicts_do_not_record_literal_or_cache_environment() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let cache_root = tempfile::tempdir().expect("cache root");
+    let mut check = sh("privacy", "test -n \"$PRIVATE_CHECK\"");
+    check.env.insert(
+        "PRIVATE_CHECK".into(),
+        "private-check-value-sentinel".into(),
+    );
+    check.cache_paths = vec!["cache".into()];
+    check.triggers = vec![ci_config::Trigger::Manual];
+    let config = CiConfig::from_checks(vec![check]);
+    let environment = HermeticEnv::with_host(BTreeMap::from([
+        ("HOME".into(), "/private-home-sentinel".into()),
+        ("UNRECOGNIZED".into(), "private-unknown-sentinel".into()),
+    ]));
+    for (trigger, conclusion) in [
+        (ci_config::Trigger::Manual, Conclusion::Success),
+        (ci_config::Trigger::Push, Conclusion::Skipped),
+    ] {
+        let results = run_checks_with(
+            &config,
+            &context(),
+            &RunOptions {
+                workdir: workdir.path(),
+                services: &NoopProvider,
+                now_rfc3339: &fixed_clock,
+            },
+            &RunControls {
+                trigger: Some(trigger),
+                cache_root: Some(cache_root.path()),
+                hermetic_env: Some(&environment),
+                ..RunControls::default()
+            },
+        )
+        .expect("execute or skip");
+        assert_eq!(results[0].conclusion(), conclusion);
+        let body = String::from_utf8(results[0].body.canonical_bytes()).expect("JSON");
+        for private in [
+            "private-check-value-sentinel",
+            "/private-home-sentinel",
+            "private-unknown-sentinel",
+            workdir.path().to_str().expect("workdir"),
+            cache_root.path().to_str().expect("cache root"),
+        ] {
+            assert!(
+                !body.contains(private),
+                "{conclusion:?} recorded private environment"
+            );
+        }
+    }
+}
+
+#[test]
 fn executes_argv_and_classifies_treadle_failure_shapes() {
     let workdir = tempfile::tempdir().expect("workdir");
     let results = run(

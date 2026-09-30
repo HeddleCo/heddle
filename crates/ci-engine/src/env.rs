@@ -22,7 +22,13 @@ pub const GIT_IDENTITY_NAME: &str = "heddle ci";
 /// Deterministic Git author/committer email.
 pub const GIT_IDENTITY_EMAIL: &str = "ci@heddle.invalid";
 
-/// Builder for the exact environment both executed and recorded in `repro`.
+/// Environment fields permitted in signed verdicts. None are needed: the
+/// definition digest identifies authored inputs, and the command, services and
+/// outcome identify the check and its result. Host, service, cache and literal
+/// check values may contain private paths or identities; keep them runtime-only.
+pub(crate) const VERDICT_ENV_ALLOWLIST: &[&str] = &[];
+
+/// Builder for the runtime environment, separate from signed evidence.
 #[derive(Debug, Clone)]
 pub struct HermeticEnv {
     git_hermetic: bool,
