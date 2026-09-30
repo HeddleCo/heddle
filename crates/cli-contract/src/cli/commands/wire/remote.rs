@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use verbs::{ActionTemplate, PullOutcome, PushOutcome, RepositoryVerificationState};
+use verbs::{
+    ActionTemplate, PullOutcome, PushOutcome, RepositoryVerificationState,
+    source_heads::SourceHeadsReport,
+};
 
 use super::bridge::SkippedRefOutput;
 
@@ -38,6 +41,12 @@ pub struct CloneOutput {
     #[serde(rename = "verification")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust: Option<RepositoryVerificationState>,
+    /// Threads cloned with several concurrent source heads. One head was
+    /// checked out by the documented default; the rest stay selectable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub source_heads: Vec<SourceHeadsReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
 }
 
 /// JSON payload for `heddle import local`.
@@ -200,6 +209,12 @@ pub struct PullOutput {
     pub outcome: PullOutcome,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
+    /// The pulled Thread has several concurrent source heads. One is checked
+    /// out by the documented default; the rest stay selectable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_heads: Option<SourceHeadsReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
 }
 
 /// JSON payload for `heddle push`: the verbs [`PushOutcome`] body beside

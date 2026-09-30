@@ -10,34 +10,51 @@ use objects::{
     store::ObjectStore,
 };
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
-use repo::{MergeState, Repository};
+use repo::{MergeState, Repository, thread_replication::source_heads::DefaultHeadRule};
 use verbs::{
     ConflictRegionReport, ConflictResolutionReport, ResolveReport,
-    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
+    contains_line_start_conflict_markers, path_is_active_conflict,
+    source_heads::{
+        MergeSourceHeadOutcome, SourceHeadResolutionMode, SourceHeadResolutionReport,
+        SourceHeadsReport, merge_source_head, pick_source_head, select_source_head,
+        source_heads_report,
+    },
+    unresolved_conflict_paths,
 };
 
 use super::{
     action_line::print_next_step,
     advice::RecoveryAdvice,
-    next_action::{NextActionValidationContext, write_full_command_json},
+    next_action::{NextActionValidationContext, normalized_action, write_full_command_json},
     snapshot::resolve_attribution,
 };
 use crate::{
-    cli::{Cli, should_output_json},
+    cli::{Cli, ResolveArgs, should_output_json},
     config::UserConfig,
 };
 
-#[allow(clippy::too_many_arguments)]
-pub fn cmd_resolve(
-    cli: &Cli,
-    path: Option<String>,
-    all: bool,
-    list: bool,
-    ours: bool,
-    theirs: bool,
-    force: bool,
-) -> Result<()> {
+pub fn cmd_resolve(cli: &Cli, args: ResolveArgs) -> Result<()> {
+    let ResolveArgs {
+        path,
+        all,
+        list,
+        ours,
+        theirs,
+        force,
+        heads,
+        pick,
+        merge,
+    } = args;
     let repo = cli.open_repo()?;
+    if heads {
+        return cmd_resolve_heads(&repo, cli);
+    }
+    if let Some(selector) = pick {
+        return cmd_resolve_source_head(&repo, cli, &selector, SourceHeadResolutionMode::Pick);
+    }
+    if let Some(selector) = merge {
+        return cmd_resolve_source_head(&repo, cli, &selector, SourceHeadResolutionMode::Merge);
+    }
     let merge_manager = repo.merge_state_manager();
 
     if list {
@@ -101,6 +118,8 @@ fn cmd_resolve_list(
                 continuation_message: None,
                 next_action: None,
                 recommended_action: None,
+                source_heads: None,
+                head_resolution: None,
             })?
         );
     } else if unresolved.is_empty() {
@@ -429,6 +448,212 @@ fn resolve_output(
         continuation_message,
         next_action,
         recommended_action,
+        source_heads: None,
+        head_resolution: None,
+    }
+}
+
+/// `resolve --heads`: every concurrent source head of the current Thread,
+/// with its claimed producer and the exact pick / merge commands.
+fn cmd_resolve_heads(repo: &Repository, cli: &Cli) -> Result<()> {
+    let thread = verbs::source_heads::attached_thread(repo)?;
+    let heads = source_heads_report(repo, &thread, None)?;
+    let message = match &heads {
+        Some(heads) => format!(
+            "Thread '{thread}' has {} concurrent source heads",
+            heads.heads.len()
+        ),
+        None => format!("Thread '{thread}' has no alternative source heads"),
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        let mut output = source_head_output(message);
+        output.source_heads = heads;
+        return write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["resolve"]),
+        );
+    }
+    println!("{message}");
+    if let Some(heads) = &heads {
+        render_source_heads(heads);
+    }
+    Ok(())
+}
+
+/// Clone and pull: say which head is checked out, why, and what remains.
+pub(crate) fn render_source_heads_summary(heads: &SourceHeadsReport) {
+    let rule = heads
+        .selected_by
+        .as_deref()
+        .and_then(DefaultHeadRule::parse)
+        .map(DefaultHeadRule::describe)
+        .unwrap_or("the local Thread tip");
+    println!(
+        "  thread '{}' has {} concurrent source heads; checked out {} ({rule})",
+        heads.thread,
+        heads.heads.len(),
+        heads.current.as_deref().unwrap_or("none"),
+    );
+    render_source_heads(heads);
+    print_next_step(verbs::source_heads::SOURCE_HEADS_ACTION);
+}
+
+/// Human rendering shared by `resolve --heads`, clone and pull.
+pub(crate) fn render_source_heads(heads: &SourceHeadsReport) {
+    for head in &heads.heads {
+        let actor = head
+            .producer
+            .agent
+            .as_ref()
+            .map(|agent| format!("{}/{}", agent.provider, agent.model))
+            .unwrap_or_else(|| head.producer.principal.name.clone());
+        let current = if head.current { " (checked out)" } else { "" };
+        let intent = head
+            .intent
+            .as_deref()
+            .map(|intent| format!(" \"{intent}\""))
+            .unwrap_or_default();
+        println!("  {}{current} by {actor} (claimed){intent}", head.state);
+        println!("    pick:  {}", head.pick_action);
+        if let Some(merge) = &head.merge_action {
+            println!("    merge: {merge}");
+        }
+    }
+}
+
+fn source_head_output(message: String) -> ResolveReport {
+    ResolveReport {
+        output_kind: "resolve".to_string(),
+        message: Some(message),
+        resolved: Vec::new(),
+        remaining: Vec::new(),
+        conflict_paths: Vec::new(),
+        conflicts: Vec::new(),
+        resolutions: Vec::new(),
+        continued: false,
+        continuation_status: None,
+        continuation_message: None,
+        next_action: None,
+        recommended_action: None,
+        source_heads: None,
+        head_resolution: None,
+    }
+}
+
+/// `resolve --pick` / `resolve --merge`: retire concurrent source heads with
+/// one attributed capture.
+fn cmd_resolve_source_head(
+    repo: &Repository,
+    cli: &Cli,
+    selector: &str,
+    mode: SourceHeadResolutionMode,
+) -> Result<()> {
+    let selection = select_source_head(repo, selector)?;
+    let attribution = resolve_attribution(repo, &UserConfig::load_default()?)?;
+    let selected = selection.selected.to_string_full();
+    let (state, conflicts) = match mode {
+        SourceHeadResolutionMode::Pick => (
+            Some(pick_source_head(repo, &selection, attribution)?),
+            Vec::new(),
+        ),
+        SourceHeadResolutionMode::Merge => {
+            match merge_source_head(repo, &selection, attribution)? {
+                MergeSourceHeadOutcome::Merged(state) => (Some(state), Vec::new()),
+                MergeSourceHeadOutcome::Conflicted(paths) => (None, paths),
+            }
+        }
+    };
+    let parents = match state {
+        Some(state) => repo
+            .store()
+            .get_state(&state)?
+            .ok_or(HeddleError::StateNotFound(state))?
+            .parents
+            .iter()
+            .map(StateId::to_string_full)
+            .collect(),
+        None => Vec::new(),
+    };
+    let verb = match mode {
+        SourceHeadResolutionMode::Pick => "Picked",
+        SourceHeadResolutionMode::Merge => "Merged",
+    };
+    let message = match state {
+        Some(state) => format!(
+            "{verb} source head {} on thread '{}' as {}",
+            selection.selected.short(),
+            selection.thread,
+            state.short()
+        ),
+        None => format!(
+            "Merging source head {} on thread '{}' stopped on {} conflict(s)",
+            selection.selected.short(),
+            selection.thread,
+            conflicts.len()
+        ),
+    };
+    let remaining = source_heads_report(repo, &selection.thread, None)?;
+    // Publishing the resolution collapses the hosted heads too.
+    let next_action = state.and(normalized_action(publish_action(repo)));
+    let structured = if conflicts.is_empty() {
+        Vec::new()
+    } else {
+        match repo.merge_state_manager().load()? {
+            Some(merge_state) => structured_conflicts_for_paths(repo, &merge_state, &conflicts)?,
+            None => Vec::new(),
+        }
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        let mut output = source_head_output(message);
+        output.remaining = conflicts.clone();
+        output.conflict_paths = conflicts;
+        output.conflicts = structured;
+        output.recommended_action = next_action.clone();
+        output.next_action = next_action;
+        output.source_heads = remaining;
+        output.head_resolution = Some(SourceHeadResolutionReport {
+            mode,
+            thread: selection.thread.clone(),
+            selected,
+            state: state.map(|state| state.to_string_full()),
+            parents,
+        });
+        return write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["resolve"]),
+        );
+    }
+    println!("{message}");
+    for conflict in &structured {
+        render_conflict_region(conflict);
+    }
+    if !conflicts.is_empty() {
+        for path in &conflicts {
+            println!("  {path}");
+        }
+        println!(
+            "Resolve each path with `heddle resolve <path>`; the merge completes when none remain."
+        );
+    }
+    if let Some(remaining) = &remaining {
+        println!(
+            "{} other source head(s) remain on thread '{}':",
+            remaining.heads.len().saturating_sub(1),
+            selection.thread
+        );
+        render_source_heads(remaining);
+    }
+    if let Some(action) = next_action.as_deref() {
+        print_next_step(action);
+    }
+    Ok(())
+}
+
+fn publish_action(repo: &Repository) -> String {
+    if verbs::status::default_remote_name(repo).is_some() {
+        "heddle push".to_string()
+    } else {
+        "heddle status".to_string()
     }
 }
 

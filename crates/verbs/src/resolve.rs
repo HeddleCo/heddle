@@ -27,6 +27,11 @@ pub struct ResolveReport {
     pub continuation_message: Option<String>,
     pub next_action: Option<String>,
     pub recommended_action: Option<String>,
+    /// Concurrent source heads of the current Thread, listed by `--heads`
+    /// and still unresolved after `--pick` / `--merge`.
+    pub source_heads: Option<crate::source_heads::SourceHeadsReport>,
+    /// What `--pick` or `--merge` did.
+    pub head_resolution: Option<crate::source_heads::SourceHeadResolutionReport>,
 }
 
 impl ResolveReport {

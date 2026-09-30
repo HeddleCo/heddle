@@ -52,6 +52,66 @@ pub struct PublicationCapture {
     /// Apply the next discussion command, then lose its receipt, so the
     /// client must redeliver an operation the server already holds.
     pub lose_next_discussion_receipt: bool,
+    /// Every accepted source publication on the fixture Thread, in arrival
+    /// order. Like Weft, the Thread's source heads are the published
+    /// revisions no other publication names in its ancestry, so two writers
+    /// publishing from one base leave two heads until one of them publishes a
+    /// capture naming both.
+    pub published: Vec<PublishedSource>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishedSource {
+    pub revision: v2::RevisionRef,
+    pub thread_genesis: v2::ThreadGenesisRecord,
+    pub operations: Vec<v2::ReplicationOperations>,
+    pub pack_data: Vec<u8>,
+    pub index_data: Vec<u8>,
+    /// Source revisions the publication's signed operations carry, its own
+    /// included.
+    pub ancestry: std::collections::BTreeSet<Vec<u8>>,
+}
+
+impl PublicationCapture {
+    /// Non-dominated published revisions: Weft's `source_heads`.
+    pub fn source_heads(&self) -> Vec<v2::RevisionRef> {
+        let mut heads: Vec<v2::RevisionRef> = Vec::new();
+        for (index, published) in self.published.iter().enumerate() {
+            let own = revision_state(&published.revision);
+            let dominated = self.published.iter().enumerate().any(|(other, candidate)| {
+                other != index
+                    && revision_state(&candidate.revision) != own
+                    && candidate.ancestry.contains(&own)
+            });
+            if !dominated && !heads.contains(&published.revision) {
+                heads.push(published.revision.clone());
+            }
+        }
+        heads
+    }
+}
+
+fn revision_state(revision: &v2::RevisionRef) -> Vec<u8> {
+    match revision.revision.as_ref() {
+        Some(v2::revision_ref::Revision::State(id)) => id.value.clone(),
+        _ => panic!("fixture publications carry State revisions"),
+    }
+}
+
+fn published_ancestry(
+    operations: &[v2::ReplicationOperations],
+) -> std::collections::BTreeSet<Vec<u8>> {
+    operations
+        .iter()
+        .flat_map(|batch| &batch.operations)
+        .filter_map(|record| {
+            objects::object::thread_replication::ThreadOperation::decode(&record.canonical_record)
+                .expect("published operation")
+                .source_state()
+                .expect("published source state")
+                .map(|state| state.id().as_bytes().to_vec())
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1180,10 +1240,7 @@ async fn serve_observe_threads(
             .captured
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .revision
-            .clone()
-            .into_iter()
-            .collect(),
+            .source_heads(),
         ..Default::default()
     };
     let mut overviews = vec![overview];
@@ -1391,6 +1448,20 @@ async fn serve_publication(
                         std::mem::take(&mut capture.delivered_command_ids);
                     accepted.reject_discussions = capture.reject_discussions;
                     accepted.lose_next_discussion_receipt = capture.lose_next_discussion_receipt;
+                    accepted.published = std::mem::take(&mut capture.published);
+                    if open.thread == Some(thread_ref(&fixture)) {
+                        accepted.published.push(PublishedSource {
+                            revision: open.revision.clone().expect("published revision"),
+                            thread_genesis: accepted
+                                .thread_genesis
+                                .clone()
+                                .expect("published genesis"),
+                            operations: accepted.operations.clone(),
+                            pack_data: accepted.pack_data.clone(),
+                            index_data: accepted.index_data.clone(),
+                            ancestry: published_ancestry(&accepted.operations),
+                        });
+                    }
                     *capture = accepted;
                 }
                 write_message(
@@ -1439,21 +1510,30 @@ async fn serve_fetch(
         panic!("native fetch must start with Open");
     };
     assert_eq!(open.thread, Some(thread_ref(&fixture)));
-    let accepted = fixture
-        .captured
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    let genesis = accepted
-        .thread_genesis
-        .clone()
-        .expect("published Thread genesis");
-    let revision = accepted.revision.clone().expect("published revision");
-    assert!(
-        open.revision
-            .as_ref()
-            .is_none_or(|value| value == &revision)
-    );
+    // Serve the publication whose revision was requested: each head of a
+    // multi-head Thread is fetched on its own, as from Weft.
+    let accepted = {
+        let capture = fixture
+            .captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match open.revision.as_ref() {
+            Some(requested) => capture
+                .published
+                .iter()
+                .rev()
+                .find(|published| &published.revision == requested)
+                .cloned()
+                .expect("requested revision was published"),
+            None => capture
+                .published
+                .last()
+                .cloned()
+                .expect("published revision"),
+        }
+    };
+    let genesis = accepted.thread_genesis.clone();
+    let revision = accepted.revision.clone();
     let artifacts = [&accepted.pack_data, &accepted.index_data];
     let packs = pack_extents(artifacts);
     let checkpoint = v2::TransferCheckpoint {
