@@ -1,14 +1,14 @@
 [package]
 name = "heddleco-capability-verifier"
-version = "0.23.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version = "1.85"
-authors = ["HeddleCo"]
+authors.workspace = true
 description = "Pure owner-anchored capability verification shared by Heddle and Weft"
-repository = "https://github.com/HeddleCo/heddle"
-license = "MIT OR Apache-2.0"
-keywords = ["authorization", "capability", "ed25519", "security", "wasm"]
-categories = ["authentication", "cryptography", "wasm"]
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 readme = "README.md"
 include = [
   "/src/**",
@@ -24,7 +24,7 @@ include = [
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.27.1" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.27.2" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro"] }

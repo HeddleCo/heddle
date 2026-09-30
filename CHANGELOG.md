@@ -13,6 +13,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Changed
+
+- Capability-verifier and its npm/WASM package now follow the workspace version.
+  The workspace is 0.27.2: the dependency-version guard requires a bump for the
+  updated verifier requirements. All publishable crates must inherit the version.
+
 ### Added
 
 - **`heddle whoami` lists grant-reachable spools.** After a reachable
