@@ -55,6 +55,33 @@ impl ClientOperationId {
         Ok(Self(scoped_to_method(&path, &value)))
     }
 
+    /// The exact command ID a signed collaboration operation authenticates.
+    ///
+    /// Unlike [`Self::caller_or_fresh`] this is never scoped or rederived: the
+    /// hosted service rejects a command whose ID differs from the signed
+    /// operation's idempotency key, and deduplicates redelivery on that ID.
+    /// The key must already be the canonical hyphenated UUID the service
+    /// parses; any other spelling cannot be carried byte-for-byte.
+    pub(crate) fn signed_command(method: &str, key: &str) -> Result<Self, ProtocolError> {
+        let path = if method.starts_with('/') {
+            method.to_string()
+        } else {
+            format!("/{method}")
+        };
+        if operation_id_required(&path) != Some(true) {
+            return Err(ProtocolError::InvalidState(format!(
+                "{method} is not declared to require a client operation ID"
+            )));
+        }
+        let canonical = uuid::Uuid::parse_str(key).ok().map(|id| id.to_string());
+        if canonical.as_deref() != Some(key) {
+            return Err(ProtocolError::InvalidState(format!(
+                "signed collaboration idempotency key {key:?} is not a canonical UUID, so no hosted command ID can match it; replication is incomplete"
+            )));
+        }
+        Ok(Self(key.to_string()))
+    }
+
     pub(crate) fn to_wire(&self) -> String {
         self.0.clone()
     }
@@ -109,5 +136,29 @@ mod tests {
         assert_ne!(context.as_str(), publish.as_str());
         assert!(uuid::Uuid::parse_str(open.as_str()).is_ok());
         assert!(uuid::Uuid::parse_str(context.as_str()).is_ok());
+    }
+
+    #[test]
+    fn signed_command_carries_the_signed_key_unscoped() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let key = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef).to_string();
+        let exact = ClientOperationId::signed_command(OPEN, &key).expect("canonical key");
+        assert_eq!(exact.as_str(), key);
+        assert_ne!(
+            exact,
+            ClientOperationId::caller_or_fresh(OPEN, key.clone()),
+            "per-method scoping would diverge from the signed key"
+        );
+        for rejected in [
+            key.to_uppercase(),
+            key.replace('-', ""),
+            format!("{{{key}}}"),
+            "test-op:open".to_string(),
+        ] {
+            assert!(
+                ClientOperationId::signed_command(OPEN, &rejected).is_err(),
+                "{rejected} must not be sent as a signed command ID"
+            );
+        }
     }
 }

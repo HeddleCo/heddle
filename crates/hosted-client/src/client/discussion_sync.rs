@@ -42,8 +42,8 @@ use crate::{
     hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
 };
 
-/// Deterministic namespace for the derived client-operation-ids so a retried
-/// push replays (server-side idempotent) rather than duplicating a turn.
+/// Deterministic namespace for idempotency keys of operations materialized
+/// from hosted discussions, so every clone derives the same `CollabOpId`.
 const OP_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6865_6464_6c65_6469_7363_7573_7379_6e63);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -67,6 +67,12 @@ struct RepoMirror {
 struct PreparedNativeOperation {
     local_operation_id: String,
     signed_record: Vec<u8>,
+    /// Hosted view version a prepared resolution was signed against. It is
+    /// part of the delivered command, so retries must resend it unchanged.
+    /// Absent for records retained from hosted observation, which the service
+    /// already holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_version: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +94,10 @@ struct MirrorEntry {
     /// competing sibling.
     #[serde(default)]
     pulled_resolution_key: Option<String>,
+    /// Local `CollabOpId` of the resolution whose native signed operation the
+    /// hosted service has acknowledged.
+    #[serde(default)]
+    published_resolution_operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,22 +167,6 @@ fn lock_mirror_write(heddle_dir: &Path) -> Result<objects::lock::WriteLockGuard>
     mirror_lock(heddle_dir)?
         .write()
         .map_err(|error| anyhow!("lock hosted discussion mirror: {error}"))
-}
-
-fn open_op_id(repo_path: &str, local_id: &str) -> String {
-    uuid::Uuid::new_v5(
-        &OP_NAMESPACE,
-        format!("open:{repo_path}:{local_id}").as_bytes(),
-    )
-    .to_string()
-}
-
-fn append_op_id(repo_path: &str, server_id: &str, turn_id: &str) -> String {
-    uuid::Uuid::new_v5(
-        &OP_NAMESPACE,
-        format!("append:{repo_path}:{server_id}:{turn_id}").as_bytes(),
-    )
-    .to_string()
 }
 
 /// Enumerate a materialized discussion's turns with their per-op index (turn
@@ -288,17 +282,137 @@ async fn publish_authored_append(
             .push(PreparedNativeOperation {
                 local_operation_id: turn.operation_id.to_string_full(),
                 signed_record: signed.encode_to_vec(),
+                expected_version: None,
             });
         save_mirror(repo.heddle_dir(), mirror)?;
         signed
     };
     client
-        .publish_append_discussion_operation(
-            signed,
-            append_op_id(repo_path, server_id, &turn.turn_id),
-        )
+        .publish_append_discussion_operation(signed)
         .await
         .map_err(Into::into)
+}
+
+/// The single resolving operation at the discussion's causal frontier.
+fn resolving_operation(
+    store: &CollaborationStore,
+    local_id: &str,
+    discussion: &MaterializedDiscussion,
+) -> Result<(CollabOpId, CollaborationOperationEnvelope)> {
+    let mut resolving = Vec::new();
+    for head in &discussion.heads {
+        let decoded = store
+            .read_operation(head)
+            .context("read discussion head")?
+            .ok_or_else(|| anyhow!("discussion head {head} is missing"))?;
+        if matches!(
+            decoded.operation.body,
+            CollaborationOperationBodyV1::Resolve { .. }
+        ) {
+            resolving.push((*head, decoded.operation));
+        }
+    }
+    match resolving.len() {
+        1 => Ok(resolving.remove(0)),
+        0 => Err(anyhow!(
+            "discussion {local_id} is resolved but no resolution is at its causal head; replication is incomplete"
+        )),
+        _ => Err(anyhow!(
+            "discussion {local_id} has concurrent resolutions; resolve the conflict before replication"
+        )),
+    }
+}
+
+/// Publish the discussion's locally authored resolution, once. The signed
+/// record and the view version it was signed against are persisted before
+/// delivery; a retry resends those exact bytes under the same signed key.
+#[allow(clippy::too_many_arguments)]
+async fn publish_authored_resolution(
+    client: &mut HostedClient,
+    store: &CollaborationStore,
+    repo: &Repository,
+    repo_path: &str,
+    mirror: &mut HostedMirror,
+    index: usize,
+    server_id: &str,
+    local_id: &str,
+    discussion: &MaterializedDiscussion,
+    self_attr: Option<&Attribution>,
+) -> Result<bool> {
+    let (resolving_id, authored) = resolving_operation(store, local_id, discussion)?;
+    let local_operation_id = resolving_id.to_string_full();
+    let mark_published = |mirror: &mut HostedMirror| -> Result<()> {
+        mirror
+            .repos
+            .get_mut(repo_path)
+            .and_then(|repository| repository.discussions.get_mut(index))
+            .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?
+            .published_resolution_operation_id = Some(local_operation_id.clone());
+        Ok(())
+    };
+    if mirror.repos[repo_path].discussions[index]
+        .published_resolution_operation_id
+        .as_deref()
+        == Some(local_operation_id.as_str())
+    {
+        return Ok(false);
+    }
+    let prepared = mirror.repos[repo_path]
+        .native_operations
+        .iter()
+        .find(|operation| operation.local_operation_id == local_operation_id)
+        .cloned();
+    let (signed, expected_version) = match prepared {
+        Some(PreparedNativeOperation {
+            signed_record,
+            expected_version: Some(expected_version),
+            ..
+        }) => (
+            SignedRecord::decode(signed_record.as_slice())
+                .context("decode prepared native discussion resolution")?,
+            expected_version,
+        ),
+        Some(PreparedNativeOperation {
+            expected_version: None,
+            ..
+        }) => {
+            // Retained from hosted observation: the service already holds it.
+            mark_published(mirror)?;
+            return Ok(false);
+        }
+        None => {
+            if !self_attr
+                .is_some_and(|attr| principals_match(&authored.author.principal, &attr.principal))
+            {
+                return Err(anyhow!(
+                    "discussion {local_id} has a resolution not attributed to the local principal and no retained native signed operation; replication is incomplete"
+                ));
+            }
+            let (signed, expected_version) = client
+                .prepare_resolve_discussion_operation(repo_path, server_id, &authored)
+                .await
+                .with_context(|| format!("prepare hosted resolution for {local_id}"))?;
+            mirror
+                .repos
+                .entry(repo_path.to_string())
+                .or_default()
+                .native_operations
+                .push(PreparedNativeOperation {
+                    local_operation_id: local_operation_id.clone(),
+                    signed_record: signed.encode_to_vec(),
+                    expected_version: Some(expected_version.clone()),
+                });
+            save_mirror(repo.heddle_dir(), mirror)?;
+            (signed, expected_version)
+        }
+    };
+    client
+        .publish_resolve_discussion_operation(signed, expected_version)
+        .await
+        .with_context(|| format!("resolve hosted discussion for {local_id}"))?;
+    mark_published(mirror)?;
+    save_mirror(repo.heddle_dir(), mirror)?;
+    Ok(true)
 }
 
 /// Publish every supported locally authored discussion anchor through the
@@ -411,7 +525,7 @@ async fn push_one(
             "discussion {local_id} has {skipped_foreign} unlinked turn(s) not attributed to the local principal and no retained native signed operation; replication is incomplete"
         ));
     }
-    let (_index, _server_id, changed, _hosted) = match entry_index {
+    let (index, server_id, mut changed, _hosted) = match entry_index {
         None => {
             if candidates.is_empty() {
                 return Ok(false);
@@ -456,12 +570,13 @@ async fn push_one(
                     .push(PreparedNativeOperation {
                         local_operation_id: open_operation_id.to_string_full(),
                         signed_record: signed.encode_to_vec(),
+                        expected_version: None,
                     });
                 save_mirror(repo.heddle_dir(), mirror)?;
                 signed
             };
             let mut hosted = client
-                .publish_open_discussion_operation(signed, open_op_id(repo_path, local_id))
+                .publish_open_discussion_operation(signed)
                 .await
                 .with_context(|| format!("open hosted discussion for {local_id}"))?;
             let server_id = hosted.id.clone();
@@ -476,6 +591,7 @@ async fn push_one(
                 }],
                 resolved_into_annotation_operation_id: None,
                 pulled_resolution_key: None,
+                published_resolution_operation_id: None,
             });
             let index = repo_mirror.discussions.len() - 1;
             for turn in &candidates[1..] {
@@ -529,10 +645,14 @@ async fn push_one(
         }
     };
 
-    if discussion.resolution.is_some() {
-        return Err(anyhow!(
-            "discussion {local_id} has a legacy resolution without a persisted native signed operation; replication is incomplete"
-        ));
+    if discussion.resolution.is_some()
+        && publish_authored_resolution(
+            client, store, repo, repo_path, mirror, index, &server_id, local_id, discussion,
+            self_attr,
+        )
+        .await?
+    {
+        changed = true;
     }
     Ok(changed)
 }
@@ -622,6 +742,7 @@ async fn pull_discussions_filtered(
                 repository.native_operations.push(PreparedNativeOperation {
                     local_operation_id,
                     signed_record: record.encode_to_vec(),
+                    expected_version: None,
                 });
             }
         }
@@ -849,6 +970,7 @@ fn pull_one(
                 links: Vec::new(),
                 resolved_into_annotation_operation_id: None,
                 pulled_resolution_key: None,
+                published_resolution_operation_id: None,
             });
             entry_index = Some(repo_mirror.discussions.len() - 1);
         }
@@ -886,6 +1008,7 @@ fn pull_one(
                 }],
                 resolved_into_annotation_operation_id: None,
                 pulled_resolution_key: None,
+                published_resolution_operation_id: None,
             });
             let index = repo_mirror.discussions.len() - 1;
 
@@ -1623,7 +1746,15 @@ mod tests {
     /// `write_local_operation` directly (production callers derive theirs from
     /// hosted ids via `turn_op_key`/`resolve_op_key`).
     fn test_key(seed: &str) -> CollaborationIdempotencyKey {
-        CollaborationIdempotencyKey::new(format!("test-op:{seed}")).expect("valid test key")
+        // Keys are the hosted command IDs, which are canonical UUIDs.
+        CollaborationIdempotencyKey::new(
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("test-op:{seed}").as_bytes(),
+            )
+            .to_string(),
+        )
+        .expect("valid test key")
     }
 
     fn local(
@@ -1753,19 +1884,9 @@ mod tests {
         let self_attr = Attribution::human(Principal::new("Importer", "importer@x"));
         let turns = collect_local_turns(&store, &materialized, Some(&self_attr)).unwrap();
 
-        // All three turns share ONE CollabOpId but MUST have distinct ids…
+        // All three turns share ONE CollabOpId but MUST have distinct ids.
         let ids: HashSet<&String> = turns.iter().map(|t| &t.turn_id).collect();
         assert_eq!(ids.len(), 3, "multi-turn op must yield distinct turn ids");
-        // …and distinct append idempotency keys.
-        let keys: HashSet<String> = turns
-            .iter()
-            .map(|t| append_op_id("ns/repo", "server-1", &t.turn_id))
-            .collect();
-        assert_eq!(
-            keys.len(),
-            3,
-            "each turn must get a distinct idempotency key"
-        );
         // All authored by the importer (self) → all are push candidates.
         assert!(turns.iter().all(|t| t.is_self));
     }
@@ -2730,6 +2851,7 @@ mod tests {
             ],
             resolved_into_annotation_operation_id: None,
             pulled_resolution_key: None,
+            published_resolution_operation_id: None,
         };
         let before = originator_store.operation_ids().unwrap();
         let error = adopt_from_push_echo(
@@ -2800,6 +2922,7 @@ mod tests {
             }],
             resolved_into_annotation_operation_id: None,
             pulled_resolution_key: None,
+            published_resolution_operation_id: None,
         };
         assert!(
             adopt_hosted_canonical_turns(
