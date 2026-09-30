@@ -36,7 +36,7 @@ async fn run_login(
     .await
 }
 
-struct IsolatedHome {
+pub(super) struct IsolatedHome {
     _guard: MutexGuard<'static, ()>,
     _temp: TempDir,
     prev_home: Option<OsString>,
@@ -45,7 +45,7 @@ struct IsolatedHome {
 }
 
 impl IsolatedHome {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let guard = credentials::lock_test_env();
         let temp = TempDir::new().expect("temp home");
         let prev_home = std::env::var_os("HOME");

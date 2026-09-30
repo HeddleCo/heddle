@@ -180,7 +180,10 @@ fn finish(
         .context("pairing omitted account ownership")?;
     let credential = verify_response(subject, binding, attachment, response, operation)?;
     let now = Utc::now().timestamp();
-    let authority = verify_pairing_authority(
+    let PairingAuthority {
+        authority,
+        mint_root,
+    } = verify_pairing_authority(
         owner,
         binding,
         credential.mint_root_attachment.as_deref(),
@@ -193,12 +196,19 @@ fn finish(
         .context("verified pairing proof key missing")?;
     repo::identity::link_device_key(subject.public_key(), pem, server)
         .context("record paired local signing identity")?;
-    let directory = repo::identity::heddle_home_dir().join("paired-devices");
-    objects::fs_atomic::create_private_dir_all(&directory)?;
-    let path = directory.join(format!("{}.pb", blake3::hash(server.as_bytes())));
+    let path = approval_path(server);
+    objects::fs_atomic::create_private_dir_all(
+        path.parent().context("paired approval directory")?,
+    )?;
     objects::fs_atomic::write_file_atomic_secret(&path, &attachment.encode_to_vec())?;
     let subject = credential.subject.clone();
-    super::source_author::retain(server, &credential)?;
+    // `verify_response` checked that the credential chains to exactly this
+    // approved root; retain it under that root, not under this device's key.
+    super::source_author::retain(
+        server,
+        &credential,
+        super::source_author::CredentialRoot::Paired(mint_root),
+    )?;
     config::credentials::store_server_credential(server, credential)?;
     Ok(AuthLoginOutcome::Authenticated {
         subject,
@@ -206,12 +216,68 @@ fn finish(
     })
 }
 
+/// Weft names every credential issued by pairing with this reference prefix;
+/// `verify_response` refuses a pairing credential without it.
+const PAIRED_REFERENCE_PREFIX: &str = "paired:";
+
+/// Whether a stored credential was issued by browser pairing, from the
+/// reference `verify_response` required when it was saved.
+pub(super) fn is_paired(credential: &config::credentials::ServerCredential) -> bool {
+    credential
+        .credential_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with(PAIRED_REFERENCE_PREFIX))
+}
+
+/// The approval this device co-signed for `server`, saved by `finish`.
+fn approval_path(server: &str) -> std::path::PathBuf {
+    repo::identity::heddle_home_dir()
+        .join("paired-devices")
+        .join(format!("{}.pb", blake3::hash(server.as_bytes())))
+}
+
+/// The root a stored paired credential chains to, read from the approval this
+/// device co-signed at pairing. The approval's credential digest must name
+/// exactly the stored token, so the root cannot come from another pairing.
+/// Callers still verify the root against the admitted owner authority.
+pub(super) fn approved_root(
+    server: &str,
+    credential: &config::credentials::ServerCredential,
+) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(approval_path(server)).context(
+        "paired credential has no recorded approval; run `heddle auth logout` and pair again",
+    )?;
+    let attachment = api::RootAttachment::decode(bytes.as_slice())
+        .context("decode recorded pairing approval")?;
+    let record = attachment
+        .attachment
+        .as_ref()
+        .context("recorded pairing approval is unsigned")?;
+    let binding = api::RootAttachmentBinding::decode(record.canonical_record.as_slice())
+        .context("decode recorded pairing approval binding")?;
+    thread_api::root_attachment::verify_possession(&attachment, &binding)?;
+    let token = URL_SAFE
+        .decode(&credential.token)
+        .context("decode stored paired credential")?;
+    if binding.credential_digest != blake3::hash(&token).as_bytes() {
+        bail!("recorded pairing approval names a different credential");
+    }
+    Ok(binding.root_public_key)
+}
+
+/// Owner authority admitted by a pairing, with the approved mint root it
+/// verified. The paired credential chains to that root, not to this device.
+struct PairingAuthority {
+    authority: repo::device_authority::DeviceAuthority,
+    mint_root: super::source_author::VerifiedMintRoot,
+}
+
 fn verify_pairing_authority(
     owner: api::OwnerState,
     binding: &api::RootAttachmentBinding,
     mint_attachment: Option<&[u8]>,
     now: i64,
-) -> Result<repo::device_authority::DeviceAuthority> {
+) -> Result<PairingAuthority> {
     if owner
         .owner
         .as_ref()
@@ -232,10 +298,13 @@ fn verify_pairing_authority(
         revoked_mint_roots: Vec::new(),
         revoked_publishers: Vec::new(),
     };
-    authority
-        .verify_mint_root(&binding.root_public_key, now)
-        .context("verify approved root belongs to the paired account")?;
-    Ok(authority)
+    let mint_root =
+        super::source_author::VerifiedMintRoot::verify(&authority, &binding.root_public_key, now)
+            .context("verify approved root belongs to the paired account")?;
+    Ok(PairingAuthority {
+        authority,
+        mint_root,
+    })
 }
 
 fn verify_response(
@@ -313,7 +382,9 @@ fn verify_response(
     }
     let credential_id = issued
         .r#ref
-        .filter(|reference| reference.spool.is_none() && reference.id.starts_with("paired:"))
+        .filter(|reference| {
+            reference.spool.is_none() && reference.id.starts_with(PAIRED_REFERENCE_PREFIX)
+        })
         .context("paired credential reference missing")?
         .id;
     let pem = subject.to_pem().context("encode paired proof key")?;
@@ -339,6 +410,9 @@ async fn wait_for_pairing<T, E: std::fmt::Display>(
         .context("pairing approval deadline expired; run `heddle auth login` again")?
         .map_err(|error| anyhow::anyhow!("pairing observation failed: {error}"))
 }
+#[cfg(test)]
+#[path = "auth_pairing_finish_tests.rs"]
+mod finish_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

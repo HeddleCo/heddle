@@ -785,7 +785,7 @@ pub(crate) fn install_credential_file(path: &Path) -> Result<String> {
             .with_context(|| format!("registering device identity for {server}"))?;
         let stored = credentials::get_server_credential(&server)?
             .context("installed device credential missing")?;
-        super::source_author::retain(&server, &stored)?;
+        super::source_author::retain_stored(&server, &stored)?;
     }
 
     Ok(subject)
