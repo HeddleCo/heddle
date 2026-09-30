@@ -157,14 +157,25 @@ impl HostedSession {
         resolve_and_verify_endpoint_descriptor(server, &self.config).await
     }
 
+    /// Renew a locally minted authority that is due, before handing out the
+    /// connection. A renewed credential this device cannot retain fails the
+    /// connection rather than silently dropping the retained uploader bearer.
+    async fn rotated(&self, mut client: HostedClient) -> Result<HostedClient, ProtocolError> {
+        if let Err(error) = client
+            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+            .await
+        {
+            client.close().await;
+            return Err(ProtocolError::AuthenticationFailed(format!("{error:#}")));
+        }
+        Ok(client)
+    }
+
     pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
         match HostedClient::connect_via_netd(server, &self.config, None).await {
-            Ok(mut client) => {
-                client
-                    .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
-                    .await;
-                return Ok(client);
+            Ok(client) => {
+                return self.rotated(client).await;
             }
             Err(error) => {
                 // Includes a netd Weft identity the caller's configured trust
@@ -180,13 +191,10 @@ impl HostedSession {
             .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let mut client = HostedClient::connect_with_config(&descriptor, &self.config)
+        let client = HostedClient::connect_with_config(&descriptor, &self.config)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        client
-            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
-            .await;
-        Ok(client)
+        self.rotated(client).await
     }
 
     /// Connect for outbound calls only, on an ephemeral endpoint node id.
@@ -197,11 +205,8 @@ impl HostedSession {
     pub async fn connect_outbound(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
         match HostedClient::connect_via_netd(server, &self.config, None).await {
-            Ok(mut client) => {
-                client
-                    .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
-                    .await;
-                return Ok(client);
+            Ok(client) => {
+                return self.rotated(client).await;
             }
             Err(error) => {
                 // Includes a netd Weft identity the caller's configured trust
@@ -217,13 +222,10 @@ impl HostedSession {
             .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let mut client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
+        let client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        client
-            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
-            .await;
-        Ok(client)
+        self.rotated(client).await
     }
 }
 
