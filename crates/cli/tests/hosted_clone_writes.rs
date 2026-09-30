@@ -1504,3 +1504,396 @@ async fn context_failures_report_recovery_and_concurrent_writer_stays_rejected()
     );
     fixture.close().await;
 }
+
+// ---------------------------------------------------------------------------
+// heddle#1886: a Thread with two hosted heads.
+// ---------------------------------------------------------------------------
+
+/// The last JSON document a command printed (clone prints a connection line
+/// first).
+fn last_json(stdout: &str) -> Value {
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON output: {stdout}"));
+    serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}"))
+}
+
+fn head_of(path: &Path) -> objects::object::StateId {
+    Repository::open(path)
+        .expect("checkout")
+        .head()
+        .expect("HEAD")
+        .expect("checked-out State")
+}
+
+fn json_error_kind(output: &Output) -> Value {
+    assert!(!output.status.success(), "command must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    serde_json::from_str::<Value>(stderr.trim())
+        .unwrap_or_else(|_| panic!("stderr should be a JSON envelope: {stderr}"))["kind"]
+        .clone()
+}
+
+struct TwoHeads {
+    fixture: Fixture,
+    /// Writer A's head (the source checkout).
+    a: objects::object::StateId,
+    /// Writer B's head (the first clone).
+    b: objects::object::StateId,
+}
+
+impl TwoHeads {
+    /// Two writers publish divergent captures from one base on `main`.
+    async fn publish(a_file: &str, a_body: &str, b_file: &str, b_body: &str) -> Self {
+        let fixture = Fixture::new().await;
+        fixture.run_at(
+            &fixture.source,
+            &["remote", "add", "origin", &fixture.remote()],
+        );
+        std::fs::write(fixture.source.join(a_file), a_body).expect("writer A edit");
+        fixture.run_at(&fixture.source, &["capture", "-m", "writer A"]);
+        fixture.run_at(&fixture.source, &["push", "origin"]);
+        std::fs::write(fixture.clone.join(b_file), b_body).expect("writer B edit");
+        fixture.run(&["capture", "-m", "writer B"]);
+        fixture.run(&["push", "origin"]);
+        let a = head_of(&fixture.source);
+        let b = head_of(&fixture.clone);
+        assert_ne!(a, b);
+        assert_eq!(
+            fixture
+                .captured
+                .lock()
+                .expect("published heads")
+                .source_heads()
+                .len(),
+            2,
+            "the hosted Thread holds both writers' heads"
+        );
+        Self { fixture, a, b }
+    }
+
+    fn default_and_alternative(&self) -> (objects::object::StateId, objects::object::StateId) {
+        (self.a.max(self.b), self.a.min(self.b))
+    }
+
+    fn clone_into(&self, name: &str) -> (PathBuf, Value) {
+        let path = self.fixture._temp.path().join(name);
+        let output = self.fixture.output_at(
+            self.fixture._temp.path(),
+            &[
+                "--output",
+                "json",
+                "clone",
+                &self.fixture.remote(),
+                path.to_str().expect("clone path"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "whole-spool clone of a two-head Thread must succeed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (path, last_json(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    fn json_at(&self, path: &Path, args: &[&str]) -> Value {
+        let mut full = vec!["--output", "json"];
+        full.extend_from_slice(args);
+        last_json(&self.fixture.run_at(path, &full))
+    }
+}
+
+fn head_states(report: &Value) -> Vec<String> {
+    report["heads"]
+        .as_array()
+        .expect("heads")
+        .iter()
+        .map(|head| head["state"].as_str().expect("head state").to_string())
+        .collect()
+}
+
+fn story_of(heads: &TwoHeads, state: objects::object::StateId) -> &'static str {
+    if state == heads.a {
+        "head A\n"
+    } else {
+        assert_eq!(state, heads.b);
+        "head B\n"
+    }
+}
+
+/// Whole-spool clone: the default is the greatest State ID, stated in the
+/// output, and both heads stay listed in clone and status output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternatives() {
+    let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
+    let (default, alternative) = heads.default_and_alternative();
+    let (fresh, clone) = heads.clone_into("fresh");
+    println!("clone: {clone}");
+    assert_eq!(head_of(&fresh), default);
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("story.txt")).expect("story"),
+        story_of(&heads, default)
+    );
+    let reported = &clone["source_heads"][0];
+    assert_eq!(reported["thread"], "main");
+    assert_eq!(reported["selected_by"], "greatest_state_id");
+    assert_eq!(reported["current"], default.to_string_full());
+    assert_eq!(
+        head_states(reported),
+        vec![default.to_string_full(), alternative.to_string_full()]
+    );
+    assert_eq!(clone["next_action"], "heddle resolve --heads");
+    // Deterministic: another clone checks out the same head, and the human
+    // output says which head and why.
+    let again = heads.fixture._temp.path().join("fresh-again");
+    let text = heads.fixture.run_at(
+        heads.fixture._temp.path(),
+        &[
+            "clone",
+            &heads.fixture.remote(),
+            again.to_str().expect("clone path"),
+        ],
+    );
+    println!("clone text:\n{text}");
+    assert_eq!(head_of(&again), default);
+    assert!(
+        text.contains(&format!(
+            "thread 'main' has 2 concurrent source heads; checked out {}",
+            default.to_string_full()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("greatest State ID"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "heddle resolve --pick {}",
+            alternative.to_string_full()
+        )),
+        "{text}"
+    );
+    let listed = heads.fixture.run_at(&again, &["resolve", "--heads"]);
+    println!("resolve --heads text:\n{listed}");
+    let status_text = heads.fixture.run_at(&again, &["status"]);
+    println!("status text:\n{status_text}");
+    assert!(
+        status_text.contains("2 concurrent source heads; pick or merge one"),
+        "{status_text}"
+    );
+    assert!(
+        status_text.contains("heddle resolve --heads"),
+        "{status_text}"
+    );
+
+    // Status keeps the unresolved alternative visible.
+    let status = heads.json_at(&fresh, &["status"]);
+    println!("status: {status}");
+    assert_eq!(
+        head_states(&status["alternative_heads"]),
+        vec![default.to_string_full(), alternative.to_string_full()]
+    );
+    assert_eq!(status["recommended_action"], "heddle resolve --heads");
+    assert!(
+        status["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|blocker| blocker
+                .as_str()
+                .is_some_and(|text| text.contains("unresolved alternative source heads"))),
+        "{status}"
+    );
+    // Readiness agrees: the Thread is blocked until a pick or merge.
+    let ready = heads
+        .fixture
+        .output_at(&fresh, &["--output", "json", "ready"]);
+    println!(
+        "ready: {}\nstderr: {}",
+        String::from_utf8_lossy(&ready.stdout),
+        String::from_utf8_lossy(&ready.stderr)
+    );
+    let ready = last_json(&String::from_utf8_lossy(&ready.stdout));
+    assert_eq!(ready["status"], "blocked", "{ready}");
+    assert_eq!(ready["next_action"], "heddle resolve --heads", "{ready}");
+    heads.fixture.close().await;
+}
+
+/// `pull --thread` on a two-head Thread succeeds and keeps each writer's own
+/// head checked out, reporting the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_head_thread_pull_keeps_each_writers_head() {
+    let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
+    for (checkout, own) in [
+        (&heads.fixture.source, heads.a),
+        (&heads.fixture.clone, heads.b),
+    ] {
+        let pulled = heads.json_at(checkout, &["pull", "origin", "--thread", "main"]);
+        println!("pull: {pulled}");
+        assert_eq!(head_of(checkout), own);
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("story.txt")).expect("story"),
+            story_of(&heads, own)
+        );
+        assert_eq!(pulled["source_heads"]["selected_by"], "local_tip");
+        assert_eq!(pulled["source_heads"]["current"], own.to_string_full());
+        assert_eq!(head_states(&pulled["source_heads"]).len(), 2);
+        assert_eq!(pulled["next_action"], "heddle resolve --heads");
+        let status = heads.json_at(checkout, &["status"]);
+        assert_eq!(head_states(&status["alternative_heads"]).len(), 2);
+    }
+    heads.fixture.close().await;
+}
+
+/// Select head B by a unique prefix and pick it: the Thread takes exactly its
+/// tree, every head stays in ancestry, status clears, and publishing the pick
+/// collapses the hosted heads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_head_thread_pick_resolves_every_head() {
+    let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
+    let (default, alternative) = heads.default_and_alternative();
+    let (fresh, _) = heads.clone_into("fresh");
+
+    // A selector naming no head is a typed refusal that changes nothing.
+    for selector in ["hs-zzzzzzzz", "hs-"] {
+        let refused = heads
+            .fixture
+            .output_at(&fresh, &["--output", "json", "resolve", "--pick", selector]);
+        assert_eq!(json_error_kind(&refused), "unknown_source_head");
+    }
+    assert_eq!(head_of(&fresh), default);
+
+    let listed = heads.json_at(&fresh, &["resolve", "--heads"]);
+    println!("heads: {listed}");
+    assert_eq!(
+        head_states(&listed["source_heads"]),
+        vec![default.to_string_full(), alternative.to_string_full()]
+    );
+    let prefix = &alternative.to_string_full()[..20];
+    let picked = heads.json_at(&fresh, &["resolve", "--pick", prefix]);
+    println!("pick: {picked}");
+    let resolution = &picked["head_resolution"];
+    assert_eq!(resolution["mode"], "pick");
+    assert_eq!(resolution["selected"], alternative.to_string_full());
+    assert_eq!(
+        resolution["parents"],
+        serde_json::json!([alternative.to_string_full(), default.to_string_full()])
+    );
+    assert!(picked["source_heads"].is_null(), "{picked}");
+    assert_eq!(picked["next_action"], "heddle push");
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("story.txt")).expect("story"),
+        story_of(&heads, alternative)
+    );
+    let status = heads.json_at(&fresh, &["status"]);
+    assert!(status.get("alternative_heads").is_none(), "{status}");
+    assert_ne!(status["recommended_action"], "heddle resolve --heads");
+
+    // Publishing the pick collapses the hosted heads to the resolution.
+    heads.fixture.run_at(&fresh, &["push", "origin"]);
+    let hosted = heads
+        .fixture
+        .captured
+        .lock()
+        .expect("published heads")
+        .source_heads();
+    assert_eq!(hosted.len(), 1, "the pick retires both hosted heads");
+    let (after, clone) = heads.clone_into("after-pick");
+    assert!(clone.get("source_heads").is_none(), "{clone}");
+    assert_eq!(head_of(&after), head_of(&fresh));
+    heads.fixture.close().await;
+}
+
+/// A conflicting merge of the selected head stops in merge state; resolving
+/// the conflict finishes one capture naming both heads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_head_thread_conflicted_merge_finishes_with_resolve() {
+    let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
+    let (default, alternative) = heads.default_and_alternative();
+    let (fresh, _) = heads.clone_into("fresh");
+    let merged = heads.json_at(
+        &fresh,
+        &["resolve", "--merge", &alternative.to_string_full()],
+    );
+    println!("merge: {merged}");
+    assert_eq!(merged["conflict_paths"], serde_json::json!(["story.txt"]));
+    assert!(merged["head_resolution"]["state"].is_null(), "{merged}");
+    let status = heads.json_at(&fresh, &["status"]);
+    assert_eq!(status["recommended_action"], "heddle continue");
+    let resolved = heads.json_at(&fresh, &["resolve", "--all", "--theirs"]);
+    println!("resolved: {resolved}");
+    assert_eq!(resolved["continued"], true);
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("story.txt")).expect("story"),
+        story_of(&heads, alternative)
+    );
+    let tip = Repository::open(&fresh)
+        .expect("fresh")
+        .store()
+        .get_state(&head_of(&fresh))
+        .expect("tip")
+        .expect("tip State");
+    assert_eq!(tip.parents, vec![default, alternative]);
+    let status = heads.json_at(&fresh, &["status"]);
+    assert!(status.get("alternative_heads").is_none(), "{status}");
+    heads.fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_head_thread_merges_the_selected_head() {
+    let heads = TwoHeads::publish("a.txt", "from A\n", "b.txt", "from B\n").await;
+    let (default, alternative) = heads.default_and_alternative();
+    let (fresh, _) = heads.clone_into("fresh");
+    assert_eq!(head_of(&fresh), default);
+
+    let merged = heads.json_at(
+        &fresh,
+        &["resolve", "--merge", &alternative.to_string_full()],
+    );
+    println!("merge: {merged}");
+    let resolution = &merged["head_resolution"];
+    assert_eq!(resolution["mode"], "merge");
+    assert_eq!(
+        resolution["parents"],
+        serde_json::json!([default.to_string_full(), alternative.to_string_full()])
+    );
+    assert!(merged["source_heads"].is_null(), "{merged}");
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("a.txt")).expect("A"),
+        "from A\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("b.txt")).expect("B"),
+        "from B\n"
+    );
+    let status = heads.json_at(&fresh, &["status"]);
+    assert!(status["alternative_heads"].is_null(), "{status}");
+    heads.fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_head_thread_reports_no_alternatives() {
+    let fixture = Fixture::new().await;
+    let fresh = fixture._temp.path().join("fresh");
+    let output = fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "--output",
+            "json",
+            "clone",
+            &fixture.remote(),
+            fresh.to_str().expect("fresh"),
+        ],
+    );
+    let clone = last_json(&output);
+    assert!(clone.get("source_heads").is_none(), "{clone}");
+    assert!(clone.get("next_action").is_none(), "{clone}");
+    let status = last_json(&fixture.run_at(&fresh, &["--output", "json", "status"]));
+    assert!(status.get("alternative_heads").is_none(), "{status}");
+    let listed = last_json(&fixture.run_at(&fresh, &["--output", "json", "resolve", "--heads"]));
+    assert!(listed["source_heads"].is_null(), "{listed}");
+    let pick = fixture.output_at(&fresh, &["--output", "json", "resolve", "--pick", "hs-0"]);
+    assert_eq!(json_error_kind(&pick), "no_alternative_source_heads");
+    fixture.close().await;
+}
