@@ -163,7 +163,11 @@ impl HostedConnection {
     /// v2 RPC stream is spliced to netd over its same-uid UDS bridge. Provider
     /// connections still dial directly from this process's local endpoint.
     #[cfg(unix)]
-    pub(super) async fn connect_via_netd(server: &str, config: &ClientConfig) -> Result<Arc<Self>> {
+    pub(super) async fn connect_via_netd(
+        server: &str,
+        config: &ClientConfig,
+        descriptor: Option<&super::VerifiedEndpointDescriptor>,
+    ) -> Result<Arc<Self>> {
         let socket_path =
             hosted_bridge::hosted_bridge_socket_path(&repo::identity::heddle_home_dir());
         if !socket_path.exists() {
@@ -171,6 +175,7 @@ impl HostedConnection {
         }
         let ensured =
             hosted_bridge::ensure_via_netd(&socket_path, server, config.allow_insecure).await?;
+        verify_netd_weft_identity(server, config, descriptor, ensured.weft_endpoint_id).await?;
 
         let proxy_endpoint = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -205,12 +210,14 @@ impl HostedConnection {
         let proxy_socket = socket_path.clone();
         let proxy_server = server.to_string();
         let allow_insecure = config.allow_insecure;
+        let weft_endpoint_id = ensured.weft_endpoint_id;
         tokio::spawn(async move {
             if let Err(error) = serve_netd_proxy(
                 proxy_task_endpoint,
                 proxy_socket,
                 proxy_server,
                 allow_insecure,
+                weft_endpoint_id,
             )
             .await
             {
@@ -345,12 +352,53 @@ impl HostedConnection {
     }
 }
 
+/// Refuse netd's warm Weft session unless its identity is the one the caller's
+/// own trust verified. Nothing has crossed the bridge except `server` and
+/// `allow_insecure` at this point, so rejection happens before any credential
+/// or proof is sent.
+///
+/// - An already verified descriptor pins the exact identity; netd holding a
+///   session to any other endpoint is not used.
+/// - A configured descriptor root, CA, or TLS name override is applied here,
+///   in this process: the live descriptor set is fetched and verified with the
+///   caller's policy, and netd's identity must be one of its root-attested
+///   entries. netd bootstraps with default trust, so its choice alone proves
+///   nothing about the caller's pin.
+/// - Default trust is what netd itself applies (automatic pins in the same
+///   Heddle home), so the warm route is used as-is.
+#[cfg(unix)]
+async fn verify_netd_weft_identity(
+    server: &str,
+    config: &ClientConfig,
+    descriptor: Option<&super::VerifiedEndpointDescriptor>,
+    netd_weft: EndpointId,
+) -> Result<()> {
+    let verified = match descriptor {
+        Some(descriptor) => descriptor.endpoint_addr()?.id,
+        None if super::resolver::configures_endpoint_trust(config) => {
+            super::resolver::resolve_and_verify_netd_endpoint(server, config, netd_weft)
+                .await?
+                .endpoint_addr()?
+                .id
+        }
+        None => return Ok(()),
+    };
+    if verified != netd_weft {
+        return Err(HostedError::DescriptorTrust(
+            "netd Weft identity does not match the caller's verified endpoint descriptor"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 async fn serve_netd_proxy(
     endpoint: Endpoint,
     socket_path: PathBuf,
     server: String,
     allow_insecure: bool,
+    weft_endpoint_id: EndpointId,
 ) -> Result<()> {
     let result = async {
         let incoming = endpoint.accept().await.ok_or_else(|| {
@@ -361,8 +409,15 @@ async fn serve_netd_proxy(
             let socket_path = socket_path.clone();
             let server = server.clone();
             tokio::spawn(async move {
-                if let Err(error) =
-                    splice_netd_stream(send, recv, &socket_path, &server, allow_insecure).await
+                if let Err(error) = splice_netd_stream(
+                    send,
+                    recv,
+                    &socket_path,
+                    &server,
+                    allow_insecure,
+                    weft_endpoint_id,
+                )
+                .await
                 {
                     tracing::debug!(%error, "local netd stream proxy stopped");
                 }
@@ -382,9 +437,17 @@ async fn splice_netd_stream(
     socket_path: &std::path::Path,
     server: &str,
     allow_insecure: bool,
+    weft_endpoint_id: EndpointId,
 ) -> Result<()> {
-    let (stream, _reused) =
+    let (stream, _reused, opened_endpoint_id) =
         hosted_bridge::open_bi_via_netd(socket_path, server, allow_insecure).await?;
+    // No request bytes (including discovery credentials) cross the UDS until
+    // the connection used for this stream proves the same verified identity.
+    if opened_endpoint_id != weft_endpoint_id {
+        return Err(HostedError::DescriptorTrust(
+            "netd Weft identity changed after endpoint verification".to_string(),
+        ));
+    }
     let (mut unix_read, mut unix_write) = stream.into_split();
     let to_netd = async {
         while let Some(chunk) = recv
@@ -602,6 +665,7 @@ mod tests {
         let connection = HostedConnection::connect_via_netd(
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
+            None,
         )
         .await
         .expect("connect through warm netd bridge");
@@ -638,6 +702,7 @@ mod tests {
         let connection = HostedConnection::connect_via_netd(
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
+            None,
         )
         .await
         .expect("connect through warm netd bridge");
@@ -716,6 +781,7 @@ mod tests {
         let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
+            None,
         )
         .await
         .expect("warm Discover must succeed with Weft's endpoint key");
@@ -738,6 +804,99 @@ mod tests {
             "Discover must reuse netd's Weft session"
         );
         client.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_stream_rejects_changed_or_missing_identity_before_forwarding_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        for changed_identity in [false, true] {
+            let home = tempfile::TempDir::new().expect("home");
+            let _home = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
+            let socket = super::hosted_bridge::hosted_bridge_socket_path(home.path());
+            std::fs::create_dir_all(socket.parent().expect("socket parent"))
+                .expect("state directory");
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bridge socket");
+            let weft_id = iroh_base::SecretKey::generate().public();
+            let descriptor = super::super::connection_path_tests::verified_descriptor(
+                weft_id,
+                vec![],
+                vec!["127.0.0.1:9".into()],
+            );
+            let serve = tokio::spawn(async move {
+                for op in ["ready", "opened"] {
+                    let (mut stream, _) = listener.accept().await.expect("bridge request");
+                    let length = stream.read_u32().await.expect("request length");
+                    let mut request = vec![0; length as usize];
+                    stream
+                        .read_exact(&mut request)
+                        .await
+                        .expect("request frame");
+                    let mut response = serde_json::json!({ "op": op, "reused": true });
+                    if op == "ready" {
+                        response["node_id"] =
+                            iroh_base::SecretKey::generate().public().to_string().into();
+                        response["weft_endpoint_id"] = weft_id.to_string().into();
+                    } else if changed_identity {
+                        response["weft_endpoint_id"] =
+                            iroh_base::SecretKey::generate().public().to_string().into();
+                    }
+                    let response = serde_json::to_vec(&response).expect("bridge response");
+                    stream
+                        .write_u32(response.len() as u32)
+                        .await
+                        .expect("response length");
+                    stream.write_all(&response).await.expect("response frame");
+                    if op == "opened" {
+                        let mut forwarded = Vec::new();
+                        stream
+                            .read_to_end(&mut forwarded)
+                            .await
+                            .expect("closed rejected stream");
+                        assert!(
+                            forwarded.is_empty(),
+                            "credentials forwarded after changed/missing identity"
+                        );
+                    }
+                }
+            });
+            let connection = HostedConnection::connect_via_netd(
+                super::hosted_bridge::tests::TEST_WEFT_SERVER,
+                &config::ClientConfig::default(),
+                Some(&descriptor),
+            )
+            .await
+            .expect("verified Ready route");
+            let context = api::heddle::api::common::CallContext {
+                bearer_capability: b"bearer-secret".to_vec(),
+                request_proof: Some(Default::default()),
+                ..Default::default()
+            };
+            let response = tokio::time::timeout(
+                Duration::from_secs(2),
+                super::super::call::unary_encoded::<
+                    api::heddle::api::v1alpha2::DescribeEndpointResponse,
+                >(
+                    &connection,
+                    "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint",
+                    &context,
+                    &[],
+                ),
+            )
+            .await
+            .expect("rejected RPC stream");
+            assert!(
+                response.is_err(),
+                "unproved Opened identity must fail the RPC"
+            );
+            tokio::time::timeout(Duration::from_secs(2), serve)
+                .await
+                .expect("bridge task finishes")
+                .expect("no forwarded bytes");
+            connection.close().await;
+        }
     }
 
     #[cfg(unix)]
@@ -773,6 +932,7 @@ mod tests {
         let error = HostedConnection::connect_via_netd(
             super::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
+            None,
         )
         .await
         .expect_err("missing Weft identity must reject the proxy route");

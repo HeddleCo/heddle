@@ -159,7 +159,7 @@ impl HostedSession {
 
     pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
-        match HostedClient::connect_via_netd(server, &self.config).await {
+        match HostedClient::connect_via_netd(server, &self.config, None).await {
             Ok(mut client) => {
                 client
                     .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
@@ -167,9 +167,12 @@ impl HostedSession {
                 return Ok(client);
             }
             Err(error) => {
+                // Includes a netd Weft identity the caller's configured trust
+                // could not verify: no bytes were sent over that route, and
+                // discovery below applies the same trust without netd.
                 tracing::debug!(
                     %error,
-                    "netd hosted bridge unavailable; discovering the endpoint locally"
+                    "netd hosted bridge unusable; discovering the endpoint locally"
                 );
             }
         }
@@ -193,7 +196,7 @@ impl HostedSession {
     /// on (heddle#1620).
     pub async fn connect_outbound(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
-        match HostedClient::connect_via_netd(server, &self.config).await {
+        match HostedClient::connect_via_netd(server, &self.config, None).await {
             Ok(mut client) => {
                 client
                     .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
@@ -201,9 +204,12 @@ impl HostedSession {
                 return Ok(client);
             }
             Err(error) => {
+                // Includes a netd Weft identity the caller's configured trust
+                // could not verify: no bytes were sent over that route, and
+                // discovery below applies the same trust without netd.
                 tracing::debug!(
                     %error,
-                    "netd hosted bridge unavailable; discovering the endpoint locally"
+                    "netd hosted bridge unusable; discovering the endpoint locally"
                 );
             }
         }
