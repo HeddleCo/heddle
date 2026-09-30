@@ -189,25 +189,23 @@ def dependency_contract(manifest: dict, workspace: dict) -> dict:
     return contract
 
 
-@dataclass(frozen=True)
-class RequiredBump:
-    source: str
-    base: str
-    head: str
-
-
-def dependency_changes(base: str, head: str) -> tuple[list[str], list[RequiredBump]]:
+def dependency_changes(base: str, head: str) -> tuple[list[str], str, str]:
     base_root, base_publishable, base_manifests = revision_state(base)
     head_root, head_publishable, head_manifests = revision_state(head)
 
+    for name, (path, manifest) in head_manifests.items():
+        package = manifest["package"]
+        if package.get("publish") is False:
+            continue
+        if package.get("version") != {"workspace": True}:
+            raise CheckError(
+                f"{path} ({name}) must use version.workspace = true"
+            )
+
     changes: list[str] = []
-    bumps: list[RequiredBump] = []
     base_workspace = base_root.get("workspace", {})
     head_workspace = head_root.get("workspace", {})
-    workspace_changed = base_workspace.get("dependencies", {}) != head_workspace.get(
-        "dependencies", {}
-    )
-    if workspace_changed:
+    if base_workspace.get("dependencies", {}) != head_workspace.get("dependencies", {}):
         changes.append("Cargo.toml [workspace.dependencies]")
 
     names = dict.fromkeys([*base_publishable, *head_publishable])
@@ -223,27 +221,12 @@ def dependency_changes(base: str, head: str) -> tuple[list[str], list[RequiredBu
         ):
             continue
         changes.append(f"{path} [dependencies] (including build/dev/target; {name})")
-        head_version = manifest.get("package", {}).get("version")
-        if isinstance(head_version, dict) and head_version.get("workspace") is True:
-            workspace_changed = True
-        else:
-            base_version = base_entry[1].get("package", {}).get("version")
-            # If a crate stops inheriting the workspace version, compare its
-            # new independent version with the version consumers had before.
-            if isinstance(base_version, dict) and base_version.get("workspace") is True:
-                base_version = base_workspace.get("package", {}).get("version")
-            source = f"{path} [package] version ({name})"
-            SemVer.parse(base_version, f"{base}:{source}")
-            SemVer.parse(head_version, f"{head}:{source}")
-            bumps.append(RequiredBump(source, str(base_version), str(head_version)))
 
     base_version = base_workspace.get("package", {}).get("version")
     head_version = head_workspace.get("package", {}).get("version")
     SemVer.parse(base_version, f"{base}:workspace.package.version")
     SemVer.parse(head_version, f"{head}:workspace.package.version")
-    if workspace_changed:
-        bumps.append(RequiredBump("workspace", str(base_version), str(head_version)))
-    return changes, bumps
+    return changes, str(base_version), str(head_version)
 
 
 def main() -> int:
@@ -253,7 +236,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        changes, bumps = dependency_changes(args.base, args.head)
+        changes, base_version, head_version = dependency_changes(args.base, args.head)
     except CheckError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -267,31 +250,20 @@ def main() -> int:
         print(f"  - {change}")
     sys.stdout.flush()
 
-    failed = False
-    for bump in bumps:
-        if SemVer.parse(bump.head, bump.source) <= SemVer.parse(bump.base, bump.source):
-            source = (
-                "[workspace.package] version in Cargo.toml"
-                if bump.source == "workspace" else bump.source
-            )
-            print(
-                f"error: dependency changes require an increased {source} "
-                f"(base {bump.base}, head {bump.head})",
-                file=sys.stderr,
-            )
-            failed = True
-        else:
-            print(
-                f"ok: {bump.source}{' version' if bump.source == 'workspace' else ''} increased "
-                f"from {bump.base} to {bump.head}"
-            )
-    if failed:
+    if SemVer.parse(head_version, "workspace") <= SemVer.parse(base_version, "workspace"):
+        print(
+            "error: dependency changes require an increased [workspace.package] "
+            f"version in Cargo.toml (base {base_version}, head {head_version})",
+            file=sys.stderr,
+        )
         print(
             "note: release-plz auto-bump wiring is the fuller fix; until then "
             "this bump is manual",
             file=sys.stderr,
         )
-    return 1 if failed else 0
+        return 1
+    print(f"ok: workspace version increased from {base_version} to {head_version}")
+    return 0
 
 
 if __name__ == "__main__":
