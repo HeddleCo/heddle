@@ -1,8 +1,8 @@
 {
   "name": "@heddleco/capability-verifier-wasm",
-  "version": "0.23.0",
+  "version": "0.27.2",
   "description": "Canonical owner-anchored authorization verifier compiled from heddleco-capability-verifier to WebAssembly",
-  "license": "MIT OR Apache-2.0",
+  "license": "Apache-2.0",
   "author": "HeddleCo",
   "type": "module",
   "repository": {
@@ -44,7 +44,7 @@
   ],
   "scripts": {
     "build": "cd .. && npm run build",
-    "prepack": "npm run build"
+    "prepack": "npm run build && node ../sync-npm-version.mjs --check-pack-version"
   },
   "publishConfig": {
     "access": "public",
