@@ -998,13 +998,15 @@ fn resolve_discussion_id(store: &CollaborationStore, value: &str) -> Result<Disc
     }
 }
 
+/// The key is also the hosted command ID that the signed operation
+/// authenticates, so it is always the canonical hyphenated UUID. An `--op-id`
+/// accepted in another UUID spelling (braced, simple, upper-case) must not
+/// become a key that the hosted command cannot carry byte-for-byte.
 fn idempotency_key(cli: &Cli) -> Result<CollaborationIdempotencyKey> {
-    CollaborationIdempotencyKey::new(
-        cli.op_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-    )
-    .map_err(anyhow::Error::msg)
+    let id = crate::operation_id::resolve_operation_id(cli)?
+        .map(|id| id.0)
+        .unwrap_or_else(uuid::Uuid::new_v4);
+    CollaborationIdempotencyKey::new(id.to_string()).map_err(anyhow::Error::msg)
 }
 
 fn now_ms() -> i64 {

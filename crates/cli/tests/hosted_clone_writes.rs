@@ -25,6 +25,8 @@ struct Fixture {
     client: hosted_client::hosted_runtime::hosted::HostedClient,
     captured: std::sync::Arc<std::sync::Mutex<native_hosted_server::PublicationCapture>>,
     clone: PathBuf,
+    source: PathBuf,
+    addr: iroh::EndpointAddr,
     home: PathBuf,
     ca: PathBuf,
     credential: PathBuf,
@@ -45,6 +47,8 @@ impl Fixture {
         let envs = [("HEDDLE_HOME", source_home.to_str().expect("source home"))];
         heddle_env(&["init"], Some(&source), &envs).expect("native source init");
         std::fs::write(source.join("story.txt"), "source only\n").expect("source file");
+        std::fs::write(source.join("example.py"), "def amount():\n    return 42\n")
+            .expect("symbol fixture");
         heddle_env(&["capture", "-m", "source seed"], Some(&source), &envs)
             .expect("source capture");
         let repo = Repository::open(&source).expect("source repo");
@@ -78,7 +82,7 @@ impl Fixture {
         );
         let https = native_hosted_https::TestHttpsServer::start(HashMap::from([(
             "/.well-known/heddle/iroh-endpoint".into(),
-            VecDeque::from(vec![descriptor; 32]),
+            VecDeque::from(vec![descriptor; 64]),
         )]));
         let ca = temp.path().join("ca.pem");
         std::fs::write(&ca, &https.certificate_pem).expect("test CA");
@@ -150,6 +154,8 @@ impl Fixture {
         }
         let fixture = Self {
             clone: temp.path().join("clone"),
+            source,
+            addr,
             root_key: hex::encode(root.public_key()),
             _temp: temp,
             https,
@@ -312,87 +318,434 @@ async fn fresh_clone_ci_run_record() {
     fixture.close().await;
 }
 
+fn assert_push_succeeded(fixture: &Fixture, path: &Path) {
+    let output = fixture.output_at(path, &["--output", "json", "push", "origin"]);
+    let result: Value = serde_json::from_slice(&output.stdout).expect("push result");
+    println!("push exit {:?}: {result}", output.status.code());
+    assert_eq!(result["source"]["status"], "succeeded");
+    assert_eq!(result["context"]["status"], "succeeded");
+    assert_eq!(result["discussions"]["status"], "succeeded");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Push once, expecting source and context to land and only the discussion
+/// replication to fail; the partial status must say so.
+fn assert_push_discussions_failed(fixture: &Fixture, path: &Path, reason: &str) {
+    let output = fixture.output_at(path, &["--output", "json", "push", "origin"]);
+    let result: Value = serde_json::from_slice(&output.stdout).expect("partial result");
+    println!("push exit {:?}: {result}", output.status.code());
+    assert_eq!(output.status.code(), Some(65));
+    assert_eq!(result["status"], "partial");
+    assert_eq!(result["source"]["status"], "succeeded");
+    assert_eq!(result["context"]["status"], "succeeded");
+    assert_eq!(result["discussions"]["status"], "failed");
+    let error = result["discussions"]["error"].as_str().expect("error");
+    assert!(error.contains(reason), "{error}");
+}
+
+/// The idempotency key the signed discussion operation authenticates.
+fn signed_key(signed: Option<&api::heddle::api::v1alpha2::SignedRecord>) -> String {
+    let operation =
+        thread_api::collaboration::verify(signed.expect("signed original")).expect("verified");
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        panic!("discussion original")
+    };
+    objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .expect("envelope")
+        .operation
+        .idempotency_key
+        .as_str()
+        .to_string()
+}
+
+fn fresh_discussion(fixture: &Fixture, name: &str) -> objects::object::MaterializedDiscussion {
+    let path = fixture._temp.path().join(name);
+    fixture.run_at(
+        fixture._temp.path(),
+        &["clone", &fixture.remote(), path.to_str().expect("checkout")],
+    );
+    let repo = Repository::open(&path).expect("fresh checkout");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("discussion store")
+        .materialize()
+        .expect("discussions");
+    assert_eq!(view.discussions.len(), 1, "one reconstructed discussion");
+    let discussion = view.discussions.into_values().next().expect("discussion");
+    // Exercise the human view as well as reconstruction from signed originals.
+    let shown = fixture.run_at(
+        &path,
+        &["discuss", "show", &discussion.discussion_id.to_string()],
+    );
+    assert!(shown.contains(&discussion.turns[0].1.body), "{shown}");
+    discussion
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_context_revision_discussion_push() {
+async fn private_symbol_discussion_fixture_publishes_and_clones() {
+    let fixture = Fixture::new().await;
+    // Source was initialized and captured before the server was routed.
+    fixture.run_at(
+        &fixture.source,
+        &["remote", "add", "origin", &fixture.remote()],
+    );
+    fixture.run_at(
+        &fixture.source,
+        &[
+            "context",
+            "set",
+            "--path",
+            "example.py",
+            "--symbol",
+            "amount",
+            "--kind",
+            "rationale",
+            "--body",
+            "initial note",
+        ],
+    );
+    fixture.run_at(&fixture.source, &["push", "origin"]);
+    fixture.run_at(
+        &fixture.source,
+        &[
+            "context",
+            "edit",
+            "--path",
+            "example.py",
+            "--symbol",
+            "amount",
+            "--body",
+            "revised note",
+        ],
+    );
+    fixture.run_at(
+        &fixture.source,
+        &[
+            "discuss",
+            "new",
+            "--path",
+            "example.py",
+            "--symbol",
+            "amount",
+            "--thread",
+            "main",
+            "--visibility",
+            "private:clone",
+            "--body",
+            "private discussion",
+        ],
+    );
+    assert_push_succeeded(&fixture, &fixture.source);
+    let discussion = fresh_discussion(&fixture, "fixture-clone");
+    assert_eq!(discussion.turns[0].1.body, "private discussion");
+    assert_eq!(
+        discussion.visibility,
+        objects::object::VisibilityTier::Private {
+            scope_label: "clone".into()
+        }
+    );
+    assert_eq!(discussion.thread_ref.as_deref(), Some("main"));
+    let objects::object::CollaborationAnchor::Source { source } = discussion.anchor else {
+        panic!("native source anchor")
+    };
+    assert_eq!(source.path, "example.py");
+    assert_eq!(source.symbol_id, "amount");
+    let capture = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(capture.contexts.len(), 2);
+    assert_eq!(capture.discussions.len(), 1);
+    let request = &capture.discussions[0];
+    assert_eq!(
+        request.client_operation_id,
+        signed_key(request.signed_operation.as_ref()),
+        "the wire command ID is the signed operation's key"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discussion_open_reply_resolve_publish_and_clone() {
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--symbol",
+        "amount",
+        "--thread",
+        "main",
+        "--visibility",
+        "private:clone",
+        "--body",
+        "opening turn",
+    ]);
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view");
+    let id = view.discussions.keys().next().expect("id").to_string();
+    assert_push_succeeded(&fixture, &fixture.clone);
+    fixture.run(&["discuss", "reply", &id, "--body", "reply turn"]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    fixture.run(&[
+        "discuss",
+        "resolve",
+        &id,
+        "--mode",
+        "dismiss",
+        "--reason",
+        "review complete",
+    ]);
+    // The resolution is applied but its receipt is lost: push must report
+    // the discussion as failed, and the retry must redeliver the persisted
+    // signed resolution under the same command ID rather than re-sign it.
+    fixture
+        .captured
+        .lock()
+        .expect("lose resolve receipt")
+        .lose_next_discussion_receipt = true;
+    assert_push_discussions_failed(&fixture, &fixture.clone, "receipt lost after apply");
+    assert_push_succeeded(&fixture, &fixture.clone);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let discussion = fresh_discussion(&fixture, "resolved-clone");
+    assert_eq!(
+        discussion
+            .turns
+            .iter()
+            .map(|(_, t)| t.body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["opening turn", "reply turn"]
+    );
+    assert_eq!(
+        discussion.resolution,
+        Some(objects::object::CollaborationResolution::Dismissed {
+            reason: "review complete".into()
+        })
+    );
+    let captured = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(captured.discussions.len(), 1);
+    assert_eq!(captured.appends.len(), 1);
+    assert_eq!(captured.resolutions.len(), 1);
+    assert_eq!(captured.discussion_operations.len(), 3);
+    let open = signed_key(captured.discussions[0].signed_operation.as_ref());
+    let append = signed_key(captured.appends[0].signed_operation.as_ref());
+    let resolve = signed_key(captured.resolutions[0].signed_operation.as_ref());
+    assert_eq!(captured.discussions[0].client_operation_id, open);
+    assert_eq!(captured.appends[0].client_operation_id, append);
+    assert_eq!(captured.resolutions[0].client_operation_id, resolve);
+    assert_eq!(
+        captured.delivered_command_ids,
+        vec![open, append, resolve.clone(), resolve],
+        "one delivery per command, plus one redelivery of the unacknowledged resolve"
+    );
+    fixture.close().await;
+}
+
+/// A rejected delivery's failure code and message.
+#[derive(Debug)]
+struct Rejected {
+    code: i32,
+    message: String,
+}
+
+/// Send the captured request bytes again through the real hosted framing.
+async fn deliver(
+    fixture: &Fixture,
+    method: &str,
+    body: Vec<u8>,
+) -> Result<api::heddle::api::v1alpha2::MutationResponse, Rejected> {
+    use prost::Message;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("replay endpoint");
+    let connection = endpoint
+        .connect(fixture.addr.clone(), api::HOSTED_ALPN_V1)
+        .await
+        .expect("replay connection");
+    let (mut send, mut recv) = connection.open_bi().await.expect("replay stream");
+    send.write_all(
+        &api::framing::encode_request_frame(method, &Default::default(), &body)
+            .expect("request frame"),
+    )
+    .await
+    .expect("send replay");
+    send.finish().expect("finish request");
+    let bytes = recv
+        .read_to_end(api::framing::MAX_CONTROL_BODY)
+        .await
+        .expect("replay response");
+    let result = match api::framing::decode_response_frame(&bytes).expect("response frame") {
+        api::framing::ResponseFrame::Success(bytes) => {
+            Ok(api::heddle::api::v1alpha2::MutationResponse::decode(bytes).expect("receipt"))
+        }
+        api::framing::ResponseFrame::Failure(failure) => Err(Rejected {
+            code: failure.code,
+            message: failure.message,
+        }),
+    };
+    endpoint.close().await;
+    result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discussion_signed_replay_is_idempotent_and_mismatch_never_mutates() {
+    use prost::Message;
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--body",
+        "one turn",
+    ]);
+    // Apply the open but lose its receipt; the retry must redeliver the same
+    // signed operation under the same command ID, leaving one discussion.
+    fixture
+        .captured
+        .lock()
+        .expect("lose open receipt")
+        .lose_next_discussion_receipt = true;
+    assert_push_discussions_failed(&fixture, &fixture.clone, "receipt lost after apply");
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let request = fixture.captured.lock().expect("capture").discussions[0].clone();
+    let key = signed_key(request.signed_operation.as_ref());
+    assert_eq!(request.client_operation_id, key);
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("deliveries")
+            .delivered_command_ids,
+        vec![key.clone(), key.clone()]
+    );
+    let method = "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
+    for _ in 0..2 {
+        deliver(&fixture, method, request.encode_to_vec())
+            .await
+            .expect("identical signed replay");
+    }
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("replays")
+            .discussion_operations
+            .len(),
+        1
+    );
+    // A new signed original makes mutation on rejection observable, even if
+    // an implementation accidentally deduplicates before checking the ID.
+    let signed = request.signed_operation.as_ref().expect("original");
+    let operation = thread_api::collaboration::verify(signed).expect("verified");
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        panic!("discussion")
+    };
+    let authored = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .expect("envelope")
+        .operation;
+    let different = thread_api::collaboration::Command {
+        discussion: objects::object::DiscussionRecordId::generate(),
+        operation_id: objects::object::CollaborationIdempotencyKey::new(
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .expect("key"),
+        metadata: authored.metadata.expect("metadata"),
+        author: authored.author,
+        occurred_at_ms: authored.occurred_at_ms,
+        body: authored.body,
+    }
+    .sign(&[], &Ed25519Signer::from_seed(&[71; 32]).expect("signer"))
+    .expect("different signed open");
+    let mut mismatch = request;
+    mismatch.signed_operation = Some(different);
+    mismatch.client_operation_id = uuid::Uuid::new_v4().to_string();
+    let before = fixture.captured.lock().expect("before").clone();
+    let failure = deliver(&fixture, method, mismatch.encode_to_vec())
+        .await
+        .expect_err("mismatched command rejected");
+    assert_eq!(
+        failure.code,
+        api::heddle::api::common::CallFailureCode::InvalidArgument as i32
+    );
+    assert_eq!(failure.message, "command ID differs from signed operation");
+    let after = fixture.captured.lock().expect("after").clone();
+    assert_eq!(after.discussions, before.discussions);
+    assert_eq!(after.discussion_operations, before.discussion_operations);
+    assert_eq!(after.discussions.len(), 1);
+    let discussion = fresh_discussion(&fixture, "replayed-clone");
+    assert_eq!(discussion.turns.len(), 1);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discussion_failure_keeps_push_partial_after_source_success() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "context",
         "set",
         "--path",
-        "story.txt",
-        "--kind",
-        "rationale",
-        "-m",
-        "initial note",
-    ]);
-    fixture.run(&[
-        "context",
-        "edit",
-        "--path",
-        "story.txt",
-        "-m",
-        "revised note",
+        "example.py",
+        "--body",
+        "context succeeds",
     ]);
     fixture.run(&[
         "discuss",
         "new",
         "--path",
-        "story.txt",
-        "--visibility",
-        "private:clone",
-        "-m",
-        "private discussion",
+        "example.py",
+        "--body",
+        "retained discussion",
     ]);
+    fixture
+        .captured
+        .lock()
+        .expect("reject discussion")
+        .reject_discussions = true;
+    fixture.capture();
     let output = fixture.output_at(&fixture.clone, &["--output", "json", "push", "origin"]);
-    println!(
-        "(d) exit {:?}\n{}\n{}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).expect("source push result");
+    let result: Value = serde_json::from_slice(&output.stdout).expect("partial result");
+    assert_eq!(output.status.code(), Some(65));
+    assert_eq!(result["status"], "partial");
     assert_eq!(result["source"]["status"], "succeeded");
     assert_eq!(result["context"]["status"], "succeeded");
-    assert_eq!(result["context"]["count"], 1);
-    assert_eq!(
-        output.status.code(),
-        Some(65),
-        "#1900 must be the only remaining failure"
-    );
     assert_eq!(result["discussions"]["status"], "failed");
     assert!(
         result["discussions"]["error"]
             .as_str()
-            .expect("discussion failure")
-            .contains("command ID differs from signed operation")
+            .expect("error")
+            .contains("injected discussion rejection")
     );
-    let capture = fixture
+    assert!(
+        fixture
+            .captured
+            .lock()
+            .expect("no mutation")
+            .discussion_operations
+            .is_empty()
+    );
+    fixture
         .captured
         .lock()
-        .expect("collaboration capture")
-        .clone();
+        .expect("allow discussion")
+        .reject_discussions = false;
+    assert_push_succeeded(&fixture, &fixture.clone);
     assert_eq!(
-        capture.contexts.len(),
-        2,
-        "initial annotation and its revision"
+        fresh_discussion(&fixture, "recovered-clone").turns[0]
+            .1
+            .body,
+        "retained discussion"
     );
-    assert_eq!(capture.discussions.len(), 1);
-    fixture.assert_identity();
-    fixture.capture();
-    let retry = fixture.output_at(&fixture.clone, &["--output", "json", "push", "origin"]);
-    let result: Value =
-        serde_json::from_slice(&retry.stdout).expect("push after collaboration failure");
-    assert_eq!(result["source"]["status"], "succeeded");
-    assert_eq!(result["context"]["status"], "succeeded");
-    assert_eq!(retry.status.code(), Some(65));
-    assert!(
-        result["discussions"]["error"]
-            .as_str()
-            .expect("discussion failure")
-            .contains("command ID differs from signed operation")
-    );
-    println!("(d, after partial) source=succeeded context=succeeded; exit 65 only for #1900");
-    fixture.assert_identity();
     fixture.close().await;
 }
 

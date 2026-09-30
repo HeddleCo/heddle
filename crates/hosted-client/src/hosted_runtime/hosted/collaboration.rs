@@ -2,21 +2,26 @@
 //! Hosted `CollaborationService` client wrappers over v2 RPCs.
 //!
 //! Write path: signed original operations via `OpenDiscussion`, `AppendTurn`,
-//! and `PutContext`. Read path: `ObserveCollaboration`.
+//! `ResolveDiscussion`, and `PutContext`. Read path: `ObserveCollaboration`.
+//!
+//! A discussion command's wire ID is always the idempotency key its signed
+//! operation authenticates (see `ClientOperationId::signed_command`); the
+//! hosted service rejects any other ID and deduplicates redelivery on it.
 
 use std::collections::BTreeSet;
 
 use api::heddle::api::v1alpha2::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
-    PageRequest, PutContextRequest, RecordRef, collaboration_anchor, collaboration_event,
-    discussion_record, revision_ref,
+    PageRequest, PutContextRequest, RecordRef, ResolveDiscussionRequest, collaboration_anchor,
+    collaboration_event, discussion_record, resolve_discussion_request, revision_ref,
 };
 use objects::object::{
     AnnotationTag, Attribution, CollaborationActor, CollaborationAnchor as Anchor,
     CollaborationMetadata, CollaborationOperationBodyV1 as Body, CollaborationOperationEnvelope,
-    CollaborationScope, ContentHash, ContextProvenance, ContextRevision, DiscussionRecordId,
-    Principal, StateId, VisibilityTier, thread_replication::ThreadOperationBody,
+    CollaborationResolution, CollaborationScope, ContentHash, ContextProvenance, ContextRevision,
+    DiscussionRecordId, Principal, StateId, VisibilityTier,
+    thread_replication::ThreadOperationBody,
 };
 use thread_api::rpc;
 use wire::ProtocolError;
@@ -28,6 +33,7 @@ use super::{
 
 const OPEN: &str = "heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
 const APPEND: &str = "heddle.api.v1alpha2.CollaborationService/AppendTurn";
+const RESOLVE: &str = "heddle.api.v1alpha2.CollaborationService/ResolveDiscussion";
 const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
 
 /// One turn of a hosted discussion, decoded from the wire.
@@ -242,6 +248,44 @@ fn canonical_anchor(
     let wire = thread_api::collaboration::anchor_ref(&anchor, scope).map_err(native_error)?;
     let canonical = thread_api::collaboration::anchor(&wire, scope).map_err(native_error)?;
     Ok((canonical, wire))
+}
+
+/// The `ResolveDiscussion` resolution that carries exactly `resolution`.
+/// Local-only resolution shapes have no hosted command and are reported as
+/// incomplete replication rather than approximated.
+fn resolution_command(
+    resolution: &CollaborationResolution,
+    spool: &contract::SpoolRef,
+) -> Result<resolve_discussion_request::Resolution, ProtocolError> {
+    use resolve_discussion_request::Resolution;
+    let unsupported = |kind: &str| {
+        ProtocolError::InvalidState(format!(
+            "{kind} discussion resolution has no native hosted command; replication is incomplete"
+        ))
+    };
+    match resolution {
+        CollaborationResolution::Dismissed { reason } => {
+            Ok(Resolution::DismissalReason(reason.clone()))
+        }
+        CollaborationResolution::AddressedByState { state_id } => {
+            Ok(Resolution::ResolvedByEdit(contract::RevisionRef {
+                spool: Some(spool.clone()),
+                revision: Some(revision_ref::Revision::State(
+                    api::heddle::api::common::StateId {
+                        value: state_id.as_bytes().to_vec(),
+                    },
+                )),
+            }))
+        }
+        CollaborationResolution::IntoContext { context } => Ok(Resolution::ExtractContext(
+            context_draft_from_revision(context, spool.clone())?,
+        )),
+        CollaborationResolution::AddressedByChange { .. } => {
+            Err(unsupported("addressed-by-change"))
+        }
+        CollaborationResolution::IntoAnnotation { .. } => Err(unsupported("into-annotation")),
+        CollaborationResolution::Annotation { .. } => Err(unsupported("annotation-bound")),
+    }
 }
 
 fn decoded_discussion(
@@ -561,14 +605,15 @@ impl HostedClient {
     }
 
     /// Deliver an already prepared Open operation without reconstructing or
-    /// restamping any authored field.
+    /// restamping any authored field. The command ID is the signed key, so a
+    /// redelivery of the same record is the same hosted command.
     pub(crate) async fn publish_open_discussion_operation(
         &self,
         signed: contract::SignedRecord,
-        client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(OPEN, client_operation_id);
         let record = decoded_discussion(&signed)?;
+        let operation_id =
+            ClientOperationId::signed_command(OPEN, record.idempotency_key.as_str())?;
         let metadata = record.metadata.as_ref().ok_or_else(|| {
             ProtocolError::InvalidState("signed discussion metadata is absent".into())
         })?;
@@ -835,6 +880,55 @@ impl HostedClient {
                     .into(),
             ));
         };
+        let body = Body::AppendTurn { turn: turn.clone() };
+        let (signed, _) = self
+            .sign_discussion_descendant(repo_path, discussion_id, authored, body)
+            .await?;
+        Ok(signed)
+    }
+
+    /// Prepare an authored resolution against the observed native frontier.
+    ///
+    /// Returns the signed record with the view version it was signed against.
+    /// The service admits a resolution only while both still name the same
+    /// heads, and it deduplicates on the whole request, so callers persist the
+    /// pair together and every retry resends identical bytes.
+    pub(crate) async fn prepare_resolve_discussion_operation(
+        &mut self,
+        repo_path: &str,
+        discussion_id: &str,
+        authored: &CollaborationOperationEnvelope,
+    ) -> Result<(contract::SignedRecord, Vec<u8>), ProtocolError> {
+        let Body::Resolve { resolution } = &authored.body else {
+            return Err(ProtocolError::InvalidState(
+                "native resolution preparation requires an authored Resolve operation".into(),
+            ));
+        };
+        // Refuse before signing anything the hosted command cannot express.
+        resolution_command(resolution, &contract::SpoolRef::default())?;
+        let body = Body::Resolve {
+            resolution: resolution.clone(),
+        };
+        let (signed, observed) = self
+            .sign_discussion_descendant(repo_path, discussion_id, authored, body)
+            .await?;
+        if observed.version.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "hosted discussion view carries no version to resolve against".into(),
+            ));
+        }
+        Ok((signed, observed.version))
+    }
+
+    /// Sign `body` as the authored descendant of the observed hosted heads,
+    /// keeping the authored identity, key, author and occurrence time.
+    async fn sign_discussion_descendant(
+        &mut self,
+        repo_path: &str,
+        discussion_id: &str,
+        authored: &CollaborationOperationEnvelope,
+        body: Body,
+    ) -> Result<(contract::SignedRecord, HostedDiscussion), ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let reference = RecordRef {
             spool: Some(spool.clone()),
@@ -859,7 +953,7 @@ impl HostedClient {
         let discussion = parse_discussion_id(discussion_id)?;
         if discussion != authored.discussion_id {
             return Err(ProtocolError::InvalidState(
-                "authored turn belongs to another discussion".into(),
+                "authored operation belongs to another discussion".into(),
             ));
         }
         let signed = thread_api::collaboration::Command {
@@ -872,23 +966,23 @@ impl HostedClient {
             },
             author: authored.author.clone(),
             occurred_at_ms: authored.occurred_at_ms,
-            body: Body::AppendTurn { turn: turn.clone() },
+            body,
         }
         .sign(&parent_records, signer)
         .map_err(native_error)?;
-        Ok(signed)
+        Ok((signed, current))
     }
 
-    /// Deliver a prepared append operation unchanged.
+    /// Deliver a prepared append operation unchanged, under its signed key.
     pub(crate) async fn publish_append_discussion_operation(
         &self,
         signed: contract::SignedRecord,
-        client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(APPEND, client_operation_id);
         let outer = thread_api::collaboration::verify(&signed).map_err(native_error)?;
         let parents: Vec<_> = outer.parents.iter().copied().collect();
         let record = decoded_discussion(&signed)?;
+        let operation_id =
+            ClientOperationId::signed_command(APPEND, record.idempotency_key.as_str())?;
         let Body::AppendTurn { turn } = &record.body else {
             return Err(ProtocolError::InvalidState(
                 "prepared native discussion operation is not an append".into(),
@@ -923,6 +1017,53 @@ impl HostedClient {
             &request.client_operation_id,
             &remote.description.endpoint,
             "append discussion turn",
+        )?;
+        self.observe_discussion(spool, reference).await
+    }
+
+    /// Deliver a prepared resolution unchanged, under its signed key and the
+    /// view version it was prepared against.
+    pub(crate) async fn publish_resolve_discussion_operation(
+        &self,
+        signed: contract::SignedRecord,
+        expected_version: Vec<u8>,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let record = decoded_discussion(&signed)?;
+        let operation_id =
+            ClientOperationId::signed_command(RESOLVE, record.idempotency_key.as_str())?;
+        let Body::Resolve { resolution } = &record.body else {
+            return Err(ProtocolError::InvalidState(
+                "prepared native discussion operation is not a resolution".into(),
+            ));
+        };
+        let metadata = record.metadata.as_ref().ok_or_else(|| {
+            ProtocolError::InvalidState("signed discussion metadata is absent".into())
+        })?;
+        let spool = contract::SpoolRef {
+            id: metadata.scope.spool.to_string(),
+        };
+        let reference = RecordRef {
+            spool: Some(spool.clone()),
+            id: record.discussion_id.to_string(),
+        };
+        let request = ResolveDiscussionRequest {
+            client_operation_id: operation_id.to_wire(),
+            discussion: Some(reference.clone()),
+            expected_version,
+            resolution: Some(resolution_command(resolution, &spool)?),
+            signed_operation: Some(signed),
+        };
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::CollaborationServiceResolveDiscussion>(&request)
+            .await
+            .map_err(native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "resolve discussion",
         )?;
         self.observe_discussion(spool, reference).await
     }
@@ -1110,6 +1251,46 @@ mod tests {
         assert_eq!(parse_discussion_id(&id.to_string()).unwrap(), id);
         let raw = id.to_string().trim_start_matches("disc-").to_string();
         assert!(discussion_ids_match(&id.to_string(), &raw));
+    }
+
+    #[test]
+    fn resolution_command_carries_the_signed_resolution_exactly() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let spool = contract::SpoolRef {
+            id: uuid::Uuid::from_u128(7).to_string(),
+        };
+        assert_eq!(
+            resolution_command(
+                &CollaborationResolution::Dismissed {
+                    reason: "done".into()
+                },
+                &spool
+            )
+            .unwrap(),
+            resolve_discussion_request::Resolution::DismissalReason("done".into())
+        );
+        let state_id = StateId::from_bytes([3; 32]);
+        let resolve_discussion_request::Resolution::ResolvedByEdit(revision) = resolution_command(
+            &CollaborationResolution::AddressedByState { state_id },
+            &spool,
+        )
+        .unwrap() else {
+            panic!("by-edit resolution")
+        };
+        assert_eq!(revision.spool, Some(spool.clone()));
+        assert!(matches!(
+            revision.revision,
+            Some(revision_ref::Revision::State(ref state)) if state.value == state_id.as_bytes()
+        ));
+        let error = resolution_command(
+            &CollaborationResolution::Annotation {
+                annotation_id: "ann-1".into(),
+            },
+            &spool,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("replication is incomplete"), "{error}");
     }
 
     #[test]
