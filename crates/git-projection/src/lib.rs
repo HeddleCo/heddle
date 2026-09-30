@@ -16,6 +16,7 @@ pub mod git_reconstruct;
 pub mod git_residual;
 pub mod git_sync;
 pub mod git_util;
+pub mod source_ref_budget;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub mod test_support;

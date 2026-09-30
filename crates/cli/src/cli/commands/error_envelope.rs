@@ -575,6 +575,15 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     "import_source_invalid_branch",
                     serde_json::json!({ "source_ref": ref_name }),
                 ),
+                ImportSourceRefError::AdvertisementOverBudget(over) => (
+                    "import_source_advertisement_limit",
+                    serde_json::json!({
+                        "bound": over.bound.to_string(),
+                        "limit": over.limit,
+                        "bytes_read": over.bytes_read,
+                        "records_read": over.records_read,
+                    }),
+                ),
                 ImportSourceRefError::Discovery(_) => {
                     ("import_source_discovery_failed", serde_json::json!({}))
                 }
@@ -588,6 +597,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 }
                 ImportSourceRefError::InvalidBranch { .. } => {
                     "Choose source branch names that are valid Thread names."
+                }
+                ImportSourceRefError::AdvertisementOverBudget(_) => {
+                    "Choose a source that advertises at most 512 branches and tags."
                 }
                 ImportSourceRefError::Discovery(_) => {
                     "Check the public source URL and network access."

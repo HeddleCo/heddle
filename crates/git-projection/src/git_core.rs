@@ -47,6 +47,7 @@ use super::{
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_residual::ResidualStore,
     git_util::FailedRefExportReason,
+    source_ref_budget::{MeteredHttpClient, RefAdvertisementOverBudget},
 };
 
 /// Errors specific to Git Projection operations.
@@ -134,6 +135,11 @@ pub enum GitProjectionError {
 
     #[error("change id parse error: {0}")]
     StateIdParse(#[from] StateIdParseError),
+
+    /// A public import source's ref advertisement passed an import-scale bound
+    /// while it was being read (heddle#1905).
+    #[error(transparent)]
+    SourceAdvertisementOverBudget(RefAdvertisementOverBudget),
 
     /// A SINGLE ref could not be published, already classified against the
     /// compare-and-swap heddle asserted (heddle#261). Distinct from the errors
@@ -3664,7 +3670,20 @@ pub fn copy_reachable_objects(
 /// Discover import branches and tags through Sley without a checkout or Git process.
 /// Public HTTPS uses the same configured HTTP client as other Git operations.
 pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<String>> {
-    use sley::remote::{LsRemoteRequest, LsRemoteSource, ls_remote_with_http_client};
+    discover_git_source_refs_with_client(clone_url, configured_https_client())
+}
+
+/// [`discover_git_source_refs`] over an explicit HTTP client (Sley's default
+/// when `None`). An HTTPS advertisement is metered while it is read, so an
+/// oversized one fails with [`GitProjectionError::SourceAdvertisementOverBudget`]
+/// before it is materialized.
+pub(crate) fn discover_git_source_refs_with_client(
+    clone_url: &str,
+    http_client: Option<&dyn HttpClient>,
+) -> GitProjectionResult<Vec<String>> {
+    use sley::remote::{
+        LsRemoteRequest, LsRemoteSource, ls_remote_with_http_client, new_http_client_with_config,
+    };
     use sley_transport::{RemoteTransport, parse_remote_url};
 
     let remote = parse_remote_url(clone_url).map_err(git_err)?;
@@ -3673,8 +3692,23 @@ pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<Stri
             "public import URL must not contain credentials".into(),
         ));
     }
-    let (source, format) = match remote.transport {
-        RemoteTransport::Https => (LsRemoteSource::Http(remote), ObjectFormat::Sha1),
+    let policy = RemotePolicy::default();
+    let default_client;
+    let (source, format, metered) = match remote.transport {
+        RemoteTransport::Https => {
+            let client = match http_client {
+                Some(client) => client,
+                None => {
+                    default_client = new_http_client_with_config(&policy.transport, None);
+                    &default_client as &dyn HttpClient
+                }
+            };
+            (
+                LsRemoteSource::Http(remote),
+                ObjectFormat::Sha1,
+                Some(MeteredHttpClient::new(client)),
+            )
+        }
         RemoteTransport::Local | RemoteTransport::File => {
             let repository = SleyRepository::discover(&remote.path).map_err(git_err)?;
             (
@@ -3682,6 +3716,7 @@ pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<Stri
                     git_dir: repository.git_dir().to_path_buf(),
                 },
                 repository.object_format(),
+                None,
             )
         }
         _ => {
@@ -3692,7 +3727,7 @@ pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<Stri
     };
     let outcome = ls_remote_with_http_client(
         LsRemoteRequest {
-            policy: &RemotePolicy::default(),
+            policy: &policy,
             source: &source,
             format,
             filter: &LsRemoteFilter {
@@ -3704,9 +3739,14 @@ pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<Stri
         },
         &|_| true,
         &mut NoCredentials,
-        configured_https_client(),
+        metered.as_ref().map(|client| client as &dyn HttpClient),
     )
-    .map_err(git_err)?;
+    .map_err(
+        |error| match metered.as_ref().and_then(MeteredHttpClient::over_budget) {
+            Some(over) => GitProjectionError::SourceAdvertisementOverBudget(over),
+            None => git_err(error),
+        },
+    )?;
     Ok(outcome
         .records
         .into_iter()
