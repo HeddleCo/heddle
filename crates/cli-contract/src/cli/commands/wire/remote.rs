@@ -80,6 +80,22 @@ pub struct RemoteMutationOutput {
     pub trust: RepositoryVerificationState,
 }
 
+/// Executor's fidelity assessment of the retained Git import.
+#[derive(Serialize, JsonSchema)]
+pub struct ImportReportOutput {
+    pub fidelity: &'static str,
+    pub commits: u64,
+    pub branches: u64,
+    pub tags: u64,
+    pub skipped_refs: Vec<SkippedImportRefOutput>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SkippedImportRefOutput {
+    pub name: String,
+    pub reason: String,
+}
+
 /// One committed hosted import operation update.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ImportOperationOutput")]
@@ -89,8 +105,6 @@ pub struct ImportOperationOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub destination: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
     pub operation_id: String,
     pub client_operation_id: String,
     pub state: String,
@@ -98,6 +112,9 @@ pub struct ImportOperationOutput {
     pub total_units: Option<u64>,
     pub unit: String,
     pub terminal: bool,
+    pub success: bool,
+    pub summary: String,
+    pub import_report: Option<ImportReportOutput>,
     pub results: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,

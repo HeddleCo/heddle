@@ -154,7 +154,9 @@ mod tests {
         let creator = Ed25519Signer::from_seed(&[41; 32]).expect("creator");
         let executor = Ed25519Signer::from_seed(&[42; 32]).expect("executor");
         let key = creator.public_key().try_into().expect("creator key");
-        let base = repo.head().expect("HEAD").expect("initial state");
+        let base = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+            .expect("seed")
+            .id();
         let genesis = ThreadGenesis {
             version: 1,
             spool: uuid::Uuid::from_u128(43).to_string(),
@@ -173,7 +175,7 @@ mod tests {
         .expect("replica");
         let state = State::new_snapshot(
             Tree::new().hash(),
-            vec![base],
+            vec![],
             Attribution::human(Principal::new("Git author", "git@example.test")),
         );
         let trust = TrustedHostedExecutor {
@@ -192,6 +194,7 @@ mod tests {
             provider: ImportProvider::GitHub {
                 repository_id: "123".into(),
             },
+            source_ref: "refs/heads/import".into(),
             source_commit: ImportedCommit::Sha1([45; 20]),
             initiating_request_proof: ContentHash::from_bytes([46; 32]),
             executed_at_ms: 100,

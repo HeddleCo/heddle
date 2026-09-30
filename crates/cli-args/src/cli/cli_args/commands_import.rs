@@ -34,7 +34,7 @@ pub enum ImportCommands {
     /// Import a Git checkout on this computer.
     Local(ImportLocalArgs),
 
-    /// Have the server import a public HTTPS Git URL.
+    /// Have the server import a public HTTPS Git URL, with one Thread per branch.
     #[cfg(feature = "client")]
     Url(ImportUrlArgs),
 
@@ -60,10 +60,6 @@ pub struct ImportUrlArgs {
     /// Hosted destination spool path or URL.
     #[arg(long, value_name = "SPOOL|URL")]
     pub to: String,
-
-    /// Name of the imported native thread (default: main).
-    #[arg(long, value_name = "NAME")]
-    pub thread: Option<String>,
 
     /// Heddle server address when --to is a spool path.
     #[arg(long, value_name = "HOST")]
