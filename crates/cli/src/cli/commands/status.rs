@@ -670,7 +670,11 @@ fn short_status_health(output: &StatusOutput) -> String {
     if matches!(output.recommended_action.as_str(), "heddle push")
         && output.thread_health == "clean"
     {
-        "ready to push".to_string()
+        if output.repository_capability == "git-overlay" {
+            "ready to push".to_string()
+        } else {
+            "captured changes to push".to_string()
+        }
     } else {
         human_thread_health(&output.thread_health)
     }

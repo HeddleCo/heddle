@@ -582,7 +582,14 @@ fn check_local_spool(repo: &Repository, hosted: uuid::Uuid) -> Result<()> {
     let local = match std::fs::read_to_string(&path) {
         Ok(value) => uuid::Uuid::parse_str(value.trim())
             .with_context(|| format!("parse local Spool identity {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(record_refusal(
+                "ci_record_spool_identity_missing",
+                "local Spool identity is missing".to_string(),
+                "Clone the hosted Spool again before recording evidence.",
+                "heddle clone --help",
+            ));
+        }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     if local != hosted {
@@ -1014,6 +1021,21 @@ mod tests {
             evidence_error(unrelated, "hs-example", "team/repo")
                 .downcast_ref::<HostedError>()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn recording_without_local_spool_identity_fails_closed_without_minting() {
+        let root = tempfile::tempdir().expect("repository directory");
+        let repo = repo::Repository::init(root.path()).expect("unseeded repository");
+        let error = check_local_spool(&repo, uuid::Uuid::now_v7()).expect_err("identity required");
+        let advice = error
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("typed refusal");
+        assert_eq!(advice.kind, "ci_record_spool_identity_missing");
+        assert!(
+            !repo.heddle_dir().join("spool-id").exists(),
+            "validation must not mint a replacement identity"
         );
     }
 

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Minimal v2 Weft fixture for publication and bounded Thread review tests.
+// Shared fixtures expose entry points used by different test binaries.
+#![allow(dead_code)]
 
 use std::{
     net::Ipv4Addr,
@@ -15,7 +17,7 @@ use api::{
     heddle::api::v1alpha2 as v2,
     method_descriptor,
 };
-use crypto::Ed25519Signer;
+use crypto::{Ed25519Signer, Signer};
 use hosted_client::hosted_runtime::hosted::{CallContextFactory, HostedClient};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
@@ -30,6 +32,10 @@ pub struct PublicationCapture {
     pub operations: Vec<v2::ReplicationOperations>,
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
+    pub started: Vec<v2::ThreadOverview>,
+    pub evidence: Vec<v2::RecordEvidenceRequest>,
+    pub contexts: Vec<v2::PutContextRequest>,
+    pub discussions: Vec<v2::OpenDiscussionRequest>,
 }
 
 #[derive(Clone)]
@@ -47,6 +53,36 @@ pub async fn start(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
+    let (client, task, captured, _, _) = start_inner(spool, thread_name, thread_id, false).await;
+    (client, task, captured)
+}
+
+pub async fn start_routed(
+    spool: uuid::Uuid,
+    thread_name: impl Into<String>,
+    thread_id: [u8; 32],
+) -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<PublicationCapture>>,
+    iroh::EndpointAddr,
+    iroh::SecretKey,
+) {
+    start_inner(spool, thread_name, thread_id, true).await
+}
+
+async fn start_inner(
+    spool: uuid::Uuid,
+    thread_name: impl Into<String>,
+    thread_id: [u8; 32],
+    routed: bool,
+) -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<PublicationCapture>>,
+    iroh::EndpointAddr,
+    iroh::SecretKey,
+) {
     let captured = Arc::new(Mutex::new(PublicationCapture::default()));
     let owner_signer = Ed25519Signer::generate().expect("hosted test owner");
     let recovery = Ed25519Signer::generate().expect("hosted test recovery owner");
@@ -97,7 +133,11 @@ pub async fn start(
         captured: Arc::clone(&captured),
     };
 
+    let mut secret_bytes = [0; 32];
+    getrandom::fill(&mut secret_bytes).expect("fixture endpoint key");
+    let secret = iroh::SecretKey::from_bytes(&secret_bytes);
     let server = Endpoint::builder(presets::Minimal)
+        .secret_key(secret.clone())
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind_addr((Ipv4Addr::LOCALHOST, 0))
@@ -108,16 +148,23 @@ pub async fn start(
     let server_addr = server.addr();
     let server_key = server.id().as_bytes().to_vec();
     let server_task = tokio::spawn(async move {
-        let connection = server
-            .accept()
-            .await
-            .expect("hosted test connection")
-            .await
-            .expect("hosted test handshake");
-        while let Ok((send, recv)) = connection.accept_bi().await {
-            tokio::spawn(serve_call(send, recv, fixture.clone(), server_key.clone()));
+        while let Some(incoming) = server.accept().await {
+            let connection = incoming.await.expect("hosted test handshake");
+            let fixture = fixture.clone();
+            let server_key = server_key.clone();
+            let connection_task = async move {
+                while let Ok((send, recv)) = connection.accept_bi().await {
+                    tokio::spawn(serve_call(send, recv, fixture.clone(), server_key.clone()));
+                }
+            };
+            if routed {
+                tokio::spawn(connection_task);
+            } else {
+                connection_task.await;
+                server.close().await;
+                break;
+            }
         }
-        server.close().await;
     });
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -133,10 +180,10 @@ pub async fn start(
             "principal:test",
         )
         .expect("hosted test call context");
-    let client = HostedClient::connect_addr_with_context(endpoint, server_addr, context)
+    let client = HostedClient::connect_addr_with_context(endpoint, server_addr.clone(), context)
         .await
         .expect("connect hosted test client");
-    (client, server_task, captured)
+    (client, server_task, captured, server_addr, secret)
 }
 
 async fn serve_call(
@@ -188,6 +235,12 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                         "/heddle.api.v1alpha2.SyncService/Fetch".into(),
+                        "/heddle.api.v1alpha2.ThreadService/StartThread".into(),
+                        "/heddle.api.v1alpha2.IdentityService/GetIdentity".into(),
+                        "/heddle.api.v1alpha2.EvidenceService/RecordEvidence".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -279,6 +332,190 @@ async fn serve_call(
                 )
                 .await;
             }
+            "/heddle.api.v1alpha2.ThreadService/StartThread" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::StartThreadRequest::decode(
+                    decode_request_frame(&request).expect("start frame").body,
+                )
+                .expect("start request");
+                let record = body.thread_genesis.expect("original genesis");
+                let original = record;
+                let signed = crypto::thread_operation::SignedGenesis {
+                    canonical: original.canonical_record,
+                    signature: original.signatures[0].signature.clone(),
+                };
+                let genesis = signed.verify().expect("verify original genesis");
+                assert_eq!(genesis.spool, fixture.spool.to_string());
+                let overview = v2::ThreadOverview {
+                    name: genesis.name.clone(),
+                    r#ref: Some(v2::ThreadRef {
+                        spool: Some(v2::SpoolRef {
+                            id: genesis.spool.clone(),
+                        }),
+                        id: Some(v2::ThreadId {
+                            value: genesis.id().expect("Thread id").as_bytes().to_vec(),
+                        }),
+                    }),
+                    ..Default::default()
+                };
+                fixture
+                    .captured
+                    .lock()
+                    .expect("started Threads")
+                    .started
+                    .push(overview.clone());
+                write_unary(
+                    &mut send,
+                    &v2::ThreadMutationResponse {
+                        thread: Some(overview),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.IdentityService/GetIdentity" => {
+                read_request_body(&mut recv, &mut request).await;
+                let frame = decode_request_frame(&request).expect("identity frame");
+                let _context = frame.context;
+                write_unary(
+                    &mut send,
+                    &v2::GetIdentityResponse {
+                        identity: Some(v2::PrincipalRecord {
+                            id: "principal-test".into(),
+                            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                            ..Default::default()
+                        }),
+                        current_credential: Some(v2::CurrentCredentialRecord {
+                            kind: v2::CredentialKind::Device as i32,
+                            subject: "clone-test".into(),
+                            proof_public_key: crypto::Ed25519Signer::from_seed(&[71; 32])
+                                .expect("fixture credential signer")
+                                .public_key()
+                                .to_vec(),
+                            thread_control_authority: vec![6; 32],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.EvidenceService/RecordEvidence" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::RecordEvidenceRequest::decode(
+                    decode_request_frame(&request).expect("evidence frame").body,
+                )
+                .expect("evidence request");
+                let projection = body.evidence.as_ref().expect("signed evidence");
+                let original = thread_api::evidence::verify_evidence(
+                    projection.evidence.as_ref().expect("evidence original"),
+                )
+                .expect("verify evidence");
+                assert_eq!(original.spool, fixture.spool);
+                assert_eq!(original.thread.as_bytes().as_slice(), fixture.thread_id);
+                let reference = projection.r#ref.clone().expect("evidence ref");
+                fixture
+                    .captured
+                    .lock()
+                    .expect("record evidence")
+                    .evidence
+                    .push(body.clone());
+                write_unary(
+                    &mut send,
+                    &v2::MutationResponse {
+                        receipt: Some(v2::MutationReceipt {
+                            client_operation_id: body.client_operation_id,
+                            outcome: Some(v2::mutation_receipt::Outcome::Applied(v2::Applied {
+                                resulting_versions: vec![v2::ExpectedVersion {
+                                    resource: Some(v2::EntityRef {
+                                        entity: Some(v2::entity_ref::Entity::Evidence(reference)),
+                                    }),
+                                    ..Default::default()
+                                }],
+                            })),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::OpenDiscussionRequest::decode(
+                    decode_request_frame(&request)
+                        .expect("discussion frame")
+                        .body,
+                )
+                .expect("discussion request");
+                let operation = thread_api::collaboration::verify(
+                    body.signed_operation.as_ref().expect("signed discussion"),
+                )
+                .expect("verify discussion");
+                let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+                    operation.body
+                else {
+                    panic!("discussion original")
+                };
+                let envelope = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+                    .expect("original discussion command");
+                fixture
+                    .captured
+                    .lock()
+                    .expect("capture discussion")
+                    .discussions
+                    .push(body.clone());
+                // Match weft's command admission. #1900 remains visible here;
+                // source success must not conceal a mismatched signed command.
+                assert_ne!(
+                    body.client_operation_id,
+                    envelope.operation.idempotency_key.as_str(),
+                    "remove the #1900 expectation when that separate bug is fixed"
+                );
+                let failure =
+                    api::framing::encode_failure_response(&api::heddle::api::common::CallFailure {
+                        code: api::heddle::api::common::CallFailureCode::InvalidArgument as i32,
+                        message: "command ID differs from signed operation".into(),
+                        ..Default::default()
+                    })
+                    .expect("command failure");
+                send.write_all(&failure)
+                    .await
+                    .expect("discussion rejection");
+            }
+            "/heddle.api.v1alpha2.CollaborationService/PutContext" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::PutContextRequest::decode(
+                    decode_request_frame(&request).expect("context frame").body,
+                )
+                .expect("context request");
+                thread_api::collaboration::verify(
+                    body.signed_operation.as_ref().expect("signed context"),
+                )
+                .expect("verify context");
+                fixture
+                    .captured
+                    .lock()
+                    .expect("capture context")
+                    .contexts
+                    .push(body.clone());
+                write_unary(
+                    &mut send,
+                    &v2::MutationResponse {
+                        receipt: Some(v2::MutationReceipt {
+                            client_operation_id: body.client_operation_id,
+                            endpoint: Some(v2::EndpointRef {
+                                kind: v2::EndpointKind::Weft as i32,
+                                public_key: server_key,
+                            }),
+                            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                                v2::Applied::default(),
+                            )),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await;
+            }
             other => panic!("unexpected hosted unary method: {other}"),
         },
         StreamingShape::ServerStreaming => match method.as_str() {
@@ -332,21 +569,69 @@ async fn serve_call(
                 }
             }
             "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" => {
-                for frame in snapshot_frames(server_key) {
-                    let payload =
-                        matches!(frame.body, Some(v2::stream_frame::Body::Data(_))).then(|| {
-                            v2::identity_event::Payload::CurrentCredential(
-                                v2::CurrentCredentialRecord {
-                                    thread_control_authority: vec![6; 32],
-                                    ..Default::default()
-                                },
-                            )
-                        });
+                let mut sequence = 1;
+                for mut frame in snapshot_frames(server_key) {
+                    let data = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)));
+                    if data {
+                        write_message(
+                            &mut send,
+                            &v2::IdentityEvent {
+                                frame: Some(v2::StreamFrame {
+                                    sequence,
+                                    body: frame.body.clone(),
+                                }),
+                                payload: Some(v2::identity_event::Payload::Identity(
+                                    v2::PrincipalRecord {
+                                        id: "principal-test".into(),
+                                        account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                                        personal_spool: Some(v2::SpoolAddress {
+                                            r#ref: Some(v2::SpoolRef {
+                                                id: fixture.spool.to_string(),
+                                            }),
+                                            path_segments: vec!["personal".into()],
+                                        }),
+                                        ..Default::default()
+                                    },
+                                )),
+                            },
+                        )
+                        .await;
+                        sequence += 1;
+                    }
+                    frame.sequence = sequence;
+                    sequence += 1;
+                    let payload = data.then(|| {
+                        v2::identity_event::Payload::CurrentCredential(
+                            v2::CurrentCredentialRecord {
+                                kind: v2::CredentialKind::Device as i32,
+                                subject: "clone-test".into(),
+                                thread_control_authority: vec![6; 32],
+                                ..Default::default()
+                            },
+                        )
+                    });
                     write_message(
                         &mut send,
                         &v2::IdentityEvent {
                             frame: Some(frame),
                             payload,
+                        },
+                    )
+                    .await;
+                }
+            }
+            "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration" => {
+                for (index, mut frame) in snapshot_frames(server_key)
+                    .into_iter()
+                    .filter(|frame| !matches!(frame.body, Some(v2::stream_frame::Body::Data(_))))
+                    .enumerate()
+                {
+                    frame.sequence = (index + 1) as u64;
+                    write_message(
+                        &mut send,
+                        &v2::CollaborationEvent {
+                            frame: Some(frame),
+                            ..Default::default()
                         },
                     )
                     .await;
@@ -452,6 +737,15 @@ async fn serve_observe_threads(
             .collect(),
         ..Default::default()
     };
+    let mut overviews = vec![overview];
+    overviews.extend(
+        fixture
+            .captured
+            .lock()
+            .expect("started listing")
+            .started
+            .clone(),
+    );
     let events = [
         v2::ThreadListEvent {
             frame: Some(v2::StreamFrame {
@@ -476,7 +770,7 @@ async fn serve_observe_threads(
                     kind: v2::StreamDataKind::Snapshot as i32,
                 })),
             }),
-            payload: Some(v2::thread_list_event::Payload::Thread(overview)),
+            payload: Some(v2::thread_list_event::Payload::Thread(overviews.remove(0))),
         },
         v2::ThreadListEvent {
             frame: Some(v2::StreamFrame {
@@ -503,7 +797,31 @@ async fn serve_observe_threads(
             ..Default::default()
         },
     ];
-    for event in events {
+    let mut sequence = 1;
+    for mut event in events {
+        if matches!(
+            event.frame.as_ref().and_then(|f| f.body.as_ref()),
+            Some(v2::stream_frame::Body::Checkpoint(_))
+        ) {
+            for overview in overviews.drain(..) {
+                write_message(
+                    send,
+                    &v2::ThreadListEvent {
+                        frame: Some(v2::StreamFrame {
+                            sequence,
+                            body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                                kind: v2::StreamDataKind::Snapshot as i32,
+                            })),
+                        }),
+                        payload: Some(v2::thread_list_event::Payload::Thread(overview)),
+                    },
+                )
+                .await;
+                sequence += 1;
+            }
+        }
+        event.frame.as_mut().expect("listing frame").sequence = sequence;
+        sequence += 1;
         write_message(send, &event).await;
     }
 }
@@ -529,7 +847,16 @@ async fn serve_publication(
     let Some(v2::publish_content_client_frame::Body::Open(open)) = opening.body.clone() else {
         panic!("native publication must start with Open");
     };
-    assert_eq!(open.thread, Some(thread_ref(&fixture)));
+    assert!(
+        open.thread == Some(thread_ref(&fixture))
+            || fixture
+                .captured
+                .lock()
+                .expect("started publication")
+                .started
+                .iter()
+                .any(|t| t.r#ref == open.thread)
+    );
     let mut logical = opening.clone();
     if let Some(v2::publish_content_client_frame::Body::Open(open)) = logical.body.as_mut() {
         open.checkpoint = None;
@@ -598,10 +925,15 @@ async fn serve_publication(
                 assert!(accepted.thread_genesis.is_some());
                 assert!(!accepted.operations.is_empty());
                 let inventory = inventory_digest(&open.packs);
-                *fixture
-                    .captured
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = accepted;
+                {
+                    let mut capture = fixture.captured.lock().expect("accepted publication");
+                    accepted.calls = std::mem::take(&mut capture.calls);
+                    accepted.started = std::mem::take(&mut capture.started);
+                    accepted.evidence = std::mem::take(&mut capture.evidence);
+                    accepted.contexts = std::mem::take(&mut capture.contexts);
+                    accepted.discussions = std::mem::take(&mut capture.discussions);
+                    *capture = accepted;
+                }
                 write_message(
                     &mut send,
                     &v2::PublishContentServerFrame {
