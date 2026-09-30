@@ -134,13 +134,61 @@ pub struct ImportRetryOutput {
     pub client_operation_id: String,
 }
 
+/// One replication surface of a push (source, discussions, context,
+/// reviews). Surfaces succeed or fail independently of each other.
 #[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 pub struct PushReplicationOutcome {
     pub status: &'static str,
+    /// Records the remote accepted during this push.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Local work that did not reach the remote and is retained for a later
+    /// push once its recovery is done.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unsent: Vec<PushReplicationItem>,
+    /// Local work that stays local: no hosted command can carry it, or its
+    /// author replaced it with an explicit revision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local_only: Vec<PushReplicationItem>,
+}
+
+impl PushReplicationOutcome {
+    pub fn with_status(status: &'static str) -> Self {
+        Self {
+            status,
+            count: None,
+            error: None,
+            unsent: Vec::new(),
+            local_only: Vec::new(),
+        }
+    }
+}
+
+/// One collaboration record the remote does not hold after a push, with a
+/// bounded recovery for it.
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct PushReplicationItem {
+    /// Local discussion or annotation ID; null when the whole surface failed
+    /// before any record was attempted.
+    pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    /// `stale_version`, `invalid_command`, `transient`, `permission_denied`,
+    /// `not_replicable`, or `superseded`.
+    pub kind: &'static str,
+    /// Whether resending the same signed command can succeed.
+    pub retry_unchanged: bool,
+    /// Command ID of the signed command involved. Kept across retries.
+    pub client_operation_id: Option<String>,
+    /// Content ID of the signed operation involved. Kept across retries.
+    pub signed_operation_id: Option<String>,
+    pub message: String,
+    pub guidance: String,
+    /// Ordered steps; run each after the previous one.
+    pub recovery_commands: Vec<String>,
+    pub recovery_action_templates: Vec<ActionTemplate>,
 }
 
 /// JSON payload for `heddle pull`: the verbs [`PullOutcome`] body beside

@@ -73,6 +73,8 @@ use crate::{
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
+#[cfg(feature = "client")]
+mod collaboration_recovery;
 mod remote_ops;
 #[cfg(feature = "client")]
 mod source_import;
@@ -96,30 +98,14 @@ fn push_output_from_outcome(
 ) -> PushOutput {
     let action = ActionFields::from_action(&trust.recommended_action);
     PushOutput {
-        source: PushReplicationOutcome {
-            status: if outcome.success {
-                "succeeded"
-            } else {
-                "failed"
-            },
-            count: None,
-            error: None,
-        },
-        discussions: PushReplicationOutcome {
-            status: "not_applicable",
-            count: None,
-            error: None,
-        },
-        context: PushReplicationOutcome {
-            status: "not_applicable",
-            count: None,
-            error: None,
-        },
-        reviews: PushReplicationOutcome {
-            status: "not_applicable",
-            count: None,
-            error: None,
-        },
+        source: PushReplicationOutcome::with_status(if outcome.success {
+            "succeeded"
+        } else {
+            "failed"
+        }),
+        discussions: PushReplicationOutcome::with_status("not_applicable"),
+        context: PushReplicationOutcome::with_status("not_applicable"),
+        reviews: PushReplicationOutcome::with_status("not_applicable"),
         outcome,
         next_action: action.action.clone(),
         next_action_template: action.template.clone(),
@@ -1523,89 +1509,46 @@ async fn push_network_connected(
     .map_err(map_missing_spool)?;
     clear_line(&progress);
 
-    let not_attempted = || PushReplicationOutcome {
-        status: "not_attempted",
-        count: None,
-        error: None,
-    };
+    let not_attempted = || PushReplicationOutcome::with_status("not_attempted");
     let mut discussions = not_attempted();
     let mut context = not_attempted();
     let reviews = hosted_review_replication_outcome(repo);
+    let json = should_output_json(options.cli, Some(repo.config()));
+    let target = collaboration_recovery::RecoveryTarget {
+        remote: options.remote_arg,
+        thread: options.track_name,
+    };
     if result.success {
-        discussions = match hosted_client::client::discussion_sync::push_discussions(
+        let discussion_result = hosted_client::client::discussion_sync::push_discussions(
             repo,
             client,
             &repo_path,
             options.track_name,
         )
-        .await
-        {
-            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
-                println!(
-                    "{} synced {count} discussion(s) to {}",
-                    style::ok_marker(),
-                    style::dim(&repo_path)
-                );
-                PushReplicationOutcome {
-                    status: "succeeded",
-                    count: Some(count),
-                    error: None,
-                }
-            }
-            Ok(count) => PushReplicationOutcome {
-                status: "succeeded",
-                count: Some(count),
-                error: None,
-            },
-            Err(error) => {
-                let message = format!("{error:#}");
-                eprintln!("{} discussion sync failed: {message}", style::warn_marker());
-                PushReplicationOutcome {
-                    status: "failed",
-                    count: None,
-                    error: Some(message),
-                }
-            }
-        };
+        .await;
+        discussions = collaboration_recovery::surface_outcome(
+            collaboration_recovery::Surface::Discussions,
+            &discussion_result,
+            target,
+        );
+        report_surface_sync(json, "discussion", &discussions, &repo_path);
 
         // Write path for hosted context annotations (`heddle context`) through
         // the native collaboration service. Native reviews are recorded by the
         // signed-comparison approval path rather than replaying state signatures.
-        context = match hosted_client::client::context_sync::push_context(
+        let context_result = hosted_client::client::context_sync::push_context(
             repo,
             client,
             &repo_path,
             options.track_name,
         )
-        .await
-        {
-            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
-                println!(
-                    "{} synced {count} annotation(s) to {}",
-                    style::ok_marker(),
-                    style::dim(&repo_path)
-                );
-                PushReplicationOutcome {
-                    status: "succeeded",
-                    count: Some(count),
-                    error: None,
-                }
-            }
-            Ok(count) => PushReplicationOutcome {
-                status: "succeeded",
-                count: Some(count),
-                error: None,
-            },
-            Err(error) => {
-                let message = format!("{error:#}");
-                eprintln!("{} context sync failed: {message}", style::warn_marker());
-                PushReplicationOutcome {
-                    status: "failed",
-                    count: None,
-                    error: Some(message),
-                }
-            }
-        };
+        .await;
+        context = collaboration_recovery::surface_outcome(
+            collaboration_recovery::Surface::Context,
+            &context_result,
+            target,
+        );
+        report_surface_sync(json, "annotation", &context, &repo_path);
     }
     let replication_complete = hosted_replication_complete(&discussions, &context);
 
@@ -1666,6 +1609,7 @@ async fn push_network_connected(
                         println!("{detail}");
                     }
                 }
+                collaboration_recovery::print_human(&output);
             }
         }
         HostedPushResult::Failed(failure) => {
@@ -1681,7 +1625,13 @@ async fn push_network_connected(
     if replication_complete {
         Ok(())
     } else {
-        Err(crate::exit::OutcomeExit::data_err().into())
+        Err(
+            crate::exit::OutcomeExit::new(collaboration_recovery::incomplete_exit(&[
+                &discussions,
+                &context,
+            ]))
+            .into(),
+        )
     }
 }
 
@@ -1700,6 +1650,21 @@ fn apply_hosted_replication_outcomes(
         output.outcome.status = "partial";
         output.outcome.success = false;
     }
+    collaboration_recovery::apply_next_action(output);
+}
+
+/// One line per collaboration surface: what synced, or why it did not.
+#[cfg(feature = "client")]
+fn report_surface_sync(json: bool, noun: &str, outcome: &PushReplicationOutcome, repo_path: &str) {
+    if let Some(error) = outcome.error.as_deref() {
+        eprintln!("{} {noun} sync failed: {error}", style::warn_marker());
+    } else if !json && let Some(count) = outcome.count.filter(|count| *count > 0) {
+        println!(
+            "{} synced {count} {noun}(s) to {}",
+            style::ok_marker(),
+            style::dim(repo_path)
+        );
+    }
 }
 
 #[cfg(feature = "client")]
@@ -1714,11 +1679,7 @@ fn hosted_replication_complete(
 
 #[cfg(feature = "client")]
 fn hosted_review_replication_outcome(_repo: &Repository) -> PushReplicationOutcome {
-    PushReplicationOutcome {
-        status: "not_applicable",
-        count: None,
-        error: None,
-    }
+    PushReplicationOutcome::with_status("not_applicable")
 }
 
 /// Push one Heddle state or one authoritative Git mirror over hosted transport.
@@ -2463,20 +2424,14 @@ mod tests {
     #[test]
     fn partial_push_keeps_replication_outcomes_separate_and_is_not_complete() {
         let discussions = PushReplicationOutcome {
-            status: "succeeded",
             count: Some(2),
-            error: None,
+            ..PushReplicationOutcome::with_status("succeeded")
         };
         let context = PushReplicationOutcome {
-            status: "failed",
-            count: None,
             error: Some("context unavailable".into()),
+            ..PushReplicationOutcome::with_status("failed")
         };
-        let reviews = PushReplicationOutcome {
-            status: "not_applicable",
-            count: None,
-            error: None,
-        };
+        let reviews = PushReplicationOutcome::with_status("not_applicable");
         assert!(!hosted_replication_complete(&discussions, &context));
         assert_eq!(discussions.count, Some(2));
         assert_eq!(context.error.as_deref(), Some("context unavailable"));

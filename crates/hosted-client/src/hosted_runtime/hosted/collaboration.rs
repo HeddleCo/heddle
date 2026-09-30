@@ -30,6 +30,7 @@ use super::{
     HostedClient, helpers::native_client_error, operation_id::ClientOperationId,
     user::require_applied_receipt,
 };
+use crate::client::replication_report::CommandIds;
 
 const OPEN: &str = "heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
 const APPEND: &str = "heddle.api.v1alpha2.CollaborationService/AppendTurn";
@@ -228,7 +229,7 @@ fn signed_head_records(
     }
     if found != wanted {
         return Err(ProtocolError::InvalidState(
-            "observed discussion heads are missing original signed operations".into(),
+            "observed collaboration heads are missing original signed operations".into(),
         ));
     }
     Ok(matched)
@@ -236,6 +237,106 @@ fn signed_head_records(
 
 fn parent_bytes(ids: &[ContentHash]) -> Vec<Vec<u8>> {
     ids.iter().map(|id| id.as_bytes().to_vec()).collect()
+}
+
+/// The scope a context record's current frontier lives in.
+///
+/// The hosted service binds a context RecordRef to the one Thread it was
+/// first published in and partitions causal history by Thread, so a revision
+/// only extends the frontier when it is signed in that same scope. A head is
+/// either a context revision or the discussion resolution it was extracted
+/// from.
+fn context_bound_scope(
+    heads: &[contract::SignedRecord],
+) -> Result<CollaborationScope, ProtocolError> {
+    let mut bound: Option<CollaborationScope> = None;
+    for record in heads {
+        let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
+        let scope = match operation.body {
+            ThreadOperationBody::Context(bytes) => {
+                ContextRevision::decode(&bytes)
+                    .map_err(native_error)?
+                    .metadata
+                    .scope
+            }
+            ThreadOperationBody::Discussion(bytes) => {
+                CollaborationOperationEnvelope::decode(&bytes)
+                    .map_err(native_error)?
+                    .operation
+                    .metadata
+                    .map(|metadata| metadata.scope)
+                    .ok_or_else(|| {
+                        ProtocolError::InvalidState(
+                            "context head has no collaboration scope".into(),
+                        )
+                    })?
+            }
+            _ => {
+                return Err(ProtocolError::InvalidState(
+                    "context head is not a collaboration operation".into(),
+                ));
+            }
+        };
+        match &bound {
+            Some(existing) if *existing != scope => {
+                return Err(ProtocolError::InvalidState(
+                    "observed context heads span collaboration scopes".into(),
+                ));
+            }
+            Some(_) => {}
+            None => bound = Some(scope),
+        }
+    }
+    bound.ok_or_else(|| ProtocolError::InvalidState("context has no observed heads".into()))
+}
+
+fn signed_operation_id(signed: &contract::SignedRecord) -> Result<String, ProtocolError> {
+    Ok(thread_api::collaboration::verify(signed)
+        .map_err(native_error)?
+        .id()
+        .map_err(native_error)?
+        .to_string())
+}
+
+/// The IDs a prepared context revision is delivered under.
+pub(crate) fn context_command_ids(
+    signed: &contract::SignedRecord,
+    client_operation_id: &str,
+) -> Result<CommandIds, ProtocolError> {
+    Ok(CommandIds {
+        client_operation_id: ClientOperationId::for_required_method(
+            PUT_CONTEXT,
+            client_operation_id,
+        )?
+        .to_wire(),
+        signed_operation_id: signed_operation_id(signed)?,
+    })
+}
+
+/// The IDs a prepared discussion command is delivered under: the command ID
+/// is always the key the signed operation authenticates.
+pub(crate) fn discussion_command_ids(
+    signed: &contract::SignedRecord,
+) -> Result<CommandIds, ProtocolError> {
+    let record = decoded_discussion(signed)?;
+    let method = match record.body {
+        Body::Open { .. } => OPEN,
+        Body::AppendTurn { .. } => APPEND,
+        Body::Resolve { .. } => RESOLVE,
+        _ => {
+            return Err(ProtocolError::InvalidState(
+                "prepared discussion operation has no hosted command".into(),
+            ));
+        }
+    };
+    Ok(CommandIds {
+        client_operation_id: ClientOperationId::signed_command(
+            method,
+            record.idempotency_key.as_str(),
+        )?
+        .to_wire(),
+        signed_operation_id: signed_operation_id(signed)?,
+    })
 }
 
 /// Weft admits the request only when `anchor(request.anchor) == signed.anchor`.
@@ -830,11 +931,14 @@ impl HostedClient {
         Ok((discussions, operations))
     }
 
+    /// The current frontier of one context record, the view version it was
+    /// observed at, and the scope that frontier is bound to (`None` until the
+    /// record exists).
     async fn observe_context_heads(
         &self,
         spool: contract::SpoolRef,
         annotation_id: &str,
-    ) -> Result<(Vec<ContentHash>, Vec<u8>), ProtocolError> {
+    ) -> Result<(Vec<ContentHash>, Vec<u8>, Option<CollaborationScope>), ProtocolError> {
         let id = annotation_id.trim_start_matches("ann-").to_string();
         let events = self
             .observe_collaboration_events(ObserveCollaborationRequest {
@@ -844,27 +948,38 @@ impl HostedClient {
                     id: id.clone(),
                 }],
                 include_history: true,
+                include_operations: true,
                 observe: Some(once_observe()),
                 ..Default::default()
             })
             .await?;
-        let Some(record) = events.into_iter().rev().find_map(|change| match change {
-            collaboration_event::Payload::Context(record)
-                if record.r#ref.as_ref().is_some_and(|reference| {
-                    reference.id == id || reference.id == annotation_id
-                }) =>
-            {
-                Some(record)
+        let mut current = None;
+        let mut operations = Vec::new();
+        for change in events {
+            match change {
+                collaboration_event::Payload::Context(record)
+                    if record.r#ref.as_ref().is_some_and(|reference| {
+                        reference.id == id || reference.id == annotation_id
+                    }) =>
+                {
+                    current = Some(record);
+                }
+                collaboration_event::Payload::Operation(record) => operations.push(record),
+                _ => {}
             }
-            _ => None,
-        }) else {
-            return Ok((Vec::new(), Vec::new()));
+        }
+        let Some(record) = current else {
+            return Ok((Vec::new(), Vec::new(), None));
         };
         let mut heads = causal_hashes(record.causal_heads)?;
         if heads.is_empty() && record.causal_id.len() == 32 {
             heads = causal_hashes(std::iter::once(record.causal_id))?;
         }
-        Ok((heads, record.version))
+        if heads.is_empty() {
+            return Ok((heads, record.version, None));
+        }
+        let scope = context_bound_scope(&signed_head_records(&operations, &heads)?)?;
+        Ok((heads, record.version, Some(scope)))
     }
 
     /// Prepare an authored append against the observed native frontier.
@@ -1165,17 +1280,30 @@ impl HostedClient {
         occurred_at_ms: i64,
         supersedes: Option<uuid::Uuid>,
     ) -> Result<(contract::SignedRecord, Vec<u8>), ProtocolError> {
-        let (spool, _, scope) = self.collaboration_scope(repo_path, thread_ref).await?;
+        let id = parse_context_id(annotation_id)?;
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let (parent_ids, expected_version, bound_scope) = self
+            .observe_context_heads(spool.clone(), annotation_id)
+            .await?;
+        // A revision extends the frontier of the Thread the record is bound
+        // to, whichever Thread is being pushed. Only a new record takes the
+        // requested scope; signing a revision into another Thread's scope
+        // names a frontier that Thread does not have.
+        let scope = match bound_scope {
+            Some(scope) if scope.spool.to_string() == spool.id => scope,
+            Some(_) => {
+                return Err(ProtocolError::InvalidState(
+                    "observed context is bound to another spool".into(),
+                ));
+            }
+            None => self.collaboration_scope(repo_path, thread_ref).await?.2,
+        };
         let (actor, _) = self.collaboration_actor().await?;
         let signer = self
             .claim_proof_signer()
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let id = parse_context_id(annotation_id)?;
         let (anchor, _) = canonical_anchor(anchor, &scope)?;
-        let (parent_ids, expected_version) = self
-            .observe_context_heads(spool.clone(), annotation_id)
-            .await?;
         let context = ContextRevision {
             version: 2,
             id,
