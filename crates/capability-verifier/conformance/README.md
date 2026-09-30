@@ -6,7 +6,9 @@ The published crate embeds four canonical-protobuf JSON fixture sets:
 - `fixtures/transfer-v2.json`: complete and incomplete two-owner handoffs; and
 - `fixtures/keyring-v2.json`: a self-rooted linear keyring and a fork; and
 - `fixtures/timeline-v3.json`: direct format-3 timeline acceptance and denial
-  cases for scope, action, version, expiry, and revocation.
+  cases for scope, action, version, expiry, and revocation, including fresh
+  acceptance after twenty owner-key rotations and recovery and rejection of
+  owner bundles larger than 64 KiB.
 
 Every protobuf value is lower-case hex of the exact encoded bytes. Fixed UUIDs,
 state hashes, and payloads are also hex. Adapters decode and re-encode

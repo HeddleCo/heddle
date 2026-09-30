@@ -50,7 +50,10 @@ pub fn verify_timeline_acceptance(
     heddle_api::timeline_upload::validate_acceptance(acceptance)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let bytes = match acceptance.authority.as_ref() {
-        Some(Authority::OwnerDerivedCapability(bytes)) if (1..=4096).contains(&bytes.len()) => {
+        Some(Authority::OwnerDerivedCapability(bytes))
+            if (1..=heddle_api::timeline_upload::MAX_TIMELINE_OWNER_BUNDLE_BYTES)
+                .contains(&bytes.len()) =>
+        {
             bytes
         }
         _ => {

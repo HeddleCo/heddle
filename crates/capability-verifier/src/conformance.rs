@@ -197,7 +197,10 @@ pub fn run_timeline_fixture(json: &str) -> Result<Vec<GuardOutcome>> {
         .map(|case| {
             let actual = (|| -> Result<()> {
                 let origin_bytes = hex_bytes(&case.origin_hex, 4096)?;
-                let acceptance_bytes = hex_bytes(&case.acceptance_hex, 8192)?;
+                let acceptance_bytes = hex_bytes(
+                    &case.acceptance_hex,
+                    heddle_api::timeline_upload::MAX_TIMELINE_REQUEST_BYTES,
+                )?;
                 let origin = TimelineOriginEndorsement::decode(origin_bytes.as_slice())?;
                 let acceptance = TimelineAdmissionAcceptance::decode(acceptance_bytes.as_slice())?;
                 if origin.encode_to_vec() != origin_bytes

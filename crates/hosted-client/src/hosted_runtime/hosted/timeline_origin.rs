@@ -279,7 +279,7 @@ pub fn sign_owner_timeline_acceptance(
     );
     let bytes = bundle.encode_to_vec();
     ensure!(
-        (1..=4096).contains(&bytes.len()),
+        (1..=api::timeline_upload::MAX_TIMELINE_OWNER_BUNDLE_BYTES).contains(&bytes.len()),
         "owner acceptance bundle exceeds contract bound"
     );
     let mut acceptance = TimelineAdmissionAcceptance {
@@ -553,6 +553,33 @@ mod tests {
                 .to_string()
                 .contains("proof key differs")
         );
+    }
+
+    #[test]
+    fn owner_acceptance_bundle_size_obeys_64_kib_contract() {
+        for size in [4097, 65_536, 65_537] {
+            let (request, mut bundle, subject) = acceptance_fixture();
+            // This producer signs opaque owner evidence; the shared verifier
+            // checks its signatures and history at admission.
+            bundle.subject_biscuit.resize(size, 0);
+            let overhead = bundle.encoded_len() - size;
+            bundle.subject_biscuit.truncate(size - overhead);
+            assert_eq!(bundle.encoded_len(), size);
+            let result = sign_owner_timeline_acceptance(&request, &bundle, &subject);
+            if size <= 65_536 {
+                let acceptance = result.expect("bundle within the timeline contract");
+                assert!(
+                    matches!(acceptance.authority, Some(Authority::OwnerDerivedCapability(bytes)) if bytes.len() == size)
+                );
+            } else {
+                assert!(
+                    result
+                        .expect_err("oversized bundle")
+                        .to_string()
+                        .contains("owner acceptance bundle exceeds contract bound")
+                );
+            }
+        }
     }
 
     #[test]
