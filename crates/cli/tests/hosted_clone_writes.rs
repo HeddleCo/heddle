@@ -932,6 +932,217 @@ async fn discussion_open_reply_resolve_publish_and_clone() {
     fixture.close().await;
 }
 
+fn publish_resolved_discussion(fixture: &Fixture) {
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--body",
+        "opening turn",
+    ]);
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view");
+    let id = view.discussions.keys().next().expect("id").to_string();
+    fixture.run(&["discuss", "reply", &id, "--body", "reply turn"]);
+    fixture.run(&[
+        "discuss",
+        "resolve",
+        &id,
+        "--mode",
+        "dismiss",
+        "--reason",
+        "review complete",
+    ]);
+    assert_push_succeeded(fixture, &fixture.clone);
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("operations")
+            .discussion_operations
+            .len(),
+        3
+    );
+}
+
+fn assert_push_sends_no_discussions(fixture: &Fixture, path: &Path) {
+    let before = fixture
+        .captured
+        .lock()
+        .expect("received")
+        .received_discussion_operations
+        .len();
+    let output = fixture.output_at(path, &["--output", "json", "push", "origin"]);
+    let result: Value = serde_json::from_slice(&output.stdout).expect("push result");
+    let after = fixture
+        .captured
+        .lock()
+        .expect("received")
+        .received_discussion_operations
+        .len();
+    assert_eq!(
+        after - before,
+        0,
+        "push must send zero discussion operations; exit {:?}: {result}",
+        output.status.code()
+    );
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["discussions"]["status"], "succeeded");
+    assert_eq!(result["discussions"]["count"], 0);
+    assert!(result["discussions"].get("unsent").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cloned_discussions_are_already_published() {
+    let fixture = Fixture::new().await;
+    publish_resolved_discussion(&fixture);
+    let path = fixture._temp.path().join("author-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &["clone", &fixture.remote(), path.to_str().expect("checkout")],
+    );
+    assert_push_sends_no_discussions(&fixture, &path);
+    // Publication markers must only cover fetched operations.
+    fixture.run_at(
+        &path,
+        &[
+            "discuss",
+            "new",
+            "--path",
+            "example.py",
+            "--body",
+            "new local discussion",
+        ],
+    );
+    // Fetching again must not mark the new local operation as accepted.
+    fixture.run_at(&path, &["pull", "origin"]);
+    let before = fixture
+        .captured
+        .lock()
+        .expect("received")
+        .received_discussion_operations
+        .len();
+    assert_push_succeeded(&fixture, &path);
+    let captured = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(captured.received_discussion_operations.len() - before, 1);
+    assert_eq!(captured.discussion_operations.len(), 4);
+    assert_push_sends_no_discussions(&fixture, &path);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pulled_discussions_are_already_published() {
+    let fixture = Fixture::new().await;
+    // Clone before the author publishes, then fetch into this existing checkout.
+    let path = fixture._temp.path().join("author-pull");
+    fixture.run_at(
+        fixture._temp.path(),
+        &["clone", &fixture.remote(), path.to_str().expect("checkout")],
+    );
+    publish_resolved_discussion(&fixture);
+    fixture.run_at(&path, &["pull", "origin"]);
+    assert_push_sends_no_discussions(&fixture, &path);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pulled_discussions_keep_local_replies_and_resolutions_pending() {
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--body",
+        "opening turn",
+    ]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let discussion = fresh_discussion(&fixture, "reply-clone");
+    let path = fixture._temp.path().join("reply-clone");
+    let id = discussion.discussion_id.to_string();
+    assert_push_sends_no_discussions(&fixture, &path);
+    fixture.run_at(&path, &["discuss", "reply", &id, "--body", "local reply"]);
+    fixture.run_at(
+        &path,
+        &[
+            "discuss",
+            "resolve",
+            &id,
+            "--mode",
+            "dismiss",
+            "--reason",
+            "local resolution",
+        ],
+    );
+    fixture.run_at(&path, &["pull", "origin"]);
+    assert_push_succeeded(&fixture, &path);
+    assert_push_sends_no_discussions(&fixture, &path);
+    let captured = fixture.captured.lock().expect("operations").clone();
+    assert_eq!(captured.received_discussion_operations.len(), 3);
+    assert_eq!(captured.discussion_operations.len(), 3);
+    let published = fresh_discussion(&fixture, "local-work-proof");
+    assert_eq!(published.turns.len(), 2);
+    assert_eq!(published.turns[1].1.body, "local reply");
+    assert_eq!(
+        published.resolution,
+        Some(objects::object::CollaborationResolution::Dismissed {
+            reason: "local resolution".into()
+        })
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cloned_discussion_without_publication_links_replays_signed_operations() {
+    let fixture = Fixture::new().await;
+    publish_resolved_discussion(&fixture);
+    let path = fixture._temp.path().join("old-author-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &["clone", &fixture.remote(), path.to_str().expect("checkout")],
+    );
+    // Reproduce the pre-fix mirror: signed originals retained, publication
+    // links absent. The resend must use the author's exact signed commands.
+    let repo = Repository::open(&path).expect("old clone");
+    let mirror_path = repo.heddle_dir().join("collaboration/hosted-mirror.json");
+    let mut mirror: Value =
+        serde_json::from_slice(&std::fs::read(&mirror_path).expect("mirror")).expect("mirror JSON");
+    for repository in mirror["repos"].as_object_mut().expect("repos").values_mut() {
+        repository["discussions"] = serde_json::json!([]);
+    }
+    std::fs::write(
+        &mirror_path,
+        serde_json::to_vec(&mirror).expect("old mirror"),
+    )
+    .expect("retain old mirror");
+    let before = fixture.captured.lock().expect("capture").clone();
+    assert_push_succeeded(&fixture, &path);
+    let after = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(
+        after.discussion_operations, before.discussion_operations,
+        "replays must not duplicate operations"
+    );
+    assert_eq!(
+        &after.received_discussion_operations[before.received_discussion_operations.len()..],
+        &before.discussion_operations[..2],
+        "open and reply must resend the exact signed originals"
+    );
+    assert_eq!(
+        &after.delivered_command_ids[before.delivered_command_ids.len()..],
+        &before.delivered_command_ids[..2],
+        "replays must keep the signed command IDs"
+    );
+    assert_push_sends_no_discussions(&fixture, &path);
+    let discussion = fresh_discussion(&fixture, "replay-proof");
+    assert_eq!(discussion.turns.len(), 2);
+    assert!(discussion.resolution.is_some());
+    fixture.close().await;
+}
+
 /// A rejected delivery's failure code and message.
 #[derive(Debug)]
 struct Rejected {
