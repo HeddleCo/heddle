@@ -523,7 +523,10 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let argv = std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
+    let executable = Path::new(env!("CARGO_BIN_EXE_heddle"))
+        .canonicalize()
+        .expect("canonicalize heddle executable");
+    let argv = std::iter::once(executable.display().to_string())
         .chain(args.into_iter().map(|arg| arg.as_ref().to_string()))
         .collect::<Vec<_>>();
     serde_json::json!(argv)

@@ -6,7 +6,7 @@ use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::Clien
 impl HostedClient {
     /// Read one authoritative identity snapshot for a one-shot caller.
     pub async fn get_identity(
-        &mut self,
+        &self,
     ) -> Result<api::heddle::api::v1alpha2::GetIdentityResponse, ProtocolError> {
         use api::heddle::api::v1alpha2 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;

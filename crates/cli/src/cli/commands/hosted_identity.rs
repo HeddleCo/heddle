@@ -5,10 +5,10 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use heddle_cli_contract::cli::commands::wire::auth::{
-    AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
-    DescriptorTrustSource as WireDescriptorTrustSource, HumanPromotionDirective,
-    ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
-    WhoamiBillingLock, WhoamiIdentity, WhoamiOutput,
+    AgentAccountCreatedOutput, AuthDeriveAgentOutput, AuthLogoutOutput, AuthStatusOutput,
+    AuthTrustOutput, CaptureActor, DescriptorTrustSource as WireDescriptorTrustSource,
+    HumanPromotionDirective, ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput,
+    SignupInviteOutput, WhoamiBillingLock, WhoamiIdentity, WhoamiOutput,
 };
 use hosted_client::hosted_runtime::{
     AgentTemplate,
@@ -126,7 +126,7 @@ fn write_auth_outcome_to(writer: &mut impl Write, outcome: AuthOutcome, json: bo
         AuthOutcome::SignupInviteCreated(outcome) => write_invite_created(writer, outcome, json)?,
         AuthOutcome::SignupInviteList(outcome) => write_invite_list(writer, outcome, json)?,
         AuthOutcome::Trust(outcome) => write_auth_trust(writer, outcome, json)?,
-        AuthOutcome::AgentDerived(outcome) => write_derived_agent(writer, outcome)?,
+        AuthOutcome::AgentDerived(outcome) => write_derived_agent(writer, outcome, json)?,
         AuthOutcome::ServiceTokenCreated(outcome) => write_service_token(writer, outcome, json)?,
     }
     Ok(())
@@ -362,7 +362,34 @@ fn write_auth_trust(writer: &mut impl Write, outcome: AuthTrust, json: bool) -> 
     Ok(())
 }
 
-fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent) -> Result<()> {
+fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent, json: bool) -> Result<()> {
+    if json {
+        let (installed, credential_path) = match outcome.destination {
+            AgentCredentialDestination::Installed => (true, None),
+            AgentCredentialDestination::File(path) => (false, Some(path)),
+        };
+        writeln!(
+            writer,
+            "{}",
+            serde_json::to_string(&AuthDeriveAgentOutput {
+                output_kind: "auth_derive_agent",
+                status: "derived",
+                agent_id: outcome.agent_id,
+                server: outcome.server,
+                parent_source: outcome.parent_source,
+                expires_at: outcome.expires_at,
+                template: outcome
+                    .template
+                    .map(|template| template.as_str().to_owned()),
+                allowed_operations: outcome.allowed_operations,
+                scopes: outcome.scopes,
+                rendered_scope: outcome.rendered_scope,
+                installed,
+                credential_path,
+            })?
+        )?;
+        return Ok(());
+    }
     match &outcome.destination {
         AgentCredentialDestination::File(path) => {
             writeln!(
