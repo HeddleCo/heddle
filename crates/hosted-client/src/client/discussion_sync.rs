@@ -350,14 +350,18 @@ async fn publish_authored_resolution(
             .published_resolution_operation_id = Some(local_operation_id.clone());
         Ok(())
     };
-    if mirror.repos[repo_path].discussions[index]
-        .published_resolution_operation_id
-        .as_deref()
-        == Some(local_operation_id.as_str())
-    {
+    let repository = mirror
+        .repos
+        .get(repo_path)
+        .ok_or_else(|| anyhow!("hosted discussion mirror lost repository {repo_path}"))?;
+    let entry = repository
+        .discussions
+        .get(index)
+        .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?;
+    if entry.published_resolution_operation_id.as_deref() == Some(local_operation_id.as_str()) {
         return Ok(false);
     }
-    let prepared = mirror.repos[repo_path]
+    let prepared = repository
         .native_operations
         .iter()
         .find(|operation| operation.local_operation_id == local_operation_id)

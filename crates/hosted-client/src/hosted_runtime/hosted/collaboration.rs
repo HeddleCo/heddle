@@ -1254,6 +1254,46 @@ mod tests {
     }
 
     #[test]
+    fn resolution_command_carries_the_signed_resolution_exactly() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let spool = contract::SpoolRef {
+            id: uuid::Uuid::from_u128(7).to_string(),
+        };
+        assert_eq!(
+            resolution_command(
+                &CollaborationResolution::Dismissed {
+                    reason: "done".into()
+                },
+                &spool
+            )
+            .unwrap(),
+            resolve_discussion_request::Resolution::DismissalReason("done".into())
+        );
+        let state_id = StateId::from_bytes([3; 32]);
+        let resolve_discussion_request::Resolution::ResolvedByEdit(revision) = resolution_command(
+            &CollaborationResolution::AddressedByState { state_id },
+            &spool,
+        )
+        .unwrap() else {
+            panic!("by-edit resolution")
+        };
+        assert_eq!(revision.spool, Some(spool.clone()));
+        assert!(matches!(
+            revision.revision,
+            Some(revision_ref::Revision::State(ref state)) if state.value == state_id.as_bytes()
+        ));
+        let error = resolution_command(
+            &CollaborationResolution::Annotation {
+                annotation_id: "ann-1".into(),
+            },
+            &spool,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("replication is incomplete"), "{error}");
+    }
+
+    #[test]
     fn discussion_parent_ids_are_sorted_unique_heads() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let discussion = HostedDiscussion {

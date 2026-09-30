@@ -547,12 +547,19 @@ async fn discussion_open_reply_resolve_publish_and_clone() {
     fixture.close().await;
 }
 
+/// A rejected delivery's failure code and message.
+#[derive(Debug)]
+struct Rejected {
+    code: i32,
+    message: String,
+}
+
 /// Send the captured request bytes again through the real hosted framing.
 async fn deliver(
     fixture: &Fixture,
     method: &str,
     body: Vec<u8>,
-) -> Result<api::heddle::api::v1alpha2::MutationResponse, api::heddle::api::common::CallFailure> {
+) -> Result<api::heddle::api::v1alpha2::MutationResponse, Rejected> {
     use prost::Message;
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
@@ -579,7 +586,10 @@ async fn deliver(
         api::framing::ResponseFrame::Success(bytes) => {
             Ok(api::heddle::api::v1alpha2::MutationResponse::decode(bytes).expect("receipt"))
         }
-        api::framing::ResponseFrame::Failure(failure) => Err(failure),
+        api::framing::ResponseFrame::Failure(failure) => Err(Rejected {
+            code: failure.code,
+            message: failure.message,
+        }),
     };
     endpoint.close().await;
     result
