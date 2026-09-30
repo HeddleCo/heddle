@@ -180,7 +180,10 @@ fn finish(
         .context("pairing omitted account ownership")?;
     let credential = verify_response(subject, binding, attachment, response, operation)?;
     let now = Utc::now().timestamp();
-    let authority = verify_pairing_authority(
+    let PairingAuthority {
+        authority,
+        mint_root,
+    } = verify_pairing_authority(
         owner,
         binding,
         credential.mint_root_attachment.as_deref(),
@@ -198,7 +201,13 @@ fn finish(
     let path = directory.join(format!("{}.pb", blake3::hash(server.as_bytes())));
     objects::fs_atomic::write_file_atomic_secret(&path, &attachment.encode_to_vec())?;
     let subject = credential.subject.clone();
-    super::source_author::retain(server, &credential)?;
+    // `verify_response` checked that the credential chains to exactly this
+    // approved root; retain it under that root, not under this device's key.
+    super::source_author::retain(
+        server,
+        &credential,
+        super::source_author::CredentialRoot::Paired(mint_root),
+    )?;
     config::credentials::store_server_credential(server, credential)?;
     Ok(AuthLoginOutcome::Authenticated {
         subject,
@@ -206,12 +215,19 @@ fn finish(
     })
 }
 
+/// Owner authority admitted by a pairing, with the approved mint root it
+/// verified. The paired credential chains to that root, not to this device.
+struct PairingAuthority {
+    authority: repo::device_authority::DeviceAuthority,
+    mint_root: super::source_author::VerifiedMintRoot,
+}
+
 fn verify_pairing_authority(
     owner: api::OwnerState,
     binding: &api::RootAttachmentBinding,
     mint_attachment: Option<&[u8]>,
     now: i64,
-) -> Result<repo::device_authority::DeviceAuthority> {
+) -> Result<PairingAuthority> {
     if owner
         .owner
         .as_ref()
@@ -232,10 +248,13 @@ fn verify_pairing_authority(
         revoked_mint_roots: Vec::new(),
         revoked_publishers: Vec::new(),
     };
-    authority
-        .verify_mint_root(&binding.root_public_key, now)
-        .context("verify approved root belongs to the paired account")?;
-    Ok(authority)
+    let mint_root =
+        super::source_author::VerifiedMintRoot::verify(&authority, &binding.root_public_key, now)
+            .context("verify approved root belongs to the paired account")?;
+    Ok(PairingAuthority {
+        authority,
+        mint_root,
+    })
 }
 
 fn verify_response(
@@ -339,6 +358,9 @@ async fn wait_for_pairing<T, E: std::fmt::Display>(
         .context("pairing approval deadline expired; run `heddle auth login` again")?
         .map_err(|error| anyhow::anyhow!("pairing observation failed: {error}"))
 }
+#[cfg(test)]
+#[path = "auth_pairing_finish_tests.rs"]
+mod finish_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
