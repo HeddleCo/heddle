@@ -45,7 +45,10 @@ use objects::{
 };
 use repo::{BlobHydrator, CheckoutMaterialization, Repository, ThreadManager};
 #[cfg(feature = "client")]
-use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
+use repo::{
+    RepositorySourceAuthority, clone_intent::CloneIntent,
+    thread_replication::source_heads::DefaultHeadRule,
+};
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
@@ -173,6 +176,8 @@ fn git_overlay_clone_output(input: GitOverlayCloneOutputInput) -> CloneOutput {
         objects: None,
         state: None,
         trust: Some(input.trust),
+        source_heads: Vec::new(),
+        next_action: None,
     }
 }
 
@@ -201,6 +206,8 @@ fn heddle_clone_output(
         objects,
         state,
         trust,
+        source_heads: Vec::new(),
+        next_action: None,
     }
 }
 
@@ -1894,8 +1901,21 @@ async fn clone_network_connected(
         )
         .await?;
         CloneIntent::clear(local_path)?;
+        // A Thread with several hosted heads cloned every head; one is checked
+        // out (or advertised) by the documented default and the rest stay
+        // selectable with `heddle resolve`.
+        let mut source_heads = Vec::new();
+        for entry in remote_refs.iter().filter(|entry| entry.is_user_thread()) {
+            if let Some(heads) = verbs::source_heads::source_heads_report(
+                &local_repo,
+                &entry.name,
+                Some(DefaultHeadRule::GreatestStateId),
+            )? {
+                source_heads.push(heads);
+            }
+        }
         if should_output_json(cli, Some(local_repo.config())) {
-            let output = heddle_clone_output(
+            let mut output = heddle_clone_output(
                 origin_url.clone(),
                 local_path.display().to_string(),
                 track_name.clone(),
@@ -1904,6 +1924,11 @@ async fn clone_network_connected(
                 Some(final_state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
             );
+            output.next_action = source_heads
+                .iter()
+                .any(|heads| heads.thread == track_name)
+                .then(|| verbs::source_heads::SOURCE_HEADS_ACTION.to_string());
+            output.source_heads = source_heads;
             write_full_command_json(
                 &output,
                 NextActionValidationContext::without_repo(&["clone"]),
@@ -1925,6 +1950,9 @@ async fn clone_network_connected(
                 "  {}",
                 style::field("state", &style::state_id(&final_state.to_string()))
             );
+            for heads in &source_heads {
+                super::resolve::render_source_heads_summary(heads);
+            }
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());

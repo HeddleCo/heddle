@@ -28,7 +28,13 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::{Repository, SyncedThreadMetadata, ThreadManager, thread_replication::ThreadReplica};
+use repo::{
+    Repository, SyncedThreadMetadata, ThreadManager,
+    thread_replication::{
+        ThreadReplica,
+        source_heads::{default_source_head, greatest_source_head},
+    },
+};
 use thread_api::{
     creation::ThreadCreation,
     publication::{PublicationOptions, PublicationOriginals, SourceBudget, SourcePack},
@@ -85,11 +91,16 @@ fn state_from_revision(revision: Option<&RevisionRef>) -> Option<StateId> {
     }
 }
 
+/// The head a ref advertisement names. Several concurrent heads advertise the
+/// repository-independent default ([`greatest_source_head`]); Fetch installs
+/// every head, so none is dropped.
 fn overview_state(overview: &ThreadOverview) -> Option<StateId> {
-    let [head] = overview.source_heads.as_slice() else {
-        return None;
-    };
-    state_from_revision(Some(head))
+    let heads = overview
+        .source_heads
+        .iter()
+        .filter_map(|revision| state_from_revision(Some(revision)))
+        .collect::<std::collections::BTreeSet<_>>();
+    greatest_source_head(&heads)
 }
 
 fn overview_thread_id(overview: &ThreadOverview) -> Result<ContentHash, ProtocolError> {
@@ -109,9 +120,6 @@ fn overview_thread_id(overview: &ThreadOverview) -> Result<ContentHash, Protocol
 fn hosted_ref_from_overview(
     overview: &ThreadOverview,
 ) -> Result<Option<HostedRefEntry>, ProtocolError> {
-    if overview.source_heads.len() > 1 {
-        return Err(multiple_heads_error(overview));
-    }
     let Some(state_id) = overview_state(overview) else {
         return Ok(None);
     };
@@ -664,11 +672,12 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        _local_thread: Option<&str>,
+        local_thread: Option<&str>,
     ) -> Result<(PullComplete, PullProfile), ProtocolError> {
         let started = Instant::now();
+        let local_tip = local_thread_tip(repo, local_thread.unwrap_or(remote_thread))?;
         let complete = self
-            .fetch_hosted_thread(repo, repo_path, remote_thread, None)
+            .fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip)
             .await?;
         Ok((
             complete,
@@ -684,12 +693,13 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        _local_thread: Option<&str>,
+        local_thread: Option<&str>,
         depth: Option<u32>,
         materialization: PullMaterialization,
     ) -> Result<PullComplete, ProtocolError> {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None)
+        let local_tip = local_thread_tip(repo, local_thread.unwrap_or(remote_thread))?;
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip)
             .await
     }
 
@@ -702,7 +712,7 @@ impl HostedClient {
         materialization: PullMaterialization,
     ) -> Result<PullComplete, ProtocolError> {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None)
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, None)
             .await
     }
 
@@ -738,13 +748,13 @@ impl HostedClient {
         }
         let repo = initialize(&advertised)?;
         let complete = self
-            .fetch_hosted_thread(&repo, repo_path, &track, None)
+            .fetch_hosted_thread(&repo, repo_path, &track, None, None)
             .await?;
         for entry in &advertised.refs {
             if !entry.is_user_thread() || entry.name == track {
                 continue;
             }
-            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None)
+            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None, None)
                 .await?;
         }
         Ok((complete, repo))
@@ -776,7 +786,7 @@ impl HostedClient {
         remote_thread: &str,
         target_state: StateId,
     ) -> Result<usize, ProtocolError> {
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, Some(target_state))
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, Some(target_state), None)
             .await
             .map(|complete| usize::from(complete.success))
     }
@@ -792,12 +802,17 @@ impl HostedClient {
             .await
     }
 
+    /// Fetch a hosted Thread. With no `target_state` every published head is
+    /// installed, so concurrent heads all reach the local replica; the
+    /// returned final state is the default head chosen by
+    /// [`default_source_head`] against `local_tip`.
     async fn fetch_hosted_thread(
         &self,
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
         target_state: Option<StateId>,
+        local_tip: Option<StateId>,
     ) -> Result<PullComplete, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let resolved = self.resolve_thread_ref(repo_path, remote_thread).await?;
@@ -817,14 +832,49 @@ impl HostedClient {
             .r#ref
             .clone()
             .ok_or_else(|| ProtocolError::InvalidState("observed Thread has no identity".into()))?;
-        let revisions = fetch_revisions(&overview, &spool, target_state)?;
-        let ambiguous = target_state.is_none() && revisions.len() > 1;
-        let mut installed = Vec::with_capacity(revisions.len());
-        for (selected, revision) in revisions {
-            installed.push(
-                self.fetch_and_install_revision(repo, &reference, revision, selected)
-                    .await?,
-            );
+        // Every head is installed, then (without an explicit target) the
+        // merge base of each pair of concurrent heads whose content is not
+        // local: a head's source pack does not carry it, and a three-way
+        // merge (`heddle resolve --merge`) needs it. A base Weft has not
+        // published stays absent with a warning; resolve then refuses that
+        // merge with a typed error, and a pick, which needs no base, works.
+        // One await site keeps this future small.
+        let mut pending = fetch_revisions(&overview, &spool, target_state)?
+            .into_iter()
+            .map(|(state, revision)| (state, revision, false))
+            .collect::<std::collections::VecDeque<_>>();
+        let mut bases_planned = target_state.is_some();
+        let mut installed = std::collections::BTreeSet::new();
+        loop {
+            let Some((selected, revision, merge_base)) = pending.pop_front() else {
+                if bases_planned {
+                    break;
+                }
+                bases_planned = true;
+                pending.extend(
+                    missing_merge_bases(repo, &installed)?
+                        .into_iter()
+                        .map(|base| (base, revision_ref(&spool, base), true)),
+                );
+                continue;
+            };
+            match self
+                .fetch_and_install_revision(repo, &reference, revision, selected)
+                .await
+            {
+                Ok(state) if !merge_base => {
+                    installed.insert(state);
+                }
+                Ok(_) => {}
+                Err(error) if merge_base => self.warn(
+                    "source_merge_base_unavailable",
+                    format!(
+                        "Thread '{remote_thread}' has concurrent source heads whose merge base {} is not available ({error}); `heddle resolve --merge` needs it, `heddle resolve --pick` does not",
+                        selected.to_string_full()
+                    ),
+                ),
+                Err(error) => return Err(error),
+            }
         }
         // Fetch retained the original signed genesis and admitted source.
         // Bind the advertised name to that replica before any local authoring.
@@ -832,14 +882,14 @@ impl HostedClient {
             .map_err(replica_err)?
             .bind_local_name(remote_thread)
             .map_err(replica_err)?;
-        if ambiguous {
-            return Err(multiple_heads_error(&overview));
-        }
-        let final_state = installed.into_iter().next().ok_or_else(|| {
-            ProtocolError::InvalidState(
-                "Fetch requires a started Thread with a published source revision".into(),
-            )
-        })?;
+        let final_state = default_source_head(repo, &installed, local_tip)
+            .map_err(replica_err)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "Fetch requires a started Thread with a published source revision".into(),
+                )
+            })?
+            .head;
         Ok(PullComplete {
             success: true,
             final_state: Some(final_state),
@@ -941,6 +991,44 @@ impl HostedClient {
     }
 }
 
+/// Merge bases of every pair of concurrent heads whose content is not local.
+fn missing_merge_bases(
+    repo: &Repository,
+    heads: &std::collections::BTreeSet<StateId>,
+) -> Result<Vec<StateId>, ProtocolError> {
+    let mut graph = repo::CommitGraphIndex::new(repo);
+    let mut bases = std::collections::BTreeSet::new();
+    for (index, left) in heads.iter().enumerate() {
+        for right in heads.iter().skip(index + 1) {
+            if let Some(base) = graph
+                .find_merge_base(left, right)
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
+            {
+                bases.insert(base);
+            }
+        }
+    }
+    let mut missing = Vec::new();
+    for base in bases {
+        let present = match repo.store().get_state(&base)? {
+            Some(state) => repo.store().get_tree(&state.tree)?.is_some(),
+            None => false,
+        };
+        if !present {
+            missing.push(base);
+        }
+    }
+    Ok(missing)
+}
+
+/// The local Thread ref a pull would advance, used to keep the caller's own
+/// head checked out when the hosted Thread has several.
+fn local_thread_tip(repo: &Repository, name: &str) -> Result<Option<StateId>, ProtocolError> {
+    repo.refs()
+        .get_thread(&ThreadName::new(name))
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))
+}
+
 fn reject_unsupported_hosted_fetch_modes(
     depth: Option<u32>,
     materialization: PullMaterialization,
@@ -986,22 +1074,6 @@ fn fetch_revisions(
         revisions.entry(state).or_insert_with(|| revision.clone());
     }
     Ok(revisions.into_iter().collect())
-}
-
-fn multiple_heads_error(overview: &ThreadOverview) -> ProtocolError {
-    let mut heads = overview
-        .source_heads
-        .iter()
-        .filter_map(|revision| state_from_revision(Some(revision)))
-        .map(|state| state.to_string_full())
-        .collect::<Vec<_>>();
-    heads.sort();
-    heads.dedup();
-    ProtocolError::InvalidState(format!(
-        "Thread '{}' has multiple source heads ({}); integrate them or select an explicit revision before pulling",
-        overview.name,
-        heads.join(", ")
-    ))
 }
 
 struct HostedStartSet {
@@ -1374,14 +1446,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn concurrent_source_heads_never_select_a_winner_by_wire_order() {
+    fn concurrent_source_heads_advertise_the_greatest_state_regardless_of_wire_order() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let spool = SpoolRef {
             id: Uuid::from_u128(1).to_string(),
         };
         let first = revision_ref(&spool, StateId::from_bytes([1; 32]));
         let second = revision_ref(&spool, StateId::from_bytes([2; 32]));
-        let mut conflicts = Vec::new();
         for source_heads in [
             vec![first.clone(), second.clone()],
             vec![second.clone(), first.clone()],
@@ -1393,8 +1464,8 @@ mod tests {
             };
             assert_eq!(
                 overview_state(&overview),
-                None,
-                "a concurrent frontier requires explicit integration"
+                Some(StateId::from_bytes([2; 32])),
+                "the advertised default is content-intrinsic, never wire order"
             );
             let selected = fetch_revisions(&overview, &spool, None)
                 .expect("all concurrent revisions remain fetchable")
@@ -1403,12 +1474,10 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 selected,
-                vec![StateId::from_bytes([1; 32]), StateId::from_bytes([2; 32])]
+                vec![StateId::from_bytes([1; 32]), StateId::from_bytes([2; 32])],
+                "every head is installed, so the alternative stays available"
             );
-            conflicts.push(multiple_heads_error(&overview).to_string());
         }
-        assert_eq!(conflicts[0], conflicts[1]);
-        assert!(conflicts[0].contains("multiple source heads"));
     }
 
     #[tokio::test]

@@ -90,7 +90,12 @@ fn heddle_pull_output_from_local(
         plan,
         heddle_pull_execution_facts_from_local(changed, remote, thread, summary),
     );
-    PullOutput { outcome, trust }
+    PullOutput {
+        outcome,
+        trust,
+        source_heads: None,
+        next_action: None,
+    }
 }
 
 #[cfg(feature = "client")]
@@ -106,7 +111,12 @@ fn heddle_pull_output_from_hosted(
         plan,
         heddle_pull_execution_facts_from_hosted(changed, remote, thread, fields),
     );
-    PullOutput { outcome, trust }
+    PullOutput {
+        outcome,
+        trust,
+        source_heads: None,
+        next_action: None,
+    }
 }
 
 /// Map a typed [`PullFailure`] to RecoveryAdvice / anyhow for CLI exit.
@@ -720,6 +730,8 @@ fn pull_git_overlay(
             ),
         ),
         trust: build_repository_verification_state(repo),
+        source_heads: None,
+        next_action: None,
     };
     if should_output_json(cli, Some(repo.config())) {
         write_full_command_json(
@@ -1483,8 +1495,25 @@ async fn pull_network_connected(
                 final_state,
                 error: None,
             };
+            // Several hosted heads: the pull checked out one by the
+            // documented default and kept the rest in the replica.
+            let source_heads = match final_state_id {
+                Some(final_state_id) => verbs::source_heads::source_heads_report(
+                    repo,
+                    track_to_update,
+                    Some(verbs::source_heads::pull_selection_rule(
+                        repo,
+                        pre_target,
+                        final_state_id,
+                    )?),
+                )?,
+                None => None,
+            };
+            let next_action = source_heads
+                .as_ref()
+                .map(|_| verbs::source_heads::SOURCE_HEADS_ACTION.to_string());
             if should_output_json(options.cli, Some(repo.config())) {
-                let output = heddle_pull_output_from_hosted(
+                let mut output = heddle_pull_output_from_hosted(
                     Some(options.plan),
                     changed,
                     options.remote_thread.to_string(),
@@ -1492,6 +1521,8 @@ async fn pull_network_connected(
                     &facts_fields,
                     build_repository_verification_state(repo),
                 );
+                output.source_heads = source_heads;
+                output.next_action = next_action;
                 write_full_command_json(
                     &output,
                     NextActionValidationContext::without_repo(&["pull"]),
@@ -1506,6 +1537,9 @@ async fn pull_network_connected(
                     build_repository_verification_state(repo),
                 );
                 render_pull_outcome_text(&output.outcome, &output.trust);
+                if let Some(heads) = &source_heads {
+                    super::super::resolve::render_source_heads_summary(heads);
+                }
             }
         }
         HostedPullResult::Failed(failure) => {

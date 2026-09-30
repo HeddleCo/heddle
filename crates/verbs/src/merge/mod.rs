@@ -64,6 +64,11 @@ pub use relation::{MergeRelation, MergeRelationKind};
 pub use structured::build_conflict_payload;
 pub use worktree_safety::ensure_worktree_clean;
 
+/// The typed refusal for starting a merge while another is in progress.
+pub(crate) fn merge_already_in_progress_error() -> objects::HeddleError {
+    advice::merge_already_in_progress()
+}
+
 /// CLI merge planning must hydrate partial-clone blobs before content merge.
 /// The engine stays repository-free and only asks this boundary for bytes.
 struct RepositoryMergeBlobSource<'repo> {
@@ -2206,6 +2211,13 @@ fn build_thread_preview_report_with_graph(
         advice.blockers.clear();
         advice.recommended_action = land_command_for_thread(repo, &thread.thread);
         advice.thread_health = "ready".to_string();
+    }
+    // Concurrent source heads block readiness and landing, as a hosted
+    // multi-head observation does, until a pick or merge resolves them.
+    if let Some(heads) = crate::source_heads::source_heads_report(repo, &thread.thread, None)? {
+        advice.blockers.push(heads.blocker());
+        advice.recommended_action = crate::source_heads::SOURCE_HEADS_ACTION.to_string();
+        advice.thread_health = "blocked".to_string();
     }
 
     let recommended_action = advice.recommended_action;

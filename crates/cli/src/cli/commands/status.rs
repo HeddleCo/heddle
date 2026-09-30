@@ -793,6 +793,13 @@ fn format_compact_status(output: &StatusOutput) -> String {
             operation.kind, operation.state
         ));
     }
+    if let Some(heads) = &output.alternative_heads {
+        lines.push(format!(
+            "{}  {} concurrent source heads; pick or merge one",
+            style::warn("unresolved"),
+            heads.heads.len()
+        ));
+    }
     if !output.submodules.is_empty() {
         lines.push(String::new());
         lines.push("Submodules".to_string());

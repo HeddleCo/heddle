@@ -97,9 +97,10 @@ pub fn classify_ready_decision(input: ReadyDecisionInput<'_>) -> ReadyDecision {
         already_ready,
         ready_without_target,
         integration_clear: clear,
-        // Matches CLI: completed when no target is configured, or when the
-        // thread is (or would be) Ready after this invocation.
-        operator_completed: !has_target || clear,
+        // Completed when the thread is (or would be) Ready after this
+        // invocation, or clean without a target. A blocker without a target
+        // (concurrent source heads) still blocks.
+        operator_completed: clear,
     }
 }
 
@@ -108,7 +109,11 @@ pub fn ready_report_recommended_action(
     merge_relation: &str,
     recommended_action: &str,
 ) -> Option<String> {
-    if merge_relation == "no_target" {
+    // Resolving concurrent source heads is Thread-local work, so it stays
+    // the next action even without an integration target.
+    if merge_relation == "no_target"
+        && recommended_action != crate::source_heads::SOURCE_HEADS_ACTION
+    {
         return None;
     }
     non_empty_action(Some(recommended_action)).map(str::to_string)
@@ -734,6 +739,20 @@ mod tests {
         assert!(!no_target.has_integration_target);
         assert!(no_target.operator_completed);
 
+        let heads = [
+            "thread 'main' has 2 unresolved alternative source heads; pick or merge one"
+                .to_string(),
+        ];
+        let blocked_without_target = classify_ready_decision(ReadyDecisionInput {
+            merge_relation: "no_target",
+            captured: false,
+            thread_already_ready: false,
+            conflict_count: 0,
+            blockers: &heads,
+        });
+        assert!(!blocked_without_target.ready_without_target);
+        assert!(!blocked_without_target.operator_completed);
+
         let blocked = classify_ready_decision(ReadyDecisionInput {
             merge_relation: "conflicted",
             captured: false,
@@ -750,6 +769,10 @@ mod tests {
         assert_eq!(
             ready_report_recommended_action("no_target", "heddle land --thread main"),
             None
+        );
+        assert_eq!(
+            ready_report_recommended_action("no_target", "heddle resolve --heads"),
+            Some("heddle resolve --heads".to_string())
         );
         assert_eq!(
             ready_report_recommended_action("fast_forward", "heddle land --thread feature"),

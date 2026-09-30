@@ -50,6 +50,7 @@ pub mod schema_keys;
 pub mod semantic_plan;
 pub mod shell_plan;
 pub mod source_authority;
+pub mod source_heads;
 pub mod spool_plan;
 pub mod status;
 pub mod thread;

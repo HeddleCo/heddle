@@ -1024,8 +1024,18 @@ pub struct ExpandArgs {
 
 /// Arguments for the `resolve` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Concurrent source heads:
+  When two writers publish divergent heads on one Thread, clone and pull check
+  out one of them and keep the rest. `status` lists them until you choose:
+    heddle resolve --heads            list every head and who produced it
+    heddle resolve --pick <STATE>     take exactly that head's tree
+    heddle resolve --merge <STATE>    three-way merge that head into your tip
+  <STATE> is a head's State ID or a unique prefix of it.
+")]
 pub struct ResolveArgs {
     /// File to resolve.
+    #[arg(conflicts_with_all = ["heads", "pick", "merge"])]
     pub path: Option<String>,
 
     /// Resolve all conflicts.
@@ -1047,6 +1057,26 @@ pub struct ResolveArgs {
     /// Mark the path resolved even if conflict markers are still present.
     #[arg(long)]
     pub force: bool,
+
+    /// List the current Thread's concurrent source heads.
+    #[arg(long, conflicts_with_all = ["all", "list", "ours", "theirs", "force", "pick", "merge"])]
+    pub heads: bool,
+
+    /// Resolve every source head to exactly this head's tree.
+    #[arg(
+        long,
+        value_name = "STATE",
+        conflicts_with_all = ["all", "list", "ours", "theirs", "force", "merge"]
+    )]
+    pub pick: Option<String>,
+
+    /// Three-way merge this source head into the current Thread tip.
+    #[arg(
+        long,
+        value_name = "STATE",
+        conflicts_with_all = ["all", "list", "ours", "theirs", "force"]
+    )]
+    pub merge: Option<String>,
 }
 
 /// The `(remote, thread)` pair shared by remote commands that use an
