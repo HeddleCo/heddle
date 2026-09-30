@@ -28,6 +28,9 @@ use super::{
     CallContextFactory, HostedClient, HostedDiscussion, HostedDiscussionTurn, HostedResolution,
 };
 
+mod thread_pages;
+pub use thread_pages::thread_section_page_sizes;
+
 const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
 
@@ -1249,7 +1252,7 @@ async fn serve_native_identity_observation(
     }
 }
 
-async fn serve_native_thread_review(
+pub async fn serve_native_thread_review(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
@@ -1262,6 +1265,15 @@ async fn serve_native_thread_review(
         .ok()
         .and_then(|frame| v2::ObserveThreadRequest::decode(frame.body).ok())
         .expect("native review observation request");
+    let sizes = match thread_section_page_sizes(&body, 64) {
+        Ok(sizes) => sizes,
+        Err(failure) => {
+            send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+                .await
+                .unwrap();
+            return;
+        }
+    };
     assert!(body.sections.contains(&(v2::ThreadSection::Review as i32)));
     let landing_target = body.landing_target.clone();
     let thread = body.thread.expect("review Thread identity");
@@ -1271,92 +1283,143 @@ async fn serve_native_thread_review(
             api::heddle::api::common::StateId { value: vec![5; 32] },
         )),
     };
-    let data = |sequence, payload| v2::ThreadEvent {
+    let overview = v2::ThreadOverview {
+        r#ref: Some(thread),
+        name: "feature".into(),
+        version: vec![7; 32],
+        review_policy_version: vec![6; 32],
+        source_heads: vec![revision.clone()],
+        base: Some(revision.clone()),
+        readiness: v2::ReviewReadiness::Unknown as i32,
+        landing_assessment: landing_target.map(|target| v2::LandingAssessment {
+            target: Some(target),
+            source: Some(revision.clone()),
+            expected_target: Some(revision.clone()),
+            policy_version: vec![6; 32],
+            readiness: v2::ReviewReadiness::Eligible as i32,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let after = body
+        .pages
+        .as_ref()
+        .and_then(|pages| pages.reviews.as_ref())
+        .map(|page| page.after_page.as_slice())
+        .unwrap_or_default();
+    let offset = if after.is_empty() {
+        0
+    } else {
+        u32::from_be_bytes(after.try_into().expect("fixture review cursor"))
+    };
+    // Weft also trims emitted rows to fit overview, comparison and status
+    // in the committed batch (observation.rs::Query::snapshot).
+    let max_items = body
+        .observe
+        .as_ref()
+        .and_then(|options| options.budget)
+        .expect("negotiated budget")
+        .max_items;
+    let end = (offset + sizes[2].min(max_items.saturating_sub(3))).min(65);
+    assert!(end > offset, "fixture page must advance");
+    let page = v2::PageInfo {
+        exhausted: end == 65,
+        next_page: if end == 65 {
+            vec![]
+        } else {
+            end.to_be_bytes().to_vec()
+        },
+        ..Default::default()
+    };
+    let mut payloads = vec![
+        v2::thread_event::Payload::Comparison(v2::ReviewComparison {
+            source: Some(revision.clone()),
+            base: Some(revision),
+            policy_version: vec![6; 32],
+        }),
+        v2::thread_event::Payload::Overview(overview.clone()),
+    ];
+    use objects::object::{ContentHash, StateId};
+    use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
+    let signer = Ed25519Signer::from_seed(&[13; 32]).expect("fixture review author");
+    for index in offset + 1..=end {
+        let id = uuid::Uuid::from_u128(u128::from(index));
+        let prepared = PreparedControl::sign(
+            &overview,
+            Control::Review(Review {
+                id,
+                source: StateId::from_bytes([5; 32]),
+                target: StateId::from_bytes([5; 32]),
+                policy_version: ContentHash::from_bytes([6; 32]),
+                kind: ReviewKind::Approval,
+                explanation: "fixture approval".into(),
+                revokes: None,
+                expires_at_unix_seconds: None,
+                coverage: None,
+            }),
+            Author {
+                account: uuid::Uuid::from_bytes([9; 16]),
+                agent_id: None,
+                authority_envelope: b"test original authority",
+            },
+            id,
+            1_800_000_000_000,
+            &signer,
+        )
+        .expect("signed fixture review");
+        payloads.push(v2::thread_event::Payload::Review(v2::ReviewRecord {
+            decision: prepared.record_review().expect("fixture decision").decision,
+            original: Some(prepared.record),
+        }));
+    }
+    payloads.push(v2::thread_event::Payload::Status(v2::SectionStatus {
+        section: "review".into(),
+        coverage: if page.exhausted {
+            v2::Coverage::Complete
+        } else {
+            v2::Coverage::Partial
+        } as i32,
+        page: Some(page.clone()),
+        ..Default::default()
+    }));
+    let mut events = vec![v2::ThreadEvent {
         frame: Some(v2::StreamFrame {
-            sequence,
-            body: Some(v2::stream_frame::Body::Data(v2::StreamData {
-                kind: v2::StreamDataKind::Snapshot as i32,
+            sequence: 1,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                binding_digest: vec![8; 32],
+                accepted_budget: body.observe.and_then(|options| options.budget),
+                ..Default::default()
             })),
         }),
-        payload: Some(payload),
-    };
-    let events = [
-        v2::ThreadEvent {
+        ..Default::default()
+    }];
+    for (index, payload) in payloads.into_iter().enumerate() {
+        events.push(v2::ThreadEvent {
             frame: Some(v2::StreamFrame {
-                sequence: 1,
-                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
-                    source: Some(v2::EndpointRef {
-                        kind: v2::EndpointKind::Weft as i32,
-                        public_key: server_key,
-                    }),
-                    binding_digest: vec![8; 32],
-                    accepted_budget: Some(v2::ReadBudget {
-                        max_items: 64,
-                        max_frame_bytes: 65536,
-                        max_snapshot_bytes: 1048576,
-                    }),
-                    ..Default::default()
+                sequence: index as u64 + 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
                 })),
             }),
-            ..Default::default()
-        },
-        data(
-            2,
-            v2::thread_event::Payload::Comparison(v2::ReviewComparison {
-                source: Some(revision.clone()),
-                base: Some(revision.clone()),
-                policy_version: vec![6; 32],
-            }),
-        ),
-        data(
-            3,
-            v2::thread_event::Payload::Overview(v2::ThreadOverview {
-                r#ref: Some(thread),
-                name: "feature".into(),
-                version: vec![7; 32],
-                review_policy_version: vec![6; 32],
-                source_heads: vec![revision.clone()],
-                base: Some(revision.clone()),
-                readiness: v2::ReviewReadiness::Unknown as i32,
-                landing_assessment: landing_target.map(|target| v2::LandingAssessment {
-                    target: Some(target),
-                    source: Some(revision.clone()),
-                    expected_target: Some(revision.clone()),
-                    policy_version: vec![6; 32],
-                    readiness: v2::ReviewReadiness::Eligible as i32,
-                    ..Default::default()
-                }),
+            payload: Some(payload),
+        });
+    }
+    events.push(v2::ThreadEvent {
+        frame: Some(v2::StreamFrame {
+            sequence: events.len() as u64 + 1,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                page: Some(page),
                 ..Default::default()
-            }),
-        ),
-        data(
-            4,
-            v2::thread_event::Payload::Status(v2::SectionStatus {
-                section: "review".into(),
-                coverage: v2::Coverage::Complete as i32,
-                page: Some(v2::PageInfo {
-                    exhausted: true,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        ),
-        v2::ThreadEvent {
-            frame: Some(v2::StreamFrame {
-                sequence: 5,
-                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
-                    cursor: vec![1],
-                    snapshot_complete: true,
-                    page: Some(v2::PageInfo {
-                        exhausted: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                })),
-            }),
-            ..Default::default()
-        },
-    ];
+            })),
+        }),
+        ..Default::default()
+    });
     for event in events {
         send.write_chunk(Bytes::from(
             encode_stream_message(&event.encode_to_vec()).unwrap(),

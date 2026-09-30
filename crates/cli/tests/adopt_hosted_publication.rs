@@ -198,3 +198,77 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     hosted.close().await;
     server.await.expect("hosted test server");
 }
+
+#[tokio::test]
+async fn native_hosted_review_verbs_fit_weft_budget() {
+    let (client, server, _) =
+        native_hosted_server::start(uuid::Uuid::from_bytes([22; 16]), "feature", [23; 32]).await;
+    // These are the two observation entry points used by the four review verbs.
+    // The native server checks every page, including continuation requests.
+    for verb in ["show", "list", "readiness", "approve"] {
+        let snapshot = if verb == "readiness" {
+            client
+                .observe_landing_assessment("acme/widgets", "feature", "main")
+                .await
+        } else {
+            client.observe_review("acme/widgets", "feature").await
+        };
+        let snapshot = snapshot.unwrap_or_else(|error| panic!("review {verb}: {error}"));
+        assert_eq!(
+            snapshot.decisions.len(),
+            65,
+            "review {verb} must drain every page"
+        );
+        if verb == "readiness" {
+            let target = snapshot
+                .overview
+                .landing_assessment
+                .expect("landing assessment")
+                .target
+                .expect("landing target");
+            assert_eq!(target.id.expect("landing target ID").value, vec![24; 32]);
+        }
+    }
+    // Verify this CLI fixture also rejects the original production request.
+    use api::heddle::api::v1alpha2 as v2;
+    let reference = client
+        .resolve_thread_ref("acme/widgets", "feature")
+        .await
+        .expect("Thread");
+    let remote = client.native().await.expect("native client");
+    let mut observation = remote
+        .observe::<thread_api::rpc::ThreadServiceObserveThread>(
+            v2::ObserveThreadRequest {
+                thread: Some(reference),
+                sections: vec![v2::ThreadSection::Review as i32],
+                pages: Some(v2::ThreadPages {
+                    reviews: Some(v2::PageRequest {
+                        size: 128,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                observe: Some(v2::ObserveOptions {
+                    mode: v2::ObservationMode::Once as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("open observation");
+    let error = observation
+        .next_commit()
+        .await
+        .err()
+        .expect("128 rows must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("Thread section pages exceed shared item budget"),
+        "{error}"
+    );
+    client.close().await;
+    server.await.expect("native hosted server");
+}
