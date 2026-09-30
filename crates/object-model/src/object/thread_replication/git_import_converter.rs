@@ -329,6 +329,66 @@ mod tests {
     use crate::object::Tree;
 
     #[test]
+    fn embedded_integration_rejects_uncertified_parent_identity_count_and_order() {
+        let tree = Tree::new().hash();
+        let a = StateId::from_bytes([1; 32]);
+        let b = StateId::from_bytes([2; 32]);
+        let forged = StateId::from_bytes([3; 32]);
+        let source = State::new(
+            tree,
+            vec![a, b],
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .with_intent("automatic integration merge");
+        let bytes = HeddleNote::from_state(&source)
+            .to_json_bytes()
+            .expect("note");
+        let oid = GitObjectId::Sha1([4; 20]);
+        let convert = |parents, rewrite| {
+            let signature = GitImportSignature {
+                name: b"Test".to_vec(),
+                email: b"test@example.com".to_vec(),
+                time: DateTime::UNIX_EPOCH,
+                tz_offset: 0,
+            };
+            GitImportGraph::convert_commit(
+                GitImportCommit {
+                    oid: &oid,
+                    author: signature.clone(),
+                    committer: signature,
+                    message: b"automatic integration merge",
+                    extra_headers: &[],
+                    heddle_note: Some(&bytes),
+                },
+                tree,
+                parents,
+                false,
+                GitImportParentPolicy::Validate,
+                |id| Ok((rewrite && id == a).then_some(forged)),
+            )
+        };
+        assert!(
+            convert(vec![forged, b], false).is_err(),
+            "identity requires a certified rewrite"
+        );
+        assert!(
+            convert(vec![a], true).is_err(),
+            "a rewrite cannot explain a dropped parent"
+        );
+        assert!(
+            convert(vec![b, a], true).is_err(),
+            "a rewrite cannot explain reordered parents"
+        );
+        assert!(
+            convert(vec![a, forged], true).is_err(),
+            "a rewrite of a cannot explain forged b"
+        );
+        let repaired = convert(vec![forged, b], true).expect("certified identity rewrite");
+        assert_eq!(repaired.parents, vec![forged, b]);
+        assert_ne!(repaired.id(), source.id());
+    }
+
+    #[test]
     fn typed_local_and_raw_conversion_are_byte_identical() {
         let raw = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\nmessage\n";
         let oid = sley_core::object_id_for_bytes(sley_core::ObjectFormat::Sha1, "commit", raw)

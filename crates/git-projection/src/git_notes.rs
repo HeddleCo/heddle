@@ -192,3 +192,58 @@ pub(crate) fn git_projection_notes_identity() -> sley::notes::NotesCommitIdentit
         committer: ident,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use objects::object::{Attribution, Principal, Tree, TreeEntry};
+
+    use super::*;
+
+    #[test]
+    fn portable_child_note_explains_salted_parent_identity_loss() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let repo = HeddleRepository::init_default(temp.path()).expect("init");
+        let entry = TreeEntry::file(
+            "app.py",
+            objects::object::ContentHash::compute(b"app"),
+            false,
+        )
+        .expect("entry");
+        let portable = Tree::from_entries(vec![entry.clone()]).expect("portable tree");
+        let salted = Tree::from_entries_salted_v4(vec![entry], vec![[7; 32]]).expect("salted tree");
+        repo.store()
+            .put_tree(&portable)
+            .expect("store portable tree");
+        repo.store().put_tree(&salted).expect("store salted tree");
+        let author = Attribution::human(Principal::new("Test", "test@example.com"));
+        let salted_parent = State::new(salted.hash(), vec![], author.clone());
+        let portable_parent = State::new(portable.hash(), vec![], author.clone());
+        repo.store()
+            .put_state(&salted_parent)
+            .expect("store salted parent");
+        repo.store()
+            .put_state(&portable_parent)
+            .expect("store portable parent");
+
+        let parent_note = note_for_state(&repo, &salted_parent, false).expect("salted note");
+        assert!(
+            parent_note.source_state.is_none(),
+            "Git cannot reconstruct private salts"
+        );
+        let child = State::new(portable.hash(), vec![salted_parent.id()], author.clone());
+        let note = note_for_state(&repo, &child, false).expect("child note");
+        assert_eq!(note.source_state.expect("portable embedded child"), child);
+        assert!(
+            note.parents_rewritten,
+            "the salted parent's State identity changes on import"
+        );
+
+        // A portable parent must not give an unrelated forged identity a pass.
+        let child = State::new(portable.hash(), vec![portable_parent.id()], author);
+        let note = note_for_state(&repo, &child, false).expect("portable parent note");
+        assert!(
+            !note.parents_rewritten,
+            "portable ancestry does not authorize a rewrite"
+        );
+    }
+}
