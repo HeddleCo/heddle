@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.22.0...heddleco-capability-verifier-v0.23.0) - 2026-09-30
+
+### Changed
+
+- Pin heddle-api 0.31.0-alpha.10 and heddle-biscuit-verifier 0.27.1.
+- Release matching Rust and npm versions so registry consumers receive the updated dependency contract.
+
 ## [0.22.0](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.6...heddleco-capability-verifier-v0.22.0) - 2026-09-28
 
 ### Changed
