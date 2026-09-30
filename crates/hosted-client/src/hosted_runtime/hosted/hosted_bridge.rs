@@ -56,9 +56,19 @@ enum HostedBridgeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum HostedBridgeResponse {
-    Ready { reused: bool, node_id: String },
-    Opened { reused: bool },
-    Error { message: String },
+    // Required on new clients; old clients tolerate the extra JSON field.
+    // Never default this to the daemon or loopback adapter identity.
+    Ready {
+        reused: bool,
+        node_id: String,
+        weft_endpoint_id: String,
+    },
+    Opened {
+        reused: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 struct CachedWeft {
@@ -152,9 +162,10 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let outcome = ensure_weft(&bridge, &server, allow_insecure).await;
             let response = match outcome {
-                Ok(reused) => HostedBridgeResponse::Ready {
+                Ok((reused, weft_endpoint_id)) => HostedBridgeResponse::Ready {
                     reused,
                     node_id: bridge.endpoint.id().to_string(),
+                    weft_endpoint_id: weft_endpoint_id.to_string(),
                 },
                 Err(error) => HostedBridgeResponse::Error {
                     message: error.to_string(),
@@ -168,7 +179,7 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let opened = ensure_weft(&bridge, &server, allow_insecure).await;
             match opened {
-                Ok(reused) => {
+                Ok((reused, _)) => {
                     write_frame(
                         &mut stream,
                         &serde_json::to_vec(&HostedBridgeResponse::Opened { reused })?,
@@ -191,9 +202,13 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
     Ok(())
 }
 
-async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) -> Result<bool> {
-    if live_weft(bridge, server).await.is_some() {
-        return Ok(true);
+async fn ensure_weft(
+    bridge: &HostedBridge,
+    server: &str,
+    allow_insecure: bool,
+) -> Result<(bool, EndpointId)> {
+    if let Some(connection) = live_weft(bridge, server).await {
+        return Ok((true, connection.remote_id()));
     }
     let mut config = ClientConfig::default();
     if allow_insecure {
@@ -203,6 +218,7 @@ async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) 
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let connection = connect_weft(&bridge.endpoint, &descriptor).await?;
+    let weft_endpoint_id = connection.remote_id();
     let expires_at_unix_millis = descriptor.document().expires_at_unix_millis;
     bridge.weft.lock().await.insert(
         server.to_string(),
@@ -211,7 +227,7 @@ async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) 
             expires_at_unix_millis,
         },
     );
-    Ok(false)
+    Ok((false, weft_endpoint_id))
 }
 
 async fn live_weft(bridge: &HostedBridge, server: &str) -> Option<iroh::endpoint::Connection> {
@@ -337,9 +353,18 @@ pub async fn ensure_via_netd(
         .map_err(HostedError::transport)?
         .ok_or_else(|| HostedError::transport("netd hosted bridge closed during Ensure"))?;
     match serde_json::from_slice(&response).map_err(HostedError::transport)? {
-        HostedBridgeResponse::Ready { reused, node_id } => {
+        HostedBridgeResponse::Ready {
+            reused,
+            node_id,
+            weft_endpoint_id,
+        } => {
             let node_id = node_id.parse().map_err(HostedError::transport)?;
-            Ok(EnsureOutcome { reused, node_id })
+            let weft_endpoint_id = weft_endpoint_id.parse().map_err(HostedError::transport)?;
+            Ok(EnsureOutcome {
+                reused,
+                node_id,
+                weft_endpoint_id,
+            })
         }
         HostedBridgeResponse::Error { message } => Err(HostedError::transport(message)),
         HostedBridgeResponse::Opened { .. } => Err(HostedError::transport(
@@ -352,6 +377,8 @@ pub async fn ensure_via_netd(
 pub struct EnsureOutcome {
     pub reused: bool,
     pub node_id: EndpointId,
+    /// Weft's authenticated remote id, not the daemon or the CLI's adapter.
+    pub weft_endpoint_id: EndpointId,
 }
 
 /// Open a bidirectional stream on the warm Weft connection.
@@ -484,6 +511,60 @@ pub(crate) mod tests {
         (server, task)
     }
 
+    /// Weft stand-in that answers DescribeEndpoint with this endpoint's public
+    /// key. Used to prove proxied Discover must compare against Weft, not the
+    /// local Iroh↔UDS adapter (heddle#1794).
+    async fn describe_server(accepts: Arc<AtomicUsize>) -> (Endpoint, tokio::task::JoinHandle<()>) {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let accept_endpoint = server.clone();
+        let weft_key = server.id().as_bytes().to_vec();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = accept_endpoint.accept().await {
+                accepts.fetch_add(1, Ordering::SeqCst);
+                let Ok(connection) = incoming.await else {
+                    continue;
+                };
+                let weft_key = weft_key.clone();
+                tokio::spawn(async move {
+                    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                        let bytes = recv.read_to_end(64 * 1024).await.unwrap_or_default();
+                        let Ok(frame) = api::framing::decode_request_frame(&bytes) else {
+                            continue;
+                        };
+                        if frame.method != "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" {
+                            continue;
+                        }
+                        let description = api::heddle::api::v1alpha2::DescribeEndpointResponse {
+                            endpoint: Some(api::heddle::api::v1alpha2::EndpointRef {
+                                kind: api::heddle::api::v1alpha2::EndpointKind::Weft as i32,
+                                public_key: weft_key.clone(),
+                            }),
+                            supported_packages: vec!["heddle.api.v1alpha2".into()],
+                            implemented_methods: vec![
+                                "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint".into(),
+                            ],
+                            ..Default::default()
+                        };
+                        let encoded = prost::Message::encode_to_vec(&description);
+                        let Ok(response) = api::framing::encode_success_response(&encoded) else {
+                            continue;
+                        };
+                        let _ = send.write_all(&response).await;
+                        let _ = send.finish();
+                    }
+                });
+            }
+        });
+        (server, task)
+    }
+
     #[tokio::test]
     async fn warm_open_bi_reuses_the_cached_weft_connection() {
         let accepts = Arc::new(AtomicUsize::new(0));
@@ -526,6 +607,8 @@ pub(crate) mod tests {
             "pre-seeded weft session must be reported as reused"
         );
 
+        assert_eq!(ensure_first.weft_endpoint_id, server.id());
+
         let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
             .await
             .unwrap();
@@ -565,6 +648,7 @@ pub(crate) mod tests {
         pub home: TempDir,
         pub socket: PathBuf,
         pub node_id: iroh::EndpointId,
+        pub weft_id: iroh::EndpointId,
         accepts: Arc<AtomicUsize>,
         serve: Option<tokio::task::JoinHandle<Result<()>>>,
         server_task: Option<tokio::task::JoinHandle<()>>,
@@ -573,8 +657,21 @@ pub(crate) mod tests {
 
     impl WarmBridgeFixture {
         pub async fn start() -> Self {
+            Self::start_with(echo_server).await
+        }
+
+        pub async fn start_describe() -> Self {
+            Self::start_with(describe_server).await
+        }
+
+        async fn start_with<F, Fut>(bind_server: F) -> Self
+        where
+            F: FnOnce(Arc<AtomicUsize>) -> Fut,
+            Fut: std::future::Future<Output = (Endpoint, tokio::task::JoinHandle<()>)>,
+        {
             let accepts = Arc::new(AtomicUsize::new(0));
-            let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+            let (server, server_task) = bind_server(Arc::clone(&accepts)).await;
+            let weft_id = server.id();
             let netd = Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::Disabled)
                 .bind_addr((Ipv4Addr::LOCALHOST, 0))
@@ -600,11 +697,16 @@ pub(crate) mod tests {
                 home,
                 socket,
                 node_id,
+                weft_id,
                 accepts,
                 serve: Some(serve),
                 server_task: Some(server_task),
                 server: Some(server),
             }
+        }
+
+        pub fn weft_address(&self) -> iroh::EndpointAddr {
+            self.server.as_ref().expect("fixture server").addr()
         }
 
         pub fn accepts(&self) -> usize {
@@ -847,6 +949,99 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_rejects_ready_without_weft_identity() {
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let serve = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut stream).await;
+            let response = serde_json::to_vec(&serde_json::json!({
+                "op": "ready",
+                "reused": true,
+                "node_id": iroh_base::SecretKey::generate().public().to_string(),
+            }))
+            .unwrap();
+            let _ = write_frame(&mut stream, &response).await;
+        });
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+            .await
+            .expect_err("Ready without weft_endpoint_id must fail closed");
+        assert!(
+            error.to_string().contains("weft_endpoint_id"),
+            "got {error}"
+        );
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
+    async fn legacy_cli_tolerates_ready_identity_addition() {
+        // The old Ready schema deliberately has no weft_endpoint_id field.
+        #[derive(Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum LegacyResponse {
+            Ready { reused: bool, node_id: String },
+        }
+
+        let fixture = WarmBridgeFixture::start().await;
+        let mut stream = UnixStream::connect(&fixture.socket).await.expect("bridge");
+        let request = HostedBridgeRequest::Ensure {
+            server: TEST_WEFT_SERVER.to_string(),
+            allow_insecure: false,
+        };
+        write_frame(&mut stream, &serde_json::to_vec(&request).expect("request"))
+            .await
+            .expect("send Ensure");
+        let response = read_frame(&mut stream)
+            .await
+            .expect("Ready frame")
+            .expect("Ready");
+        let json: serde_json::Value = serde_json::from_slice(&response).expect("Ready JSON");
+        assert_eq!(json["weft_endpoint_id"], fixture.weft_id.to_string());
+        let LegacyResponse::Ready { reused, node_id } =
+            serde_json::from_slice(&response).expect("old CLI must tolerate the extra field");
+        assert!(reused);
+        assert_eq!(node_id, fixture.node_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn ensure_rejects_invalid_weft_identity() {
+        for weft_endpoint_id in [
+            serde_json::Value::Null,
+            serde_json::json!("not-an-endpoint-id"),
+            serde_json::json!(""),
+        ] {
+            let home = TempDir::new().expect("home");
+            let socket = hosted_bridge_socket_path(home.path());
+            std::fs::create_dir_all(socket.parent().expect("socket parent"))
+                .expect("state directory");
+            let listener = UnixListener::bind(&socket).expect("bridge socket");
+            let serve = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("Ensure connection");
+                read_frame(&mut stream).await.expect("Ensure request");
+                let response = serde_json::to_vec(&serde_json::json!({
+                    "op": "ready",
+                    "reused": true,
+                    "node_id": iroh_base::SecretKey::generate().public().to_string(),
+                    "weft_endpoint_id": weft_endpoint_id,
+                }))
+                .expect("Ready JSON");
+                write_frame(&mut stream, &response)
+                    .await
+                    .expect("Ready frame");
+            });
+            ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+                .await
+                .expect_err("invalid Weft identity must reject Ensure");
+            serve.await.expect("bridge task");
+        }
+    }
+
+    #[tokio::test]
     async fn open_bi_rejects_a_ready_response() {
         let home = TempDir::new().unwrap();
         let socket = hosted_bridge_socket_path(home.path());
@@ -860,6 +1055,7 @@ pub(crate) mod tests {
             let response = serde_json::to_vec(&HostedBridgeResponse::Ready {
                 reused: true,
                 node_id: iroh_base::SecretKey::generate().public().to_string(),
+                weft_endpoint_id: iroh_base::SecretKey::generate().public().to_string(),
             })
             .unwrap();
             let _ = write_frame(&mut stream, &response).await;

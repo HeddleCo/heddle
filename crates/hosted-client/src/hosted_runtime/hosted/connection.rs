@@ -87,10 +87,20 @@ pub(super) struct HostedConnection {
     provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
-    /// Local loopback endpoint that adapts the v2 Iroh transport to netd's UDS
-    /// stream bridge. `None` for an ordinary direct connection.
-    proxy_endpoint: Option<Endpoint>,
+    route: HostedRoute,
     reused_warm: bool,
+}
+
+/// A netd route must carry the authenticated Weft identity along with its
+/// loopback adapter. The adapter's Iroh peer key is never a Weft identity.
+#[derive(Debug)]
+enum HostedRoute {
+    Direct,
+    #[cfg(unix)]
+    Netd {
+        proxy_endpoint: Endpoint,
+        weft_endpoint_id: EndpointId,
+    },
 }
 
 impl HostedConnection {
@@ -116,7 +126,7 @@ impl HostedConnection {
             connection,
             provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
             provider_connections: Mutex::new(HashMap::new()),
-            proxy_endpoint: None,
+            route: HostedRoute::Direct,
             reused_warm: false,
         }))
     }
@@ -141,7 +151,7 @@ impl HostedConnection {
             connection,
             provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
-            proxy_endpoint: None,
+            route: HostedRoute::Direct,
             reused_warm: false,
         })))
     }
@@ -220,6 +230,7 @@ impl HostedConnection {
         tracing::debug!(
             reused = ensured.reused,
             netd_node_id = %ensured.node_id,
+            weft_endpoint_id = %ensured.weft_endpoint_id,
             local_node_id = %endpoint.id(),
             "hosted connect using netd warm bridge"
         );
@@ -230,9 +241,23 @@ impl HostedConnection {
             connection,
             provider_transport: Some(provider_transport),
             provider_connections: Mutex::new(HashMap::new()),
-            proxy_endpoint: Some(proxy_endpoint),
+            route: HostedRoute::Netd {
+                proxy_endpoint,
+                weft_endpoint_id: ensured.weft_endpoint_id,
+            },
             reused_warm: ensured.reused,
         })))
+    }
+
+    /// Key that v2 Discover must prove on this route.
+    pub(super) fn discover_endpoint_key(&self) -> [u8; 32] {
+        match &self.route {
+            HostedRoute::Direct => *self.connection.remote_id().as_bytes(),
+            #[cfg(unix)]
+            HostedRoute::Netd {
+                weft_endpoint_id, ..
+            } => *weft_endpoint_id.as_bytes(),
+        }
     }
 
     pub(super) fn endpoint_id(&self) -> EndpointId {
@@ -313,8 +338,9 @@ impl HostedConnection {
             }
         }
         close_endpoint(&self.endpoint).await;
-        if let Some(endpoint) = &self.proxy_endpoint {
-            close_endpoint(endpoint).await;
+        #[cfg(unix)]
+        if let HostedRoute::Netd { proxy_endpoint, .. } = &self.route {
+            close_endpoint(proxy_endpoint).await;
         }
     }
 }
@@ -596,6 +622,200 @@ mod tests {
             "netd must reuse its cached QUIC session"
         );
         connection.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_discover_rejects_adapter_id_and_accepts_weft_id() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let connection = HostedConnection::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("connect through warm netd bridge");
+        let adapter_key = *connection.connection.remote_id().as_bytes();
+        let weft_key = *fixture.weft_id.as_bytes();
+        assert_ne!(
+            adapter_key, weft_key,
+            "local Iroh↔UDS adapter peer must not be Weft"
+        );
+
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                connection.connection.clone(),
+                thread_api::credentials::Credentials::Public,
+                api::framing::MAX_CONTROL_BODY,
+                Duration::from_secs(5),
+            )
+        };
+        let adapter = thread_api::Remote::discover(
+            transport().expect("adapter transport"),
+            adapter_key,
+            EndpointKind::Weft,
+        )
+        .await;
+        let adapter_error = match adapter {
+            Ok(_) => panic!("Discover must not treat the local adapter as Weft"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            adapter_error.contains("endpoint identity/package mismatch"),
+            "adapter Discover must fail closed, got {adapter_error}"
+        );
+
+        let remote = thread_api::Remote::discover(
+            transport().expect("weft transport"),
+            weft_key,
+            EndpointKind::Weft,
+        )
+        .await
+        .expect("Discover must accept Weft's endpoint key over the proxy");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
+            weft_key
+        );
+        let client = super::super::HostedClient {
+            connection: connection.clone(),
+            context: super::super::CallContextFactory::default(),
+            on_human_signature: None,
+            warnings: Arc::new(super::super::NoopWarnings),
+            server_key: None,
+        };
+        let discovered = client.native().await;
+        connection.close().await;
+        assert!(
+            discovered.is_ok(),
+            "proxied client must discover Weft, got {:?}",
+            discovered.err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_warm_client_discovers_weft_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("warm Discover must succeed with Weft's endpoint key");
+        assert!(client.reused_warm_connection());
+        let remote = client
+            .native()
+            .await
+            .expect("cached native description after warm Discover");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
+            fixture.weft_id.as_bytes()
+        );
+        assert_eq!(
+            fixture.accepts(),
+            1,
+            "Discover must reuse netd's Weft session"
+        );
+        client.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_connection_rejects_ready_without_weft_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let home = tempfile::TempDir::new().expect("home");
+        let _home = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
+        let socket = super::hosted_bridge::hosted_bridge_socket_path(home.path());
+        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("state directory");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bridge socket");
+        let serve = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.expect("Ensure connection");
+            let length = stream.read_u32().await.expect("Ensure length");
+            let mut request = vec![0; length as usize];
+            stream
+                .read_exact(&mut request)
+                .await
+                .expect("Ensure request");
+            let response = serde_json::to_vec(&serde_json::json!({
+                "op": "ready",
+                "reused": true,
+                "node_id": iroh_base::SecretKey::generate().public().to_string(),
+            }))
+            .expect("old daemon Ready");
+            stream
+                .write_u32(response.len() as u32)
+                .await
+                .expect("Ready length");
+            stream.write_all(&response).await.expect("Ready frame");
+        });
+        let error = HostedConnection::connect_via_netd(
+            super::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect_err("missing Weft identity must reject the proxy route");
+        assert!(
+            error.to_string().contains("weft_endpoint_id"),
+            "got {error}"
+        );
+        serve.await.expect("bridge task");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_client_discovers_remote_identity() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start_describe().await;
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("client address")
+            .bind()
+            .await
+            .expect("client endpoint");
+        let client = super::super::HostedClient::connect_addr(endpoint, fixture.weft_address())
+            .await
+            .expect("direct client");
+        assert!(matches!(
+            client.connection.route,
+            super::HostedRoute::Direct
+        ));
+        assert_eq!(
+            client.connection.discover_endpoint_key(),
+            *client.connection.connection.remote_id().as_bytes()
+        );
+        let remote = client.native().await.expect("direct Discover");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("Weft endpoint")
+                .public_key,
+            fixture.weft_id.as_bytes()
+        );
+        client.close().await;
     }
 
     #[tokio::test]
