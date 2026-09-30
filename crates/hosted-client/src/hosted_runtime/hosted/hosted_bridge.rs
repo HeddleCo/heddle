@@ -65,6 +65,7 @@ enum HostedBridgeResponse {
     },
     Opened {
         reused: bool,
+        weft_endpoint_id: String,
     },
     Error {
         message: String,
@@ -162,10 +163,10 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let outcome = ensure_weft(&bridge, &server, allow_insecure).await;
             let response = match outcome {
-                Ok((reused, weft_endpoint_id)) => HostedBridgeResponse::Ready {
+                Ok((reused, connection)) => HostedBridgeResponse::Ready {
                     reused,
                     node_id: bridge.endpoint.id().to_string(),
-                    weft_endpoint_id: weft_endpoint_id.to_string(),
+                    weft_endpoint_id: connection.remote_id().to_string(),
                 },
                 Err(error) => HostedBridgeResponse::Error {
                     message: error.to_string(),
@@ -179,13 +180,19 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let opened = ensure_weft(&bridge, &server, allow_insecure).await;
             match opened {
-                Ok((reused, _)) => {
+                Ok((reused, connection)) => {
+                    // The stream is opened on exactly the connection named in
+                    // Opened, so the client verifies the identity it will use
+                    // even if the cache entry is replaced concurrently.
                     write_frame(
                         &mut stream,
-                        &serde_json::to_vec(&HostedBridgeResponse::Opened { reused })?,
+                        &serde_json::to_vec(&HostedBridgeResponse::Opened {
+                            reused,
+                            weft_endpoint_id: connection.remote_id().to_string(),
+                        })?,
                     )
                     .await?;
-                    splice_weft(&bridge, &server, stream).await?;
+                    splice_connection(connection, stream).await?;
                 }
                 Err(error) => {
                     write_frame(
@@ -206,9 +213,9 @@ async fn ensure_weft(
     bridge: &HostedBridge,
     server: &str,
     allow_insecure: bool,
-) -> Result<(bool, EndpointId)> {
+) -> Result<(bool, iroh::endpoint::Connection)> {
     if let Some(connection) = live_weft(bridge, server).await {
-        return Ok((true, connection.remote_id()));
+        return Ok((true, connection));
     }
     let mut config = ClientConfig::default();
     if allow_insecure {
@@ -218,16 +225,15 @@ async fn ensure_weft(
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let connection = connect_weft(&bridge.endpoint, &descriptor).await?;
-    let weft_endpoint_id = connection.remote_id();
     let expires_at_unix_millis = descriptor.document().expires_at_unix_millis;
     bridge.weft.lock().await.insert(
         server.to_string(),
         CachedWeft {
-            connection,
+            connection: connection.clone(),
             expires_at_unix_millis,
         },
     );
-    Ok((false, weft_endpoint_id))
+    Ok((false, connection))
 }
 
 async fn live_weft(bridge: &HostedBridge, server: &str) -> Option<iroh::endpoint::Connection> {
@@ -264,13 +270,6 @@ async fn connect_weft(
         .connect(address, api::HOSTED_ALPN_V1)
         .await
         .context("connecting to weft through the netd endpoint")
-}
-
-async fn splice_weft(bridge: &HostedBridge, server: &str, stream: UnixStream) -> Result<()> {
-    let connection = live_weft(bridge, server)
-        .await
-        .context("weft session vanished after OpenBi")?;
-    splice_connection(connection, stream).await
 }
 
 async fn splice_connection(
@@ -386,7 +385,7 @@ pub async fn open_bi_via_netd(
     socket_path: &Path,
     server: &str,
     allow_insecure: bool,
-) -> std::result::Result<(UnixStream, bool), HostedError> {
+) -> std::result::Result<(UnixStream, bool, EndpointId), HostedError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .map_err(HostedError::transport)?;
@@ -405,7 +404,13 @@ pub async fn open_bi_via_netd(
         .map_err(HostedError::transport)?
         .ok_or_else(|| HostedError::transport("netd hosted bridge closed during OpenBi"))?;
     match serde_json::from_slice(&response).map_err(HostedError::transport)? {
-        HostedBridgeResponse::Opened { reused } => Ok((stream, reused)),
+        HostedBridgeResponse::Opened {
+            reused,
+            weft_endpoint_id,
+        } => {
+            let weft_endpoint_id = weft_endpoint_id.parse().map_err(HostedError::transport)?;
+            Ok((stream, reused, weft_endpoint_id))
+        }
         HostedBridgeResponse::Error { message } => Err(HostedError::transport(message)),
         HostedBridgeResponse::Ready { .. } => Err(HostedError::transport(
             "netd hosted bridge returned Ready for OpenBi",
@@ -609,9 +614,11 @@ pub(crate) mod tests {
 
         assert_eq!(ensure_first.weft_endpoint_id, server.id());
 
-        let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
-            .await
-            .unwrap();
+        let (mut stream, reused, weft_id) =
+            open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
+                .await
+                .unwrap();
+        assert_eq!(weft_id, server.id());
         assert!(reused, "OpenBi on a warm session must not cold-connect");
         stream.write_all(b"ping-one").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -619,9 +626,11 @@ pub(crate) mod tests {
         stream.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"ping-one");
 
-        let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
-            .await
-            .unwrap();
+        let (mut stream, reused, weft_id) =
+            open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
+                .await
+                .unwrap();
+        assert_eq!(weft_id, server.id());
         assert!(reused, "second OpenBi must reuse the same weft connection");
         stream.write_all(b"ping-two").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -933,8 +942,11 @@ pub(crate) mod tests {
         let serve = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _ = read_frame(&mut stream).await;
-            let response =
-                serde_json::to_vec(&HostedBridgeResponse::Opened { reused: true }).unwrap();
+            let response = serde_json::to_vec(&HostedBridgeResponse::Opened {
+                reused: true,
+                weft_endpoint_id: iroh_base::SecretKey::generate().public().to_string(),
+            })
+            .unwrap();
             let _ = write_frame(&mut stream, &response).await;
         });
         let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
