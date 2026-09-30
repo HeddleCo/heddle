@@ -54,23 +54,42 @@ fn native_context_operations(
         .collect()
 }
 
-fn native_scope(anchor: &NativeAnchor) -> AnnotationScope {
+/// Reconstruct the authored annotation scope from a native anchor.
+///
+/// The symbol selector is authoritative: a source anchor that names a symbol
+/// is a symbol annotation, and any line range it carries is only the range the
+/// symbol resolved to when it was authored (heddle#1901). A partial line range
+/// cannot be reconstructed without inventing a bound, so it is refused.
+fn native_scope(anchor: &NativeAnchor) -> Result<AnnotationScope, ProtocolError> {
     match anchor {
-        NativeAnchor::Source { source } if source.start_line.is_some() => AnnotationScope::Lines(
-            source.start_line.unwrap_or_default(),
-            source.end_line.unwrap_or_default(),
-        ),
-        NativeAnchor::Source { source } if !source.symbol_id.is_empty() => {
-            AnnotationScope::Symbol {
-                name: source.symbol_id.clone(),
-                resolved_lines: source.start_line.zip(source.end_line),
-            }
+        NativeAnchor::Source { source } => {
+            let resolved_lines = match (source.start_line, source.end_line) {
+                (Some(start), Some(end)) => Some((start, end)),
+                (None, None) => None,
+                (start, end) => {
+                    return Err(ProtocolError::InvalidState(format!(
+                        "context source anchor for {} carries a partial line range ({start:?}, {end:?}); replication is incomplete",
+                        source.path
+                    )));
+                }
+            };
+            Ok(match (source.symbol_id.is_empty(), resolved_lines) {
+                (false, resolved_lines) => AnnotationScope::Symbol {
+                    name: source.symbol_id.clone(),
+                    resolved_lines,
+                },
+                (true, Some((start, end))) => AnnotationScope::Lines(start, end),
+                (true, None) => AnnotationScope::File,
+            })
         }
-        NativeAnchor::Symbol { symbol, .. } => AnnotationScope::Symbol {
+        NativeAnchor::Symbol { symbol, .. } => Ok(AnnotationScope::Symbol {
             name: symbol.clone(),
             resolved_lines: None,
-        },
-        _ => AnnotationScope::File,
+        }),
+        NativeAnchor::Repository
+        | NativeAnchor::State { .. }
+        | NativeAnchor::Path { .. }
+        | NativeAnchor::Change { .. } => Ok(AnnotationScope::File),
     }
 }
 
@@ -130,7 +149,7 @@ fn native_annotation(
 ) -> Result<Annotation, ProtocolError> {
     Ok(Annotation {
         annotation_id: context.id.to_string(),
-        scope: native_scope(&context.anchor),
+        scope: native_scope(&context.anchor)?,
         status: AnnotationStatus::Active,
         revisions: vec![native_revision(operation_id, context)?],
         supersedes_annotation_id: context.supersedes.map(|id| id.to_string()),
@@ -248,5 +267,69 @@ impl HostedClient {
             ));
         }
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objects::object::{CollaborationSourceAnchor, StateId};
+
+    use super::*;
+
+    fn source(symbol_id: &str, start: Option<u32>, end: Option<u32>) -> NativeAnchor {
+        NativeAnchor::Source {
+            source: CollaborationSourceAnchor {
+                revision: NativeRevision::State {
+                    state_id: StateId::from_bytes([3; 32]),
+                },
+                path: "example.py".into(),
+                symbol_id: symbol_id.into(),
+                start_line: start,
+                end_line: end,
+                target: None,
+            },
+        }
+    }
+
+    /// heddle#1901: the symbol selector wins over the resolved range it
+    /// carries; only a selector-less range is a line annotation.
+    #[test]
+    fn symbol_selector_survives_alongside_its_resolved_range() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        assert_eq!(
+            native_scope(&source("amount", Some(1), Some(2))).expect("symbol with range"),
+            AnnotationScope::Symbol {
+                name: "amount".into(),
+                resolved_lines: Some((1, 2)),
+            }
+        );
+        assert_eq!(
+            native_scope(&source("amount", None, None)).expect("symbol only"),
+            AnnotationScope::Symbol {
+                name: "amount".into(),
+                resolved_lines: None,
+            }
+        );
+        assert_eq!(
+            native_scope(&source("", Some(1), Some(2))).expect("lines"),
+            AnnotationScope::Lines(1, 2)
+        );
+        assert_eq!(
+            native_scope(&source("", None, None)).expect("file"),
+            AnnotationScope::File
+        );
+    }
+
+    #[test]
+    fn partial_line_range_is_an_explicit_incomplete_result() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        for (symbol, start, end) in [
+            ("amount", Some(1), None),
+            ("", None, Some(2)),
+            ("", Some(1), None),
+        ] {
+            let error = native_scope(&source(symbol, start, end)).expect_err("partial range");
+            assert!(error.to_string().contains("partial line range"), "{error}");
+        }
     }
 }

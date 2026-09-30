@@ -9,7 +9,8 @@ use std::{collections::HashMap, path::Path};
 #[cfg(feature = "async-source")]
 use objects::object::resolve_tree_path_async;
 pub use objects::object::{
-    StalenessStatus, annotation_status_for_source, extract_line_range, resolve_current_symbol,
+    StalenessStatus, SymbolResolution, annotation_status_for_source, extract_line_range,
+    resolve_current_symbol,
 };
 #[cfg(feature = "async-source")]
 use objects::store::AsyncObjectSource;
@@ -112,9 +113,10 @@ pub fn check_context_staleness(
 
 /// Re-resolve a symbol against the current code tree at `state` and return
 /// the live `(start, end)` line range, or `None` when the symbol cannot be
-/// located (file missing, language unsupported, parse failure, or symbol
-/// genuinely absent). Cheap when callers already loaded the source — but
-/// here we re-read because callers don't always hold the bytes.
+/// located to exactly one definition (file missing, language unsupported,
+/// parse failure, symbol absent, or more than one matching definition).
+/// Cheap when callers already loaded the source — but here we re-read
+/// because callers don't always hold the bytes.
 pub fn live_symbol_lines(
     repo: &Repository,
     state: &State,
@@ -124,38 +126,56 @@ pub fn live_symbol_lines(
     let tree = repo.store().get_tree(&state.tree).ok().flatten()?;
     let blob = get_blob_at_path(repo.store(), &tree, path).ok().flatten()?;
     let file_path = std::path::Path::new(path);
-    resolve_current_symbol_for_repo(blob.content(), file_path, symbol, None)
+    match resolve_current_symbol_for_repo(blob.content(), file_path, symbol, None) {
+        SymbolResolution::Resolved { start, end } => Some((start, end)),
+        SymbolResolution::Missing | SymbolResolution::Ambiguous { .. } => None,
+    }
 }
 
-/// Internal: tree-sitter resolution with a fallback. When the feature is
-/// enabled, `Ok` returns the live range; `SymbolNotFound` returns `None`;
-/// language/parse errors fall back to `stored`. When the feature is
-/// disabled, simply return `stored`.
+/// Internal: tree-sitter resolution of a symbol selector. Exactly one
+/// matching definition resolves; none is `Missing`; several are `Ambiguous`
+/// rather than silently attaching to the first (heddle#1901). A qualified
+/// `Parent::name` selector only matches definitions under that parent.
+/// Language/parse errors fall back to `stored`, the range recorded when the
+/// annotation was authored. When the feature is disabled, only `stored`
+/// is available.
 #[cfg(feature = "tree-sitter-symbols")]
 fn resolve_current_symbol_for_repo(
     source: &[u8],
     file_path: &std::path::Path,
     symbol: &str,
     stored: Option<(u32, u32)>,
-) -> Option<(u32, u32)> {
-    use crate::symbol_resolver::{SymbolResolveError, resolve_symbol_lines};
-    match resolve_symbol_lines(source, file_path, symbol) {
-        Ok(range) => Some(range),
-        Err(SymbolResolveError::SymbolNotFound(_)) => None,
+) -> SymbolResolution {
+    use crate::symbol_resolver::{SymbolResolveError, resolve_all_symbols};
+    match resolve_all_symbols(source, file_path, symbol) {
+        Ok(definitions) => match definitions.as_slice() {
+            [] => SymbolResolution::Missing,
+            [definition] => SymbolResolution::Resolved {
+                start: definition.start_line,
+                end: definition.end_line,
+            },
+            candidates => SymbolResolution::Ambiguous {
+                candidate_lines: candidates
+                    .iter()
+                    .map(|definition| (definition.start_line, definition.end_line))
+                    .collect(),
+            },
+        },
+        Err(SymbolResolveError::SymbolNotFound(_)) => SymbolResolution::Missing,
         Err(SymbolResolveError::UnsupportedLanguage(_)) | Err(SymbolResolveError::ParseFailed) => {
-            stored
+            resolve_current_symbol(source, file_path, symbol, stored)
         }
     }
 }
 
 #[cfg(not(feature = "tree-sitter-symbols"))]
 fn resolve_current_symbol_for_repo(
-    _source: &[u8],
-    _file_path: &std::path::Path,
-    _symbol: &str,
+    source: &[u8],
+    file_path: &std::path::Path,
+    symbol: &str,
     stored: Option<(u32, u32)>,
-) -> Option<(u32, u32)> {
-    stored
+) -> SymbolResolution {
+    resolve_current_symbol(source, file_path, symbol, stored)
 }
 
 /// Resolve a blob at a file path within a tree by walking the tree hierarchy.
@@ -690,6 +710,66 @@ mod tests {
         );
     }
 
+    /// A duplicated symbol no longer identifies one definition. The check
+    /// must say so rather than hash the first match and report Fresh
+    /// (heddle#1901).
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
+    fn staleness_symbol_scope_reports_ambiguous_when_symbol_duplicated() {
+        let (_dir, repo) = make_test_repo();
+
+        let original = b"def amount():\n    return 42\n";
+        let duplicated = b"def amount():\n    return 42\n\n\ndef amount():\n    return 43\n";
+        let blob = objects::object::Blob::new(duplicated.to_vec());
+        let blob_hash = repo.store().put_blob(&blob).unwrap();
+        let entry = objects::object::TreeEntry::file("pricing.py", blob_hash, false).unwrap();
+        let tree = objects::object::Tree::from_entries(vec![entry]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+
+        // The first definition still hashes identically to the authored one.
+        let annotation = make_annotation(
+            AnnotationScope::Symbol {
+                name: "amount".to_string(),
+                resolved_lines: Some((1, 2)),
+            },
+            Some(ContentHash::compute(&extract_line_range(original, 1, 2))),
+        );
+
+        let state = make_state_with_tree(tree_hash);
+        let target = ContextTarget::file("pricing.py").unwrap();
+
+        let status = check_annotation_staleness(&repo, &annotation, &target, &state).unwrap();
+        assert_eq!(
+            status,
+            StalenessStatus::SymbolAmbiguous {
+                symbol: "amount".to_string(),
+                candidate_lines: vec![(1, 2), (5, 6)],
+            }
+        );
+        assert_eq!(
+            live_symbol_lines(&repo, &state, "pricing.py", "amount"),
+            None,
+            "an ambiguous selector has no single live range"
+        );
+    }
+
+    /// A qualified selector resolves only under its parent; it must not
+    /// silently re-attach to a same-named definition elsewhere.
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
+    fn staleness_qualified_symbol_does_not_fall_back_to_another_parent() {
+        let source = b"impl Bar {\n    fn open(&self) {}\n}\n";
+        let file_path = Path::new("lib.rs");
+        assert_eq!(
+            resolve_current_symbol_for_repo(source, file_path, "Foo::open", Some((2, 2))),
+            SymbolResolution::Missing
+        );
+        assert_eq!(
+            resolve_current_symbol_for_repo(source, file_path, "Bar::open", None),
+            SymbolResolution::Resolved { start: 2, end: 2 }
+        );
+    }
+
     // -- test helpers --
 
     fn legacy_annotation_status_for_source(
@@ -712,10 +792,16 @@ mod tests {
                 name,
                 resolved_lines,
             } => match resolve_current_symbol_for_repo(source, file_path, name, *resolved_lines) {
-                Some((start, end)) => extract_line_range(source, start, end),
-                None => {
+                SymbolResolution::Resolved { start, end } => extract_line_range(source, start, end),
+                SymbolResolution::Missing => {
                     return StalenessStatus::SymbolMissing {
                         symbol: name.clone(),
+                    };
+                }
+                SymbolResolution::Ambiguous { candidate_lines } => {
+                    return StalenessStatus::SymbolAmbiguous {
+                        symbol: name.clone(),
+                        candidate_lines,
                     };
                 }
             },

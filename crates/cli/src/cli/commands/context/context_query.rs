@@ -381,41 +381,39 @@ pub async fn cmd_context_check(
                 &entry.target,
                 &state_obj,
             )?;
-            match &status {
-                StalenessStatus::Fresh => fresh += 1,
-                StalenessStatus::Unknown => unknown += 1,
-                StalenessStatus::SourceChanged { .. }
-                | StalenessStatus::SymbolMissing { .. }
-                | StalenessStatus::AmbiguousFileMove { .. }
-                | StalenessStatus::FileMissing => {
-                    stale += 1;
-                    let reason = match &status {
-                        StalenessStatus::SourceChanged { .. } => "source_changed",
-                        StalenessStatus::SymbolMissing { .. } => "symbol_missing",
-                        StalenessStatus::AmbiguousFileMove { .. } => "ambiguous_file_move",
-                        StalenessStatus::FileMissing => "file_missing",
-                        StalenessStatus::Unknown | StalenessStatus::Fresh => unreachable!(),
-                    };
-                    let (_, target_label) = target_label(&entry.target);
-                    if should_output_json(cli, None) {
-                        let candidate_paths = match &status {
-                            StalenessStatus::AmbiguousFileMove { candidate_paths } => {
-                                candidate_paths.clone()
-                            }
-                            _ => Vec::new(),
-                        };
-                        issues.push(serde_json::json!({
-                            "target": target_label,
-                            "scope": annotation.scope.to_string(),
-                            "reason": reason,
-                            "annotation_id": annotation.annotation_id,
-                            "content": current.content.chars().take(80).collect::<String>(),
-                            "candidate_paths": candidate_paths,
-                        }));
-                    } else {
-                        println!("  ✗ {}  {}  {}", target_label, annotation.scope, reason,);
-                    }
+            let (reason, candidate_paths, candidate_lines) = match &status {
+                StalenessStatus::Fresh => {
+                    fresh += 1;
+                    continue;
                 }
+                StalenessStatus::Unknown => {
+                    unknown += 1;
+                    continue;
+                }
+                StalenessStatus::SourceChanged { .. } => ("source_changed", Vec::new(), Vec::new()),
+                StalenessStatus::SymbolMissing { .. } => ("symbol_missing", Vec::new(), Vec::new()),
+                StalenessStatus::SymbolAmbiguous {
+                    candidate_lines, ..
+                } => ("symbol_ambiguous", Vec::new(), candidate_lines.clone()),
+                StalenessStatus::AmbiguousFileMove { candidate_paths } => {
+                    ("ambiguous_file_move", candidate_paths.clone(), Vec::new())
+                }
+                StalenessStatus::FileMissing => ("file_missing", Vec::new(), Vec::new()),
+            };
+            stale += 1;
+            let (_, target_label) = target_label(&entry.target);
+            if should_output_json(cli, None) {
+                issues.push(serde_json::json!({
+                    "target": target_label,
+                    "scope": annotation.scope.to_string(),
+                    "reason": reason,
+                    "annotation_id": annotation.annotation_id,
+                    "content": current.content.chars().take(80).collect::<String>(),
+                    "candidate_paths": candidate_paths,
+                    "candidate_lines": candidate_lines,
+                }));
+            } else {
+                println!("  ✗ {}  {}  {}", target_label, annotation.scope, reason);
             }
         }
     }
