@@ -262,6 +262,12 @@ mod tests {
             .expect("signed child")
             .id()
             .expect("child ID");
+        assert_eq!(
+            replica
+                .source_ancestry_counts(selected)
+                .expect("closure counts"),
+            (2, 2)
+        );
         let graph = replica
             .source_ancestry(selected, 2, 16 * 1024 * 1024)
             .expect("exact two records");

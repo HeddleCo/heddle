@@ -6,6 +6,26 @@ use rusqlite::params;
 
 use super::{Error, Result, ThreadReplica};
 impl ThreadReplica {
+    /// Count the selected causal closure without loading its original records.
+    /// Publication can report a whole-Thread limit before preparing an upload.
+    pub fn source_ancestry_counts(&self, selected: ContentHash) -> Result<(usize, usize)> {
+        let (operations, states): (i64, i64) = self.connect()?.query_row(
+            "WITH RECURSIVE ancestry(id) AS (
+                SELECT ?1 UNION SELECT operation FROM thread_owner_claim_frontier WHERE thread=?2
+                UNION SELECT p.parent FROM parents p JOIN ancestry a ON p.child=a.id
+             ) SELECT count(*),count(DISTINCT o.source_revision)
+               FROM ancestry a JOIN operations o ON o.id=a.id",
+            params![selected.as_bytes(), self.thread.as_bytes()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((
+            usize::try_from(operations)
+                .map_err(|_| Error::Invalid("invalid source operation count".into()))?,
+            usize::try_from(states)
+                .map_err(|_| Error::Invalid("invalid source State count".into()))?,
+        ))
+    }
+
     pub fn source_ancestry(
         &self,
         selected: ContentHash,
@@ -73,9 +93,12 @@ impl ThreadReplica {
                 .checked_add(canonical.len() + signature.len() + receipt_bytes + 128)
                 .ok_or_else(|| Error::Invalid("source ancestry byte overflow".into()))?;
             if output.len() >= max_records || bytes > max_bytes {
-                return Err(Error::Invalid(
-                    "source ancestry exceeds transfer budget".into(),
-                ));
+                return Err(Error::SourceAncestryBudgetExceeded {
+                    records: output.len() + 1,
+                    bytes,
+                    max_records,
+                    max_bytes,
+                });
             }
             if status != 1 || thread != self.thread.as_bytes() || facet != 1 {
                 return Err(Error::Invalid(

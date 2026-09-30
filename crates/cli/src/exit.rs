@@ -251,6 +251,8 @@ impl HeddleExitCode {
                     | wire::ProtocolError::AuthenticationFailed(_) => Self::NoPerm,
                     wire::ProtocolError::ObjectNotFound(_) => Self::Config,
                     wire::ProtocolError::InvalidState(_)
+                    | wire::ProtocolError::PublicationLimitExceeded { .. }
+                    | wire::ProtocolError::PublicationOperationTooLarge { .. }
                     | wire::ProtocolError::AlreadyExists(_)
                     | wire::ProtocolError::Serialization(_)
                     | wire::ProtocolError::MessageTooLarge { .. }

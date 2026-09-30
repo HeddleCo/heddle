@@ -7,6 +7,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{Remote, contract::*, rpc, transport};
 
+mod batching;
+
 #[cfg(feature = "source-transfer")]
 mod acceptance;
 #[cfg(feature = "source-transfer")]
@@ -127,6 +129,24 @@ pub enum Error {
     Source(#[from] std::io::Error),
     #[error("invalid publication: {0}")]
     Invalid(&'static str),
+    #[error(
+        "publication {limit_name} limit is {limit}, required {actual} for {operations} operations"
+    )]
+    OriginalBudgetExceeded {
+        operations: usize,
+        limit_name: &'static str,
+        limit: usize,
+        actual: usize,
+    },
+    #[error(
+        "publication operation {operation} requires {bytes} encoded bytes; batch limit {batch_limit} bytes, frame limit {frame_limit} bytes"
+    )]
+    OriginalOperationTooLarge {
+        operation: usize,
+        bytes: usize,
+        batch_limit: usize,
+        frame_limit: usize,
+    },
 }
 
 impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
@@ -140,6 +160,10 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
+        // Preflight all originals before opening the exchange. The Ready may
+        // narrow the frame budget; re-batch again before sending any content.
+        let originals =
+            batching::bounded_originals(originals, &opening.client_operation_id, 512 * 1024)?;
         originals.validate_bounds()?;
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
@@ -197,6 +221,9 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         if !(1024..=512 * 1024).contains(&frame_limit) {
             return Err(Error::Invalid("unsupported publication frame budget"));
         }
+        let originals =
+            batching::bounded_originals(&originals, &opening.client_operation_id, frame_limit)?;
+        originals.validate_bounds()?;
         let upload = async {
             for body in originals
                 .geneses

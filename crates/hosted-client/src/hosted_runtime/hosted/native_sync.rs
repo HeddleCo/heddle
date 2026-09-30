@@ -6,7 +6,10 @@
 //! `HostedClient::fetch_native_source`. Provider-preferred Fetch is selected
 //! only when usable dial routes are present; otherwise the direct path runs.
 //! No v1 RepoSyncService frames.
-use std::time::Instant;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use api::heddle::api::{
     common::StateId as ApiStateId,
@@ -56,6 +59,7 @@ const SOURCE_OBJECTS: usize = 100_000;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const ANCESTRY_RECORDS: usize = 10_000;
 const ANCESTRY_BYTES: usize = 16 * 1024 * 1024;
+const LINEAGE_STATES: usize = 4096;
 const THREAD_PAGE_SIZE: u32 = 64;
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
@@ -145,6 +149,113 @@ fn signed_record(signed: &SignedOperation) -> Result<contract::SignedRecord, Pro
             signature: signed.signature.clone(),
         }],
     })
+}
+
+fn publication_limit(
+    thread: &str,
+    states: usize,
+    operations: usize,
+    limit_name: &'static str,
+    limit: usize,
+    actual: usize,
+) -> ProtocolError {
+    ProtocolError::PublicationLimitExceeded {
+        thread: thread.into(),
+        states,
+        operations,
+        limit_name,
+        limit,
+        actual,
+    }
+}
+
+fn publication_ancestry(
+    replica: &ThreadReplica,
+    selected: ContentHash,
+    name: &str,
+    max_states: usize,
+    max_operations: usize,
+) -> Result<Vec<repo::thread_replication::admission::StoredOperation>, ProtocolError> {
+    let (operations, states) = replica
+        .source_ancestry_counts(selected)
+        .map_err(replica_err)?;
+    if operations > max_operations {
+        return Err(publication_limit(
+            name,
+            states,
+            operations,
+            "operation count",
+            max_operations,
+            operations,
+        ));
+    }
+    if states > max_states {
+        return Err(publication_limit(
+            name,
+            states,
+            operations,
+            "State lineage",
+            max_states,
+            states,
+        ));
+    }
+    let stored = replica
+        .source_ancestry(selected, ANCESTRY_RECORDS, ANCESTRY_BYTES)
+        .map_err(|error| match error {
+            repo::thread_replication::Error::SourceAncestryBudgetExceeded {
+                bytes,
+                max_bytes,
+                ..
+            } => publication_limit(
+                name,
+                states,
+                operations,
+                "ancestry metadata bytes",
+                max_bytes,
+                bytes,
+            ),
+            other => replica_err(other),
+        })?;
+    // The indexed ancestry query walks backwards. A topological order also
+    // handles merges whose branches reach the same ancestor at different depths.
+    let mut records = BTreeMap::new();
+    let mut children: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
+    let mut remaining = BTreeMap::new();
+    let mut ready = BTreeSet::new();
+    for item in stored {
+        let operation = item.original.verify().map_err(native_error)?;
+        let id = operation.id().map_err(native_error)?;
+        remaining.insert(id, operation.parents.len());
+        if operation.parents.is_empty() {
+            ready.insert(id);
+        }
+        for parent in operation.parents {
+            children.entry(parent).or_default().push(id);
+        }
+        records.insert(id, item);
+    }
+    let mut ordered = Vec::with_capacity(records.len());
+    while let Some(id) = ready.pop_first() {
+        let record = records
+            .remove(&id)
+            .ok_or_else(|| native_error("source ancestor unavailable"))?;
+        ordered.push(record);
+        if let Some(dependants) = children.remove(&id) {
+            for child in dependants {
+                let parents = remaining
+                    .get_mut(&child)
+                    .ok_or_else(|| native_error("source child unavailable"))?;
+                *parents -= 1;
+                if *parents == 0 {
+                    ready.insert(child);
+                }
+            }
+        }
+    }
+    if !records.is_empty() {
+        return Err(native_error("source ancestry is cyclic or incomplete"));
+    }
+    Ok(ordered)
 }
 
 fn operation_id(method: &str, caller: String) -> String {
@@ -532,6 +643,31 @@ impl HostedClient {
         creator_authority: &[u8],
         client_operation_id: String,
     ) -> Result<contract::PublicationReceipt, ProtocolError> {
+        self.publish_local_state_with_limits(
+            repo,
+            reference,
+            thread_name,
+            local_state,
+            creator_authority,
+            client_operation_id,
+            LINEAGE_STATES,
+            ANCESTRY_RECORDS,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_local_state_with_limits(
+        &self,
+        repo: &Repository,
+        reference: &ThreadRef,
+        thread_name: &str,
+        local_state: StateId,
+        creator_authority: &[u8],
+        client_operation_id: String,
+        max_states: usize,
+        max_operations: usize,
+    ) -> Result<contract::PublicationReceipt, ProtocolError> {
         let thread = overview_thread_id_from_ref(reference)?;
         let replica = match ThreadReplica::open(repo.heddle_dir(), thread) {
             Ok(replica) => replica,
@@ -587,9 +723,8 @@ impl HostedClient {
             .ok_or_else(|| {
                 ProtocolError::InvalidState("capture was not admitted on the hosted Thread".into())
             })?;
-        let stored = replica
-            .source_ancestry(operation, ANCESTRY_RECORDS, ANCESTRY_BYTES)
-            .map_err(replica_err)?;
+        let stored =
+            publication_ancestry(&replica, operation, thread_name, max_states, max_operations)?;
         let state = repo
             .store()
             .get_state(&local_state)?
@@ -623,28 +758,26 @@ impl HostedClient {
         )
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let mut operations = Vec::new();
-        let mut authority_admissions = Vec::new();
-        let mut boundary_acceptances = Vec::new();
         for item in &stored {
-            operations.push(signed_record(&item.original)?);
+            let mut unit = contract::ReplicationOperations {
+                operations: vec![signed_record(&item.original)?],
+                ..Default::default()
+            };
             if let Some(receipt) = &item.authority_admission {
-                authority_admissions.push(
+                unit.authority_admissions.push(
                     thread_api::authority_admission::encode(receipt)
                         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
                 );
-                boundary_acceptances.extend(
+                unit.boundary_acceptances.extend(
                     thread_api::boundary_acceptance::authority_evidence(Some(receipt))
                         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
                 );
             }
+            operations.push(unit);
         }
         let originals = PublicationOriginals {
             geneses: vec![replica.genesis_record().map_err(replica_err)?],
-            operations: vec![contract::ReplicationOperations {
-                boundary_acceptances,
-                operations,
-                authority_admissions,
-            }],
+            operations,
         };
         let remote = self.native().await.map_err(native_error)?;
         let source = EndpointRef {
@@ -664,7 +797,45 @@ impl HostedClient {
                 },
             )
             .await
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))
+            .map_err(|error| match error {
+                thread_api::publication::Error::OriginalBudgetExceeded {
+                    operations,
+                    limit_name,
+                    limit,
+                    actual,
+                } => {
+                    // The preflight counts distinct States; duplicate publisher
+                    // operations never inflate the State lineage count.
+                    let states = replica
+                        .source_ancestry_counts(operation)
+                        .map_err(replica_err)
+                        .map(|(_, states)| states);
+                    match states {
+                        Ok(states) => publication_limit(
+                            thread_name,
+                            states,
+                            operations,
+                            limit_name,
+                            limit,
+                            actual,
+                        ),
+                        Err(error) => error,
+                    }
+                }
+                thread_api::publication::Error::OriginalOperationTooLarge {
+                    operation,
+                    bytes,
+                    batch_limit,
+                    frame_limit,
+                } => ProtocolError::PublicationOperationTooLarge {
+                    thread: thread_name.into(),
+                    operation,
+                    bytes,
+                    batch_limit,
+                    frame_limit,
+                },
+                other => native_error(other),
+            })
     }
 
     pub async fn pull_profiled(
@@ -1666,6 +1837,99 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn publication_limits_refuse_before_any_upload() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
+        replica.bind_local_name("main").expect("name");
+        let root = snapshot(&repo, Vec::new(), "root");
+        let middle = snapshot(&repo, vec![root.id()], "middle");
+        let last = snapshot(&repo, vec![middle.id()], "last");
+        let tip = snapshot(&repo, vec![root.id(), last.id()], "unequal merge paths");
+        admit_hosted_source_ancestry(
+            &repo,
+            &replica,
+            tip.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect("admit merge ancestry");
+        let selected = replica
+            .source_operation_page(tip.id(), None, 1)
+            .expect("tip")[0];
+        let ordered =
+            publication_ancestry(&replica, selected, "main", LINEAGE_STATES, ANCESTRY_RECORDS)
+                .expect("ancestor-first merge");
+        let mut seen = BTreeSet::new();
+        for item in ordered {
+            let operation = item.original.verify().expect("signed");
+            assert!(operation.parents.iter().all(|parent| seen.contains(parent)));
+            seen.insert(operation.id().expect("ID"));
+        }
+        let (client, server, captured) = super::super::native_exchange_test_server::start(
+            spool,
+            "main",
+            *replica.thread_id().as_bytes(),
+        )
+        .await;
+        let reference = ThreadRef {
+            spool: Some(SpoolRef {
+                id: spool.to_string(),
+            }),
+            id: Some(contract::ThreadId {
+                value: replica.thread_id().as_bytes().to_vec(),
+            }),
+        };
+        for (max_states, max_operations, expected) in [
+            (3, ANCESTRY_RECORDS, "State lineage"),
+            (LINEAGE_STATES, 3, "operation count"),
+        ] {
+            let error = client
+                .publish_local_state_with_limits(
+                    &repo,
+                    &reference,
+                    "main",
+                    tip.id(),
+                    &authority,
+                    "over-budget".into(),
+                    max_states,
+                    max_operations,
+                )
+                .await
+                .expect_err("local preflight must refuse");
+            assert!(
+                matches!(&error, ProtocolError::PublicationLimitExceeded {
+                thread, states: 4, operations: 4, limit_name, limit: 3, actual: 4,
+            } if thread == "main" && *limit_name == expected),
+                "{error}"
+            );
+            assert!(error.to_string().contains("weft#2432"));
+            assert!(error.to_string().contains("hosted import"));
+            let publication = captured.lock().expect("untouched fixture");
+            assert!(publication.thread_genesis.is_none());
+            assert!(publication.operations.is_empty());
+            assert!(publication.pack_data.is_empty());
+            assert!(!repo.heddle_dir().join("source-transfers").exists());
+        }
+        assert_eq!(
+            (LINEAGE_STATES, ANCESTRY_RECORDS, ANCESTRY_BYTES),
+            (4096, 10_000, 16 * 1024 * 1024)
+        );
+        client.close().await;
+        // Preflight never dials the fixture, so its accept loop has no client
+        // connection to close it. Stop and await this intentionally idle task.
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("idle server cancelled")
+                .is_cancelled()
+        );
     }
 
     static HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
