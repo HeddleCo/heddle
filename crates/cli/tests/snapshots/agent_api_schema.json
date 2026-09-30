@@ -3541,6 +3541,39 @@
         },
         "type": "object"
       },
+      "AgentReport": {
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "policy_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "segment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ],
+        "type": "object"
+      },
       "ChangesInfo": {
         "properties": {
           "added": {
@@ -3566,6 +3599,35 @@
           "modified",
           "added",
           "deleted"
+        ],
+        "type": "object"
+      },
+      "ClaimedProducerReport": {
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attribution": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/ResolverKindReport"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalReport"
+          }
+        },
+        "required": [
+          "attribution",
+          "kind",
+          "principal"
         ],
         "type": "object"
       },
@@ -4054,6 +4116,21 @@
         ],
         "type": "object"
       },
+      "PrincipalReport": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "email"
+        ],
+        "type": "object"
+      },
       "RepositoryContextInfo": {
         "properties": {
           "kind": {
@@ -4211,6 +4288,86 @@
         ],
         "type": "object"
       },
+      "ResolverKindReport": {
+        "enum": [
+          "human",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "SourceHeadReport": {
+        "properties": {
+          "current": {
+            "description": "This head is the local Thread tip.",
+            "type": "boolean"
+          },
+          "intent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "merge_action": {
+            "description": "Three-way merge this head into the local tip. Absent for the tip.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pick_action": {
+            "description": "Resolve the Thread to exactly this head's tree.",
+            "type": "string"
+          },
+          "producer": {
+            "$ref": "#/$defs/ClaimedProducerReport",
+            "description": "Attribution recorded in the head's State, not an authenticated actor."
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "current",
+          "producer",
+          "pick_action"
+        ],
+        "type": "object"
+      },
+      "SourceHeadsReport": {
+        "description": "A Thread whose source has several concurrent heads. Every head is listed;\nchoosing one to check out never discards the others.",
+        "properties": {
+          "current": {
+            "description": "Full State ID of the local Thread tip.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "heads": {
+            "description": "Every concurrent head, greatest State ID first.",
+            "items": {
+              "$ref": "#/$defs/SourceHeadReport"
+            },
+            "type": "array"
+          },
+          "selected_by": {
+            "description": "Rule a clone or pull used to choose `current`. Absent outside a\ntransfer. One of `local_tip`, `local_lineage_greatest_state_id`,\n`greatest_state_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread",
+          "heads"
+        ],
+        "type": "object"
+      },
       "StateInfo": {
         "properties": {
           "content_hash": {
@@ -4319,6 +4476,17 @@
             "type": "null"
           }
         ]
+      },
+      "alternative_heads": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SourceHeadsReport"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Concurrent source heads on the current Thread, until a pick or merge\nresolves them. Absent while the Thread has one head."
       },
       "attach_reason": {
         "type": [

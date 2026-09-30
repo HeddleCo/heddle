@@ -86,6 +86,17 @@ pub(super) fn summary_in(tx: &Transaction<'_>, thread: ContentHash) -> Result<(u
 }
 
 impl super::ThreadReplica {
+    /// Every current source head, from the indexed frontier. Empty before the
+    /// first admitted capture; more than one while concurrent heads await a
+    /// pick or merge.
+    pub fn source_head_revisions(&self) -> Result<std::collections::BTreeSet<StateId>> {
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        let (_, heads) = summary_in(&tx, self.thread)?;
+        tx.commit()?;
+        Ok(heads.into_iter().collect())
+    }
+
     /// Bounded display selectors, not source possession or audience authority.
     /// Callers must independently authorize every returned revision.
     pub fn current_source_revisions(&self, limit: usize) -> Result<Vec<StateId>> {
