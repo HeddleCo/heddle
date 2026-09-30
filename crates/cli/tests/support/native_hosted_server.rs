@@ -1356,6 +1356,10 @@ async fn serve_publication(
     fixture: Fixture,
 ) {
     let opening: v2::PublishContentClientFrame = read_message(&mut recv, &mut buffered).await;
+    if opening.encoded_len() > PUBLICATION_FRAME_BYTES {
+        reject_publication(&mut send, "publication frame budget exceeded").await;
+        return;
+    }
     let Some(v2::publish_content_client_frame::Body::Open(open)) = opening.body.clone() else {
         panic!("native publication must start with Open");
     };
@@ -1448,18 +1452,7 @@ async fn serve_publication(
             }
         });
         if let Some(message) = failure {
-            send.write_chunk(
-                api::framing::encode_stream_failure(&api::heddle::api::common::CallFailure {
-                    code: api::heddle::api::common::CallFailureCode::InvalidArgument as i32,
-                    message: message.into(),
-                    ..Default::default()
-                })
-                .expect("encode publication failure")
-                .into(),
-            )
-            .await
-            .expect("write publication failure");
-            send.finish().expect("finish rejected publication");
+            reject_publication(&mut send, message).await;
             return;
         }
         match frame.body {
@@ -1556,6 +1549,21 @@ async fn serve_publication(
             other => panic!("unexpected native publication frame: {other:?}"),
         }
     }
+}
+
+async fn reject_publication(send: &mut iroh::endpoint::SendStream, message: &str) {
+    send.write_chunk(
+        api::framing::encode_stream_failure(&api::heddle::api::common::CallFailure {
+            code: api::heddle::api::common::CallFailureCode::InvalidArgument as i32,
+            message: message.into(),
+            ..Default::default()
+        })
+        .expect("encode publication failure")
+        .into(),
+    )
+    .await
+    .expect("write publication failure");
+    send.finish().expect("finish rejected publication");
 }
 
 async fn serve_fetch(

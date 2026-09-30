@@ -121,11 +121,8 @@ impl ThreadReplica {
         }
         drop(rows);
         drop(statement);
-        let evidence = super::boundary_evidence::load_many(
-            &connection,
-            &evidence_ids,
-            max_bytes.saturating_sub(bytes),
-        )?;
+        let evidence =
+            super::boundary_evidence::load_many(&connection, &evidence_ids, bytes, max_bytes)?;
         for stored in &mut output {
             if let Some(receipt) = &mut stored.authority_admission
                 && let objects::object::original_boundary_acceptance::AdmissionBasis::BoundaryAcceptance {acceptance}=receipt.verify_signature()?.basis

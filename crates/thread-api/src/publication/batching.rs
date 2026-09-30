@@ -52,10 +52,47 @@ pub(super) fn bounded_originals(
             actual: operations,
         });
     }
+    if originals.operations.iter().any(|batch| {
+        batch.operations.is_empty() || batch.authority_admissions.len() > batch.operations.len()
+    }) {
+        return Err(Error::Invalid(
+            "bounded original genesis and source operations required",
+        ));
+    }
+    let bytes = originals
+        .geneses
+        .iter()
+        .map(Message::encoded_len)
+        .sum::<usize>()
+        + originals
+            .operations
+            .iter()
+            .map(Message::encoded_len)
+            .sum::<usize>();
+    if bytes <= PUBLICATION_BYTES
+        && originals.operations.iter().all(|batch| {
+            fits(
+                batch.operations.len(),
+                batch.encoded_len(),
+                operation_id,
+                frame_limit,
+            )
+        })
+    {
+        return Ok(originals.clone());
+    }
     let mut output = Vec::new();
     let mut current = ReplicationOperations::default();
     let mut index = 0;
     for batch in &originals.operations {
+        if batch.operations.len() == 1 && !fits(1, batch.encoded_len(), operation_id, frame_limit) {
+            return Err(Error::OriginalOperationTooLarge {
+                operation: index + 1,
+                bytes: batch.encoded_len(),
+                batch_limit: BATCH_BYTES,
+                frame_limit,
+            });
+        }
         // Decode sidecars only when present, to retain the exact receipt and
         // its evidence with the matching original after a frame-size split.
         #[cfg(not(feature = "replication"))]
@@ -219,6 +256,108 @@ mod tests {
                 body: Some(Body::Operations(batch)),
             };
             assert!(frame.encoded_len() <= 1024);
+        }
+    }
+
+    #[cfg(feature = "replication")]
+    #[test]
+    fn admission_sidecars_stay_with_their_exact_originals() {
+        use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
+        use heddle_object_model::object::{
+            CollaborationActor, ContentHash,
+            original_boundary_acceptance::AdmissionBasis,
+            thread_authority_admission::{OriginalAuthoritySubject, ThreadAuthorityAdmission},
+            thread_replication::{
+                OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
+                metadata::{AUTHORITY_FORMAT, Control, ThreadControl},
+            },
+        };
+        use uuid::Uuid;
+
+        use crate::contract::RecordSignature;
+        let author = Ed25519Signer::from_seed(&[41; 32]).expect("author");
+        let executor = Ed25519Signer::from_seed(&[42; 32]).expect("executor");
+        let mut input = originals(0, 0);
+        input.operations.clear();
+        for index in 1..=3 {
+            let control = ThreadControl {
+                version: 1,
+                spool: Uuid::from_u128(100),
+                actor: CollaborationActor {
+                    principal_id: Uuid::from_u128(101),
+                    agent_id: None,
+                },
+                authority_digest: ContentHash::compute_typed(AUTHORITY_FORMAT, b"authority"),
+                authority_envelope: b"authority".to_vec(),
+                client_operation_id: Uuid::from_u128(index),
+                occurred_at_ms: 1,
+                control: Control::Name(format!("original {index}")),
+            };
+            let operation = ThreadOperation {
+                version: 1,
+                thread: ContentHash::from_bytes([43; 32]),
+                parents: Default::default(),
+                publisher: author.public_key().try_into().expect("key"),
+                body: ThreadOperationBody::Metadata(control.encode().expect("control")),
+            };
+            let signed = SignedOperation::sign(&operation, &author).expect("original");
+            let receipt = ThreadAuthorityAdmission {
+                version: 3,
+                basis: AdmissionBasis::OriginalAuthority,
+                spool: control.spool,
+                spool_genesis: ContentHash::from_bytes([44; 32]),
+                thread: operation.thread,
+                subject: OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
+                actor: control.actor,
+                publisher: operation.publisher,
+                authority_digest: control.authority_digest,
+                executor: executor.public_key().try_into().expect("key"),
+                admitted_at_ms: 2000,
+            };
+            let receipt = crate::authority_admission::sign(&receipt, &executor).expect("receipt");
+            input.operations.push(ReplicationOperations {
+                operations: vec![crate::contract::SignedRecord {
+                    format: OPERATION_FORMAT.into(),
+                    canonical_record: signed.canonical,
+                    signatures: vec![RecordSignature {
+                        public_key: operation.publisher.to_vec(),
+                        signature: signed.signature,
+                    }],
+                }],
+                authority_admissions: vec![receipt],
+                ..Default::default()
+            });
+        }
+        let combined = PublicationOriginals {
+            geneses: input.geneses.clone(),
+            operations: vec![ReplicationOperations {
+                operations: input
+                    .operations
+                    .iter()
+                    .flat_map(|batch| batch.operations.clone())
+                    .collect(),
+                authority_admissions: input
+                    .operations
+                    .iter()
+                    .flat_map(|batch| batch.authority_admissions.clone())
+                    .collect(),
+                ..Default::default()
+            }],
+        };
+        let large = bounded_originals(&combined, "publication", 512 * 1024).expect("combined");
+        assert_eq!(large.operations.len(), 1);
+        let unit_bytes = input.operations[0].encoded_len();
+        let smaller =
+            bounded_originals(&large, "publication", unit_bytes + 64).expect("split with sidecars");
+        assert_eq!(smaller.operations.len(), 3);
+        for (batch, original) in smaller.operations.iter().zip(&input.operations) {
+            assert_eq!(batch, original);
+            assert_eq!(
+                crate::authority_admission::match_batch(batch)
+                    .expect("exact matched sidecar")
+                    .len(),
+                1
+            );
         }
     }
 

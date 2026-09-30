@@ -25,8 +25,8 @@ use objects::{
     object::{
         CollaborationActor, ContentHash, StateId, ThreadName,
         thread_replication::{
-            AuthoredCapture, GenesisOwner, OPERATION_FORMAT, ThreadGenesis, ThreadOperation,
-            ThreadOperationBody, hosted_import::synthetic_initial_base,
+            AuthoredCapture, GenesisOwner, ThreadGenesis, ThreadOperation, ThreadOperationBody,
+            hosted_import::synthetic_initial_base,
         },
     },
     store::ObjectStore,
@@ -137,20 +137,6 @@ fn hosted_ref_from_overview(
     )))
 }
 
-fn signed_record(signed: &SignedOperation) -> Result<contract::SignedRecord, ProtocolError> {
-    let operation = signed
-        .verify()
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-    Ok(contract::SignedRecord {
-        format: OPERATION_FORMAT.into(),
-        canonical_record: signed.canonical.clone(),
-        signatures: vec![contract::RecordSignature {
-            public_key: operation.publisher.to_vec(),
-            signature: signed.signature.clone(),
-        }],
-    })
-}
-
 fn publication_limit(
     thread: &str,
     states: usize,
@@ -175,7 +161,13 @@ fn publication_ancestry(
     name: &str,
     max_states: usize,
     max_operations: usize,
-) -> Result<Vec<repo::thread_replication::admission::StoredOperation>, ProtocolError> {
+) -> Result<
+    (
+        Vec<repo::thread_replication::admission::StoredOperation>,
+        usize,
+    ),
+    ProtocolError,
+> {
     let (operations, states) = replica
         .source_ancestry_counts(selected)
         .map_err(replica_err)?;
@@ -255,7 +247,7 @@ fn publication_ancestry(
     if !records.is_empty() {
         return Err(native_error("source ancestry is cyclic or incomplete"));
     }
-    Ok(ordered)
+    Ok((ordered, states))
 }
 
 fn operation_id(method: &str, caller: String) -> String {
@@ -723,7 +715,7 @@ impl HostedClient {
             .ok_or_else(|| {
                 ProtocolError::InvalidState("capture was not admitted on the hosted Thread".into())
             })?;
-        let stored =
+        let (stored, state_count) =
             publication_ancestry(&replica, operation, thread_name, max_states, max_operations)?;
         let state = repo
             .store()
@@ -757,24 +749,32 @@ impl HostedClient {
             },
         )
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let mut operations = Vec::new();
-        for item in &stored {
-            let mut unit = contract::ReplicationOperations {
-                operations: vec![signed_record(&item.original)?],
-                ..Default::default()
-            };
-            if let Some(receipt) = &item.authority_admission {
-                unit.authority_admissions.push(
-                    thread_api::authority_admission::encode(receipt)
-                        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
-                );
-                unit.boundary_acceptances.extend(
-                    thread_api::boundary_acceptance::authority_evidence(Some(receipt))
-                        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
-                );
-            }
-            operations.push(unit);
-        }
+        let operations = thread_api::authority_admission::batches(
+            stored
+                .into_iter()
+                .map(|item| thread_api::replication::store::ReceivedOperation {
+                    original: item.original,
+                    authority_admission: item.authority_admission,
+                }),
+            256 * 1024,
+            128,
+        )
+        .map_err(native_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| match error {
+            thread_api::transport::Error::OriginalOperationTooLarge {
+                operation,
+                bytes,
+                limit,
+            } => ProtocolError::PublicationOperationTooLarge {
+                thread: thread_name.into(),
+                operation,
+                bytes,
+                batch_limit: limit,
+                frame_limit: 512 * 1024,
+            },
+            other => native_error(other),
+        })?;
         let originals = PublicationOriginals {
             geneses: vec![replica.genesis_record().map_err(replica_err)?],
             operations,
@@ -803,25 +803,14 @@ impl HostedClient {
                     limit_name,
                     limit,
                     actual,
-                } => {
-                    // The preflight counts distinct States; duplicate publisher
-                    // operations never inflate the State lineage count.
-                    let states = replica
-                        .source_ancestry_counts(operation)
-                        .map_err(replica_err)
-                        .map(|(_, states)| states);
-                    match states {
-                        Ok(states) => publication_limit(
-                            thread_name,
-                            states,
-                            operations,
-                            limit_name,
-                            limit,
-                            actual,
-                        ),
-                        Err(error) => error,
-                    }
-                }
+                } => publication_limit(
+                    thread_name,
+                    state_count,
+                    operations,
+                    limit_name,
+                    limit,
+                    actual,
+                ),
                 thread_api::publication::Error::OriginalOperationTooLarge {
                     operation,
                     bytes,
@@ -1844,7 +1833,11 @@ mod tests {
         let _process_env_guard = crate::test_process_env::exclusive().await;
         let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
         replica.bind_local_name("main").expect("name");
-        let root = snapshot(&repo, Vec::new(), "root");
+        let root = snapshot(
+            &repo,
+            vec![replica.genesis().expect("genesis").base],
+            "root",
+        );
         let middle = snapshot(&repo, vec![root.id()], "middle");
         let last = snapshot(&repo, vec![middle.id()], "last");
         let tip = snapshot(&repo, vec![root.id(), last.id()], "unequal merge paths");
@@ -1862,7 +1855,7 @@ mod tests {
         let selected = replica
             .source_operation_page(tip.id(), None, 1)
             .expect("tip")[0];
-        let ordered =
+        let (ordered, _) =
             publication_ancestry(&replica, selected, "main", LINEAGE_STATES, ANCESTRY_RECORDS)
                 .expect("ancestor-first merge");
         let mut seen = BTreeSet::new();

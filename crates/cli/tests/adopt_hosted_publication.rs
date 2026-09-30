@@ -327,7 +327,8 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         .expect("Git importer");
     {
         let input = importer.stdin.as_mut().expect("import input");
-        for index in 0..states {
+        let git_states = if capture_again { 1 } else { states };
+        for index in 0..git_states {
             let content = format!("State {index}\n");
             writeln!(input, "commit refs/heads/main\ncommitter Git Author <author@example.com> {} +0000\ndata 0\nM 100644 inline story.txt\ndata {}\n{}", 1_700_000_000 + index, content.len(), content)
                 .expect("write commit");
@@ -344,7 +345,56 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
     )
     .expect("adopt history");
     let adopted = repo::Repository::open(&work).expect("adopted repo");
-    let tip = adopted.current_state().expect("HEAD").expect("State");
+    let mut tip = adopted.current_state().expect("HEAD").expect("State");
+    if capture_again {
+        // Build admitted native originals directly, retaining the real signing
+        // and admission path without repeating capture's identity/reference
+        // preparation for this unchanged tree. Git adoption is covered above.
+        use crypto::{Signer, thread_operation::SignedOperation};
+        use objects::object::thread_replication::{
+            AuthoredCapture, ThreadOperation, ThreadOperationBody,
+        };
+        let replica = adopted.native_thread("main").expect("native Thread");
+        let signer = adopted
+            .native_thread_signer(&replica)
+            .expect("source signer");
+        let mut parent = replica
+            .source_operation_page(tip.id(), None, 1)
+            .expect("root original")[0];
+        for index in 1..states {
+            let state = objects::object::State::new_snapshot(
+                tip.tree,
+                vec![tip.id()],
+                tip.attribution.clone(),
+            )
+            .with_intent(format!("native capture {index}"));
+            adopted.store().put_state(&state).expect("store capture");
+            let operation = ThreadOperation {
+                version: 1,
+                thread: replica.thread_id(),
+                parents: std::collections::BTreeSet::from([parent]),
+                publisher: signer.public_key().try_into().expect("publisher"),
+                body: ThreadOperationBody::Capture(AuthoredCapture::local(
+                    state
+                        .encode_current_msgpack()
+                        .expect("canonical State")
+                        .into(),
+                )),
+            };
+            let signed = SignedOperation::sign(&operation, &signer).expect("sign capture");
+            assert_eq!(
+                replica
+                    .receive_prepared_source(&signed, adopted.store(), |_| Ok(()))
+                    .expect("admit capture"),
+                objects::object::thread_replication::Admission::Accepted
+            );
+            parent = operation.id().expect("capture ID");
+            tip = state;
+        }
+        adopted
+            .set_thread_recorded(&objects::object::ThreadName::new("main"), &tip.id())
+            .expect("advance main");
+    }
     let spool = std::fs::read_to_string(work.join(".heddle/spool-id"))
         .expect("Spool")
         .trim()

@@ -25,6 +25,7 @@ pub struct AuthorityBatches<I> {
     max_bytes: usize,
     max_operations: usize,
     ended: bool,
+    consumed: usize,
 }
 pub fn batches<I: IntoIterator<Item = ReceivedOperation>>(
     originals: I,
@@ -41,6 +42,7 @@ pub fn batches<I: IntoIterator<Item = ReceivedOperation>>(
         max_bytes: max_batch_bytes,
         max_operations,
         ended: false,
+        consumed: 0,
     })
 }
 impl<I: Iterator<Item = ReceivedOperation>> Iterator for AuthorityBatches<I> {
@@ -71,7 +73,10 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
             let candidate = match self.pending.take() {
                 Some(value) => value,
                 None => match self.input.next() {
-                    Some(value) => encode(value)?,
+                    Some(value) => {
+                        self.consumed += 1;
+                        encode(value)?
+                    }
                     None => break,
                 },
             };
@@ -106,9 +111,11 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
             let required = bytes.saturating_add(extra).saturating_add(acceptance_bytes);
             if required > self.max_bytes {
                 if batch.operations.is_empty() {
-                    return Err(Error::Protocol(
-                        "original and matched evidence exceed batch budget",
-                    ));
+                    return Err(Error::OriginalOperationTooLarge {
+                        operation: self.consumed,
+                        bytes: required,
+                        limit: self.max_bytes,
+                    });
                 }
                 self.pending = Some(candidate);
                 break;
