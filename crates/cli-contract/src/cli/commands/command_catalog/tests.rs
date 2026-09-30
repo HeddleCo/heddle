@@ -1933,6 +1933,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // compare-and-swap replacement emit stable trust records.
             "auth trust show",
             "auth trust replace",
+            "auth derive-agent",
             "auth create-service-token",
             // heddle whoami (H6, weft#642): the machine-readable
             // acting-identity verb emits `output_kind: "whoami"`, so it

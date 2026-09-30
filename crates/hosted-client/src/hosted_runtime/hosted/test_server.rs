@@ -611,7 +611,7 @@ async fn serve_native_get_identity(
     let response = v2::GetIdentityResponse {
         identity: Some(v2::PrincipalRecord {
             id: "principal-1".into(),
-            account_id: "account-1".into(),
+            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
             handle: "acme".into(),
             rooting_tier: v2::RootingTier::SelfRooted as i32,
             ..Default::default()
@@ -619,6 +619,8 @@ async fn serve_native_get_identity(
         current_credential: Some(v2::CurrentCredentialRecord {
             kind: v2::CredentialKind::Agent as i32,
             subject: "agent:reviewer".into(),
+            thread_control_authority: vec![6; 32],
+            acting_agent_id: "reviewer-1".into(),
             ..Default::default()
         }),
         billing_lock: Some(api::heddle::api::common::AccountBillingLock {

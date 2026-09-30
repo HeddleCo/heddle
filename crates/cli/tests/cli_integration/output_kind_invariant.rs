@@ -79,6 +79,7 @@ const SWEPT: &[&str] = &[
     "auth trust show",
     "auth trust replace",
     "auth create-service-token",
+    "auth derive-agent",
     "revert",
     "redact apply",
     "redact list",

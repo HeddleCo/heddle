@@ -71,11 +71,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    serde_json::json!(
-        std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
-            .chain(args.into_iter().map(|arg| arg.as_ref().to_string()))
-            .collect::<Vec<_>>()
-    )
+    cli_test_support::heddle_argv_json(args)
 }
 
 fn canonical_path_string(path: &std::path::Path) -> String {

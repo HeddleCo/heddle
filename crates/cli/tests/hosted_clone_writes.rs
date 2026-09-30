@@ -265,6 +265,130 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_derived_agent_clones_and_pushes_its_spool() {
+    let mut fixture = Fixture::new().await;
+    let child = fixture._temp.path().join("scoped.hcred");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "auth",
+            "derive-agent",
+            "--server",
+            &fixture.https.authority,
+            "--scope",
+            "spool:acme",
+            "--out",
+            child.to_str().expect("child path"),
+        ],
+    );
+    fixture.credential = child;
+    fixture
+        .captured
+        .lock()
+        .expect("scope enforcement")
+        .enforce_scope = true;
+    fixture.clone = fixture._temp.path().join("scoped-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "clone",
+            &fixture.remote(),
+            fixture.clone.to_str().expect("clone path"),
+        ],
+    );
+    fixture.assert_identity();
+    fixture.capture();
+    assert_push_succeeded(&fixture, &fixture.clone);
+    fixture.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn derive_agent_json_output_contract() {
+    let fixture = Fixture::new().await;
+    let mode = "json";
+    for export in [true, false] {
+        let path = fixture._temp.path().join(format!("{mode}.hcred"));
+        let mut args = vec![
+            "--output",
+            mode,
+            "auth",
+            "derive-agent",
+            "--server",
+            &fixture.https.authority,
+            "--agent-id",
+            "scoped-worker",
+            "--scope",
+            "spool:acme",
+            "--template",
+            "contributor",
+            "--ttl",
+            "900",
+        ];
+        if export {
+            args.extend(["--out", path.to_str().expect("path")]);
+        }
+        let output = fixture.output_at(fixture._temp.path(), &args);
+        assert!(
+            output.status.success(),
+            "derive JSON: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).expect("single JSON document");
+        assert_eq!(value["output_kind"], "auth_derive_agent");
+        assert_eq!(value["status"], "derived");
+        assert_eq!(value["agent_id"], "scoped-worker");
+        assert_eq!(value["scopes"], serde_json::json!(["spool:acme"]));
+        assert_eq!(value["template"], "contributor");
+        assert!(
+            value["allowed_operations"]
+                .as_array()
+                .expect("operations")
+                .iter()
+                .any(|op| op == "PublishContent")
+        );
+        assert_eq!(value["installed"], !export);
+        assert_eq!(
+            value["credential_path"],
+            if export {
+                serde_json::json!(path)
+            } else {
+                Value::Null
+            }
+        );
+        let remaining =
+            chrono::DateTime::parse_from_rfc3339(value["expires_at"].as_str().expect("expiry"))
+                .expect("RFC3339")
+                .with_timezone(&chrono::Utc)
+                - chrono::Utc::now();
+        assert!((850..=900).contains(&remaining.num_seconds()));
+        assert!(value.get("token").is_none());
+        assert!(value.get("proof_key_pem").is_none());
+        let schema = heddle_schema("auth derive-agent");
+        assert_eq!(
+            schema["properties"]["output_kind"]["enum"],
+            serde_json::json!(["auth_derive_agent"])
+        );
+        for field in schema["required"].as_array().expect("required fields") {
+            assert!(value.get(field.as_str().expect("field name")).is_some());
+        }
+    }
+    let catalog: Value =
+        serde_json::from_str(&fixture.run(&["help", "--output", "json"])).expect("catalog");
+    let commands = catalog["commands"].as_array().expect("commands");
+    let entry = commands
+        .iter()
+        .find(|entry| entry["path"] == serde_json::json!(["auth", "derive-agent"]))
+        .expect("derive catalog");
+    assert_eq!(entry["supports_json"], true);
+    assert_eq!(
+        entry["schema_verbs"],
+        serde_json::json!(["auth derive-agent"])
+    );
+    fixture.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_clone_capture_push_main() {
     let fixture = Fixture::new().await;
     fixture.capture();
