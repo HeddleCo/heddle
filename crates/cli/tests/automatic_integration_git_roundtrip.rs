@@ -46,7 +46,6 @@ fn heddle(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HEDDLE_HOME", home)
         .env("HEDDLE_CONFIG", home.join("config.toml"))
-        .env("TMPDIR", "/home/scratch")
         .env("HEDDLE_PRINCIPAL_NAME", "Roundtrip Test")
         .env("HEDDLE_PRINCIPAL_EMAIL", "roundtrip@example.com")
         .env("HEDDLE_FSMONITOR", "off")
@@ -67,8 +66,8 @@ enum Workflow {
 }
 
 fn roundtrip(workflow: Workflow) {
-    let temp = TempDir::new_in("/home/scratch").expect("repro directory");
-    let home = TempDir::new_in("/home/scratch").expect("isolated HEDDLE_HOME");
+    let temp = TempDir::new().expect("repro directory");
+    let home = TempDir::new().expect("isolated HEDDLE_HOME");
     let source = temp.path().join("source");
     fs::create_dir(&source).expect("source directory");
     git(&source, &["init", "-b", "main"]);
