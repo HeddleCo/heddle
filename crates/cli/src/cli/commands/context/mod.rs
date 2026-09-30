@@ -45,6 +45,7 @@ pub(crate) struct RevisionOutput {
 pub(crate) struct AnnotationOutput {
     pub(crate) annotation_id: String,
     pub(crate) status: String,
+    pub(crate) visibility: String,
     pub(crate) scope: String,
     pub(crate) kind: String,
     pub(crate) content: String,
@@ -65,6 +66,7 @@ impl AnnotationOutput {
         let current = &annotation.revisions[annotation.revisions.len() - 1];
         Self {
             annotation_id: annotation.annotation_id.clone(),
+            visibility: for_thread::visibility_label(&annotation.visibility),
             status: match annotation.status {
                 AnnotationStatus::Active => "active".to_string(),
                 AnnotationStatus::Superseded => "superseded".to_string(),
@@ -502,6 +504,12 @@ pub(crate) fn print_context_get(
         println!("{target_kind} {target_label}");
         for annotation in annotations {
             let current = &annotation.revisions[annotation.revisions.len() - 1];
+            println!(
+                "visibility: {}",
+                crate::cli::style::human_text(&for_thread::visibility_label(
+                    &annotation.visibility
+                ))
+            );
             if !annotation.divergent_revision_ids.is_empty() {
                 println!(
                     "--- {} (diverged: needs a decision) ---",
@@ -581,6 +589,7 @@ mod tests {
             1,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         );
         let first = annotation.revisions[0].revision_id.clone();
         annotation.revise(
@@ -641,6 +650,7 @@ mod tests {
             1_700_000_000,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         );
         annotation.anchor_status = AnnotationAnchorStatus::Ambiguous {
             candidate_paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],

@@ -528,6 +528,7 @@ mod tests {
             1700000000,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         )
     }
 
@@ -671,6 +672,7 @@ mod tests {
             created_at,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         );
         a.annotation_id = id.to_string();
         a
@@ -691,6 +693,7 @@ mod tests {
             1_700_000_000,
             source_hash,
             Some(state.id()),
+            objects::object::VisibilityTier::Public,
         )
     }
 
@@ -1168,6 +1171,7 @@ mod review_1863 {
             10,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         )
     }
     fn amend(a: &Annotation, text: &str, ts: i64) -> Annotation {
@@ -1193,6 +1197,7 @@ mod review_1863 {
             0,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         )
     }
     #[test]

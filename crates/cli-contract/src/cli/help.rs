@@ -1007,6 +1007,7 @@ record the file and selector; `--state` is the historical revision:\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
 - `resolve <id> --mode into-annotation --body <text>` creates and links a\n\
   context annotation; `--kind` defaults to rationale and `--tag` is repeatable.\n\
+  Visibility is inherited; `--visibility` may only narrow the discussion audience.\n\
 - `reopen <id> --reason <text>`          compensates a prior resolution.\n\
 \n\
 `--body` is inline markdown; `--file` is a markdown body file. `--thread <ref>`\n\

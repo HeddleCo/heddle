@@ -355,6 +355,21 @@ pub async fn push_context(
         return Ok(0);
     }
 
+    // The collaboration ContextDraft/ContextRevision contract has no audience
+    // field. Local native transfer preserves ContextBlob visibility, but this
+    // hosted context operation would discard it. Refuse before any RPC.
+    if let Some(annotation) = entries
+        .iter()
+        .flat_map(|entry| &entry.blob.annotations)
+        .find(|annotation| annotation.visibility != objects::object::VisibilityTier::Public)
+    {
+        anyhow::bail!(
+            "hosted context {} cannot preserve {:?} visibility in the collaboration contract; replication is incomplete",
+            annotation.annotation_id,
+            annotation.visibility
+        );
+    }
+
     let user_config = config::UserConfig::load_default().unwrap_or_default();
     let self_local_attr = crate::attribution::resolve_attribution(repo, &user_config)
         .ok()
@@ -1449,12 +1464,78 @@ mod tests {
             1_700_000_000,
             None,
             Some(state.id()),
+            objects::object::VisibilityTier::Public,
         );
         let root = repo
             .set_context_blob(None, &target, &ContextBlob::new(vec![annotation.clone()]))
             .unwrap();
         put_context_attachment(&repo, &head_state, Some(root)).unwrap();
         (temp, repo, annotation)
+    }
+
+    #[tokio::test]
+    async fn hosted_context_publication_refuses_to_discard_source_visibility() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let (_temp, repo, mut annotation) = seed_local_context_annotation("confidential");
+        let state = repo.current_state().unwrap().unwrap();
+        for visibility in [
+            objects::object::VisibilityTier::Internal,
+            objects::object::VisibilityTier::TeamScoped {
+                team_id: "engineering".into(),
+            },
+            objects::object::VisibilityTier::Restricted {
+                scope_label: "evaluation".into(),
+            },
+            objects::object::VisibilityTier::Private {
+                scope_label: "evaluation".into(),
+            },
+        ] {
+            annotation.visibility = visibility;
+            let root = repo
+                .set_context_blob(
+                    None,
+                    &ContextTarget::file("lib.rs").unwrap(),
+                    &ContextBlob::new(vec![annotation.clone()]),
+                )
+                .unwrap();
+            put_context_attachment(&repo, &state, Some(root)).unwrap();
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            let error = push_context(&repo, &mut client, "acme/widgets", "main")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("cannot preserve"), "{error}");
+            assert!(
+                !mirror_path(repo.heddle_dir()).exists(),
+                "refusal must precede publication preparation"
+            );
+            client.close().await;
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn incoming_private_annotation_retains_visibility_on_first_pull() {
+        let _guard = crate::test_process_env::shared_blocking();
+        let (_temp, repo, mut server) = seed_local_context_annotation("private remote decision");
+        server.visibility = objects::object::VisibilityTier::Private {
+            scope_label: "evaluation".into(),
+        };
+        let state = repo.current_state().unwrap().unwrap();
+        let target = ContextTarget::file("imported.rs").unwrap();
+        pull_one_annotation(
+            &repo,
+            "acme/widgets",
+            &state,
+            &target,
+            &server,
+            None,
+            None,
+            &mut HostedContextMirror::default(),
+        )
+        .unwrap();
+        let root = context_root_for_state(&repo, &state).unwrap().unwrap();
+        let imported = repo.get_context_blob(&root, &target).unwrap().unwrap();
+        assert_eq!(imported.annotations[0].visibility, server.visibility);
     }
 
     #[tokio::test]

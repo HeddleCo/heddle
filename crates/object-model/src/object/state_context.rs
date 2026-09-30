@@ -164,6 +164,8 @@ versioned_msgpack_blob! {
 }
 
 impl Annotation {
+    /// Create an annotation with an explicit audience. Derived annotations must
+    /// carry their source visibility rather than choosing a creation default.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         scope: AnnotationScope,
@@ -174,6 +176,7 @@ impl Annotation {
         created_at: i64,
         source_hash: Option<ContentHash>,
         created_at_state: Option<StateId>,
+        visibility: VisibilityTier,
     ) -> Self {
         Self {
             annotation_id: uuid::Uuid::now_v7().to_string(),
@@ -191,7 +194,7 @@ impl Annotation {
             }],
             supersedes_annotation_id: None,
             supersedes_rewrite_pct: None,
-            visibility: VisibilityTier::default(),
+            visibility,
             resolved_from_discussion: None,
             anchor_status: AnnotationAnchorStatus::default(),
             divergent_revision_ids: Vec::new(),
@@ -517,6 +520,49 @@ impl std::fmt::Display for AnnotationScope {
 mod tests {
     use super::*;
 
+    #[test]
+    fn explicit_visibility_survives_revision_and_blob_round_trip() {
+        for visibility in [
+            VisibilityTier::Public,
+            VisibilityTier::Internal,
+            VisibilityTier::TeamScoped {
+                team_id: "engineering".into(),
+            },
+            VisibilityTier::Restricted {
+                scope_label: "evaluation".into(),
+            },
+            VisibilityTier::Private {
+                scope_label: "evaluation".into(),
+            },
+        ] {
+            let mut annotation = Annotation::new(
+                AnnotationScope::File,
+                AnnotationKind::Invariant,
+                "decision".into(),
+                vec![],
+                "test@example.com".into(),
+                1,
+                None,
+                None,
+                visibility.clone(),
+            );
+            annotation.revise(
+                AnnotationKind::Invariant,
+                "revised decision".into(),
+                vec![],
+                "test@example.com".into(),
+                2,
+                None,
+                None,
+            );
+            let decoded =
+                ContextBlob::decode(&ContextBlob::new(vec![annotation]).encode().expect("encode"))
+                    .expect("decode");
+            assert_eq!(decoded.annotations[0].visibility, visibility);
+            assert_eq!(decoded.annotations[0].revisions.len(), 2);
+        }
+    }
+
     // --- ContextTarget::file validation --------------------------------
 
     #[test]
@@ -598,6 +644,7 @@ mod tests {
             1700000000,
             None,
             Some(created_at_state),
+            crate::object::VisibilityTier::Public,
         )]);
 
         let encoded = blob.encode().unwrap();
@@ -618,6 +665,7 @@ mod tests {
             1700000000,
             None,
             None,
+            crate::object::VisibilityTier::Public,
         )]);
 
         let bytes = blob.encode().unwrap();
@@ -706,6 +754,7 @@ mod tests {
             0,
             None,
             None,
+            crate::object::VisibilityTier::Public,
         )]);
         assert!(matches!(
             blob.validate(),
@@ -727,6 +776,7 @@ mod tests {
             0,
             None,
             None,
+            crate::object::VisibilityTier::Public,
         )]);
         assert!(matches!(blob.validate(), Err(ContextError::EmptySymbol)));
     }

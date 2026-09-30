@@ -40,6 +40,20 @@ pub enum VisibilityTier {
 }
 
 impl VisibilityTier {
+    /// Whether every reader of this tier could also read the source tier.
+    /// Labels are separate audiences, so a higher rank alone cannot prove
+    /// narrowing. This follows the audience sets defined by `visible`.
+    pub fn is_no_more_visible_than(&self, source: &Self) -> bool {
+        self == source
+            || matches!(source, Self::Public)
+            || matches!((self, source), (Self::TeamScoped { .. }, Self::Internal))
+            || matches!(
+                (self, source),
+                (Self::Private { scope_label: target }, Self::Restricted { scope_label: source })
+                    if target == source
+            )
+    }
+
     /// A hidden embargo blocks descendants, even when a descendant's own tier
     /// is visible. Internal and TeamScoped restrict only their own state.
     pub fn is_embargo(&self) -> bool {
@@ -102,6 +116,47 @@ impl VisibilityTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrowing_matches_reader_sets_including_distinct_labels() {
+        use crate::object::{AudienceTier, visible};
+        let tiers = [
+            VisibilityTier::Public,
+            VisibilityTier::Internal,
+            team("a"),
+            team("b"),
+            restricted("a"),
+            restricted("b"),
+            VisibilityTier::Private {
+                scope_label: "a".into(),
+            },
+            VisibilityTier::Private {
+                scope_label: "b".into(),
+            },
+        ];
+        let readers = [
+            AudienceTier::Public,
+            AudienceTier::Internal,
+            AudienceTier::Team("a".into()),
+            AudienceTier::Team("b".into()),
+            AudienceTier::Team("other".into()),
+            AudienceTier::Restricted("a".into()),
+            AudienceTier::Restricted("b".into()),
+            AudienceTier::Restricted("other".into()),
+        ];
+        for source in &tiers {
+            for target in &tiers {
+                let subset = readers
+                    .iter()
+                    .all(|reader| !visible(target, reader) || visible(source, reader));
+                assert_eq!(
+                    target.is_no_more_visible_than(source),
+                    subset,
+                    "{source:?} -> {target:?}"
+                );
+            }
+        }
+    }
 
     fn team(id: &str) -> VisibilityTier {
         VisibilityTier::TeamScoped { team_id: id.into() }

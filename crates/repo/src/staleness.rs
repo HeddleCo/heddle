@@ -222,6 +222,7 @@ mod tests {
             1700000000,
             source_hash,
             None,
+            objects::object::VisibilityTier::Public,
         )
     }
 
