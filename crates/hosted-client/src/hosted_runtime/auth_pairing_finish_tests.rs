@@ -539,6 +539,7 @@ async fn login_again() -> anyhow::Result<AuthLoginOutcome> {
         SERVER,
         crate::hosted_runtime::auth_requests::LoginPermission::HeadlessOnly,
         None,
+        None,
         &mut |_| Ok(()),
     )
     .await

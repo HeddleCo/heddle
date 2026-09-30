@@ -116,6 +116,19 @@ pub enum AuthCommands {
         #[arg(long)]
         open_browser: bool,
 
+        /// Host of the web page where you approve this login, such as
+        /// `pr-17-tapestry.example.workers.dev`. Not the API server: that is
+        /// `--server`. Accepts a bare host or an `https://` origin; no port,
+        /// path, or wildcard. Used only by browser pairing. Omit to use the
+        /// server's default web host.
+        #[arg(
+            long,
+            value_name = "WEB_HOST",
+            value_parser = config::web_origin::PairingWebOrigin::parse,
+            conflicts_with_all = ["credential", "invite"],
+        )]
+        host: Option<config::web_origin::PairingWebOrigin>,
+
         /// Invite consumed only when this machine has no hosted account yet.
         #[arg(long, conflicts_with = "credential")]
         invite: Option<String>,
@@ -436,12 +449,14 @@ mod tests {
                     server,
                     credential,
                     open_browser,
+                    host,
                     invite,
                 },
         } = cli.command
         else {
             panic!("expected auth login");
         };
+        assert_eq!(host, None);
         assert_eq!(server, None, "server comes from the credential file");
         assert_eq!(
             credential.as_deref(),
@@ -542,6 +557,7 @@ mod tests {
                     invite,
                     credential,
                     open_browser,
+                    host,
                 },
         } = cli.command
         else {
@@ -551,6 +567,71 @@ mod tests {
         assert_eq!(invite.as_deref(), Some("invite-secret"));
         assert_eq!(credential, None);
         assert!(!open_browser);
+        assert_eq!(host, None);
+    }
+
+    #[test]
+    fn login_host_is_the_web_approval_host_distinct_from_server() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "login",
+            "--server",
+            "api.staging.heddle.test",
+            "--host",
+            "PR-17-Tapestry.zephyr-forge.workers.dev",
+            "--open-browser",
+        ])
+        .expect("auth login --host parses");
+        let Commands::Auth {
+            command: AuthCommands::Login { server, host, .. },
+        } = cli.command
+        else {
+            panic!("expected auth login");
+        };
+        assert_eq!(server.as_deref(), Some("api.staging.heddle.test"));
+        assert_eq!(
+            host.as_ref().map(|origin| origin.as_str()),
+            Some("https://pr-17-tapestry.zephyr-forge.workers.dev"),
+            "--host normalises to the canonical https origin"
+        );
+    }
+
+    #[test]
+    fn login_host_rejects_non_origin_values_locally() {
+        for invalid in [
+            "http://preview.example.dev",
+            "https://preview.example.dev:8443",
+            "https://preview.example.dev/auth",
+            "https://user@preview.example.dev",
+            "https://*.example.dev",
+            "localhost",
+            "",
+        ] {
+            let error = Cli::try_parse_from(["heddle", "auth", "login", "--host", invalid])
+                .err()
+                .unwrap_or_else(|| panic!("--host {invalid:?} must be rejected"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{invalid:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_host_conflicts_with_paths_that_never_pair() {
+        for conflicting in [
+            vec!["--credential", "/run/secrets/agent.hcred"],
+            vec!["--invite", "code"],
+        ] {
+            let mut args = vec!["heddle", "auth", "login", "--host", "preview.example.dev"];
+            args.extend(conflicting);
+            let error = Cli::try_parse_from(args)
+                .err()
+                .unwrap_or_else(|| panic!("--host must not combine with credential or invite"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     #[test]

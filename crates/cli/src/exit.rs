@@ -104,7 +104,10 @@ impl HeddleExitCode {
             | "no_hosted_upstream"
             | "repository_not_found"
             | "hosted_tls_trust"
-            | "auth_login_invite_required" => Some(Self::Config),
+            | "auth_login_invite_required"
+            // The server has no default web host for the pairing approval
+            // page; the caller must name one with `--host`.
+            | "auth_login_web_host_required" => Some(Self::Config),
             "clone_invalid_remote_url" => Some(Self::DataErr),
             // A Heddle global option after `try --` is a malformed
             // invocation, not a child-command argument.
@@ -392,6 +395,25 @@ mod tests {
             vec!["heddle auth login --invite <code>".to_string()],
         );
         let err = anyhow::anyhow!(advice);
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn auth_login_web_host_required_advice_is_config() {
+        // Raised by hosted-client pairing as a typed `HeddleError::Recovery`.
+        let err = anyhow::Error::new(objects::error::HeddleError::recovery(
+            objects::error::RecoveryDetails::safety_refusal(
+                "auth_login_web_host_required",
+                "api.staging.test has no default web host",
+                "hint",
+                "unsafe",
+                "would change",
+                "preserved",
+            )
+            .with_recovery_commands(vec![
+                "heddle auth login --server api.staging.test --host <web-host>".to_string(),
+            ]),
+        ));
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 
