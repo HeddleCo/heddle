@@ -19,7 +19,7 @@ access; owner authority uses the separate signed operations below.
 
 ## Contract
 
-Version 0.22.0 consumes `heddle-api = "0.31.0-alpha.8"`. Public proof types come
+Version 0.23.0 consumes `heddle-api = "=0.31.0-alpha.10"`. Public proof types come
 from `heddle.api.v1alpha2`; the durable signing formats keep their own versions.
 The verifier implements the owner contract:
 

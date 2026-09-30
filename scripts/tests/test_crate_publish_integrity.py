@@ -85,11 +85,14 @@ class DependencyVersionGateTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def write_crate(self, dependency: str) -> None:
+    def write_crate(self, dependency: str, version: str | None = None) -> None:
+        package_version = (
+            "version.workspace = true\n" if version is None else f'version = "{version}"\n'
+        )
         (self.repo / "crates/demo/Cargo.toml").write_text(
             "[package]\n"
             'name = "heddle-demo"\n'
-            "version.workspace = true\n"
+            f"{package_version}"
             "\n[dependencies]\n"
             f"{dependency}\n",
             encoding="utf-8",
@@ -130,6 +133,100 @@ class DependencyVersionGateTests(unittest.TestCase):
         result = self.gate(self.base)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("crates/demo/Cargo.toml [dependencies]", result.stdout)
+
+    def test_independent_version_must_increase_even_when_workspace_bumps(self) -> None:
+        self.write_crate('anyhow = "1"', "0.22.0")
+        self.commit("independent base")
+        base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        self.write_root("0.2.0", 'serde = "1"')
+        self.write_crate('anyhow = "2"', "0.22.0")
+        self.commit("dependency and workspace bump")
+        failed = self.gate(base)
+        self.assertEqual(failed.returncode, 1, failed.stdout)
+        self.assertIn("[package] version (heddle-demo)", failed.stdout)
+        self.assertIn("base 0.22.0, head 0.22.0", failed.stdout)
+
+        self.write_crate('anyhow = "2"', "0.21.0")
+        self.commit("downgrade does not fix it")
+        self.assertEqual(self.gate(base).returncode, 1)
+
+        self.write_crate('anyhow = "2"', "0.23.0")
+        self.commit("independent bump")
+        passed = self.gate(base)
+        self.assertEqual(passed.returncode, 0, passed.stdout)
+        self.assertIn("from 0.22.0 to 0.23.0", passed.stdout)
+
+    def test_independent_inherited_change_is_gated_without_manifest_edit(self) -> None:
+        self.write_crate('serde.workspace = true', "0.22.0")
+        self.commit("inherited base")
+        base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        self.write_root("0.2.0", 'serde = "2"')
+        self.commit("workspace requirement changed")
+        failed = self.gate(base)
+        self.assertEqual(failed.returncode, 1, failed.stdout)
+        self.assertIn("[package] version (heddle-demo)", failed.stdout)
+        self.write_crate('serde.workspace = true', "0.23.0")
+        self.commit("independent bump")
+        passed = self.gate(base)
+        self.assertEqual(passed.returncode, 0, passed.stdout)
+
+    def test_independent_target_build_and_dev_requirements_are_gated(self) -> None:
+        for table in (
+            "build-dependencies", "dev-dependencies",
+            'target.\'cfg(target_arch = "wasm32")\'.dependencies',
+        ):
+            with self.subTest(table=table):
+                self.write_crate(f'[{table}]\nanyhow = "1"', "0.22.0")
+                self.commit("target base")
+                base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+                self.write_crate(f'[{table}]\nanyhow = "2"', "0.22.0")
+                self.commit("target requirement changed")
+                failed = self.gate(base)
+                self.assertEqual(failed.returncode, 1, failed.stdout)
+                self.assertIn("[package] version (heddle-demo)", failed.stdout)
+                self.write_crate(f'[{table}]\nanyhow = "2"', "0.23.0")
+                self.commit("target bump")
+                passed = self.gate(base)
+                self.assertEqual(passed.returncode, 0, passed.stdout)
+
+    def test_independent_feature_change_requires_bump(self) -> None:
+        self.write_crate('serde = { version = "1", features = ["std"] }', "0.22.0")
+        self.commit("features base")
+        base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        self.write_crate('serde = { version = "1", features = ["derive"] }', "0.22.0")
+        self.commit("features change")
+        failed = self.gate(base)
+        self.assertEqual(failed.returncode, 1, failed.stdout)
+        self.assertIn("[package] version (heddle-demo)", failed.stdout)
+
+    def test_independent_path_and_feature_order_changes_do_not_force_release(self) -> None:
+        self.write_crate(
+            'serde = { version = "1", path = "../old", features = ["std", "derive"] }',
+            "0.22.0",
+        )
+        self.commit("local source base")
+        base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        self.write_crate(
+            'serde = { version = "1", path = "../new", features = ["derive", "std"] }',
+            "0.22.0",
+        )
+        self.commit("local source moved")
+        passed = self.gate(base)
+        self.assertEqual(passed.returncode, 0, passed.stdout)
+        self.assertIn("no publishable dependency contracts changed", passed.stdout)
+
+    def test_nonpublishable_independent_crate_is_ignored(self) -> None:
+        private = self.repo / "crates/private"
+        private.mkdir()
+        manifest = private / "Cargo.toml"
+        template = '[package]\nname = "private"\nversion = "1.0.0"\npublish = false\n[dependencies]\nanyhow = "{}"\n'
+        manifest.write_text(template.format("1"))
+        self.commit("private base")
+        base = run("git", "rev-parse", "HEAD", cwd=self.repo).stdout.strip()
+        manifest.write_text(template.format("2"))
+        self.commit("private requirement change")
+        passed = self.gate(base)
+        self.assertEqual(passed.returncode, 0, passed.stdout)
 
 
 class PublishedGraphTests(unittest.TestCase):

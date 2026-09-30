@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require a workspace version bump when public dependency contracts change."""
+"""Require version bumps when publishable dependency contracts change."""
 
 from __future__ import annotations
 
@@ -156,49 +156,94 @@ def revision_state(
     )
 
 
-def dependency_changes(base: str, head: str) -> tuple[list[str], str, str]:
-    # CI passes the immutable PR endpoint SHAs. Use their diff as the change
-    # boundary, then compare the affected TOML tables semantically so comments
-    # and formatting alone do not force a release.
-    changed_paths = set(
-        git(
-            "diff",
-            "--name-only",
-            base,
-            head,
-            "--",
-            "Cargo.toml",
-            "crates/*/Cargo.toml",
-            PUBLISH_WORKFLOW,
-        ).splitlines()
-    )
+def dependency_contract(manifest: dict, workspace: dict) -> dict:
+    """Resolve inherited requirements in every packaged dependency table."""
+    contract = {}
+    tables = [("", manifest), *manifest.get("target", {}).items()]
+    for target, table in tables:
+        for kind in ("dependencies", "build-dependencies", "dev-dependencies"):
+            dependencies = {}
+            for name, value in table.get(kind, {}).items():
+                dependency = {"version": value} if isinstance(value, str) else dict(value)
+                if dependency.pop("workspace", False):
+                    inherited = workspace.get("dependencies", {}).get(name)
+                    if inherited is None:
+                        raise CheckError(f"missing workspace dependency {name!r}")
+                    resolved = (
+                        {"version": inherited} if isinstance(inherited, str) else dict(inherited)
+                    )
+                    features = set(resolved.get("features", []))
+                    features.update(dependency.pop("features", []))
+                    resolved.update(dependency)
+                    if features:
+                        resolved["features"] = sorted(features)
+                    dependency = resolved
+                # Paths select local sources, but are stripped from published
+                # manifests; moving a checkout must not force a release.
+                dependency.pop("path", None)
+                if "features" in dependency:
+                    dependency["features"] = sorted(set(dependency["features"]))
+                dependencies[name] = dependency
+            if dependencies:
+                contract[(target, kind)] = dependencies
+    return contract
+
+
+@dataclass(frozen=True)
+class RequiredBump:
+    source: str
+    base: str
+    head: str
+
+
+def dependency_changes(base: str, head: str) -> tuple[list[str], list[RequiredBump]]:
     base_root, base_publishable, base_manifests = revision_state(base)
     head_root, head_publishable, head_manifests = revision_state(head)
 
     changes: list[str] = []
+    bumps: list[RequiredBump] = []
     base_workspace = base_root.get("workspace", {})
     head_workspace = head_root.get("workspace", {})
-    if "Cargo.toml" in changed_paths and base_workspace.get(
+    workspace_changed = base_workspace.get("dependencies", {}) != head_workspace.get(
         "dependencies", {}
-    ) != head_workspace.get("dependencies", {}):
+    )
+    if workspace_changed:
         changes.append("Cargo.toml [workspace.dependencies]")
 
     names = dict.fromkeys([*base_publishable, *head_publishable])
     for name in names:
         base_entry = base_manifests.get(name)
         head_entry = head_manifests.get(name)
-        base_deps = base_entry[1].get("dependencies", {}) if base_entry else {}
-        head_deps = head_entry[1].get("dependencies", {}) if head_entry else {}
-        paths = {entry[0] for entry in (base_entry, head_entry) if entry is not None}
-        if paths.intersection(changed_paths) and base_deps != head_deps:
-            path = head_entry[0] if head_entry else base_entry[0]  # type: ignore[index]
-            changes.append(f"{path} [dependencies] ({name})")
+        # A newly added/removed crate has no existing release to compare.
+        if base_entry is None or head_entry is None:
+            continue
+        path, manifest = head_entry
+        if dependency_contract(base_entry[1], base_workspace) == dependency_contract(
+            manifest, head_workspace
+        ):
+            continue
+        changes.append(f"{path} [dependencies] (including build/dev/target; {name})")
+        head_version = manifest.get("package", {}).get("version")
+        if isinstance(head_version, dict) and head_version.get("workspace") is True:
+            workspace_changed = True
+        else:
+            base_version = base_entry[1].get("package", {}).get("version")
+            # If a crate stops inheriting the workspace version, compare its
+            # new independent version with the version consumers had before.
+            if isinstance(base_version, dict) and base_version.get("workspace") is True:
+                base_version = base_workspace.get("package", {}).get("version")
+            source = f"{path} [package] version ({name})"
+            SemVer.parse(base_version, f"{base}:{source}")
+            SemVer.parse(head_version, f"{head}:{source}")
+            bumps.append(RequiredBump(source, str(base_version), str(head_version)))
 
-    base_version_value = base_workspace.get("package", {}).get("version")
-    head_version_value = head_workspace.get("package", {}).get("version")
-    SemVer.parse(base_version_value, f"{base}:workspace.package.version")
-    SemVer.parse(head_version_value, f"{head}:workspace.package.version")
-    return changes, str(base_version_value), str(head_version_value)
+    base_version = base_workspace.get("package", {}).get("version")
+    head_version = head_workspace.get("package", {}).get("version")
+    SemVer.parse(base_version, f"{base}:workspace.package.version")
+    SemVer.parse(head_version, f"{head}:workspace.package.version")
+    if workspace_changed:
+        bumps.append(RequiredBump("workspace", str(base_version), str(head_version)))
+    return changes, bumps
 
 
 def main() -> int:
@@ -208,11 +253,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        changes, base_version_text, head_version_text = dependency_changes(
-            args.base, args.head
-        )
-        base_version = SemVer.parse(base_version_text, "base workspace version")
-        head_version = SemVer.parse(head_version_text, "head workspace version")
+        changes, bumps = dependency_changes(args.base, args.head)
     except CheckError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -226,25 +267,31 @@ def main() -> int:
         print(f"  - {change}")
     sys.stdout.flush()
 
-    if head_version <= base_version:
-        print(
-            "error: dependency changes require an increased "
-            "[workspace.package] version in Cargo.toml "
-            f"(base {base_version_text}, head {head_version_text})",
-            file=sys.stderr,
-        )
+    failed = False
+    for bump in bumps:
+        if SemVer.parse(bump.head, bump.source) <= SemVer.parse(bump.base, bump.source):
+            source = (
+                "[workspace.package] version in Cargo.toml"
+                if bump.source == "workspace" else bump.source
+            )
+            print(
+                f"error: dependency changes require an increased {source} "
+                f"(base {bump.base}, head {bump.head})",
+                file=sys.stderr,
+            )
+            failed = True
+        else:
+            print(
+                f"ok: {bump.source}{' version' if bump.source == 'workspace' else ''} increased "
+                f"from {bump.base} to {bump.head}"
+            )
+    if failed:
         print(
             "note: release-plz auto-bump wiring is the fuller fix; until then "
             "this bump is manual",
             file=sys.stderr,
         )
-        return 1
-
-    print(
-        "ok: workspace version increased "
-        f"from {base_version_text} to {head_version_text}"
-    )
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
