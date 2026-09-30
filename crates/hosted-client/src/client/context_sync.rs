@@ -1677,6 +1677,25 @@ mod tests {
                 },
             ),
             (CollaborationAnchor::Repository, AnnotationScope::File),
+            // heddle#1901: `--symbol` stamps the resolved range at creation.
+            // The symbol selector is authoritative; the range only supplements
+            // it and must never turn the annotation into a line annotation.
+            (
+                CollaborationAnchor::Source {
+                    source: CollaborationSourceAnchor {
+                        revision: CollaborationRevision::State { state_id: state },
+                        path: "lib.rs".into(),
+                        symbol_id: "run".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                        target: None,
+                    },
+                },
+                AnnotationScope::Symbol {
+                    name: "run".into(),
+                    resolved_lines: Some((1, 1)),
+                },
+            ),
         ];
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let mut expected = Vec::new();
@@ -1775,7 +1794,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            4
+            5
         );
         let head = destination
             .store()
@@ -1819,8 +1838,8 @@ mod tests {
             .collect();
         assert_eq!(
             stored.len(),
-            5,
-            "four opens plus one edit stay signed locally"
+            6,
+            "five opens plus one edit stay signed locally"
         );
         let mut pulled_signed: Vec<Vec<u8>> = stored
             .iter()
