@@ -123,13 +123,14 @@ pub struct LogRef {
     pub size_bytes: u64,
 }
 
-/// Exact local reproduction recipe.
+/// Portable reproduction recipe without the runner's private environment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Repro {
     /// Argument vector to execute.
     pub command: Vec<String>,
-    /// Sorted environment variables to set.
+    /// Explicitly allowlisted portable environment; local host-exec leaves this
+    /// empty. Runtime host, check, service and cache values are never copied here.
     pub env: BTreeMap<String, String>,
     /// Optional container image.
     #[serde(default, skip_serializing_if = "Option::is_none")]

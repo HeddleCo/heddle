@@ -762,6 +762,149 @@ mod tests {
 
     use super::{PendingCiRun, check_local_spool, evidence_error, scope_error};
 
+    #[cfg(unix)]
+    #[test]
+    fn recorded_check_does_not_disclose_runner_environment() {
+        use crypto::Signer;
+        use objects::object::{CollaborationActor, ContentHash};
+        use prost::Message;
+
+        const TEST: &str =
+            "cli::commands::ci::run::tests::recorded_check_does_not_disclose_runner_environment";
+        const SENTINELS: &[(&str, &str)] = &[
+            ("PATH", "/privacy-1885-path-sentinel:/usr/bin:/bin"),
+            ("HOME", "/privacy-1885-home-sentinel"),
+            ("USER", "privacy-1885-user-sentinel"),
+            ("LANG", "privacy-1885-locale-sentinel"),
+        ];
+        // Isolate process-wide environment changes from other tests. The child
+        // uses the real host capture, executor, verdict signer and record encoder.
+        if std::env::var_os("HEDDLE_PRIVACY_TEST_CHILD").is_none() {
+            let home = tempfile::tempdir().expect("isolated Heddle home");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", TEST, "--nocapture"])
+                .envs(SENTINELS.iter().copied())
+                .env("HEDDLE_HOME", home.path())
+                .env("HEDDLE_PRIVACY_TEST_CHILD", "1")
+                .output()
+                .expect("run isolated privacy test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let root = tempfile::tempdir().expect("repository");
+        let repo = repo::Repository::init_default(root.path()).expect("init repository");
+        let target = super::EvaluationTarget::prepare(&repo, None, true).expect("recorded target");
+        let context = super::execution_context(&repo, &target, "definition-digest".into());
+        let check = ci_config::Check::new(
+            "privacy",
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '%s\\n' \"$PATH\" \"$HOME\" \"$USER\" \"$LANG\"".into(),
+            ],
+        );
+        let results = ci_engine::run_checks_with(
+            &ci_config::CiConfig::from_checks(vec![check]),
+            &context,
+            &ci_engine::RunOptions {
+                workdir: &target.workdir,
+                services: &ci_engine::NoopProvider,
+                now_rfc3339: &|| "2026-09-30T12:00:00Z".into(),
+            },
+            &ci_engine::RunControls::default(),
+        )
+        .expect("execute recorded check");
+        assert_eq!(results[0].conclusion(), crypto::Conclusion::Success);
+        assert_eq!(
+            results[0].combined_output,
+            SENTINELS
+                .iter()
+                .map(|(_, value)| format!("{value}\n"))
+                .collect::<String>(),
+            "private values remain available at runtime"
+        );
+        target
+            .ensure_unchanged(&repo)
+            .expect("exact evaluated state");
+        let signer = crypto::Ed25519Signer::generate().expect("signer");
+        let verdicts = super::sign_results(
+            results,
+            &target,
+            &signer,
+            crypto::SignerKind::ServiceAccount,
+        )
+        .expect("sign verdicts");
+        let envelope = b"test authority envelope".to_vec();
+        let author = thread_api::evidence::CheckAuthor {
+            actor: CollaborationActor {
+                principal_id: uuid::Uuid::from_u128(1),
+                agent_id: Some("test-runner".into()),
+            },
+            publisher: signer.public_key().try_into().expect("Ed25519 key"),
+            authority_digest: ContentHash::compute_typed(
+                objects::object::thread_replication::metadata::AUTHORITY_FORMAT,
+                &envelope,
+            ),
+            authority_envelope: envelope,
+        };
+        let pending = super::prepare_ci_run(
+            &super::EvidenceDestination {
+                address: "test/repo",
+                spool: uuid::Uuid::from_u128(2),
+                thread: [3; 32],
+            },
+            target.state.id(),
+            uuid::Uuid::from_u128(4),
+            target.state.tree,
+            super::EvidenceIdentity {
+                author: &author,
+                signer: &signer,
+            },
+            &verdicts,
+        )
+        .expect("prepare hosted record");
+        let mut bytes = vec![
+            (
+                "signed verdict JSON",
+                serde_json::to_vec(&verdicts).expect("JSON"),
+            ),
+            (
+                "pending evidence",
+                rmp_serde::to_vec_named(&pending).expect("pending bytes"),
+            ),
+            ("canonical verdict body", verdicts[0].body.canonical_bytes()),
+        ];
+        for request in &pending.requests {
+            bytes.push(("hosted request", request.clone()));
+            let request = super::wire::RecordEvidenceRequest::decode(request.as_slice())
+                .expect("decode request");
+            let record = request
+                .evidence
+                .expect("projection")
+                .evidence
+                .expect("signed evidence");
+            thread_api::evidence::verify_evidence(&record).expect("evidence signature");
+            bytes.push(("canonical evidence", record.canonical_record));
+        }
+        for (surface, bytes) in bytes {
+            for (name, sentinel) in SENTINELS {
+                assert!(
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|window| window == sentinel.as_bytes()),
+                    "{surface} disclosed {name} sentinel"
+                );
+            }
+        }
+    }
+
     fn verdict(digest: &str) -> crypto::SignedVerdict {
         let body = crypto::CiVerdictBody {
             check: crypto::CheckDescriptor {

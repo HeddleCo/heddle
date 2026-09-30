@@ -131,11 +131,11 @@ fn unsupported_versions_are_distinct_from_body_tampering() {
     ));
 
     let mut old_schema = verdict;
-    old_schema.body.schema_version = 0;
+    old_schema.body.schema_version = 1;
     assert!(matches!(
         old_schema.verify(),
         Err(SignedVerdictError::UnsupportedSchemaVersion {
-            found: 0,
+            found: 1,
             supported: CI_VERDICT_BODY_SCHEMA_VERSION,
         })
     ));
@@ -146,7 +146,7 @@ fn signing_rejects_unsupported_schema_and_malformed_signed_at() {
     let signer = test_signer();
     let (change_id, tree_digest) = bindings();
     let mut old_body = passing_body();
-    old_body.schema_version = 0;
+    old_body.schema_version = 1;
     assert!(matches!(
         signed_verdict_from_signer(
             old_body,
@@ -156,7 +156,7 @@ fn signing_rejects_unsupported_schema_and_malformed_signed_at() {
             SIGNED_AT.to_string(),
             &signer,
         ),
-        Err(SignedVerdictError::UnsupportedSchemaVersion { found: 0, .. })
+        Err(SignedVerdictError::UnsupportedSchemaVersion { found: 1, .. })
     ));
 
     assert!(matches!(

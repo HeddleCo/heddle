@@ -4,8 +4,8 @@ mod ci_verdict_support;
 
 use ci_verdict_support::{branch_basis_body, maximal_body, passing_body, test_signer};
 use crypto::{
-    CI_VERDICT_DOMAIN, CiVerdictBody, Signer, SignerKind, ci_verdict_signing_payload,
-    signed_verdict_from_signer,
+    CI_VERDICT_BODY_SCHEMA_VERSION, CI_VERDICT_DOMAIN, CiVerdictBody, Signer, SignerKind,
+    ci_verdict_signing_payload, signed_verdict_from_signer,
 };
 use heddle_object_model::object::{ChangeId, ContentHash};
 use serde_json::Value;
@@ -37,6 +37,11 @@ fn golden_vectors_reproduce_canonical_body_hash_preimage_and_signature() {
     let document: Value = serde_json::from_str(include_str!("fixtures/ci_verdict_v2.json"))
         .expect("golden vectors are valid JSON");
     let signer = test_signer();
+
+    assert_eq!(
+        document["body_schema_version"],
+        CI_VERDICT_BODY_SCHEMA_VERSION
+    );
 
     assert_eq!(
         hex::encode(CI_VERDICT_DOMAIN),

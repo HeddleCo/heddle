@@ -89,6 +89,43 @@ fn plant_json(root: &Path, entry: &ci_engine::ResultCacheEntry) {
 }
 
 #[test]
+fn old_environment_bearing_cache_entries_are_never_reused() {
+    for old_cache_schema in [true, false] {
+        let workdir = tempfile::tempdir().expect("workdir");
+        let cache_dir = tempfile::tempdir().expect("cache");
+        let cache = FsResultCache::new(cache_dir.path());
+        let config = echo_ok("privacy", CheckClass::Required);
+        run(&config, workdir.path(), &cache).expect("seed filesystem cache");
+        let memory = MemoryResultCache::new();
+        run(&config, workdir.path(), &memory).expect("seed portable entry");
+        let mut entry = memory.entries().pop().expect("entry");
+        if old_cache_schema {
+            entry.schema_version = 1;
+        } else {
+            entry.body.schema_version = 1;
+        }
+        entry
+            .body
+            .repro
+            .env
+            .insert("HOME".into(), "/private-cache-home-sentinel".into());
+        plant_json(cache_dir.path(), &entry);
+
+        let results = run(&config, workdir.path(), &cache).expect("rerun old entry");
+        assert_eq!(
+            marker_runs(workdir.path()),
+            3,
+            "old evidence must cause a fresh execution"
+        );
+        assert!(
+            !String::from_utf8(results[0].body.canonical_bytes())
+                .expect("JSON")
+                .contains("private-cache-home-sentinel")
+        );
+    }
+}
+
+#[test]
 fn planted_output_digest_from_a_different_check_identity_does_not_hit() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache_dir = tempfile::tempdir().expect("cache");
