@@ -31,6 +31,7 @@ async fn run_login(
         server,
         permission,
         invite,
+        None,
         &mut |_| Ok(()),
     )
     .await

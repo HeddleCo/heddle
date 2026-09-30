@@ -12,6 +12,7 @@ pub mod credentials;
 pub mod logging;
 pub mod output;
 pub mod tls_trust;
+pub mod web_origin;
 
 pub fn heddle_home_override() -> Option<std::path::PathBuf> {
     std::env::var_os("HEDDLE_HOME")

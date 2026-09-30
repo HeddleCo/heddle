@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 #[cfg(test)]
 use config::credentials;
+use config::web_origin::PairingWebOrigin;
 use crypto::{Ed25519Signer, Signer as _};
 use objects::{HeddleError, RecoveryDetails};
 
@@ -51,6 +52,7 @@ pub(crate) async fn login(
     server: &str,
     permission: LoginPermission,
     invite: Option<String>,
+    web_origin: Option<&PairingWebOrigin>,
     on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
 ) -> Result<AuthLoginOutcome> {
     let resolved = resolve_hosted_credential(Some(server))?;
@@ -72,7 +74,7 @@ pub(crate) async fn login(
             let LoginPermission::Browser { open_browser } = permission else {
                 return fail_closed(server);
             };
-            login_browser(server, open_browser, on_event).await
+            login_browser(server, open_browser, web_origin, on_event).await
         }
         LoginPath::FailClosed => fail_closed(server),
     }

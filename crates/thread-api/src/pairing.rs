@@ -99,6 +99,9 @@ fn sign_initiation_binding(
             canonical_record,
             signatures,
         }),
+        // Not part of the signed binding: the server checks the host against
+        // its own policy. Callers set it after signing; empty is the default.
+        web_origin: String::new(),
     })
 }
 /// Normative signed format: ascending protobuf tags, preserving oneof presence.

@@ -779,6 +779,34 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert!(!merge.agent_may_fill);
 }
 
+/// heddle#1930: a server with no default web host names itself in the remedy
+/// and leaves only the web host to the caller.
+#[test]
+fn login_web_host_remedy_template_fills_only_the_host() {
+    let action = "heddle auth login --server api.staging.heddle.test --host <web-host>";
+    validate_recommended_action(action).expect("web host remedy validates");
+    let template = recommended_action_template(action).expect("web host remedy template");
+    assert_eq!(
+        template.argv_template,
+        vec![
+            "heddle",
+            "auth",
+            "login",
+            "--server",
+            "api.staging.heddle.test",
+            "--host",
+            "<web-host>"
+        ]
+    );
+    assert_eq!(template.required_inputs, vec!["web_host"]);
+    assert!(template.agent_may_fill);
+    assert!(
+        recommended_action_template("heddle auth login --server <server> --host <web-host>")
+            .is_none(),
+        "the server is concrete in the remedy, never a placeholder"
+    );
+}
+
 /// heddle#1904: after a stale refusal the recovery names the annotation and
 /// leaves only the explicit revision's body to the author.
 #[test]

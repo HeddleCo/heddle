@@ -1,13 +1,19 @@
 //! Native browser pairing retains the exact user-derived capability; the CLI
 //! never turns approval into an independent credential-minting root.
+use ::api::{
+    heddle::api::common::CallFailureCode,
+    v2::client::{ClientError, RpcTransport},
+};
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 #[cfg(test)]
 use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::Utc;
+use config::web_origin::PairingWebOrigin;
 use crypto::{Ed25519Signer, Signer};
+use objects::{HeddleError, RecoveryDetails};
 use prost::Message;
-use thread_api::{contract as api, rpc};
+use thread_api::{contract as api, rpc, transport};
 
 use super::{
     agent_node_identity,
@@ -17,6 +23,7 @@ use super::{
 pub(super) async fn login(
     server: &str,
     open_browser: bool,
+    web_origin: Option<&PairingWebOrigin>,
     on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
 ) -> Result<AuthLoginOutcome> {
     let subject = Ed25519Signer::generate().context("generate paired credential key")?;
@@ -26,23 +33,16 @@ pub(super) async fn login(
     let client = super::auth::connect_enrolling_device_client(server, &subject).await?;
     let result = async {
         let remote = client.native().await?;
-        let host = remote
-            .description
-            .endpoint
-            .clone()
-            .context("Weft descriptor has no endpoint")?;
         let operation = uuid::Uuid::new_v4().to_string();
-        let begin = thread_api::pairing::sign_initiation(
+        let response = begin_pairing(
+            &remote,
+            server,
             &subject,
             &endpoint,
-            host,
             operation.clone(),
-            Utc::now().timestamp(),
-        )?;
-        let response = remote
-            .api
-            .call::<rpc::IdentityServiceBeginPairing>(&begin)
-            .await?;
+            web_origin,
+        )
+        .await?;
         applied(response.receipt.as_ref(), &operation)?;
         let pending = response
             .pairing
@@ -152,6 +152,75 @@ pub(super) async fn login(
     .await;
     client.close().await;
     result
+}
+
+/// Sign this device receiver's initiation and send it. `web_origin` is not part
+/// of the signed binding: the server checks it against its own CORS and
+/// preview-origin policy, and `None` sends empty for the server default.
+async fn begin_pairing<T: RpcTransport<Error = transport::Error>>(
+    remote: &thread_api::Remote<T>,
+    server: &str,
+    subject: &Ed25519Signer,
+    endpoint: &Ed25519Signer,
+    operation: String,
+    web_origin: Option<&PairingWebOrigin>,
+) -> Result<api::BeginPairingResponse> {
+    let host = remote
+        .description
+        .endpoint
+        .clone()
+        .context("Weft descriptor has no endpoint")?;
+    let mut begin = thread_api::pairing::sign_initiation(
+        subject,
+        endpoint,
+        host,
+        operation,
+        Utc::now().timestamp(),
+    )?;
+    if let Some(origin) = web_origin {
+        begin.web_origin = origin.as_str().to_owned();
+    }
+    remote
+        .api
+        .call::<rpc::IdentityServiceBeginPairing>(&begin)
+        .await
+        .map_err(|error| begin_pairing_error(error, server, web_origin))
+}
+
+/// A server with no default web origin cannot choose the approval page for a
+/// CLI pairing (weft#2427). Without `--host` that refusal gets a typed remedy;
+/// with one, the server's own message is the accurate report.
+fn begin_pairing_error(
+    error: ClientError<transport::Error>,
+    server: &str,
+    web_origin: Option<&PairingWebOrigin>,
+) -> anyhow::Error {
+    match (&error, web_origin) {
+        (ClientError::Transport(transport::Error::Remote(failure)), None)
+            if failure.code == CallFailureCode::FailedPrecondition as i32
+                && failure.message.contains("no web origin") =>
+        {
+            web_host_required(server, &failure.message)
+        }
+        _ => anyhow::Error::new(error),
+    }
+}
+
+fn web_host_required(server: &str, detail: &str) -> anyhow::Error {
+    let primary = format!("heddle auth login --server {server} --host <web-host>");
+    anyhow::Error::new(HeddleError::recovery(
+        RecoveryDetails::safety_refusal(
+            "auth_login_web_host_required",
+            format!("{server} has no default web host for the login approval page"),
+            format!(
+                "Run `{primary}` with the host of the web app where you approve this login, then approve it there."
+            ),
+            format!("the server refused to choose an approval page: {detail}"),
+            "guessing a web host could send the approval link to a page this server does not serve",
+            "no pairing was started and local credentials were left unchanged",
+        )
+        .with_recovery_commands(vec![primary]),
+    ))
 }
 
 fn applied(receipt: Option<&api::MutationReceipt>, operation: &str) -> Result<()> {
@@ -410,6 +479,9 @@ async fn wait_for_pairing<T, E: std::fmt::Display>(
         .context("pairing approval deadline expired; run `heddle auth login` again")?
         .map_err(|error| anyhow::anyhow!("pairing observation failed: {error}"))
 }
+#[cfg(test)]
+#[path = "auth_pairing_begin_tests.rs"]
+mod begin_tests;
 #[cfg(test)]
 #[path = "auth_pairing_finish_tests.rs"]
 mod finish_tests;
