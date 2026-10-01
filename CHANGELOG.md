@@ -15,6 +15,25 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.28.4 (batch #1953); `heddle-api` stays pinned at 0.31.0-alpha.13.
+  The capability verifier makes Recover require a replacement recovery policy
+  (BREAKING verifier behavior change, #1952; see the capability-verifier
+  changelog), which weft needs to adopt the Recover rule (weft#1527).
+- Pulling agent captures on a Thread now fetches the missing replay content
+  through the signed fork base, so `ready` no longer fails with
+  `rebase_referenced_state_missing` (#1889). Push refuses a freshly started
+  Thread that has no capture of its own with typed `thread_capture_required`
+  (exit 65) and an actionable capture command, and clone restores the signed
+  parent/target and fork base instead of using the tip (#1946).
+- Inherited annotation-only observation (`get_context_history`,
+  `observe_context_heads`) now filters by annotation, so an annotated clone
+  publishing a child Thread no longer fails after publishing source and
+  discussion; partial-push output (human and JSON) names the published
+  outcomes, pending local work, and recovery steps (#1950).
+- A cloned Thread's capture refusal (`NativeSourceSignerUnavailable`) now
+  carries actionable advice: `heddle start <name>`, `heddle capture`, and
+  `heddle push`, with guidance on moving unsaved edits to the new checkout.
+  Exit code 74 is unchanged (#1951).
 - Adopt heddle-api 0.31.0-alpha.13 (blocking-discussion resolve rule,
   additive). The workspace moves to 0.28.3: the dependency-version guard
   requires a bump for the new pin.
