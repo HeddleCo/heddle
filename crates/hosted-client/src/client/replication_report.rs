@@ -196,6 +196,9 @@ pub fn classify_error(error: &anyhow::Error) -> ReplicationIssueKind {
         cause
             .downcast_ref::<crate::hosted_runtime::hosted::ContextBindingError>()
             .is_some()
+            || cause
+                .downcast_ref::<crate::hosted_runtime::hosted::DiscussionBindingError>()
+                .is_some()
     }) {
         return ReplicationIssueKind::NotReplicable;
     }

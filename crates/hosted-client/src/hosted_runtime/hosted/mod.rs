@@ -71,10 +71,12 @@ pub use bootstrap::{
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 pub use collaboration::{
-    ContextBindingError, HostedDiscussion, HostedDiscussionTurn, HostedResolution,
+    ContextBindingError, DiscussionBindingError, HostedDiscussion, HostedDiscussionTurn,
+    HostedResolution,
 };
 pub(crate) use collaboration::{
-    PrepareContextError, context_command_ids, discussion_command_ids, retained_context_binding,
+    PrepareContextError, PrepareDiscussionError, context_command_ids, discussion_command_ids,
+    retained_context_binding, retained_discussion_scope,
 };
 use config::ClientConfig;
 use connection::HostedConnection;
