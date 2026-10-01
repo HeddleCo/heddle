@@ -237,34 +237,6 @@ pub fn sign_context(
     sign_context_ids(context, thread, ids, signer)
 }
 
-/// Sign a context revision after observing current heads by original
-/// operation id. First PutContext stays parentless; supersede/edit parents
-/// the observed causal heads.
-pub fn sign_context_parent_ids(
-    context: ContextRevision,
-    parent_ids: &[ContentHash],
-    signer: &impl Signer,
-) -> Result<SignedRecord, Error> {
-    if parent_ids.len() > 128 {
-        return Err(Error::Protocol("context has more than 128 causal parents"));
-    }
-    let thread = context.metadata.scope.thread.ok_or(Error::Protocol(
-        "Thread context requires native Thread scope",
-    ))?;
-    if parent_ids.is_empty() && context.extracted_from.is_some() {
-        return Err(Error::Protocol(
-            "context extraction requires a signed discussion resolution",
-        ));
-    }
-    let mut ids = BTreeSet::new();
-    for id in parent_ids {
-        if !ids.insert(*id) {
-            return Err(Error::Protocol("duplicate context causal parent"));
-        }
-    }
-    sign_context_ids(context, thread, ids, signer)
-}
-
 fn sign_context_ids(
     mut context: ContextRevision,
     thread: ContentHash,

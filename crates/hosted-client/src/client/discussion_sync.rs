@@ -43,9 +43,22 @@ use crate::{
         replication_report::{DeliveredCommand, ReplicationReport, issue_from_error},
     },
     hosted_runtime::hosted::{
-        HostedDiscussion, HostedDiscussionTurn, HostedResolution, discussion_command_ids,
+        HostedDiscussion, HostedDiscussionTurn, HostedResolution, PrepareDiscussionError,
+        discussion_command_ids, retained_discussion_scope,
     },
 };
+
+/// Signed originals retained for this hosted repository, including pulled records.
+fn retained_operations(repository: &RepoMirror) -> Result<Vec<SignedRecord>> {
+    repository
+        .native_operations
+        .iter()
+        .map(|operation| {
+            SignedRecord::decode(operation.signed_record.as_slice())
+                .context("decode retained native discussion operation")
+        })
+        .collect()
+}
 
 /// Attach the delivered command's IDs to a failed delivery.
 fn delivered(signed: &SignedRecord) -> Result<DeliveredCommand> {
@@ -258,11 +271,13 @@ fn validate_replicable_anchor(repo: &Repository, anchor: &CollaborationAnchor) -
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_authored_append(
     client: &mut HostedClient,
     store: &CollaborationStore,
     repo: &Repository,
     repo_path: &str,
+    thread_ref: &str,
     mirror: &mut HostedMirror,
     server_id: &str,
     turn: &LocalTurn,
@@ -281,9 +296,18 @@ async fn publish_authored_append(
             .context("read authored discussion turn")?
             .ok_or_else(|| anyhow!("authored discussion turn {} is missing", turn.operation_id))?
             .operation;
+        let retained = mirror
+            .repos
+            .get(repo_path)
+            .map(retained_operations)
+            .transpose()?
+            .unwrap_or_default();
         let signed = client
-            .prepare_append_discussion_operation(repo_path, server_id, &authored)
-            .await?;
+            .prepare_append_discussion_operation(
+                repo_path, server_id, &authored, thread_ref, &retained,
+            )
+            .await
+            .map_err(PrepareDiscussionError::into_anyhow)?;
         mirror
             .repos
             .entry(repo_path.to_string())
@@ -343,6 +367,7 @@ async fn publish_authored_resolution(
     store: &CollaborationStore,
     repo: &Repository,
     repo_path: &str,
+    thread_ref: &str,
     mirror: &mut HostedMirror,
     index: usize,
     server_id: &str,
@@ -403,9 +428,13 @@ async fn publish_authored_resolution(
                     "discussion {local_id} has a resolution not attributed to the local principal and no retained native signed operation; replication is incomplete"
                 ));
             }
+            let retained = retained_operations(repository)?;
             let (signed, expected_version) = client
-                .prepare_resolve_discussion_operation(repo_path, server_id, &authored)
+                .prepare_resolve_discussion_operation(
+                    repo_path, server_id, &authored, thread_ref, &retained,
+                )
                 .await
+                .map_err(PrepareDiscussionError::into_anyhow)
                 .with_context(|| format!("prepare hosted resolution for {local_id}"))?;
             mirror
                 .repos
@@ -611,7 +640,14 @@ async fn push_one(
             let index = repo_mirror.discussions.len() - 1;
             for turn in &candidates[1..] {
                 hosted = publish_authored_append(
-                    client, store, repo, repo_path, mirror, &server_id, turn,
+                    client,
+                    store,
+                    repo,
+                    repo_path,
+                    default_thread_ref,
+                    mirror,
+                    &server_id,
+                    turn,
                 )
                 .await
                 .with_context(|| format!("append hosted turn for {local_id}"))?;
@@ -636,7 +672,14 @@ async fn push_one(
             let mut hosted = None;
             for turn in &candidates {
                 let echoed = publish_authored_append(
-                    client, store, repo, repo_path, mirror, &server_id, turn,
+                    client,
+                    store,
+                    repo,
+                    repo_path,
+                    default_thread_ref,
+                    mirror,
+                    &server_id,
+                    turn,
                 )
                 .await
                 .with_context(|| format!("append hosted turn for {local_id}"))?;
@@ -662,7 +705,16 @@ async fn push_one(
 
     if discussion.resolution.is_some()
         && publish_authored_resolution(
-            client, store, repo, repo_path, mirror, index, &server_id, local_id, discussion,
+            client,
+            store,
+            repo,
+            repo_path,
+            default_thread_ref,
+            mirror,
+            index,
+            &server_id,
+            local_id,
+            discussion,
             self_attr,
         )
         .await?
@@ -745,6 +797,11 @@ async fn pull_discussions_filtered(
                     continue;
                 }
             }
+            let repository = mirror.repos.entry(repo_path.to_string()).or_default();
+            let mut retained = retained_operations(repository)?;
+            retained.push(record.clone());
+            retained_discussion_scope(decoded.operation.discussion_id, &retained)
+                .map_err(PrepareDiscussionError::into_anyhow)?;
             store
                 .write_operation_bytes(&bytes)
                 .context("store native signed discussion operation")?;

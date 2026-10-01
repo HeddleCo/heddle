@@ -193,24 +193,137 @@ fn discussion_parent_ids(discussion: &HostedDiscussion) -> Result<Vec<ContentHas
     )
 }
 
-/// ObserveCollaboration `causal_heads` / turn `causal_id` are outer Thread
-/// operation ids. Envelope parents must be the inner CollabOpId of those
-/// originals, so append/resolve sign the observed signed records.
-fn parent_scope(record: &contract::SignedRecord) -> Result<CollaborationScope, ProtocolError> {
+/// The client refused to sign a descendant outside its local discussion binding.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DiscussionBindingError {
+    #[error(
+        "refused to sign discussion {discussion}: hosted head {head} is not an operation of that discussion in its own Thread"
+    )]
+    ForeignHead {
+        discussion: DiscussionRecordId,
+        head: ContentHash,
+    },
+    #[error(
+        "refused to sign discussion {discussion}: operation {operation} binds it to spool {observed}, but it is bound to spool {expected}"
+    )]
+    AnotherSpool {
+        discussion: DiscussionRecordId,
+        operation: ContentHash,
+        expected: uuid::Uuid,
+        observed: uuid::Uuid,
+    },
+    #[error(
+        "refused to sign discussion {discussion}: operation {operation} binds it to {}, but it is bound to {}",
+        thread_label(observed),
+        thread_label(expected)
+    )]
+    AnotherThread {
+        discussion: DiscussionRecordId,
+        operation: ContentHash,
+        expected: Option<ContentHash>,
+        observed: Option<ContentHash>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PrepareDiscussionError {
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+    #[error(transparent)]
+    Binding(#[from] DiscussionBindingError),
+}
+
+impl PrepareDiscussionError {
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Protocol(error) => anyhow::Error::new(error),
+            Self::Binding(error) => anyhow::Error::new(error),
+        }
+    }
+}
+
+/// A discussion operation's scope must agree with its signed outer Thread.
+/// Unrelated records do not establish a retained binding for this discussion.
+fn discussion_binding_of(
+    discussion: DiscussionRecordId,
+    record: &contract::SignedRecord,
+) -> Result<Option<(ContentHash, CollaborationScope)>, PrepareDiscussionError> {
     let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
+    let head = operation.id().map_err(native_error)?;
     let ThreadOperationBody::Discussion(bytes) = operation.body else {
-        return Err(ProtocolError::InvalidState(
-            "discussion parent is not a collaboration operation".into(),
-        ));
+        return Ok(None);
     };
-    CollaborationOperationEnvelope::decode(&bytes)
+    let decoded = CollaborationOperationEnvelope::decode(&bytes)
         .map_err(native_error)?
-        .operation
+        .operation;
+    if decoded.discussion_id != discussion {
+        return Ok(None);
+    }
+    let scope = decoded
         .metadata
         .map(|metadata| metadata.scope)
-        .ok_or_else(|| {
-            ProtocolError::InvalidState("discussion parent has no collaboration scope".into())
-        })
+        .filter(|scope| scope.thread == Some(operation.thread))
+        .ok_or(DiscussionBindingError::ForeignHead { discussion, head })?;
+    Ok(Some((head, scope)))
+}
+
+fn check_discussion_scope(
+    discussion: DiscussionRecordId,
+    operation: ContentHash,
+    expected: &CollaborationScope,
+    observed: &CollaborationScope,
+) -> Result<(), DiscussionBindingError> {
+    if expected.spool != observed.spool {
+        return Err(DiscussionBindingError::AnotherSpool {
+            discussion,
+            operation,
+            expected: expected.spool,
+            observed: observed.spool,
+        });
+    }
+    if expected.thread != observed.thread {
+        return Err(DiscussionBindingError::AnotherThread {
+            discussion,
+            operation,
+            expected: expected.thread,
+            observed: observed.thread,
+        });
+    }
+    Ok(())
+}
+
+/// Signed originals retained locally fix a discussion's one spool and Thread.
+pub(crate) fn retained_discussion_scope(
+    discussion: DiscussionRecordId,
+    retained: &[contract::SignedRecord],
+) -> Result<Option<(ContentHash, CollaborationScope)>, PrepareDiscussionError> {
+    let mut bound: Option<(ContentHash, CollaborationScope)> = None;
+    for record in retained {
+        let Some((id, scope)) = discussion_binding_of(discussion, record)? else {
+            continue;
+        };
+        if let Some(expected) = &bound {
+            check_discussion_scope(discussion, id, &expected.1, &scope)?;
+        } else {
+            bound = Some((id, scope));
+        }
+    }
+    Ok(bound)
+}
+
+/// Validate every original head against the local target before signing.
+fn validate_discussion_heads(
+    discussion: DiscussionRecordId,
+    scope: &CollaborationScope,
+    heads: &[contract::SignedRecord],
+) -> Result<(), PrepareDiscussionError> {
+    for record in heads {
+        let head = thread_api::collaboration::operation_id(record).map_err(native_error)?;
+        let (_, observed) = discussion_binding_of(discussion, record)?
+            .ok_or(DiscussionBindingError::ForeignHead { discussion, head })?;
+        check_discussion_scope(discussion, head, scope, &observed)?;
+    }
+    Ok(())
 }
 
 fn signed_head_records(
@@ -1123,16 +1236,26 @@ impl HostedClient {
         repo_path: &str,
         discussion_id: &str,
         authored: &CollaborationOperationEnvelope,
-    ) -> Result<contract::SignedRecord, ProtocolError> {
+        thread_ref: &str,
+        retained: &[contract::SignedRecord],
+    ) -> Result<contract::SignedRecord, PrepareDiscussionError> {
         let Body::AppendTurn { turn } = &authored.body else {
             return Err(ProtocolError::InvalidState(
                 "unsupported authored discussion operation; native replication is incomplete"
                     .into(),
-            ));
+            )
+            .into());
         };
         let body = Body::AppendTurn { turn: turn.clone() };
         let (signed, _) = self
-            .sign_discussion_descendant(repo_path, discussion_id, authored, body)
+            .sign_discussion_descendant(
+                repo_path,
+                discussion_id,
+                authored,
+                thread_ref,
+                retained,
+                body,
+            )
             .await?;
         Ok(signed)
     }
@@ -1148,11 +1271,14 @@ impl HostedClient {
         repo_path: &str,
         discussion_id: &str,
         authored: &CollaborationOperationEnvelope,
-    ) -> Result<(contract::SignedRecord, Vec<u8>), ProtocolError> {
+        thread_ref: &str,
+        retained: &[contract::SignedRecord],
+    ) -> Result<(contract::SignedRecord, Vec<u8>), PrepareDiscussionError> {
         let Body::Resolve { resolution } = &authored.body else {
             return Err(ProtocolError::InvalidState(
                 "native resolution preparation requires an authored Resolve operation".into(),
-            ));
+            )
+            .into());
         };
         // Refuse before signing anything the hosted command cannot express.
         resolution_command(resolution, &contract::SpoolRef::default())?;
@@ -1160,12 +1286,20 @@ impl HostedClient {
             resolution: resolution.clone(),
         };
         let (signed, observed) = self
-            .sign_discussion_descendant(repo_path, discussion_id, authored, body)
+            .sign_discussion_descendant(
+                repo_path,
+                discussion_id,
+                authored,
+                thread_ref,
+                retained,
+                body,
+            )
             .await?;
         if observed.version.is_empty() {
             return Err(ProtocolError::InvalidState(
                 "hosted discussion view carries no version to resolve against".into(),
-            ));
+            )
+            .into());
         }
         Ok((signed, observed.version))
     }
@@ -1177,9 +1311,37 @@ impl HostedClient {
         repo_path: &str,
         discussion_id: &str,
         authored: &CollaborationOperationEnvelope,
+        thread_ref: &str,
+        retained: &[contract::SignedRecord],
         body: Body,
-    ) -> Result<(contract::SignedRecord, HostedDiscussion), ProtocolError> {
+    ) -> Result<(contract::SignedRecord, HostedDiscussion), PrepareDiscussionError> {
+        let discussion = parse_discussion_id(discussion_id)?;
+        if discussion != authored.discussion_id {
+            return Err(ProtocolError::InvalidState(
+                "authored operation belongs to another discussion".into(),
+            )
+            .into());
+        }
         let spool = self.resolve_spool_ref(repo_path).await?;
+        let spool_id = uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
+        // Decide the target locally before consuming any remote frontier.
+        let scope = match retained_discussion_scope(discussion, retained)? {
+            Some((operation, scope)) if scope.spool != spool_id => {
+                return Err(DiscussionBindingError::AnotherSpool {
+                    discussion,
+                    operation,
+                    expected: spool_id,
+                    observed: scope.spool,
+                }
+                .into());
+            }
+            Some((_, scope)) => scope,
+            None => {
+                self.collaboration_scope(repo_path, Some(thread_ref))
+                    .await?
+                    .2
+            }
+        };
         let reference = RecordRef {
             spool: Some(spool.clone()),
             id: discussion_id.to_string(),
@@ -1191,21 +1353,16 @@ impl HostedClient {
         if parents.is_empty() {
             return Err(ProtocolError::InvalidState(
                 "non-root collaboration operation requires a parent".into(),
-            ));
+            )
+            .into());
         }
         let parent_records = signed_head_records(&operations, &parents)?;
-        let scope = parent_scope(&parent_records[0])?;
+        validate_discussion_heads(discussion, &scope, &parent_records)?;
         let (actor, _) = self.collaboration_actor().await?;
         let signer = self
             .claim_proof_signer()
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let discussion = parse_discussion_id(discussion_id)?;
-        if discussion != authored.discussion_id {
-            return Err(ProtocolError::InvalidState(
-                "authored operation belongs to another discussion".into(),
-            ));
-        }
         let signed = thread_api::collaboration::Command {
             discussion,
             operation_id: authored.idempotency_key.clone(),
@@ -1658,6 +1815,106 @@ mod tests {
 
     fn proof_signer() -> crypto::Ed25519Signer {
         crypto::Ed25519Signer::from_seed(&[7; 32]).expect("signer")
+    }
+
+    fn signed_discussion_root(
+        discussion: DiscussionRecordId,
+        scope: CollaborationScope,
+    ) -> contract::SignedRecord {
+        thread_api::collaboration::Command {
+            discussion,
+            operation_id: CollaborationIdempotencyKey::new(Uuid::now_v7().to_string())
+                .expect("operation ID"),
+            metadata: proof_metadata(scope),
+            author: Attribution::human(Principal::new("Author", "author@test")),
+            occurred_at_ms: 100,
+            body: Body::Open {
+                blocking: false,
+                title: "Review".into(),
+                anchor: Anchor::Repository,
+                visibility: VisibilityTier::Public,
+                turn: DiscussionTurnV1::new("Review this change").expect("turn"),
+                thread_ref: None,
+            },
+        }
+        .sign(&[], &proof_signer())
+        .expect("signed discussion")
+    }
+
+    #[test]
+    fn discussion_heads_require_the_local_record_thread_and_spool() {
+        let discussion = DiscussionRecordId::generate();
+        let scope = proof_scope();
+        let honest = signed_discussion_root(discussion, scope.clone());
+        validate_discussion_heads(discussion, &scope, std::slice::from_ref(&honest))
+            .expect("legitimate head");
+        let foreign = signed_discussion_root(DiscussionRecordId::generate(), scope.clone());
+        assert!(matches!(
+            validate_discussion_heads(discussion, &scope, &[foreign]),
+            Err(PrepareDiscussionError::Binding(
+                DiscussionBindingError::ForeignHead { .. }
+            ))
+        ));
+        let mut another_thread = scope.clone();
+        another_thread.thread = Some(ContentHash::from_bytes([9; 32]));
+        let hostile = signed_discussion_root(discussion, another_thread);
+        assert!(
+            matches!(
+                validate_discussion_heads(discussion, &scope, &[honest, hostile]),
+                Err(PrepareDiscussionError::Binding(
+                    DiscussionBindingError::AnotherThread { .. }
+                ))
+            ),
+            "every head is checked, including after an honest head"
+        );
+        let mut another_spool = scope.clone();
+        another_spool.spool = Uuid::from_u128(99);
+        let hostile = signed_discussion_root(discussion, another_spool);
+        assert!(matches!(
+            validate_discussion_heads(discussion, &scope, &[hostile]),
+            Err(PrepareDiscussionError::Binding(
+                DiscussionBindingError::AnotherSpool { .. }
+            ))
+        ));
+        let context = thread_api::collaboration::sign_context(
+            security_context(Uuid::now_v7()),
+            &[],
+            &proof_signer(),
+        )
+        .expect("context");
+        assert!(matches!(
+            validate_discussion_heads(discussion, &scope, &[context]),
+            Err(PrepareDiscussionError::Binding(
+                DiscussionBindingError::ForeignHead { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn retained_discussion_binding_refuses_rebinding_and_ignores_other_records() {
+        let discussion = DiscussionRecordId::generate();
+        let scope = proof_scope();
+        let ours = signed_discussion_root(discussion, scope.clone());
+        assert_eq!(
+            retained_discussion_scope(discussion, std::slice::from_ref(&ours))
+                .expect("retained binding")
+                .map(|(_, scope)| scope),
+            Some(scope.clone())
+        );
+        assert!(
+            retained_discussion_scope(DiscussionRecordId::generate(), std::slice::from_ref(&ours))
+                .expect("unrelated record")
+                .is_none()
+        );
+        let mut rebound = scope;
+        rebound.thread = Some(ContentHash::from_bytes([9; 32]));
+        let theirs = signed_discussion_root(discussion, rebound);
+        assert!(matches!(
+            retained_discussion_scope(discussion, &[ours, theirs]),
+            Err(PrepareDiscussionError::Binding(
+                DiscussionBindingError::AnotherThread { .. }
+            ))
+        ));
     }
 
     fn security_context(id: Uuid) -> ContextRevision {
