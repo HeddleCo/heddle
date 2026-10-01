@@ -1585,11 +1585,19 @@ async fn push_network_connected(
                     reviews.clone(),
                 );
                 let text = format_push_outcome_text(&output.outcome, Some(options.track_name));
-                println!(
-                    "{} pushed to {}",
-                    style::ok_marker(),
-                    style::bold(options.track_name)
-                );
+                if replication_complete {
+                    println!(
+                        "{} pushed to {}",
+                        style::ok_marker(),
+                        style::bold(options.track_name)
+                    );
+                } else {
+                    println!(
+                        "{} partial push to {}",
+                        style::warn_marker(),
+                        style::bold(options.track_name)
+                    );
+                }
                 debug_assert!(
                     text.headline.contains(options.track_name) || text.headline.contains("pushed"),
                     "domain headline: {}",

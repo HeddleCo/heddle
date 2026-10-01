@@ -1198,6 +1198,7 @@ impl HostedClient {
                 }],
                 include_history: true,
                 include_operations: true,
+                annotations: Some(contract::AnnotationQuery::default()),
                 observe: Some(once_observe()),
                 ..Default::default()
             })

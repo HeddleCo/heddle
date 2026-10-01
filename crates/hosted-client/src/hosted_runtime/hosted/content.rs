@@ -246,6 +246,7 @@ impl HostedClient {
                 }],
                 include_history: true,
                 include_operations: true,
+                annotations: Some(AnnotationQuery::default()),
                 ..Default::default()
             })
             .await?;
