@@ -1840,6 +1840,234 @@ async fn context_failures_report_recovery_and_concurrent_writer_stays_rejected()
     fixture.close().await;
 }
 
+/// heddle#1928: the scope a hostile remote's attacker-signed head names. Same
+/// spool, another Thread.
+fn hostile_metadata(fixture: &Fixture) -> objects::object::CollaborationMetadata {
+    objects::object::CollaborationMetadata {
+        scope: objects::object::CollaborationScope {
+            spool: fixture.spool,
+            thread: Some(objects::object::ContentHash::from_bytes([92; 32])),
+        },
+        actor: objects::object::CollaborationActor {
+            principal_id: uuid::Uuid::from_u128(93),
+            agent_id: None,
+        },
+        mentions: vec![],
+    }
+}
+
+fn hostile_signer() -> Ed25519Signer {
+    Ed25519Signer::from_seed(&[91; 32]).expect("attacker key")
+}
+
+/// An attacker-signed context revision of `context` in another Thread.
+fn hostile_context(
+    fixture: &Fixture,
+    context: uuid::Uuid,
+) -> api::heddle::api::v1alpha2::SignedRecord {
+    thread_api::collaboration::sign_context(
+        objects::object::ContextRevision {
+            version: 2,
+            id: context,
+            parents: vec![],
+            metadata: hostile_metadata(fixture),
+            anchor: objects::object::CollaborationAnchor::Repository,
+            content: "attacker".into(),
+            tags: vec![],
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 1,
+            provenance: Some(objects::object::ContextProvenance {
+                revision_id: uuid::Uuid::now_v7().to_string(),
+                kind: objects::object::AnnotationKind::Rationale,
+                attribution: "Attacker <attacker@test>".into(),
+                source_hash: None,
+                created_at_state: None,
+            }),
+            canonical_body: Default::default(),
+        },
+        &[],
+        &hostile_signer(),
+    )
+    .expect("attacker-signed context")
+}
+
+/// An attacker-signed discussion operation in another Thread that extracts
+/// no context at all.
+fn hostile_discussion(fixture: &Fixture) -> api::heddle::api::v1alpha2::SignedRecord {
+    thread_api::collaboration::Command {
+        discussion: objects::object::DiscussionRecordId::generate(),
+        operation_id: objects::object::CollaborationIdempotencyKey::new(
+            uuid::Uuid::now_v7().to_string(),
+        )
+        .expect("operation ID"),
+        metadata: hostile_metadata(fixture),
+        author: objects::object::Attribution::human(objects::object::Principal::new(
+            "Attacker",
+            "attacker@test",
+        )),
+        occurred_at_ms: 1,
+        body: objects::object::CollaborationOperationBodyV1::Open {
+            blocking: false,
+            title: "unrelated".into(),
+            anchor: objects::object::CollaborationAnchor::Repository,
+            visibility: objects::object::VisibilityTier::Public,
+            turn: objects::object::DiscussionTurnV1::new("unrelated").expect("turn"),
+            thread_ref: None,
+        },
+    }
+    .sign(&[], &hostile_signer())
+    .expect("attacker-signed discussion")
+}
+
+/// The Thread of every context operation the clone retained for delivery.
+fn retained_context_threads(checkout: &Path) -> Vec<objects::object::ContentHash> {
+    use prost::Message;
+    let repo = Repository::open(checkout).expect("repo");
+    let path = repo
+        .heddle_dir()
+        .join("collaboration")
+        .join("hosted-context-mirror.json");
+    let mirror: Value =
+        serde_json::from_slice(&std::fs::read(path).expect("context mirror")).expect("mirror");
+    mirror["repos"]
+        .as_object()
+        .expect("repos")
+        .values()
+        .flat_map(|repository| repository["annotations"].as_array().expect("annotations"))
+        .flat_map(|entry| entry["native_operations"].as_array().expect("operations"))
+        .map(|operation| {
+            let bytes: Vec<u8> = serde_json::from_value(operation["signed_record"].clone())
+                .expect("signed record bytes");
+            let signed = api::heddle::api::v1alpha2::SignedRecord::decode(bytes.as_slice())
+                .expect("signed record");
+            thread_api::collaboration::verify(&signed)
+                .expect("retained operation")
+                .thread
+        })
+        .collect()
+}
+
+/// heddle#1928: a hostile remote answers the observation of a context's
+/// frontier with an attacker-signed head in another Thread of the same spool.
+/// The client refuses with a typed error before signing: nothing is retained
+/// or sent for the other Thread. Once the remote answers honestly, the same
+/// pending revision lands on the Thread the record is bound to.
+///
+/// `published` first publishes the record, so the pending revision is an
+/// edit the client already holds a binding for; otherwise it is the record's
+/// create, whose intended Thread is the one being pushed.
+async fn assert_hostile_context_head_refused(
+    published: bool,
+    hostile: impl FnOnce(&Fixture, uuid::Uuid) -> api::heddle::api::v1alpha2::SignedRecord,
+) {
+    let fixture = Fixture::new().await;
+    let main = fixture.thread_id;
+    fixture.run(&["context", "set", "--path", "example.py", "--body", "v1"]);
+    let annotation = only_context_id(&fixture, &fixture.clone, "example.py");
+    let context: uuid::Uuid = annotation
+        .trim_start_matches("ann-")
+        .parse()
+        .expect("context UUID");
+    let mut expected = vec!["v1"];
+    if published {
+        assert_push_succeeded(&fixture, &fixture.clone);
+        fixture.run(&["context", "edit", &annotation, "--body", "v2"]);
+        expected.push("v2");
+    }
+    let hostile = hostile(&fixture, context);
+    let attempts = {
+        let mut capture = fixture.captured.lock().expect("capture");
+        capture.hostile_context_head = Some(hostile);
+        capture.context_attempts.len()
+    };
+    let (code, result) = push_json(&fixture, &fixture.clone);
+    let capture = fixture.captured.lock().expect("capture").clone();
+    let redirected: Vec<_> = capture
+        .context_attempts
+        .iter()
+        .map(context_operation)
+        .filter(|operation| operation.thread != main)
+        .map(|operation| operation.thread)
+        .collect();
+    assert!(
+        redirected.is_empty(),
+        "the client signed and sent a revision into the hostile remote's Thread(s) {redirected:?} instead of {main}"
+    );
+    let retained = retained_context_threads(&fixture.clone);
+    assert!(
+        retained.iter().all(|thread| *thread == main),
+        "the client retained a revision for another Thread: {retained:?}"
+    );
+    assert_eq!(capture.context_attempts.len(), attempts, "nothing is sent");
+    assert_eq!(result["context"]["status"], "failed", "{result}");
+    let item = &result["context"]["local_only"][0];
+    assert_eq!(item["record_id"], annotation.as_str(), "{result}");
+    assert_eq!(item["kind"], "not_replicable", "{result}");
+    assert_eq!(item["retry_unchanged"], false, "{result}");
+    let message = item["message"].as_str().expect("message");
+    assert!(
+        message.contains("refused to sign"),
+        "the refusal names itself: {message}"
+    );
+    assert_eq!(code, Some(65), "{result}");
+
+    fixture
+        .captured
+        .lock()
+        .expect("capture")
+        .hostile_context_head = None;
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let capture = fixture.captured.lock().expect("capture").clone();
+    let bodies: Vec<String> = capture
+        .contexts
+        .iter()
+        .map(|request| request.context.as_ref().expect("draft").content.clone())
+        .collect();
+    assert_eq!(bodies, expected);
+    let mut parent = None;
+    for request in &capture.contexts {
+        let operation = context_operation(request);
+        assert_eq!(operation.thread, main, "every revision stays on main");
+        assert_eq!(
+            operation.parents,
+            parent.into_iter().collect(),
+            "and extends the honest frontier"
+        );
+        parent = Some(operation.id().expect("operation ID"));
+    }
+    fixture.close().await;
+}
+
+/// The head is another record's revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_head_of_another_context_is_refused() {
+    assert_hostile_context_head_refused(false, |fixture, _| {
+        hostile_context(fixture, uuid::Uuid::now_v7())
+    })
+    .await;
+}
+
+/// The head is a discussion operation that extracts no context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_discussion_head_without_extraction_is_refused() {
+    assert_hostile_context_head_refused(false, |fixture, _| hostile_discussion(fixture)).await;
+}
+
+/// The head is a forged revision of a record the client is creating, in
+/// another Thread than the one being pushed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_head_binding_a_new_context_to_another_thread_is_refused() {
+    assert_hostile_context_head_refused(false, hostile_context).await;
+}
+
+/// The head is a forged revision of a published record in another Thread;
+/// the binding the client retained from its own create refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_head_rebinding_a_published_context_is_refused() {
+    assert_hostile_context_head_refused(true, hostile_context).await;
+}
+
 // ---------------------------------------------------------------------------
 // heddle#1886: a Thread with two hosted heads.
 // ---------------------------------------------------------------------------

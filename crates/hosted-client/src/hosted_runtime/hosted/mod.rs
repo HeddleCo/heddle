@@ -70,8 +70,12 @@ pub use bootstrap::{
     fetch_ephemeral_descriptor_set,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
-pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
-pub(crate) use collaboration::{context_command_ids, discussion_command_ids};
+pub use collaboration::{
+    ContextBindingError, HostedDiscussion, HostedDiscussionTurn, HostedResolution,
+};
+pub(crate) use collaboration::{
+    PrepareContextError, context_command_ids, discussion_command_ids, retained_context_binding,
+};
 use config::ClientConfig;
 use connection::HostedConnection;
 pub(crate) use connection::track_command_endpoint;

@@ -190,6 +190,15 @@ pub fn classify_error(error: &anyhow::Error) -> ReplicationIssueKind {
     if error.downcast_ref::<StaleRevisionPending>().is_some() {
         return ReplicationIssueKind::StaleVersion;
     }
+    // The client refused to sign: nothing was sent, and no hosted command
+    // can carry the revision until the remote's frontier binds it honestly.
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::hosted_runtime::hosted::ContextBindingError>()
+            .is_some()
+    }) {
+        return ReplicationIssueKind::NotReplicable;
+    }
     let delivered = error.downcast_ref::<DeliveredCommand>().is_some();
     error
         .chain()
