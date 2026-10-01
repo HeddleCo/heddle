@@ -43,7 +43,7 @@ use crate::{
             ReplicationReport, StaleRevisionPending, classify_error, issue_from_error,
         },
     },
-    hosted_runtime::hosted::context_command_ids,
+    hosted_runtime::hosted::{PrepareContextError, context_command_ids, retained_context_binding},
 };
 
 // =========================================================================
@@ -144,6 +144,18 @@ fn save_mirror(heddle_dir: &Path, mirror: &HostedContextMirror) -> Result<()> {
 }
 
 // --- mirror accessors ---
+
+/// The signed context operations the client retains for one annotation.
+fn retained_operations(entry: &ContextMirrorEntry) -> Result<Vec<SignedRecord>> {
+    entry
+        .native_operations
+        .iter()
+        .map(|operation| {
+            SignedRecord::decode(operation.signed_record.as_slice())
+                .context("decode retained native context operation")
+        })
+        .collect()
+}
 
 fn entry_index(mirror: &HostedContextMirror, repo_path: &str, local_id: &str) -> Option<usize> {
     mirror
@@ -318,6 +330,18 @@ async fn publish_native_context_revision(
             prepared.expected_version,
         )
     } else {
+        let retained = mirror
+            .repos
+            .get(repo_path)
+            .and_then(|repository| {
+                repository
+                    .annotations
+                    .iter()
+                    .find(|entry| entry.local_id == local_annotation_id)
+            })
+            .map(retained_operations)
+            .transpose()?
+            .unwrap_or_default();
         let (signed, expected_version) = client
             .prepare_native_context_record(
                 repo_path,
@@ -329,8 +353,10 @@ async fn publish_native_context_revision(
                 native_context_provenance(revision),
                 revision.created_at.saturating_mul(1000),
                 supersedes,
+                &retained,
             )
-            .await?;
+            .await
+            .map_err(PrepareContextError::into_anyhow)?;
         get_or_create_entry(mirror, repo_path, local_annotation_id)
             .native_operations
             .push(PreparedContextOperation {
@@ -878,6 +904,12 @@ pub async fn pull_context(
             .iter()
             .any(|operation| operation.local_revision_id == provenance.revision_id)
         {
+            // Accept an operation only in the scope the record is already
+            // bound to here; a remote cannot rebind it to another Thread.
+            let mut bound = retained_operations(entry)?;
+            bound.push(signed.clone());
+            retained_context_binding(context.id, &bound)
+                .map_err(PrepareContextError::into_anyhow)?;
             entry.native_operations.push(PreparedContextOperation {
                 local_revision_id: provenance.revision_id.clone(),
                 signed_record: signed.encode_to_vec(),
@@ -1851,6 +1883,7 @@ mod tests {
                     provenance.clone(),
                     occurred_at_ms,
                     None,
+                    &[],
                 )
                 .await
                 .unwrap();
@@ -1888,6 +1921,7 @@ mod tests {
                         edit_provenance,
                         occurred_at_ms + 1000,
                         None,
+                        &[],
                     )
                     .await
                     .unwrap();

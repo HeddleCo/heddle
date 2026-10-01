@@ -75,6 +75,7 @@ pub(crate) struct CollaborationFixture {
 pub(crate) struct ContextFixture {
     pub records: Vec<v2::ContextRecord>,
     pub histories: HashMap<String, Vec<v2::ContextRecord>>,
+    pub signed_operations: Vec<v2::SignedRecord>,
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
     /// When true, PutContext returns Dedup Conflict for the create nonce.
@@ -2599,6 +2600,13 @@ fn context_history_payloads(
         .flatten()
         .cloned()
         .map(v2::collaboration_event::Payload::Context)
+        .chain(
+            fixture
+                .signed_operations
+                .iter()
+                .cloned()
+                .map(v2::collaboration_event::Payload::Operation),
+        )
         .collect()
 }
 

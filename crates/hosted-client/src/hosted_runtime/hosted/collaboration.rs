@@ -239,55 +239,191 @@ fn parent_bytes(ids: &[ContentHash]) -> Vec<Vec<u8>> {
     ids.iter().map(|id| id.as_bytes().to_vec()).collect()
 }
 
-/// The scope a context record's current frontier lives in.
-///
-/// The hosted service binds a context RecordRef to the one Thread it was
-/// first published in and partitions causal history by Thread, so a revision
-/// only extends the frontier when it is signed in that same scope. A head is
-/// either a context revision or the discussion resolution it was extracted
-/// from.
-fn context_bound_scope(
-    heads: &[contract::SignedRecord],
-) -> Result<CollaborationScope, ProtocolError> {
-    let mut bound: Option<CollaborationScope> = None;
-    for record in heads {
-        let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
-        let scope = match operation.body {
-            ThreadOperationBody::Context(bytes) => {
-                ContextRevision::decode(&bytes)
-                    .map_err(native_error)?
-                    .metadata
-                    .scope
-            }
-            ThreadOperationBody::Discussion(bytes) => {
-                CollaborationOperationEnvelope::decode(&bytes)
-                    .map_err(native_error)?
-                    .operation
-                    .metadata
-                    .map(|metadata| metadata.scope)
-                    .ok_or_else(|| {
-                        ProtocolError::InvalidState(
-                            "context head has no collaboration scope".into(),
-                        )
-                    })?
-            }
-            _ => {
-                return Err(ProtocolError::InvalidState(
-                    "context head is not a collaboration operation".into(),
-                ));
-            }
-        };
-        match &bound {
-            Some(existing) if *existing != scope => {
-                return Err(ProtocolError::InvalidState(
-                    "observed context heads span collaboration scopes".into(),
-                ));
-            }
-            Some(_) => {}
-            None => bound = Some(scope),
+/// The client refused to sign a context revision: what the remote observed,
+/// or what the client retained, does not bind the revision to the record and
+/// Thread the client holds for it. Nothing was signed, retained, or sent.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContextBindingError {
+    /// An observed head is not a revision or extraction of the record.
+    #[error(
+        "refused to sign context {context}: hosted head {head} is not a revision or extraction of that context"
+    )]
+    ForeignHead {
+        context: uuid::Uuid,
+        head: ContentHash,
+    },
+    /// An operation binds the record to another spool than the one it is
+    /// bound to.
+    #[error(
+        "refused to sign context {context}: operation {operation} binds it to spool {observed}, but it is bound to spool {expected}"
+    )]
+    AnotherSpool {
+        context: uuid::Uuid,
+        operation: ContentHash,
+        expected: uuid::Uuid,
+        observed: uuid::Uuid,
+    },
+    /// An operation binds the record to another Thread than the one it is
+    /// bound to.
+    #[error(
+        "refused to sign context {context}: operation {operation} binds it to {}, but it is bound to {}",
+        thread_label(observed),
+        thread_label(expected)
+    )]
+    AnotherThread {
+        context: uuid::Uuid,
+        operation: ContentHash,
+        expected: Option<ContentHash>,
+        observed: Option<ContentHash>,
+    },
+}
+
+fn thread_label(thread: &Option<ContentHash>) -> String {
+    match thread {
+        Some(thread) => format!("Thread {thread}"),
+        None => "no Thread".into(),
+    }
+}
+
+/// The refusal when `operation` binds `context` to `observed` while the
+/// record is bound to `expected`.
+fn scope_conflict(
+    context: uuid::Uuid,
+    operation: ContentHash,
+    expected: &CollaborationScope,
+    observed: &CollaborationScope,
+) -> Option<ContextBindingError> {
+    if expected.spool != observed.spool {
+        Some(ContextBindingError::AnotherSpool {
+            context,
+            operation,
+            expected: expected.spool,
+            observed: observed.spool,
+        })
+    } else if expected.thread != observed.thread {
+        Some(ContextBindingError::AnotherThread {
+            context,
+            operation,
+            expected: expected.thread,
+            observed: observed.thread,
+        })
+    } else {
+        None
+    }
+}
+
+/// A prepared context revision failed: either the hosted exchange itself or
+/// the client's refusal to sign an unbound revision.
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareContextError {
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+    #[error(transparent)]
+    Binding(#[from] ContextBindingError),
+}
+
+impl PrepareContextError {
+    /// The concrete cause, at the top of the chain so callers classify it by
+    /// type.
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Protocol(error) => anyhow::Error::new(error),
+            Self::Binding(error) => anyhow::Error::new(error),
         }
     }
-    bound.ok_or_else(|| ProtocolError::InvalidState("context has no observed heads".into()))
+}
+
+/// Where one signed operation binds a context record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextBinding {
+    /// The operation that establishes the binding.
+    pub operation: ContentHash,
+    pub scope: CollaborationScope,
+    pub extracted_from: Option<DiscussionRecordId>,
+}
+
+/// The binding a signed operation asserts for `context`: `None` when the
+/// operation is not a revision or extraction of that record. The scope is the
+/// one the operation's own Thread signs, so a record cannot claim one Thread
+/// while being signed into another.
+fn context_binding_of(
+    context: uuid::Uuid,
+    record: &contract::SignedRecord,
+) -> Result<Option<ContextBinding>, ProtocolError> {
+    let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
+    let id = operation.id().map_err(native_error)?;
+    let Some(revision) = operation.context_revision().map_err(native_error)? else {
+        return Ok(None);
+    };
+    if revision.id != context || revision.metadata.scope.thread != Some(operation.thread) {
+        return Ok(None);
+    }
+    Ok(Some(ContextBinding {
+        operation: id,
+        scope: revision.metadata.scope,
+        extracted_from: revision.extracted_from,
+    }))
+}
+
+/// The scope the client's own retained signed operations bind `context` to.
+///
+/// The service binds a context record to the one Thread it was first
+/// published in, so every retained operation of the record names the same
+/// scope. That durable local fact, not the remote's word, is what a later
+/// revision must extend.
+pub(crate) fn retained_context_binding(
+    context: uuid::Uuid,
+    retained: &[contract::SignedRecord],
+) -> Result<Option<ContextBinding>, PrepareContextError> {
+    let mut bound: Option<ContextBinding> = None;
+    for record in retained {
+        let Some(binding) = context_binding_of(context, record)? else {
+            continue;
+        };
+        match &bound {
+            Some(existing) => {
+                if let Some(conflict) =
+                    scope_conflict(context, binding.operation, &existing.scope, &binding.scope)
+                {
+                    return Err(conflict.into());
+                }
+            }
+            None => bound = Some(binding),
+        }
+    }
+    Ok(bound)
+}
+
+/// The binding of a context record's observed frontier.
+///
+/// The hosted service partitions causal history by Thread, so a revision only
+/// extends the frontier when it is signed in that same scope. Every head must
+/// be a revision of this record, or the discussion resolution it was
+/// extracted from, and all heads must agree on scope and extraction.
+fn context_head_binding(
+    context: uuid::Uuid,
+    heads: &[contract::SignedRecord],
+) -> Result<Option<ContextBinding>, PrepareContextError> {
+    let mut bound: Option<ContextBinding> = None;
+    for record in heads {
+        let head = thread_api::collaboration::operation_id(record).map_err(native_error)?;
+        let binding = context_binding_of(context, record)?
+            .ok_or(ContextBindingError::ForeignHead { context, head })?;
+        match &bound {
+            Some(existing) => {
+                if let Some(conflict) =
+                    scope_conflict(context, head, &existing.scope, &binding.scope)
+                {
+                    return Err(conflict.into());
+                }
+                if existing.extracted_from != binding.extracted_from {
+                    return Err(ContextBindingError::ForeignHead { context, head }.into());
+                }
+            }
+            None => bound = Some(binding),
+        }
+    }
+    Ok(bound)
 }
 
 fn signed_operation_id(signed: &contract::SignedRecord) -> Result<String, ProtocolError> {
@@ -931,14 +1067,14 @@ impl HostedClient {
         Ok((discussions, operations))
     }
 
-    /// The current frontier of one context record, the view version it was
-    /// observed at, and the scope that frontier is bound to (`None` until the
-    /// record exists).
+    /// The original signed records of one context record's current frontier
+    /// and the view version it was observed at (no heads until the record
+    /// exists). The records are the remote's claim; callers validate them.
     async fn observe_context_heads(
         &self,
         spool: contract::SpoolRef,
         annotation_id: &str,
-    ) -> Result<(Vec<ContentHash>, Vec<u8>, Option<CollaborationScope>), ProtocolError> {
+    ) -> Result<(Vec<contract::SignedRecord>, Vec<u8>), ProtocolError> {
         let id = annotation_id.trim_start_matches("ann-").to_string();
         let events = self
             .observe_collaboration_events(ObserveCollaborationRequest {
@@ -969,17 +1105,16 @@ impl HostedClient {
             }
         }
         let Some(record) = current else {
-            return Ok((Vec::new(), Vec::new(), None));
+            return Ok((Vec::new(), Vec::new()));
         };
         let mut heads = causal_hashes(record.causal_heads)?;
         if heads.is_empty() && record.causal_id.len() == 32 {
             heads = causal_hashes(std::iter::once(record.causal_id))?;
         }
         if heads.is_empty() {
-            return Ok((heads, record.version, None));
+            return Ok((Vec::new(), record.version));
         }
-        let scope = context_bound_scope(&signed_head_records(&operations, &heads)?)?;
-        Ok((heads, record.version, Some(scope)))
+        Ok((signed_head_records(&operations, &heads)?, record.version))
     }
 
     /// Prepare an authored append against the observed native frontier.
@@ -1267,6 +1402,12 @@ impl HostedClient {
 
     /// Prepare and sign a native context revision. Callers persist both the
     /// signed record and expected version before delivery.
+    ///
+    /// `retained` holds the signed context operations the client already
+    /// keeps; those of this record fix the Thread it is bound to. The
+    /// revision is signed over the observed heads' original records only
+    /// when each is a revision or extraction of this record in that same
+    /// scope, whatever the remote claims; otherwise nothing is signed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prepare_native_context_record(
         &mut self,
@@ -1279,24 +1420,44 @@ impl HostedClient {
         provenance: ContextProvenance,
         occurred_at_ms: i64,
         supersedes: Option<uuid::Uuid>,
-    ) -> Result<(contract::SignedRecord, Vec<u8>), ProtocolError> {
+        retained: &[contract::SignedRecord],
+    ) -> Result<(contract::SignedRecord, Vec<u8>), PrepareContextError> {
         let id = parse_context_id(annotation_id)?;
         let spool = self.resolve_spool_ref(repo_path).await?;
-        let (parent_ids, expected_version, bound_scope) = self
+        let spool_id = uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
+        let (heads, expected_version) = self
             .observe_context_heads(spool.clone(), annotation_id)
             .await?;
-        // A revision extends the frontier of the Thread the record is bound
-        // to, whichever Thread is being pushed. Only a new record takes the
-        // requested scope; signing a revision into another Thread's scope
-        // names a frontier that Thread does not have.
-        let scope = match bound_scope {
-            Some(scope) if scope.spool.to_string() == spool.id => scope,
-            Some(_) => {
-                return Err(ProtocolError::InvalidState(
-                    "observed context is bound to another spool".into(),
-                ));
+        let retained = retained_context_binding(id, retained)?;
+        let observed = context_head_binding(id, &heads)?;
+        // The Thread a revision is for is a local fact, not the remote's: the
+        // Thread the record is bound to when the client holds its signed
+        // operations (a revision extends that frontier whichever Thread is
+        // being pushed), otherwise the Thread being pushed. The observed
+        // frontier must already live there.
+        let scope = match retained {
+            Some(retained) if retained.scope.spool != spool_id => {
+                return Err(ContextBindingError::AnotherSpool {
+                    context: id,
+                    operation: retained.operation,
+                    expected: spool_id,
+                    observed: retained.scope.spool,
+                }
+                .into());
             }
+            Some(retained) => retained.scope,
             None => self.collaboration_scope(repo_path, thread_ref).await?.2,
+        };
+        let extracted_from = match observed {
+            Some(observed) => {
+                if let Some(conflict) =
+                    scope_conflict(id, observed.operation, &scope, &observed.scope)
+                {
+                    return Err(conflict.into());
+                }
+                observed.extracted_from
+            }
+            None => None,
         };
         let (actor, _) = self.collaboration_actor().await?;
         let signer = self
@@ -1309,7 +1470,7 @@ impl HostedClient {
             id,
             parents: vec![],
             metadata: CollaborationMetadata {
-                scope: scope.clone(),
+                scope,
                 actor,
                 mentions: vec![],
             },
@@ -1317,14 +1478,15 @@ impl HostedClient {
             content: content.to_string(),
             tags,
             supersedes,
-            extracted_from: None,
+            extracted_from,
             occurred_at_ms,
             provenance: Some(provenance),
             canonical_body: Default::default(),
         };
-        let signed =
-            thread_api::collaboration::sign_context_parent_ids(context, &parent_ids, signer)
-                .map_err(native_error)?;
+        // Full-record signing re-checks every parent's record identity,
+        // Thread, scope and extraction against the revision.
+        let signed = thread_api::collaboration::sign_context(context, &heads, signer)
+            .map_err(native_error)?;
         Ok((signed, expected_version))
     }
 
@@ -1496,6 +1658,205 @@ mod tests {
 
     fn proof_signer() -> crypto::Ed25519Signer {
         crypto::Ed25519Signer::from_seed(&[7; 32]).expect("signer")
+    }
+
+    fn security_context(id: Uuid) -> ContextRevision {
+        let mut scope = proof_scope();
+        scope.spool = Uuid::from_bytes([2; 16]);
+        ContextRevision {
+            version: 2,
+            id,
+            parents: vec![],
+            metadata: proof_metadata(scope),
+            anchor: Anchor::Repository,
+            content: "Retained rationale".into(),
+            tags: vec![],
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 100,
+            provenance: None,
+            canonical_body: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_signing_rejects_remote_head_for_another_annotation() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let victim = Uuid::now_v7();
+        let attacker = crypto::Ed25519Signer::from_seed(&[19; 32]).expect("attacker");
+        let parent = thread_api::collaboration::sign_context(
+            security_context(Uuid::now_v7()),
+            &[],
+            &attacker,
+        )
+        .expect("attacker-signed context");
+        let error = assert_remote_context_head_rejected(victim, parent, &[]).await;
+        assert!(
+            matches!(error, ContextBindingError::ForeignHead { context, .. } if context == victim),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_signing_rejects_remote_head_rebinding_to_another_thread() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let victim = Uuid::now_v7();
+        let ours =
+            thread_api::collaboration::sign_context(security_context(victim), &[], &proof_signer())
+                .expect("retained create");
+        let attacker = crypto::Ed25519Signer::from_seed(&[19; 32]).expect("attacker");
+        let mut forged = security_context(victim);
+        forged.metadata.scope.thread = Some(ContentHash::from_bytes([9; 32]));
+        let parent = thread_api::collaboration::sign_context(forged, &[], &attacker)
+            .expect("attacker-signed context");
+        let error = assert_remote_context_head_rejected(victim, parent, &[ours]).await;
+        assert!(
+            matches!(
+                &error,
+                ContextBindingError::AnotherThread { expected, observed, .. }
+                    if *expected == proof_scope().thread
+                        && *observed == Some(ContentHash::from_bytes([9; 32]))
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn retained_binding_is_the_records_one_scope() {
+        let id = Uuid::now_v7();
+        let ours =
+            thread_api::collaboration::sign_context(security_context(id), &[], &proof_signer())
+                .expect("retained create");
+        let mut rebound = security_context(id);
+        rebound.metadata.scope.thread = Some(ContentHash::from_bytes([9; 32]));
+        let attacker = crypto::Ed25519Signer::from_seed(&[19; 32]).expect("attacker");
+        let theirs =
+            thread_api::collaboration::sign_context(rebound, &[], &attacker).expect("rebound");
+        assert_eq!(
+            retained_context_binding(id, std::slice::from_ref(&ours))
+                .expect("binding")
+                .map(|binding| binding.scope),
+            Some(security_context(id).metadata.scope)
+        );
+        assert!(
+            retained_context_binding(Uuid::now_v7(), std::slice::from_ref(&ours))
+                .expect("another record")
+                .is_none(),
+            "another record's operations do not bind this one"
+        );
+        assert!(matches!(
+            retained_context_binding(id, &[ours, theirs]),
+            Err(PrepareContextError::Binding(
+                ContextBindingError::AnotherThread { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_signing_rejects_remote_discussion_without_extraction() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let victim = Uuid::now_v7();
+        let attacker = crypto::Ed25519Signer::from_seed(&[19; 32]).expect("attacker");
+        let discussion = DiscussionRecordId::generate();
+        let open = thread_api::collaboration::Command {
+            discussion,
+            operation_id: CollaborationIdempotencyKey::new(Uuid::now_v7().to_string())
+                .expect("operation ID"),
+            metadata: security_context(victim).metadata,
+            author: Attribution::human(Principal::new("Attacker", "attacker@test")),
+            occurred_at_ms: 99,
+            body: Body::Open {
+                blocking: false,
+                title: "Unrelated".into(),
+                anchor: Anchor::Repository,
+                visibility: VisibilityTier::Public,
+                turn: DiscussionTurnV1::new("Unrelated").expect("turn"),
+                thread_ref: None,
+            },
+        }
+        .sign(&[], &attacker)
+        .expect("attacker-signed open");
+        let parent = thread_api::collaboration::Command {
+            discussion,
+            operation_id: CollaborationIdempotencyKey::new(Uuid::now_v7().to_string())
+                .expect("operation ID"),
+            metadata: security_context(victim).metadata,
+            author: Attribution::human(Principal::new("Attacker", "attacker@test")),
+            occurred_at_ms: 100,
+            body: Body::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "unrelated".into(),
+                },
+            },
+        }
+        .sign(&[open], &attacker)
+        .expect("attacker-signed dismissal");
+        let error = assert_remote_context_head_rejected(victim, parent, &[]).await;
+        assert!(
+            matches!(error, ContextBindingError::ForeignHead { context, .. } if context == victim),
+            "{error}"
+        );
+    }
+
+    /// Prepare a revision of `victim` against a remote that answers with
+    /// `parent` as its only head, and return the client's typed refusal.
+    async fn assert_remote_context_head_rejected(
+        victim: Uuid,
+        parent: contract::SignedRecord,
+        retained: &[contract::SignedRecord],
+    ) -> ContextBindingError {
+        use super::super::test_server::{self, ContextFixture};
+        let head = thread_api::collaboration::verify(&parent)
+            .expect("valid signature")
+            .id()
+            .expect("head ID")
+            .as_bytes()
+            .to_vec();
+        let projection = contract::ContextRecord {
+            r#ref: Some(RecordRef {
+                spool: Some(contract::SpoolRef {
+                    id: Uuid::from_bytes([2; 16]).to_string(),
+                }),
+                id: victim.to_string(),
+            }),
+            causal_heads: vec![head],
+            version: vec![7; 32],
+            ..Default::default()
+        };
+        let fixture = ContextFixture {
+            histories: std::collections::HashMap::from([(victim.to_string(), vec![projection])]),
+            signed_operations: vec![parent],
+            ..Default::default()
+        };
+        let (mut client, server, _) = test_server::start_with_context(fixture).await;
+        let result = client
+            .prepare_native_context_record(
+                "acme/widgets",
+                Some("feature/victim"),
+                &victim.to_string(),
+                Anchor::Repository,
+                "Pending local edit",
+                vec![],
+                ContextProvenance {
+                    revision_id: Uuid::now_v7().to_string(),
+                    kind: AnnotationKind::Rationale,
+                    attribution: "Author <author@test>".into(),
+                    source_hash: None,
+                    created_at_state: None,
+                },
+                200,
+                None,
+                retained,
+            )
+            .await;
+        server.abort();
+        match result {
+            Err(PrepareContextError::Binding(error)) => error,
+            Err(PrepareContextError::Protocol(error)) => {
+                panic!("expected a typed binding refusal, got {error}")
+            }
+            Ok(_) => panic!("hostile remote obtained a user-signed revision for another Thread"),
+        }
     }
 
     /// Weft `OpenDiscussion` field check, named so a mismatch prints the
