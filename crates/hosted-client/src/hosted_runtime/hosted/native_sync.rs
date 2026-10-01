@@ -491,6 +491,14 @@ impl HostedClient {
         client_operation_id: String,
     ) -> Result<(PushComplete, PushProfile), ProtocolError> {
         let _ = force;
+        let native = repo.native_thread(target_thread).map_err(replica_err)?;
+        if local_state == native.genesis().map_err(replica_err)?.base
+            && !replica_has_admitted_source(repo, target_thread, local_state)?
+        {
+            return Err(ProtocolError::ThreadCaptureRequired {
+                thread: target_thread.into(),
+            });
+        }
         let started = Instant::now();
         let start_set = hosted_start_replicas(repo, target_thread)?;
         let mut receipt = None;
@@ -959,48 +967,60 @@ impl HostedClient {
             .r#ref
             .clone()
             .ok_or_else(|| ProtocolError::InvalidState("observed Thread has no identity".into()))?;
-        // Every head is installed, then (without an explicit target) the
-        // merge base of each pair of concurrent heads whose content is not
-        // local: a head's source pack does not carry it, and a three-way
-        // merge (`heddle resolve --merge`) needs it. A base Weft has not
-        // published stays absent with a warning; resolve then refuses that
-        // merge with a typed error, and a pick, which needs no base, works.
-        // One await site keeps this future small.
+        // Source packs carry signed ancestry metadata but only the selected
+        // State's content. Hydrate replay trees through the fork base before
+        // pull advances the checkout; ready must not discover missing trees
+        // halfway through a rebase. Each Fetch keeps its own admission budget.
         let mut pending = fetch_revisions(&overview, &spool, target_state)?
             .into_iter()
-            .map(|(state, revision)| (state, revision, false))
+            .map(|(state, revision)| (state, revision, reference.clone(), true))
             .collect::<std::collections::VecDeque<_>>();
+        let mut fetched = BTreeSet::new();
+        let mut installed = BTreeSet::new();
+        let mut optional_bases = BTreeSet::new();
         let mut bases_planned = target_state.is_some();
-        let mut installed = std::collections::BTreeSet::new();
         loop {
-            let Some((selected, revision, merge_base)) = pending.pop_front() else {
+            let Some((selected, revision, source, head)) = pending.pop_front() else {
                 if bases_planned {
                     break;
                 }
                 bases_planned = true;
-                pending.extend(
-                    missing_merge_bases(repo, &installed)?
-                        .into_iter()
-                        .map(|base| (base, revision_ref(&spool, base), true)),
-                );
+                for base in missing_merge_bases(repo, &installed)? {
+                    optional_bases.insert(base);
+                    pending.push_back((base, revision_ref(&spool, base), reference.clone(), false));
+                }
                 continue;
             };
+            if head {
+                installed.insert(selected);
+            }
+            if !fetched.insert(selected) {
+                continue;
+            }
+            let metadata_present = repo.store().get_state(&selected)?.is_some();
             match self
-                .fetch_and_install_revision(repo, &reference, revision, selected)
+                .fetch_and_install_revision(repo, &source, revision, selected)
                 .await
             {
-                Ok(state) if !merge_base => {
-                    installed.insert(state);
-                }
                 Ok(_) => {}
-                Err(error) if merge_base => self.warn(
-                    "source_merge_base_unavailable",
-                    format!(
-                        "Thread '{remote_thread}' has concurrent source heads whose merge base {} is not available ({error}); `heddle resolve --merge` needs it, `heddle resolve --pick` does not",
-                        selected.to_string_full()
-                    ),
-                ),
+                Err(error) if optional_bases.contains(&selected) => {
+                    self.warn(
+                        "source_merge_base_unavailable",
+                        format!(
+                            "Thread '{remote_thread}' has concurrent source heads whose merge base {} is not available ({error}); `heddle resolve --merge` needs it, `heddle resolve --pick` does not",
+                            selected.to_string_full()
+                        ),
+                    );
+                    continue;
+                }
                 Err(error) => return Err(error),
+            }
+            if target_state.is_none() && (head || !metadata_present) {
+                pending.extend(
+                    missing_replay_ancestry(repo, selected, &source)?
+                        .into_iter()
+                        .map(|(state, source)| (state, revision_ref(&spool, state), source, false)),
+                );
             }
         }
         // Fetch retained the original signed genesis and admitted source.
@@ -1116,6 +1136,53 @@ impl HostedClient {
                 .flatten()),
         }
     }
+}
+
+/// Content needed to replay this Thread's captures, including its fork base.
+/// An admitted ancestor State alone does not imply possession of its tree.
+fn missing_replay_ancestry(
+    repo: &Repository,
+    head: StateId,
+    reference: &ThreadRef,
+) -> Result<Vec<(StateId, ThreadRef)>, ProtocolError> {
+    let replica = ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?)
+        .map_err(replica_err)?;
+    let genesis = replica.genesis().map_err(replica_err)?;
+    // Root Threads have no integration target and cannot replay onto one.
+    // Their concurrent heads still hydrate merge bases in the caller.
+    if genesis.parent.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut pending = vec![head];
+    let mut visited = BTreeSet::new();
+    let mut missing = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let state = repo.store().get_state(&id)?;
+        let present = match &state {
+            Some(state) => repo.store().get_tree(&state.tree)?.is_some(),
+            None => false,
+        };
+        if !present {
+            let mut source = reference.clone();
+            if id == genesis.base
+                && let Some(parent) = genesis.parent
+            {
+                source.id = Some(contract::ThreadId {
+                    value: parent.as_bytes().to_vec(),
+                });
+            }
+            missing.push((id, source));
+        }
+        if id != genesis.base
+            && let Some(state) = state
+        {
+            pending.extend(state.parents);
+        }
+    }
+    Ok(missing)
 }
 
 /// Merge bases of every pair of concurrent heads whose content is not local.

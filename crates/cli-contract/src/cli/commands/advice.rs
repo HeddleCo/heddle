@@ -670,6 +670,19 @@ impl RecoveryAdvice {
         )
     }
 
+    pub fn thread_capture_required(thread: &str) -> Self {
+        Self::safety_refusal(
+            "thread_capture_required",
+            format!("Thread '{thread}' has no capture of its own to publish"),
+            "Make a change and run `heddle capture -m \"...\"` in the Thread checkout, then push again.",
+            "the Thread tip is its inherited fork base, without an admitted capture on this Thread",
+            "push publishes captures; the inherited parent capture belongs to its parent Thread",
+            "the Thread checkout and captures are preserved; no hosted Thread was started or published",
+            DIRTY_WORKTREE_CAPTURE_COMMAND,
+            vec![DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()],
+        )
+    }
+
     pub fn repository_no_head_anchor_first(action: &str) -> Self {
         Self::safety_refusal(
             "repository_no_head",

@@ -2414,6 +2414,169 @@ fn json_error_kind(output: &Output) -> Value {
         .clone()
 }
 
+impl Fixture {
+    fn start_decision_thread(&self, capture: bool) -> PathBuf {
+        self.run_at(&self.source, &["remote", "add", "origin", &self.remote()]);
+        let path = self._temp.path().join("human-thread");
+        self.run_at(
+            &self.source,
+            &["start", "decide", "--path", path.to_str().expect("path")],
+        );
+        if capture {
+            std::fs::write(path.join("TASK.md"), "Agree on the answer\n").expect("task");
+            self.run_at(&path, &["capture", "-m", "open decision"]);
+            self.run_at(&path, &["push", "origin", "decide"]);
+        }
+        path
+    }
+
+    fn clone_decision_thread(&self) -> PathBuf {
+        let path = self._temp.path().join("agent-thread");
+        self.run_at(
+            self._temp.path(),
+            &[
+                "clone",
+                &self.remote(),
+                path.to_str().expect("path"),
+                "--thread",
+                "decide",
+            ],
+        );
+        path
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1889_captureless_thread_push_has_actionable_error() {
+    let fixture = Fixture::new().await;
+    let human = fixture.start_decision_thread(false);
+    let before = {
+        let capture = fixture.captured.lock().expect("capture");
+        (capture.started.len(), capture.published.len())
+    };
+    let output = fixture.output_at(&human, &["--output", "json", "push", "origin", "decide"]);
+    println!("push stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(json_error_kind(&output), "thread_capture_required");
+    let error: Value = serde_json::from_slice(&output.stderr).expect("error envelope");
+    assert_eq!(output.status.code(), Some(65));
+    assert_eq!(error["primary_command"], "heddle capture -m \"...\"");
+    let human_error = fixture.output_at(&human, &["push", "origin", "decide"]);
+    let stderr = String::from_utf8_lossy(&human_error.stderr);
+    assert!(
+        stderr.contains("no capture of its own") && stderr.contains("Next: heddle capture"),
+        "{stderr}"
+    );
+    {
+        let capture = fixture.captured.lock().expect("capture");
+        assert_eq!(
+            (capture.started.len(), capture.published.len()),
+            before,
+            "refuse before hosted mutations"
+        );
+    }
+    std::fs::write(human.join("TASK.md"), "Publish this task\n").expect("task");
+    fixture.run_at(&human, &["capture", "-m", "open task"]);
+    fixture.run_at(&human, &["push", "origin", "decide"]);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1889_cloned_thread_reports_real_target() {
+    let fixture = Fixture::new().await;
+    fixture.start_decision_thread(true);
+    let agent = fixture.clone_decision_thread();
+    let report =
+        last_json(&fixture.run_at(&agent, &["--output", "json", "thread", "show", "decide"]));
+    println!("cloned Thread: {report}");
+    assert_eq!(report["target_thread"], "main", "{report}");
+    assert_eq!(report["parent_thread"], "main", "{report}");
+    assert_eq!(
+        report["base_state"],
+        head_of(&fixture.source).to_string_full()
+    );
+    let status = last_json(&fixture.run_at(&agent, &["--output", "json", "status"]));
+    assert_eq!(status["target_thread"], "main", "{status}");
+    // A stacked Thread must use its actual parent, rather than defaulting
+    // every cloned Thread to main.
+    let nested = fixture._temp.path().join("nested-thread");
+    fixture.run_at(
+        &agent,
+        &["start", "nested", "--path", nested.to_str().expect("path")],
+    );
+    std::fs::write(nested.join("nested.txt"), "stacked task\n").expect("nested edit");
+    fixture.run_at(&nested, &["capture", "-m", "stacked task"]);
+    fixture.run_at(&nested, &["push", "origin", "nested"]);
+    let cloned = fixture._temp.path().join("cloned-nested");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "clone",
+            &fixture.remote(),
+            cloned.to_str().expect("path"),
+            "--thread",
+            "nested",
+        ],
+    );
+    let report =
+        last_json(&fixture.run_at(&cloned, &["--output", "json", "thread", "show", "nested"]));
+    assert_eq!(report["target_thread"], "decide", "{report}");
+    assert_eq!(report["base_state"], head_of(&agent).to_string_full());
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1889_ready_after_pulling_agent_captures() {
+    let fixture = Fixture::new().await;
+    let human = fixture.start_decision_thread(true);
+    let agent = fixture.clone_decision_thread();
+    std::fs::write(agent.join("story.txt"), "agent intermediate\n").expect("agent edit");
+    fixture.run_at(&agent, &["capture", "-m", "agent intermediate"]);
+    let intermediate = head_of(&agent);
+    fixture.run_at(&agent, &["push", "origin", "decide"]);
+    std::fs::write(agent.join("story.txt"), "agent answer\n").expect("agent edit");
+    fixture.run_at(&agent, &["capture", "-m", "agent answer"]);
+    fixture.run_at(&agent, &["push", "origin", "decide"]);
+    // The target moves independently; ready must replay both agent captures.
+    std::fs::write(fixture.source.join("main.txt"), "target advance\n").expect("main edit");
+    fixture.run_at(&fixture.source, &["capture", "-m", "target advance"]);
+    fixture.run_at(&fixture.source, &["push", "origin", "main"]);
+    fixture.run_at(&human, &["pull", "origin", "--thread", "decide"]);
+    let ready = fixture.output_at(&human, &["--output", "json", "ready"]);
+    println!(
+        "ready stdout: {}\nready stderr: {}",
+        String::from_utf8_lossy(&ready.stdout),
+        String::from_utf8_lossy(&ready.stderr)
+    );
+    assert!(
+        ready.status.success(),
+        "ready must replay fetched source history"
+    );
+    let report = last_json(&String::from_utf8_lossy(&ready.stdout));
+    assert_eq!(report["status"], "completed", "{report}");
+    let repo = Repository::open(&human).expect("human checkout");
+    let state = repo
+        .store()
+        .get_state(&intermediate)
+        .expect("state lookup")
+        .expect("intermediate state");
+    assert!(
+        repo.store()
+            .get_tree(&state.tree)
+            .expect("tree lookup")
+            .is_some(),
+        "pull must fetch the replay parent tree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(human.join("story.txt")).expect("answer"),
+        "agent answer\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(human.join("main.txt")).expect("target edit"),
+        "target advance\n"
+    );
+    fixture.close().await;
+}
+
 struct TwoHeads {
     fixture: Fixture,
     /// Writer A's head (the source checkout).

@@ -2569,6 +2569,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             &[
                 (0, "ok"),
+                (
+                    65,
+                    "Thread has no capture to publish; capture in its checkout first",
+                ),
                 (75, "remote unreachable; safe to retry"),
                 (
                     76,
