@@ -60,6 +60,25 @@ impl RecoveryAdvice {
         )
     }
 
+    pub fn native_source_signer_unavailable(thread: &str, reason: &str) -> Self {
+        Self::safety_refusal(
+            "native_source_signer_unavailable",
+            format!(
+                "Cannot capture onto Thread '{thread}': its owner signing key is unavailable ({reason}). This Thread keeps its original owner; a clone without that key cannot capture onto it."
+            ),
+            "Start a new Thread owned by you with `heddle start <name>` (omit `--path` while this checkout has unsaved edits). Your edits are kept in this checkout, not copied into the new one. `cd` to the checkout path printed by start, then copy or reapply the intended edits there, including new files and deletions. Run `heddle capture -m \"...\"`, then `heddle push` from that checkout.",
+            format!("the owner signing key for Thread '{thread}' is unavailable: {reason}"),
+            "capturing onto this Thread requires its owner's signing authority",
+            "no capture was stored; Thread ownership, source history, refs, and worktree edits were left unchanged",
+            "heddle start <name>",
+            vec![
+                "heddle start <name>".to_string(),
+                DIRTY_WORKTREE_CAPTURE_COMMAND.to_string(),
+                "heddle push".to_string(),
+            ],
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn safety_refusal(
         kind: &'static str,

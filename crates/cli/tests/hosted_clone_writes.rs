@@ -398,6 +398,177 @@ async fn fresh_clone_capture_push_main() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_clone_without_owner_key_capture_advises_new_thread_without_capturing() {
+    let fixture = Fixture::new().await;
+    std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))
+        .expect("clone has no original owner key");
+    std::fs::write(fixture.clone.join("story.txt"), "unsaved clone edit\n").expect("clone edit");
+    let cloned = Repository::open(&fixture.clone).expect("clone repo");
+    let head = cloned.head().expect("HEAD");
+    let mut states = cloned.store().list_states().expect("states before refusal");
+    states.sort();
+
+    let human = fixture.output_at(&fixture.clone, &["capture", "-m", "must refuse"]);
+    let json = fixture.output_at(
+        &fixture.clone,
+        &["--output", "json", "capture", "-m", "must refuse"],
+    );
+    for output in [&human, &json] {
+        assert_eq!(output.status.code(), Some(74));
+        assert!(output.stdout.is_empty(), "refusal has no capture result");
+    }
+    let after = Repository::open(&fixture.clone).expect("repo after refusals");
+    let mut after_states = after.store().list_states().expect("states after refusal");
+    after_states.sort();
+    assert_eq!(after.head().expect("HEAD after refusal"), head);
+    assert_eq!(after_states, states, "refusal must not store a capture");
+    assert_eq!(
+        std::fs::read_to_string(fixture.clone.join("story.txt")).expect("preserved edit"),
+        "unsaved clone edit\n"
+    );
+    fixture.assert_identity();
+
+    let human = String::from_utf8_lossy(&human.stderr);
+    let json: Value = serde_json::from_slice(&json.stderr).expect("error envelope");
+    println!("human refusal:\n{human}\nJSON refusal: {json}");
+    assert!(human.contains("keeps its original owner"), "{human}");
+    assert!(
+        human.contains("a clone without that key cannot capture onto it"),
+        "{human}"
+    );
+    assert!(human.contains("Next: heddle start <name>"), "{human}");
+    assert!(human.contains("not copied"), "{human}");
+    assert!(human.contains("copy or reapply"), "{human}");
+    assert!(human.contains("cd"), "{human}");
+    assert!(human.contains("heddle capture -m \"...\""), "{human}");
+    assert!(human.contains("heddle push"), "{human}");
+    assert_eq!(json["kind"], "native_source_signer_unavailable");
+    assert_eq!(json["exit_code"], 74);
+    assert_eq!(json["primary_command"], "heddle start <name>");
+    assert_eq!(
+        json["primary_command_template"]["argv_template"],
+        serde_json::json!([env!("CARGO_BIN_EXE_heddle"), "start", "<name>"])
+    );
+    assert_eq!(json["primary_command_template"]["agent_may_fill"], true);
+    assert_eq!(
+        json["recovery_commands"],
+        serde_json::json!([
+            "heddle start <name>",
+            "heddle capture -m \"...\"",
+            "heddle push"
+        ])
+    );
+    assert_eq!(
+        json["recovery_action_templates"]
+            .as_array()
+            .expect("templates")
+            .len(),
+        3
+    );
+    assert!(
+        json["error"]
+            .as_str()
+            .expect("reason")
+            .contains("keeps its original owner")
+    );
+    assert!(json["hint"].as_str().expect("hint").contains("not copied"));
+    assert!(
+        json["hint"]
+            .as_str()
+            .expect("hint")
+            .contains("copy or reapply")
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_clone_without_owner_key_start_reapply_capture_push_succeeds() {
+    let fixture = Fixture::new().await;
+    std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))
+        .expect("clone has no original owner key");
+    std::fs::write(fixture.clone.join("story.txt"), "kept clone edit\n").expect("edit");
+    std::fs::write(fixture.clone.join("notes.txt"), "new file\n").expect("new file");
+    std::fs::remove_file(fixture.clone.join("example.py")).expect("deleted file");
+    let original = Repository::open(&fixture.clone).expect("original checkout");
+    let original_head = original.head().expect("original HEAD");
+
+    // The catalog's start command works with unsaved edits when --path is omitted.
+    let started: Value =
+        serde_json::from_str(&fixture.run(&["--output", "json", "start", "my-change"]))
+            .expect("start result");
+    let feature = PathBuf::from(
+        started["execution_path"]
+            .as_str()
+            .expect("checkout to cd into"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(feature.join("story.txt")).expect("new checkout baseline"),
+        "source only\n",
+        "start does not carry unsaved edits into the isolated checkout"
+    );
+    assert!(
+        !feature.join("notes.txt").exists(),
+        "untracked file is not copied"
+    );
+    assert!(
+        feature.join("example.py").exists(),
+        "deletion is not copied"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.clone.join("story.txt")).expect("original edit"),
+        "kept clone edit\n"
+    );
+    assert!(fixture.clone.join("notes.txt").exists());
+    assert!(!fixture.clone.join("example.py").exists());
+
+    // Keep the original edits safe and copy/reapply them after cd'ing into the new checkout.
+    for name in ["story.txt", "notes.txt"] {
+        std::fs::copy(fixture.clone.join(name), feature.join(name)).expect("copy edited file");
+    }
+    std::fs::remove_file(feature.join("example.py")).expect("reapply deletion");
+    fixture.run_at(&feature, &["capture", "-m", "my change"]);
+    let owned = Repository::open(&feature).expect("owned checkout");
+    let captured = owned.head().expect("owned HEAD").expect("captured state");
+    assert_ne!(Some(captured), original_head);
+    assert_eq!(
+        original.head().expect("original HEAD after recovery"),
+        original_head
+    );
+    let genesis = owned
+        .native_thread("my-change")
+        .expect("new Thread")
+        .genesis()
+        .expect("genesis");
+    assert_eq!(genesis.parent, Some(fixture.thread_id));
+    assert_ne!(
+        genesis.owner,
+        fixture.genesis.verify().expect("original genesis").owner
+    );
+    let pushed = fixture.output_at(&feature, &["--output", "json", "push"]);
+    assert!(
+        pushed.status.success(),
+        "push from the advised checkout: {} {}",
+        String::from_utf8_lossy(&pushed.stdout),
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let pushed: Value = serde_json::from_slice(&pushed.stdout).expect("push result");
+    assert_eq!(pushed["source"]["status"], "succeeded");
+    {
+        let published = fixture.captured.lock().expect("server publication");
+        assert!(
+            matches!(
+                published.revision.as_ref().expect("accepted revision").revision.as_ref(),
+                Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(state))
+                    if state.value == captured.as_bytes()
+            ),
+            "test server must accept the new capture"
+        );
+    }
+    fixture.assert_identity();
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_clone_start_capture_push() {
     let fixture = Fixture::new().await;
     let path = fixture.run(&["start", "feature", "--print-cd-path"]);

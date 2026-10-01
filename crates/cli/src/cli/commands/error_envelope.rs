@@ -128,6 +128,8 @@ fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&C
                 "Kept: {}",
                 crate::cli::style::human_text(&classification.preserved)
             );
+        } else if kind == "native_source_signer_unavailable" && cli.verbose == 0 {
+            eprintln!("Hint: {}", crate::cli::style::human_text(&hint));
         } else if cli.verbose > 0 {
             eprintln!(
                 "Unsafe: {}",
@@ -665,6 +667,11 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 };
             }
             match heddle_err {
+                HeddleError::NativeSourceSignerUnavailable { thread, reason } => {
+                    return ErrorClassification::from_advice(
+                        &RecoveryAdvice::native_source_signer_unavailable(thread, reason),
+                    );
+                }
                 // Corrupted stored state (HeddleCo/heddle#642): decode
                 // failures must surface as a recovery path, not raw msgpack
                 // internals — `heddle status` is the natural recovery probe
