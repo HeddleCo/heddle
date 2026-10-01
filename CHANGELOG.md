@@ -15,6 +15,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Adopt heddle-api 0.31.0-alpha.13 (blocking-discussion resolve rule,
+  additive). The workspace moves to 0.28.3: the dependency-version guard
+  requires a bump for the new pin.
 - Pin `heddle-api` 0.31.0-alpha.12 and accept timeline owner-authorization
   bundles up to the API's 64 KiB bound, including long rotation and recovery
   histories, in the hosted client and native/WASM capability verifier.
@@ -25,6 +28,18 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - Pin `heddle-api` 0.31.0-alpha.11 (linked spools, attention snooze,
   `BeginPairingRequest.web_origin`). The workspace moves to 0.28.0: the
   dependency-version guard requires a bump for the new pin.
+
+### Fixed
+
+- Bind signed context revisions to their own record and target Thread, so a
+  context signature cannot be replayed against a different Thread (#1928,
+  #1939).
+- Apply the same Thread binding to discussion append and resolve signatures
+  (#1940, #1941).
+- `heddle import local` now handles merge commits: imported Git history is
+  recorded as captures with every real parent admitted in its branch Thread
+  instead of being classified as live integration, and partial imports resume
+  from the retained synthetic seed (#1932, #1942).
 
 ### Added
 
