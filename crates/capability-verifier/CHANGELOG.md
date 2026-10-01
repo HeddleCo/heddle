@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (verifier behavior):** Recover now requires a next recovery policy (`next_recovery_policy` plus `next_recovery_key_proofs`) and fails closed without one. The retained old guardians must fall below the new policy's threshold, so the guardian words that authorized a recovery cannot start another. Release with the workspace and npm package at 0.28.4 (heddle#1952, weft#1527).
 - Require Recover to install a replacement recovery policy with every next guardian's transition-bound possession proof. Current guardians authorize recovery; the old guardian set cannot satisfy the new threshold. Native Rust and WASM/npm reject legacy Recover records without next-policy proofs. Regenerate recovery and timeline vectors for this contract.
 - Adopt heddle-api 0.31.0-alpha.13 (blocking-discussion resolve rule, additive) and release with the workspace and npm package at 0.28.3; no verifier behavior change.
 - Release with the workspace and npm package at 0.28.2; no verifier behavior change. The workspace carries signature-to-Thread binding fixes for context and discussion records (heddle#1939, #1941) and the merge-commit fix for `heddle import local` (#1942).
