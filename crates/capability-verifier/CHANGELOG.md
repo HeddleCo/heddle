@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Require Recover to install a replacement recovery policy with every next guardian's transition-bound possession proof. Current guardians authorize recovery; the old guardian set cannot satisfy the new threshold. Native Rust and WASM/npm reject legacy Recover records without next-policy proofs. Regenerate recovery and timeline vectors for this contract.
 - Pin heddle-api 0.31.0-alpha.12 and use its 64 KiB timeline owner-bundle bound in native and WASM verification, including the conformance and browser binding envelopes. Release with the workspace and npm package at 0.28.1 as required by the dependency-version guard.
 - Version capability-verifier and its npm/WASM package with the workspace (0.27.2); require every publishable crate to inherit the workspace version.
 - Bump the workspace to 0.27.2 because the dependency-version guard requires an increase for updated capability-verifier requirements.
