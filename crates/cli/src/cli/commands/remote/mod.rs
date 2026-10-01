@@ -1726,7 +1726,13 @@ async fn push_network_one_thread(
                 client_operation_id,
             )
             .await
-            .map(|(complete, _)| complete)?)
+            .map(|(complete, _)| complete)
+            .map_err(|error| match error {
+                ProtocolError::ThreadCaptureRequired { thread } => {
+                    anyhow!(RecoveryAdvice::thread_capture_required(&thread))
+                }
+                error => error.into(),
+            })?)
     }
 }
 
