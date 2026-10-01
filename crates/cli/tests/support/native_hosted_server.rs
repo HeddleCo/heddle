@@ -1095,7 +1095,7 @@ fn collaboration_payloads(
         {
             continue;
         }
-        if request.annotations.is_some() || !request.contexts.is_empty() {
+        if request.annotations.is_some() {
             continue;
         }
         let scope = originals
@@ -1207,13 +1207,20 @@ fn collaboration_payloads(
             }
         }
     }
-    if request.discussions.is_empty() {
-        for context in &capture.contexts {
-            if request.include_operations {
-                payloads.push(Payload::Operation(
-                    context.signed_operation.clone().expect("context original"),
-                ));
-            }
+    for context in &capture.contexts {
+        let record = accepted_context(context.signed_operation.as_ref().expect("context original"));
+        if !request.contexts.is_empty()
+            && !request
+                .contexts
+                .iter()
+                .any(|r| r.id == record.context.to_string())
+        {
+            continue;
+        }
+        if request.include_operations {
+            payloads.push(Payload::Operation(
+                context.signed_operation.clone().expect("context original"),
+            ));
         }
     }
     // A requested context projects its current frontier within the Thread

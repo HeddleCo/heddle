@@ -2276,53 +2276,66 @@ fn observe_payloads(
     live: &Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) -> Vec<v2::collaboration_event::Payload> {
-    if !request.discussions.is_empty() {
-        if let Some(fixture) = collaboration {
-            record_get_requests(fixture, request);
-        }
-        let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
-        let operations = operations
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        return request
-            .discussions
-            .iter()
-            .filter_map(|reference| {
-                collaboration
-                    .and_then(|fixture| fixture.discussions.get(&reference.id))
-                    .cloned()
-                    .or_else(|| live.get(&reference.id).cloned())
-                    .map(|discussion| {
-                        (
-                            discussion,
-                            operations.get(&reference.id).cloned().unwrap_or_default(),
-                        )
-                    })
-            })
-            .flat_map(|(discussion, signed)| discussion_payloads(&discussion, &signed))
-            .collect();
+    // Weft selects each record kind independently. A context ID does not
+    // suppress discussions; only AnnotationQuery selects context alone.
+    let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+    let operations = operations
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut payloads = Vec::new();
+    if request.annotations.is_none() {
+        let rows = if request.discussions.is_empty() {
+            let mut rows = collaboration
+                .map(|fixture| {
+                    *fixture
+                        .list_requests
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                    fixture.list.clone()
+                })
+                .unwrap_or_default();
+            rows.extend(live.values().cloned());
+            rows
+        } else {
+            if let Some(fixture) = collaboration {
+                record_get_requests(fixture, request);
+            }
+            request
+                .discussions
+                .iter()
+                .filter_map(|reference| {
+                    collaboration
+                        .and_then(|fixture| fixture.discussions.get(&reference.id))
+                        .or_else(|| live.get(&reference.id))
+                        .cloned()
+                })
+                .collect()
+        };
+        payloads.extend(rows.iter().flat_map(|discussion| {
+            let signed = operations
+                .get(&discussion.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            discussion_payloads(discussion, signed)
+        }));
     }
-    if !request.contexts.is_empty() {
-        let operations = operations
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let native: Vec<_> = request
-            .contexts
-            .iter()
-            .flat_map(|reference| {
-                context_operation_payloads(
-                    operations
-                        .get(&reference.id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]),
-                    request.include_operations,
-                )
-            })
-            .collect();
-        if !native.is_empty() {
-            return native;
-        }
-        if let Some(fixture) = context {
+    let native: Vec<_> = operations
+        .iter()
+        .filter(|(id, _)| {
+            request.contexts.is_empty() || request.contexts.iter().any(|r| r.id == **id)
+        })
+        .flat_map(|(_, records)| context_operation_payloads(records, request.include_operations))
+        .collect();
+    if !native.is_empty() {
+        payloads.extend(native);
+    } else if let Some(fixture) = context {
+        if request.contexts.is_empty() {
+            *fixture
+                .list_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+            payloads.extend(context_list_payloads(fixture));
+        } else {
             fixture
                 .history_requests
                 .lock()
@@ -2333,59 +2346,15 @@ fn observe_payloads(
                         .iter()
                         .map(|reference| reference.id.clone()),
                 );
-            return request
-                .contexts
-                .iter()
-                .flat_map(|reference| context_history_payloads(fixture, &reference.id))
-                .collect();
+            payloads.extend(
+                request
+                    .contexts
+                    .iter()
+                    .flat_map(|reference| context_history_payloads(fixture, &reference.id)),
+            );
         }
-        return Vec::new();
     }
-    if request.annotations.is_some() {
-        let operations = operations
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let native: Vec<_> = operations
-            .values()
-            .flat_map(|records| context_operation_payloads(records, request.include_operations))
-            .collect();
-        if !native.is_empty() {
-            return native;
-        }
-        if let Some(fixture) = context {
-            *fixture
-                .list_requests
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) += 1;
-            return context_list_payloads(fixture);
-        }
-        return Vec::new();
-    }
-    let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
-    let operations = operations
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if let Some(fixture) = collaboration {
-        *fixture
-            .list_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) += 1;
-        let mut rows = fixture.list.clone();
-        rows.extend(live.values().cloned());
-        return rows
-            .iter()
-            .flat_map(|discussion| {
-                let signed = operations.get(&discussion.id).cloned().unwrap_or_default();
-                discussion_payloads(discussion, &signed)
-            })
-            .collect();
-    }
-    live.iter()
-        .flat_map(|(id, discussion)| {
-            let signed = operations.get(id).cloned().unwrap_or_default();
-            discussion_payloads(discussion, &signed)
-        })
-        .collect()
+    payloads
 }
 
 fn record_get_requests(fixture: &CollaborationFixture, request: &v2::ObserveCollaborationRequest) {

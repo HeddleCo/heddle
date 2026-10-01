@@ -2604,3 +2604,204 @@ async fn single_head_thread_reports_no_alternatives() {
     assert_eq!(json_error_kind(&pick), "no_alternative_source_heads");
     fixture.close().await;
 }
+
+/// heddle#1948: context history must select annotations when discussions share
+/// the Spool. Reproduce a clone inheriting context, then publishing a child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inherited_annotation_and_public_discussion_push() {
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "context",
+        "set",
+        "--path",
+        "example.py",
+        "--body",
+        "inherited context",
+    ]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let annotated = fixture._temp.path().join("annotated-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "clone",
+            &fixture.remote(),
+            annotated.to_str().expect("clone path"),
+        ],
+    );
+    let path = fixture.run_at(&annotated, &["start", "mixed", "--print-cd-path"]);
+    let child = PathBuf::from(path.trim());
+    std::fs::write(child.join("story.txt"), "child source\n").expect("edit child");
+    fixture.run_at(&child, &["capture", "-m", "child edit"]);
+    assert_push_succeeded(&fixture, &child);
+    fixture.run_at(
+        &child,
+        &[
+            "discuss",
+            "new",
+            "--path",
+            "example.py",
+            "--thread",
+            "mixed",
+            "--visibility",
+            "public",
+            "--body",
+            "opening",
+        ],
+    );
+    let repo = Repository::open(&child).expect("child repo");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view");
+    let id = view
+        .discussions
+        .keys()
+        .next()
+        .expect("discussion")
+        .to_string();
+    fixture.run_at(&child, &["discuss", "reply", &id, "--body", "reply"]);
+    fixture.run_at(
+        &child,
+        &[
+            "discuss", "resolve", &id, "--mode", "dismiss", "--reason", "answered",
+        ],
+    );
+    assert_push_succeeded(&fixture, &child);
+    let count = fixture
+        .captured
+        .lock()
+        .expect("server")
+        .discussion_operations
+        .len();
+    assert_eq!(count, 3, "open, reply, resolve");
+    assert_push_succeeded(&fixture, &child);
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("server")
+            .discussion_operations
+            .len(),
+        count
+    );
+    fixture.close().await;
+}
+
+/// A context-only interruption must leave already published discussion
+/// originals on the server exactly once, including across a human retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_context_push_retry_keeps_published_discussions_once() {
+    let fixture = Fixture::new().await;
+    fixture.run(&["context", "set", "--path", "example.py", "--body", "v1"]);
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let annotation = only_context_id(&fixture, &fixture.clone, "example.py");
+    fixture.run(&[
+        "context",
+        "edit",
+        &annotation,
+        "--body",
+        &"realistic context\n".repeat(100),
+    ]);
+    fixture.capture();
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--thread",
+        "main",
+        "--visibility",
+        "public",
+        "--body",
+        "opening",
+    ]);
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view");
+    let id = view
+        .discussions
+        .keys()
+        .next()
+        .expect("discussion")
+        .to_string();
+    fixture.run(&["discuss", "reply", &id, "--body", "reply"]);
+    fixture.run(&[
+        "discuss", "resolve", &id, "--mode", "dismiss", "--reason", "answered",
+    ]);
+    fixture
+        .captured
+        .lock()
+        .expect("interrupt")
+        .interrupt_next_context = true;
+    let (code, partial) = push_json(&fixture, &fixture.clone);
+    assert_eq!(code, Some(75), "{partial}");
+    assert_eq!(partial["status"], "partial");
+    assert_eq!(partial["success"], false);
+    assert_eq!(partial["source"]["status"], "succeeded");
+    assert_eq!(partial["discussions"]["status"], "succeeded");
+    assert_eq!(partial["discussions"]["count"], 1);
+    assert_eq!(partial["context"]["status"], "failed");
+    assert_eq!(partial["context"]["unsent"][0]["record_id"], annotation);
+    assert_eq!(partial["context"]["unsent"][0]["retry_unchanged"], true);
+    assert!(
+        partial["context"]["unsent"][0]["guidance"]
+            .as_str()
+            .expect("guidance")
+            .contains("Unsent work stays local")
+    );
+    assert_eq!(
+        json_recovery_commands(&partial),
+        ["heddle push origin --thread main"]
+    );
+    assert_eq!(
+        fixture
+            .captured
+            .lock()
+            .expect("server")
+            .discussion_operations
+            .len(),
+        3
+    );
+    let attempts = fixture
+        .captured
+        .lock()
+        .expect("server")
+        .received_discussion_operations
+        .len();
+    fixture
+        .captured
+        .lock()
+        .expect("interrupt")
+        .interrupt_next_context = true;
+    let human = fixture.output_at(&fixture.clone, &["push", "origin"]);
+    assert_eq!(human.status.code(), Some(75));
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains("partial push to main"), "{text}");
+    assert!(text.contains("source: published"), "{text}");
+    assert!(text.contains("discussions: published"), "{text}");
+    assert!(text.contains("Unsent work stays local"), "{text}");
+    assert!(
+        text.contains("recovery: heddle push origin --thread main"),
+        "{text}"
+    );
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let capture = fixture.captured.lock().expect("server").clone();
+    assert_eq!(
+        capture.discussion_operations.len(),
+        3,
+        "retry must not duplicate open/reply/resolve"
+    );
+    assert_eq!(
+        capture.received_discussion_operations.len(),
+        attempts,
+        "already acknowledged discussions are not resent"
+    );
+    assert_eq!(
+        capture.contexts.len(),
+        2,
+        "only the pending revision is published"
+    );
+    fixture.close().await;
+}
