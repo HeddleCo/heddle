@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Release with the workspace and npm package at 0.28.2; no verifier behavior change. The workspace carries signature-to-Thread binding fixes for context and discussion records (heddle#1939, #1941) and the merge-commit fix for `heddle import local` (#1942).
 - Pin heddle-api 0.31.0-alpha.12 and use its 64 KiB timeline owner-bundle bound in native and WASM verification, including the conformance and browser binding envelopes. Release with the workspace and npm package at 0.28.1 as required by the dependency-version guard.
 - Version capability-verifier and its npm/WASM package with the workspace (0.27.2); require every publishable crate to inherit the workspace version.
 - Bump the workspace to 0.27.2 because the dependency-version guard requires an increase for updated capability-verifier requirements.
