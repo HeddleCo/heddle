@@ -244,6 +244,8 @@ impl DeviceRpc {
                                 .collect(),
                             audience: audience as i32,
                             audience_label: label,
+                            actions: Vec::new(),
+                            resolutions: Vec::new(),
                         })
                     } else {
                         let turn = match &record.body {
