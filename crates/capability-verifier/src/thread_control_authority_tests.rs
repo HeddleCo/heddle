@@ -325,8 +325,15 @@ fn retained_device_certificate_and_cached_proof_survive_rotation_without_new_aut
             &previous,
             &[&TestKey::new(93), &TestKey::new(94)],
             &next_key,
-            previous.recovery_policy().clone(),
+            recovery_policy(
+                &[
+                    (&TestKey::new(110), RecoveryGuardianKind::Paper),
+                    (&TestKey::new(111), RecoveryGuardianKind::Social),
+                ],
+                previous.recovery_policy().window_secs,
+            ),
             NOW - 1,
+            &[&TestKey::new(110), &TestKey::new(111)],
         ),
         NOW,
         VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
@@ -628,8 +635,15 @@ fn boundary_historical_identity_survives_rotation_and_recovery_without_issuance_
             &previous,
             &[&TestKey::new(93), &TestKey::new(94)],
             &next,
-            previous.recovery_policy().clone(),
+            recovery_policy(
+                &[
+                    (&TestKey::new(110), RecoveryGuardianKind::Paper),
+                    (&TestKey::new(111), RecoveryGuardianKind::Social),
+                ],
+                previous.recovery_policy().window_secs,
+            ),
             NOW - 1,
+            &[&TestKey::new(110), &TestKey::new(111)],
         ),
         NOW,
         limits,

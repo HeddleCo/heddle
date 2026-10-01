@@ -46,6 +46,9 @@ mod passkey_delegation_tests;
 #[path = "timeline_tests.rs"]
 mod timeline_tests;
 
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+
 struct TestKey {
     seed: [u8; 32],
     signing: SigningKey,
@@ -761,6 +764,7 @@ fn recovery_transition(
     next: &TestKey,
     next_policy: RecoveryPolicy,
     valid_from: i64,
+    next_guardians: &[&TestKey],
 ) -> SignedOwnerKeyTransition {
     let transition = transition(
         state,
@@ -778,12 +782,25 @@ fn recovery_transition(
         .map(|key| key.sign(OWNER_TRANSITION_DOMAIN, &body))
         .collect::<Vec<_>>();
     authorizations.sort_by(|left, right| left.signer_key_id.cmp(&right.signer_key_id));
-    SignedOwnerKeyTransition {
+    let mut signed = SignedOwnerKeyTransition {
         transition: Some(transition),
         authorizations,
         next_authority_key_proof: Some(next.sign(OWNER_TRANSITION_DOMAIN, &body)),
         next_recovery_key_proofs: Vec::new(),
-    }
+    };
+    sign_next_guardians(&mut signed, next_guardians);
+    signed
+}
+
+fn sign_next_guardians(signed: &mut SignedOwnerKeyTransition, guardians: &[&TestKey]) {
+    let body = transition_body(signed.transition.as_ref().expect("transition")).expect("body");
+    signed.next_recovery_key_proofs = guardians
+        .iter()
+        .map(|key| key.sign(OWNER_TRANSITION_DOMAIN, &body))
+        .collect();
+    signed
+        .next_recovery_key_proofs
+        .sort_by(|left, right| left.signer_key_id.cmp(&right.signer_key_id));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -842,12 +859,21 @@ fn recovery_retires_historical_purge_issuers_after_multiple_rotations() {
         );
     }
     let recovered_key = TestKey::new(15);
+    let next_paper = TestKey::new(16);
+    let next_social = TestKey::new(17);
     let recover = recovery_transition(
         &state,
         &[&paper, &social],
         &recovered_key,
-        state.recovery_policy().clone(),
+        recovery_policy(
+            &[
+                (&next_paper, RecoveryGuardianKind::Paper),
+                (&next_social, RecoveryGuardianKind::Social),
+            ],
+            Some(1),
+        ),
         NOW,
+        &[&next_paper, &next_social],
     );
     verify_transition_timelock(&state, &recover, NOW - 1).expect("veto elapsed");
     state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("recovery");
@@ -873,11 +899,13 @@ fn recovery_retires_historical_purge_issuers_after_multiple_rotations() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn recovery_window_is_signed_preserved_and_statefully_checkable() {
+fn recovery_window_is_signed_and_statefully_checkable() {
     let authority = TestKey::new(1);
     let paper = TestKey::new(2);
     let social = TestKey::new(3);
     let next = TestKey::new(7);
+    let next_paper = TestKey::new(8);
+    let next_social = TestKey::new(9);
     let guardians = [
         (&paper, RecoveryGuardianKind::Paper),
         (&social, RecoveryGuardianKind::Social),
@@ -887,8 +915,21 @@ fn recovery_window_is_signed_preserved_and_statefully_checkable() {
     let state = verify_owner_root(&root).expect("root");
     assert_eq!(effective_recovery_window(state.recovery_policy()), 100);
 
-    let recovery =
-        recovery_transition(&state, &[&paper, &social], &next, policy.clone(), NOW + 100);
+    let next_policy = recovery_policy(
+        &[
+            (&next_paper, RecoveryGuardianKind::Paper),
+            (&next_social, RecoveryGuardianKind::Social),
+        ],
+        Some(100),
+    );
+    let recovery = recovery_transition(
+        &state,
+        &[&paper, &social],
+        &next,
+        next_policy.clone(),
+        NOW + 100,
+        &[&next_paper, &next_social],
+    );
     verify_transition_timelock(&state, &recovery, NOW).expect("scheduled after full window");
     assert!(matches!(
         apply_transition(&state, &recovery, NOW, limits()),
@@ -897,8 +938,14 @@ fn recovery_window_is_signed_preserved_and_statefully_checkable() {
     apply_transition_with_timelock(&state, &recovery, NOW + 100, NOW, limits())
         .expect("recovery activates after the persisted hold");
 
-    let too_early =
-        recovery_transition(&state, &[&paper, &social], &next, policy.clone(), NOW + 99);
+    let too_early = recovery_transition(
+        &state,
+        &[&paper, &social],
+        &next,
+        next_policy.clone(),
+        NOW + 99,
+        &[&next_paper, &next_social],
+    );
     assert_eq!(
         verify_transition_timelock(&state, &too_early, NOW),
         Err(Error::NotYetValid)
@@ -910,15 +957,17 @@ fn recovery_window_is_signed_preserved_and_statefully_checkable() {
         &next,
         RecoveryPolicy {
             window_secs: Some(99),
-            ..policy
+            ..next_policy
         },
         NOW + 100,
+        &[&next_paper, &next_social],
     );
-    assert!(apply_transition(&state, &changed_window, NOW + 100, limits()).is_err());
+    apply_transition_with_timelock(&state, &changed_window, NOW + 100, NOW, limits())
+        .expect("new policy window changes only after the current window has elapsed");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn browser_paper_recovery_transition_matches_rust_owner_verifier() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../tests/fixtures/browser_paper_recovery_interop.json"
@@ -1388,7 +1437,7 @@ fn embedded_fixture_adapters_agree() {
         .expect("keyring fixture runs");
     assert_eq!(operation.len(), 11);
     assert_eq!(transfer.len(), 3);
-    assert_eq!(keyring.len(), 2);
+    assert_eq!(keyring.len(), 9);
     for outcome in operation {
         assert!(
             outcome.matches,

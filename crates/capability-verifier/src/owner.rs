@@ -480,7 +480,6 @@ pub fn apply_transition(
         .next_recovery_policy
         .as_ref()
         .ok_or_else(|| Error::Invalid("transition has no next recovery policy".to_owned()))?;
-    validate_recovery_policy(next_policy, &key_id(next_authority), false)?;
     let body = transition_body(transition)?;
     if signed
         .authorizations
@@ -496,6 +495,7 @@ pub fn apply_transition(
 
     match kind {
         OwnerKeyTransitionKind::Rotate => {
+            validate_recovery_policy(next_policy, &key_id(next_authority), false)?;
             if !same_recovery_policy(next_policy, state.recovery_policy())
                 || signed.authorizations.len() != 1
                 || !signed.next_recovery_key_proofs.is_empty()
@@ -521,12 +521,9 @@ pub fn apply_transition(
             )?;
         }
         OwnerKeyTransitionKind::Recover => {
-            if !same_recovery_policy(next_policy, state.recovery_policy())
-                || transition.previous_key_valid_until_unix_seconds != 0
-                || !signed.next_recovery_key_proofs.is_empty()
-            {
+            if transition.previous_key_valid_until_unix_seconds != 0 {
                 return Err(Error::Invalid(
-                    "recovery changed policy or retained compromised authority".to_owned(),
+                    "recovery retained compromised authority".to_owned(),
                 ));
             }
             verify_threshold(
@@ -543,6 +540,31 @@ pub fn apply_transition(
                 OWNER_TRANSITION_DOMAIN,
                 &body,
             )?;
+            verify_next_recovery_policy(
+                next_policy,
+                next_authority,
+                &signed.next_recovery_key_proofs,
+                &body,
+            )?;
+            let current_guardians = state
+                .recovery_policy()
+                .guardians
+                .iter()
+                .filter_map(|guardian| guardian.key.as_ref())
+                .map(key_id)
+                .collect::<BTreeSet<_>>();
+            let retained_guardians = next_policy
+                .guardians
+                .iter()
+                .filter_map(|guardian| guardian.key.as_ref())
+                .filter(|key| current_guardians.contains(&key_id(key)))
+                .count();
+            if retained_guardians >= next_policy.threshold as usize {
+                return Err(Error::Invalid(
+                    "recovery must replace enough guardians to retire the current policy"
+                        .to_owned(),
+                ));
+            }
         }
         OwnerKeyTransitionKind::RecoveryPolicy => {
             if next_authority != state.authority_key() || signed.next_authority_key_proof.is_some()
@@ -554,7 +576,12 @@ pub fn apply_transition(
             let guardian_signatures =
                 verify_exact_signature(&signed.authorizations, state.authority_key(), &body)?;
             verify_threshold(state.recovery_policy(), &guardian_signatures, &body)?;
-            verify_next_guardians(next_policy, &signed.next_recovery_key_proofs, &body)?;
+            verify_next_recovery_policy(
+                next_policy,
+                next_authority,
+                &signed.next_recovery_key_proofs,
+                &body,
+            )?;
         }
         OwnerKeyTransitionKind::ClaimDeferredHuman => {
             if !state.claimable_deferred_human
@@ -583,7 +610,12 @@ pub fn apply_transition(
                 OWNER_TRANSITION_DOMAIN,
                 &body,
             )?;
-            verify_next_guardians(next_policy, &signed.next_recovery_key_proofs, &body)?;
+            verify_next_recovery_policy(
+                next_policy,
+                next_authority,
+                &signed.next_recovery_key_proofs,
+                &body,
+            )?;
         }
         OwnerKeyTransitionKind::Unspecified => unreachable!("filtered above"),
     }
@@ -739,11 +771,13 @@ fn verify_exact_signature<'a>(
         .collect())
 }
 
-fn verify_next_guardians(
+fn verify_next_recovery_policy(
     policy: &RecoveryPolicy,
+    authority: &AuthorizationVerificationKey,
     proofs: &[AuthorizationSignature],
     body: &[u8],
 ) -> Result<()> {
+    validate_recovery_policy(policy, &key_id(authority), false)?;
     if proofs.len() != policy.guardians.len() {
         return Err(Error::Invalid(
             "next recovery proof count does not match policy".to_owned(),

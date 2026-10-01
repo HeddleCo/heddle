@@ -99,10 +99,21 @@ tarball with `npm run pack:binding`.
 ## Recovery window boundary
 
 `RecoveryPolicy.window_secs` is included in every canonical owner-root and
-transition signature. Absence means 604800 seconds. Rotation, recovery, and
-deferred claim cannot change its effective value. A policy transition may
-change it only with the current authority signature, the current recovery
-threshold, and possession proofs from every next guardian.
+transition signature. Absence means 604800 seconds. Rotation and deferred
+claim cannot change its effective value. A policy transition may change it
+only with the current authority signature, the current recovery threshold,
+and possession proofs from every next guardian.
+
+Recover must carry a replacement `next_recovery_policy` and possession proofs
+in `next_recovery_key_proofs` from every next guardian, using the same policy
+validation as a recovery-policy transition. The current guardians authorize
+Recover; the new guardians prove possession over the same signed transition.
+The new policy may change the window, but activation still waits for the
+current policy's window. Recovery installs the next policy and retires all
+previous authority issuers in one verified state fold. The old guardian set
+must be unable to meet the next threshold, including when only the window
+changes. Legacy Recover records that echo the current policy without next
+guardian proofs are rejected in native Rust and the WASM/npm package.
 
 The portable transition contains `valid_from_unix_seconds`, but it does not
 contain the time at which a recovery or policy change entered pending state.
