@@ -121,6 +121,7 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
+            | "thread_capture_required"
             | "commit_requires_git_overlay"
             | "commit_capture_required"
             | "start_requires_path"
@@ -253,6 +254,7 @@ impl HeddleExitCode {
                     wire::ProtocolError::AuthorizationFailed(_)
                     | wire::ProtocolError::AuthenticationFailed(_) => Self::NoPerm,
                     wire::ProtocolError::ObjectNotFound(_) => Self::Config,
+                    wire::ProtocolError::ThreadCaptureRequired { .. } => Self::DataErr,
                     wire::ProtocolError::InvalidState(_)
                     | wire::ProtocolError::PublicationLimitExceeded { .. }
                     | wire::ProtocolError::PublicationOperationTooLarge { .. }
@@ -572,6 +574,7 @@ mod tests {
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
+            ("thread_capture_required", HeddleExitCode::DataErr),
             ("start_requires_path", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
