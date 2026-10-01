@@ -245,16 +245,51 @@ fn materialized_thread_for_state(
             ref_state.to_string_full()
         ))
     })?;
+    // Clone retains the original signed fork lineage, not the source's local
+    // workspace record. Rebuild its target and base from that lineage.
+    let replica = repo
+        .native_thread(thread)
+        .map_err(|error| HeddleError::Config(error.to_string()))?;
+    let genesis = replica
+        .genesis()
+        .map_err(|error| HeddleError::Config(error.to_string()))?;
+    let parent_thread = genesis
+        .parent
+        .map(|parent| {
+            repo.list_native_threads()
+                .map_err(|error| HeddleError::Config(error.to_string()))?
+                .into_iter()
+                .find(|(_, named)| named.thread_id() == parent)
+                .map(|(name, _)| Ok(name))
+                .unwrap_or_else(|| {
+                    crate::thread_replication::ThreadReplica::open(repo.heddle_dir(), parent)
+                        .and_then(|replica| replica.genesis())
+                        .map(|genesis| genesis.name)
+                        .map_err(|error| HeddleError::Config(error.to_string()))
+                })
+        })
+        .transpose()?;
+    let base = if genesis.parent.is_some() {
+        genesis.base
+    } else {
+        ref_state
+    };
+    let base_state = repo.store().get_state(&base)?.ok_or_else(|| {
+        HeddleError::NotFound(format!(
+            "Thread '{thread}' fork base {} is missing",
+            base.to_string_full()
+        ))
+    })?;
     let now = Utc::now();
     Ok(Thread {
         id: stable_id,
         thread: thread.to_string(),
-        target_thread: None,
-        parent_thread: None,
+        target_thread: parent_thread.clone(),
+        parent_thread,
         mode: ThreadMode::Materialized,
         state: ThreadState::Active,
-        base_state: ref_state.to_string_full(),
-        base_root: state.tree.to_hex(),
+        base_state: base.to_string_full(),
+        base_root: base_state.tree.to_hex(),
         current_state: Some(ref_state.to_string_full()),
         merged_state: None,
         task: None,
