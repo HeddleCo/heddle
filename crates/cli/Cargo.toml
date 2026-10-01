@@ -259,7 +259,7 @@ mount = [
 # directly; the production CLI gets both through `hosted-client`.
 hosted-client = { workspace = true, features = ["client", "test-utils"] }
 biscuit-auth.workspace = true
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.0" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.1" }
 iroh.workspace = true
 criterion = "0.8"
 heddle-cli-render = { workspace = true, features = ["default", "test-utils"] }

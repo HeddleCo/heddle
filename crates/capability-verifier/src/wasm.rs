@@ -170,7 +170,10 @@ pub fn verify_timeline_acceptance_binding(
     let limits = VerificationLimits::new(max_capability_ttl_seconds).map_err(js_error)?;
     let verified = (|| -> crate::Result<()> {
         let origin: TimelineOriginEndorsement = canonical_message(origin_bytes, 4096)?;
-        let acceptance: TimelineAdmissionAcceptance = canonical_message(acceptance_bytes, 8192)?;
+        let acceptance: TimelineAdmissionAcceptance = canonical_message(
+            acceptance_bytes,
+            heddle_api::timeline_upload::MAX_TIMELINE_REQUEST_BYTES,
+        )?;
         let state_hash = fixed::<32>(accepted_state_hash, "accepted owner state hash")?;
         let request_sha256 = fixed::<32>(request_sha256, "request digest")?;
         let revoked_capability_ids = revoked_capability_ids_hex
