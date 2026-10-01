@@ -111,6 +111,11 @@ pub enum ProtocolError {
     InvalidState(String),
 
     #[error(
+        "Thread '{thread}' has no capture of its own; run `heddle capture -m \"...\"` in its checkout, then push again"
+    )]
+    ThreadCaptureRequired { thread: String },
+
+    #[error(
         "Thread {thread} has {states} States and {operations} operations; {limit_name} limit is {limit}, required {actual}. Very large histories need server-side incremental admission (HeddleCo/weft#2432) or hosted import"
     )]
     PublicationLimitExceeded {
@@ -188,6 +193,7 @@ impl ProtocolError {
             ProtocolError::ObjectNotFound(_) => "object not found".to_string(),
             ProtocolError::AlreadyExists(_) => "resource already exists".to_string(),
             ProtocolError::InvalidState(_) => "invalid request state".to_string(),
+            ProtocolError::ThreadCaptureRequired { .. } => self.to_string(),
             ProtocolError::PublicationLimitExceeded { .. }
             | ProtocolError::PublicationOperationTooLarge { .. } => self.to_string(),
             ProtocolError::Remote(_) => "internal server error".to_string(),
@@ -209,6 +215,7 @@ impl ProtocolError {
             ProtocolError::ObjectNotFound(_) => ErrorCode::NotFound,
             ProtocolError::AlreadyExists(_) => ErrorCode::InvalidArgument,
             ProtocolError::InvalidState(_) => ErrorCode::InvalidArgument,
+            ProtocolError::ThreadCaptureRequired { .. } => ErrorCode::InvalidArgument,
             ProtocolError::PublicationLimitExceeded { .. }
             | ProtocolError::PublicationOperationTooLarge { .. } => ErrorCode::InvalidArgument,
             ProtocolError::Remote(_) => ErrorCode::Server,
