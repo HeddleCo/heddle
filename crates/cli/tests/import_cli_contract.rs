@@ -16,7 +16,7 @@ fn run(cwd: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .expect("run heddle")
 }
 
-fn git(cwd: &Path, args: &[&str]) {
+fn git(cwd: &Path, args: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .current_dir(cwd)
         .args(args)
@@ -27,6 +27,185 @@ fn git(cwd: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    output.stdout
+}
+
+fn import_graph_fixture(side_branches: usize, partial: bool) {
+    use objects::{object::ThreadName, store::ObjectStore as _};
+
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path();
+    let home = path.join("home");
+    fs::create_dir(&home).expect("home");
+    git(path, &["init", "-q", "-b", "main"]);
+    git(path, &["config", "user.name", "Import Graph"]);
+    git(path, &["config", "user.email", "import@example.test"]);
+    git(path, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    let mut branches = (0..side_branches)
+        .map(|index| format!("branch-{index}"))
+        .collect::<Vec<_>>();
+    for branch in &branches {
+        git(path, &["switch", "-qc", branch, "main"]);
+        fs::write(path.join(branch), branch).expect("branch file");
+        git(path, &["add", branch]);
+        git(path, &["commit", "-qm", branch]);
+    }
+    git(path, &["switch", "-q", "main"]);
+    git(path, &["commit", "-q", "--allow-empty", "-m", "main"]);
+    if !branches.is_empty() {
+        git(path, &["branch", "branch-main"]);
+        let mut args = vec!["merge", "-q", "--no-ff", "-m", "merge"];
+        args.extend(branches.iter().map(String::as_str));
+        git(path, &args);
+        branches.push("branch-main".into());
+    }
+    git(path, &["commit", "-q", "--allow-empty", "-m", "after"]);
+    let graph = String::from_utf8(git(
+        path,
+        &[
+            "rev-list",
+            "--reverse",
+            "--topo-order",
+            "--parents",
+            "--all",
+        ],
+    ))
+    .expect("Git graph");
+    let mut original_states = std::collections::BTreeMap::new();
+    let mut original_geneses = std::collections::BTreeMap::new();
+    if partial {
+        use objects::object::{Tree, thread_replication::hosted_import::synthetic_initial_base};
+
+        // Reproduce the failed initial registration, retaining its sidecar,
+        // converted graph, original geneses, and already admitted branches.
+        let repo = repo::Repository::bootstrap_git_overlay(path).expect("overlay");
+        let seed = synthetic_initial_base().expect("seed");
+        repo.store().put_tree(&Tree::new()).expect("seed tree");
+        repo.store().put_state(&seed).expect("seed State");
+        let (_, map) = ingest::import_git_into_with_options(
+            path,
+            path,
+            ingest::ImportOptions {
+                root_parent: Some(seed.id()),
+                ..Default::default()
+            },
+        )
+        .expect("converted Git graph");
+        for line in graph.lines() {
+            let oid = line.split_whitespace().next().expect("OID");
+            original_states.insert(
+                oid.to_string(),
+                map.get_commit(oid).expect("map").expect("original State"),
+            );
+        }
+        let mut refused = false;
+        for (name, tip) in repo.refs().list_threads_with_states().expect("branches") {
+            let replica = repo
+                .create_native_thread(name.as_ref(), seed.id(), None, "")
+                .expect("original genesis");
+            original_geneses.insert(name.to_string(), replica.genesis().expect("genesis"));
+            if let Err(error) = repo.record_native_source(name.as_ref(), tip) {
+                assert!(
+                    error.to_string().contains("multiple source Threads"),
+                    "{error}"
+                );
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "fixture must retain the failed merge registration");
+    }
+    let output = run(path, &home, &["import", "local", "--output", "json"]);
+    assert!(
+        output.status.success(),
+        "import local failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("import report");
+    assert_eq!(report["commits_imported"], graph.lines().count());
+    if partial {
+        assert_eq!(report["initialized"], false);
+    }
+    let repo = repo::Repository::open(path).expect("native repository");
+    let map = ingest::ShaMap::open(path.join(".heddle/ingest/sha_map.sqlite")).expect("map");
+    let mut merges = 0;
+    for line in graph.lines() {
+        let mut commits = line.split_whitespace();
+        let oid = commits.next().expect("commit OID");
+        let parents = commits
+            .map(|parent| {
+                map.get_commit(parent)
+                    .expect("parent lookup")
+                    .expect("parent")
+            })
+            .collect::<Vec<_>>();
+        let state_id = map.get_commit(oid).expect("lookup").expect("StateId");
+        if let Some(original) = original_states.get(oid) {
+            assert_eq!(&state_id, original, "retry preserves State identity");
+        }
+        let state = repo
+            .store()
+            .get_state(&state_id)
+            .expect("lookup")
+            .expect("State");
+        // Local publication anchors only Git roots to the synthetic Spool base.
+        if !parents.is_empty() {
+            assert_eq!(state.parents, parents, "ordered real parents of {oid}");
+        }
+        if parents.len() > 1 {
+            merges += 1;
+            assert_eq!(parents.len(), side_branches + 1);
+        }
+    }
+    for branch in branches.iter().map(String::as_str).chain(["main"]) {
+        let tip_oid = String::from_utf8(git(path, &["rev-parse", branch])).expect("tip OID");
+        let tip = repo
+            .refs()
+            .get_thread(&ThreadName::new(branch))
+            .expect("ref")
+            .expect("tip");
+        assert_eq!(
+            tip,
+            map.get_commit(tip_oid.trim())
+                .expect("map")
+                .expect("tip State")
+        );
+        let replica = repo.native_thread(branch).expect("native Thread");
+        if let Some(original) = original_geneses.get(branch) {
+            assert_eq!(&replica.genesis().expect("genesis"), original);
+        }
+        let reachable =
+            String::from_utf8(git(path, &["rev-list", branch, "--"])).expect("ancestry");
+        for oid in reachable.lines() {
+            let id = map.get_commit(oid).expect("map").expect("ancestor");
+            let admitted = replica
+                .accepted_source_revision(id)
+                .expect("source lookup")
+                .expect("admitted ancestor");
+            assert_eq!(admitted.id(), id);
+        }
+    }
+    assert_eq!(merges, usize::from(side_branches > 0));
+}
+
+#[test]
+fn import_local_preserves_merge_graph() {
+    import_graph_fixture(1, false);
+}
+
+#[test]
+fn import_local_preserves_octopus_graph() {
+    import_graph_fixture(3, false);
+}
+
+#[test]
+fn import_local_preserves_linear_graph() {
+    import_graph_fixture(0, false);
+}
+
+#[test]
+fn import_local_resumes_partial_merge_graph() {
+    import_graph_fixture(1, true);
 }
 
 #[test]
