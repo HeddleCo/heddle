@@ -250,6 +250,8 @@ fn classify_protocol(error: &ProtocolError, delivered: bool) -> ReplicationIssue
             Kind::NotReplicable
         }
         ProtocolError::InvalidState(_)
+        | ProtocolError::PublicationLimitExceeded { .. }
+        | ProtocolError::PublicationOperationTooLarge { .. }
         | ProtocolError::Serialization(_)
         | ProtocolError::MessageTooLarge { .. }
         | ProtocolError::InvalidMessageType(_)

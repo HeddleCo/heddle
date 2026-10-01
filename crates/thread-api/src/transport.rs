@@ -22,6 +22,14 @@ pub enum Error {
     Timeout,
     #[error("invalid v2 transport: {0}")]
     Protocol(&'static str),
+    #[error(
+        "original and matched evidence exceed batch budget: operation {operation} requires {bytes} bytes (limit {limit})"
+    )]
+    OriginalOperationTooLarge {
+        operation: usize,
+        bytes: usize,
+        limit: usize,
+    },
     #[error("RPC failed: {0:?}")]
     Remote(RemoteFailure),
     #[error(transparent)]

@@ -552,13 +552,14 @@ fn outgoing_batches_fail_closed_when_one_complete_proof_exceeds_budget() {
     let (batch, _) = fixture(1);
     let received = crate::authority_admission::match_batch(&batch).expect("originals");
     let mut output = crate::authority_admission::batches(received, 1024, 64).expect("limits");
+    let error = output
+        .next()
+        .expect("bounded error")
+        .expect_err("complete proof does not fit");
     assert!(
-        output
-            .next()
-            .expect("bounded error")
-            .expect_err("complete proof does not fit")
-            .to_string()
-            .contains("exceed batch budget")
+        matches!(error, crate::transport::Error::OriginalOperationTooLarge {
+        operation: 1, bytes, limit: 1024,
+    } if bytes > 1024)
     );
     assert!(output.next().is_none(), "encoder is fused after denial");
 }
