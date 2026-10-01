@@ -26,6 +26,18 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   `BeginPairingRequest.web_origin`). The workspace moves to 0.28.0: the
   dependency-version guard requires a bump for the new pin.
 
+### Fixed
+
+- Bind signed context revisions to their own record and target Thread, so a
+  context signature cannot be replayed against a different Thread (#1928,
+  #1939).
+- Apply the same Thread binding to discussion append and resolve signatures
+  (#1940, #1941).
+- `heddle import local` now handles merge commits: imported Git history is
+  recorded as captures with every real parent admitted in its branch Thread
+  instead of being classified as live integration, and partial imports resume
+  from the retained synthetic seed (#1932, #1942).
+
 ### Added
 
 - **`heddle auth login --host <WEB_HOST>`.** Names the host of the web page
