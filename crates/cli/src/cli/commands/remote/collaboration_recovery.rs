@@ -169,7 +169,11 @@ fn item(
             .as_ref()
             .map(|command| command.signed_operation_id.clone()),
         message: issue.message.clone(),
-        guidance: guidance.to_string(),
+        guidance: if issue.kind.local_only() {
+            guidance.to_string()
+        } else {
+            format!("Unsent work stays local. {guidance}")
+        },
         recovery_action_templates: recovery_commands
             .iter()
             .filter_map(|command| recommended_action_template(command))
@@ -268,11 +272,15 @@ pub(super) fn incomplete_exit(surfaces: &[&PushReplicationOutcome]) -> HeddleExi
 
 /// Render the same per-surface facts `--output json` carries.
 pub(super) fn print_human(output: &PushOutput) {
+    let partial = output.outcome.status == "partial";
+    if partial {
+        println!("source: published");
+    }
     for (surface, outcome) in [
         (Surface::Discussions, &output.discussions),
         (Surface::Context, &output.context),
     ] {
-        if outcome.unsent.is_empty() && outcome.local_only.is_empty() {
+        if !partial && outcome.unsent.is_empty() && outcome.local_only.is_empty() {
             continue;
         }
         let marker = if outcome.status == "succeeded" {
@@ -281,8 +289,13 @@ pub(super) fn print_human(output: &PushOutput) {
             style::warn_marker()
         };
         println!(
-            "{marker} {}: {} accepted, {} unsent, {} local-only",
+            "{marker} {}: {}; {} accepted this push, {} unsent, {} local-only",
             surface.label(),
+            if outcome.status == "succeeded" {
+                "published"
+            } else {
+                "incomplete"
+            },
             outcome.count.unwrap_or(0),
             outcome.unsent.len(),
             outcome.local_only.len()
