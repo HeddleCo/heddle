@@ -73,7 +73,10 @@ fn recover_without_next_policy_is_rejected() {
         &[],
     );
     assert!(
-        apply_transition_with_timelock(&state, &legacy, NOW + 100, NOW, limits()).is_err(),
+        matches!(
+            apply_transition_with_timelock(&state, &legacy, NOW + 100, NOW, limits()),
+            Err(Error::Invalid(message)) if message == "next recovery proof count does not match policy"
+        ),
         "Recover must reject a carried-forward policy without next guardian proofs"
     );
     let mut absent = legacy;
