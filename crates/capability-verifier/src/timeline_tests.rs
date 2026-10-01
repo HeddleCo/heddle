@@ -527,12 +527,21 @@ fn recovered_away_fixture(rotations: &[u8]) -> TimelineFixture {
         );
     }
     let recovered_key = TestKey::new(20);
+    let next_paper = TestKey::new(21);
+    let next_social = TestKey::new(22);
     let recover = recovery_transition(
         &state,
         &[&paper, &social],
         &recovered_key,
-        state.recovery_policy().clone(),
+        recovery_policy(
+            &[
+                (&next_paper, RecoveryGuardianKind::Paper),
+                (&next_social, RecoveryGuardianKind::Social),
+            ],
+            Some(1),
+        ),
         NOW,
+        &[&next_paper, &next_social],
     );
     verify_transition_timelock(&state, &recover, NOW - 1).expect("recovery veto window elapsed");
     state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("accepted recovery");
@@ -557,12 +566,21 @@ fn long_owner_history_fixture() -> TimelineFixture {
         fixture.owner = next;
     }
     let recovered = TestKey::new(50);
+    let next_paper = TestKey::new(51);
+    let next_social = TestKey::new(52);
     let recover = recovery_transition(
         &state,
         &[&paper, &social],
         &recovered,
-        state.recovery_policy().clone(),
+        recovery_policy(
+            &[
+                (&next_paper, RecoveryGuardianKind::Paper),
+                (&next_social, RecoveryGuardianKind::Social),
+            ],
+            None,
+        ),
         NOW,
+        &[&next_paper, &next_social],
     );
     verify_transition_timelock(&state, &recover, NOW - 604_800).expect("recovery window elapsed");
     state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("recovery");

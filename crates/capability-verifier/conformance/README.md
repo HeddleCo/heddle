@@ -4,7 +4,9 @@ The published crate embeds four canonical-protobuf JSON fixture sets:
 
 - `fixtures/v2.json`: a valid purge and ten named negative decisions;
 - `fixtures/transfer-v2.json`: complete and incomplete two-owner handoffs; and
-- `fixtures/keyring-v2.json`: a self-rooted linear keyring and a fork; and
+- `fixtures/keyring-v2.json`: a self-rooted linear keyring, a fork, atomic
+  recovery-policy replacement, rejection of legacy or forged next-policy
+  proofs, and second recovery by current versus retired guardians; and
 - `fixtures/timeline-v3.json`: direct format-3 timeline acceptance and denial
   cases for scope, action, version, expiry, and revocation, including fresh
   acceptance after twenty owner-key rotations and recovery and rejection of
