@@ -50,6 +50,10 @@ pub struct PublicationCapture {
     /// Drop the next context command before applying it, as a transport
     /// failure would, so the client must redeliver its prepared record.
     pub interrupt_next_context: bool,
+    /// Misbehave: answer every requested context with this signed operation
+    /// as its only causal head, as a hostile remote redirecting the record to
+    /// another record or Thread would.
+    pub hostile_context_head: Option<v2::SignedRecord>,
     pub discussions: Vec<v2::OpenDiscussionRequest>,
     pub appends: Vec<v2::AppendDiscussionRequest>,
     pub resolutions: Vec<v2::ResolveDiscussionRequest>,
@@ -1190,6 +1194,28 @@ fn collaboration_payloads(
     // A requested context projects its current frontier within the Thread
     // the record is bound to, as Weft's view does.
     for requested in &request.contexts {
+        if let Some(hostile) = &capture.hostile_context_head {
+            let head = thread_api::collaboration::operation_id(hostile)
+                .expect("hostile head ID")
+                .as_bytes()
+                .to_vec();
+            payloads.push(Payload::Context(v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    spool: Some(v2::SpoolRef {
+                        id: fixture.spool.to_string(),
+                    }),
+                    id: requested.id.clone(),
+                }),
+                version: head.clone(),
+                causal_id: head.clone(),
+                causal_heads: vec![head],
+                ..Default::default()
+            }));
+            if request.include_operations {
+                payloads.push(Payload::Operation(hostile.clone()));
+            }
+            continue;
+        }
         let Some(latest) = capture
             .contexts
             .iter()
@@ -1541,6 +1567,7 @@ async fn serve_publication(
                     accepted.contexts = std::mem::take(&mut capture.contexts);
                     accepted.context_attempts = std::mem::take(&mut capture.context_attempts);
                     accepted.interrupt_next_context = capture.interrupt_next_context;
+                    accepted.hostile_context_head = capture.hostile_context_head.clone();
                     accepted.discussions = std::mem::take(&mut capture.discussions);
                     accepted.appends = std::mem::take(&mut capture.appends);
                     accepted.resolutions = std::mem::take(&mut capture.resolutions);
