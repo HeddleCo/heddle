@@ -1920,6 +1920,150 @@ fn hostile_discussion(fixture: &Fixture) -> api::heddle::api::v1alpha2::SignedRe
     .expect("attacker-signed discussion")
 }
 
+/// A remote's signed head cannot choose the scope of a pending append/resolve.
+async fn assert_hostile_discussion_heads_refused(resolve: bool, foreign: &str, mixed: bool) {
+    let fixture = Fixture::new().await;
+    fixture.run(&[
+        "discuss",
+        "new",
+        "--path",
+        "example.py",
+        "--thread",
+        "main",
+        "--body",
+        "opening turn",
+    ]);
+    let repo = Repository::open(&fixture.clone).expect("repo");
+    let view = repo::CollaborationStore::open(repo.heddle_dir())
+        .expect("store")
+        .materialize()
+        .expect("view");
+    let discussion = *view.discussions.keys().next().expect("discussion");
+    let id = discussion.to_string();
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let pending = "a realistic discussion reply with details\n".repeat(100);
+    if resolve {
+        fixture.run(&[
+            "discuss", "resolve", &id, "--mode", "dismiss", "--reason", &pending,
+        ]);
+    } else {
+        fixture.run(&["discuss", "reply", &id, "--body", &pending]);
+    }
+    let attacker = hostile_discussion(&fixture);
+    let outer = thread_api::collaboration::verify(&attacker).expect("attacker record");
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) = outer.body
+    else {
+        panic!("discussion")
+    };
+    let envelope = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .expect("envelope")
+        .operation;
+    let mut metadata = envelope.metadata.expect("metadata");
+    if foreign != "thread" {
+        metadata.scope.thread = Some(fixture.thread_id);
+    }
+    if foreign == "spool" {
+        metadata.scope.spool = uuid::Uuid::from_u128(94);
+    }
+    let hostile = thread_api::collaboration::Command {
+        discussion: if foreign == "discussion" {
+            envelope.discussion_id
+        } else {
+            discussion
+        },
+        operation_id: envelope.idempotency_key,
+        metadata,
+        author: envelope.author,
+        occurred_at_ms: envelope.occurred_at_ms,
+        body: envelope.body,
+    }
+    .sign(&[], &hostile_signer())
+    .expect("hostile head");
+    let mirror_path = repo
+        .heddle_dir()
+        .join("collaboration")
+        .join("hosted-mirror.json");
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(&mirror_path).expect("mirror")).expect("mirror JSON");
+    let attempts = {
+        let mut capture = fixture.captured.lock().expect("capture");
+        let mut heads = if mixed {
+            capture.discussion_operations.clone()
+        } else {
+            vec![]
+        };
+        heads.push(hostile);
+        capture.hostile_discussion_heads = Some(heads);
+        capture.received_discussion_operations.len()
+    };
+    let (code, result) = push_json(&fixture, &fixture.clone);
+    let capture = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(
+        capture.received_discussion_operations.len(),
+        attempts,
+        "the client signed and sent a discussion descendant from the hostile remote's {foreign} frontier"
+    );
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(&mirror_path).expect("mirror")).expect("mirror JSON");
+    assert_eq!(before, after, "nothing prepared or retained on refusal");
+    assert_eq!(code, Some(65), "{result}");
+    assert_eq!(result["discussions"]["status"], "failed", "{result}");
+    let issue = &result["discussions"]["local_only"][0];
+    assert_eq!(issue["kind"], "not_replicable", "{result}");
+    assert_eq!(issue["retry_unchanged"], false, "{result}");
+    assert!(
+        issue["message"]
+            .as_str()
+            .expect("message")
+            .contains("refused to sign discussion"),
+        "{result}"
+    );
+    fixture
+        .captured
+        .lock()
+        .expect("capture")
+        .hostile_discussion_heads = None;
+    assert_push_succeeded(&fixture, &fixture.clone);
+    let capture = fixture.captured.lock().expect("capture").clone();
+    assert_eq!(capture.discussion_operations.len(), 2);
+    let open = &capture.discussion_operations[0];
+    let signed = &capture.discussion_operations[1];
+    let operation = thread_api::collaboration::verify(signed).expect("signed descendant");
+    assert_eq!(operation.thread, fixture.thread_id);
+    assert_eq!(
+        operation.parents,
+        [thread_api::collaboration::operation_id(open).expect("open ID")]
+            .into_iter()
+            .collect()
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_append_head_rebinding_discussion_thread_is_refused() {
+    assert_hostile_discussion_heads_refused(false, "thread", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_resolve_head_rebinding_discussion_thread_is_refused() {
+    assert_hostile_discussion_heads_refused(true, "thread", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_append_head_of_another_discussion_is_refused() {
+    assert_hostile_discussion_heads_refused(false, "discussion", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_resolve_head_of_another_spool_is_refused() {
+    assert_hostile_discussion_heads_refused(true, "spool", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_append_mixed_discussion_heads_are_refused() {
+    assert_hostile_discussion_heads_refused(false, "thread", true).await;
+}
+
 /// The Thread of every context operation the clone retained for delivery.
 fn retained_context_threads(checkout: &Path) -> Vec<objects::object::ContentHash> {
     use prost::Message;

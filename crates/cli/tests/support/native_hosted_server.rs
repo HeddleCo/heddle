@@ -54,6 +54,8 @@ pub struct PublicationCapture {
     /// as its only causal head, as a hostile remote redirecting the record to
     /// another record or Thread would.
     pub hostile_context_head: Option<v2::SignedRecord>,
+    /// Misbehave: replace a requested discussion frontier with these originals.
+    pub hostile_discussion_heads: Option<Vec<v2::SignedRecord>>,
     pub discussions: Vec<v2::OpenDiscussionRequest>,
     pub appends: Vec<v2::AppendDiscussionRequest>,
     pub resolutions: Vec<v2::ResolveDiscussionRequest>,
@@ -1130,6 +1132,29 @@ fn collaboration_payloads(
                     .to_vec()
             })
             .collect();
+        if !request.discussions.is_empty()
+            && let Some(hostile) = &capture.hostile_discussion_heads
+        {
+            let heads: Vec<_> = hostile
+                .iter()
+                .map(|record| {
+                    thread_api::collaboration::operation_id(record)
+                        .expect("hostile discussion head")
+                        .as_bytes()
+                        .to_vec()
+                })
+                .collect();
+            payloads.push(Payload::Discussion(v2::DiscussionRecord {
+                r#ref: Some(reference),
+                version: heads.concat(),
+                causal_heads: heads,
+                ..Default::default()
+            }));
+            if request.include_operations {
+                payloads.extend(hostile.iter().cloned().map(Payload::Operation));
+            }
+            continue;
+        }
         let (audience, label) =
             thread_api::collaboration::audience(&discussion.visibility).expect("audience");
         payloads.push(Payload::Discussion(v2::DiscussionRecord {
@@ -1568,6 +1593,7 @@ async fn serve_publication(
                     accepted.context_attempts = std::mem::take(&mut capture.context_attempts);
                     accepted.interrupt_next_context = capture.interrupt_next_context;
                     accepted.hostile_context_head = capture.hostile_context_head.clone();
+                    accepted.hostile_discussion_heads = capture.hostile_discussion_heads.clone();
                     accepted.discussions = std::mem::take(&mut capture.discussions);
                     accepted.appends = std::mem::take(&mut capture.appends);
                     accepted.resolutions = std::mem::take(&mut capture.resolutions);
