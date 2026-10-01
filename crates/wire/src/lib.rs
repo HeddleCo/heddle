@@ -110,6 +110,29 @@ pub enum ProtocolError {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
+    #[error(
+        "Thread {thread} has {states} States and {operations} operations; {limit_name} limit is {limit}, required {actual}. Very large histories need server-side incremental admission (HeddleCo/weft#2432) or hosted import"
+    )]
+    PublicationLimitExceeded {
+        thread: String,
+        states: usize,
+        operations: usize,
+        limit_name: &'static str,
+        limit: usize,
+        actual: usize,
+    },
+
+    #[error(
+        "Thread {thread} operation {operation} requires {bytes} encoded bytes; one publication batch allows {batch_limit} bytes and the negotiated frame allows {frame_limit} bytes"
+    )]
+    PublicationOperationTooLarge {
+        thread: String,
+        operation: usize,
+        bytes: usize,
+        batch_limit: usize,
+        frame_limit: usize,
+    },
+
     #[error("remote error: {0}")]
     Remote(String),
 
@@ -165,6 +188,8 @@ impl ProtocolError {
             ProtocolError::ObjectNotFound(_) => "object not found".to_string(),
             ProtocolError::AlreadyExists(_) => "resource already exists".to_string(),
             ProtocolError::InvalidState(_) => "invalid request state".to_string(),
+            ProtocolError::PublicationLimitExceeded { .. }
+            | ProtocolError::PublicationOperationTooLarge { .. } => self.to_string(),
             ProtocolError::Remote(_) => "internal server error".to_string(),
             ProtocolError::RemoteFailure { message, .. } => message.clone(),
             ProtocolError::LockError(_) => "internal server error".to_string(),
@@ -184,6 +209,8 @@ impl ProtocolError {
             ProtocolError::ObjectNotFound(_) => ErrorCode::NotFound,
             ProtocolError::AlreadyExists(_) => ErrorCode::InvalidArgument,
             ProtocolError::InvalidState(_) => ErrorCode::InvalidArgument,
+            ProtocolError::PublicationLimitExceeded { .. }
+            | ProtocolError::PublicationOperationTooLarge { .. } => ErrorCode::InvalidArgument,
             ProtocolError::Remote(_) => ErrorCode::Server,
             ProtocolError::RemoteFailure { code, .. } => match code {
                 RemoteFailureCode::InvalidArgument

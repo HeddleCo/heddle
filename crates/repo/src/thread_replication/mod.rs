@@ -78,6 +78,15 @@ pub enum Error {
     ReferenceProjectionPending,
     #[error("reference has concurrent resolutions at this source revision")]
     ReferenceProjectionAmbiguous,
+    #[error(
+        "source ancestry exceeds transfer budget: {records} records / {bytes} bytes (limits {max_records} records / {max_bytes} bytes)"
+    )]
+    SourceAncestryBudgetExceeded {
+        records: usize,
+        bytes: usize,
+        max_records: usize,
+        max_bytes: usize,
+    },
     #[error("{0}")]
     Invalid(String),
 }

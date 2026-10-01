@@ -7,6 +7,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{Remote, contract::*, rpc, transport};
 
+mod batching;
+
 #[cfg(feature = "source-transfer")]
 mod acceptance;
 #[cfg(feature = "source-transfer")]
@@ -127,6 +129,24 @@ pub enum Error {
     Source(#[from] std::io::Error),
     #[error("invalid publication: {0}")]
     Invalid(&'static str),
+    #[error(
+        "publication {limit_name} limit is {limit}, required {actual} for {operations} operations"
+    )]
+    OriginalBudgetExceeded {
+        operations: usize,
+        limit_name: &'static str,
+        limit: usize,
+        actual: usize,
+    },
+    #[error(
+        "publication operation {operation} requires {bytes} encoded bytes; batch limit {batch_limit} bytes, frame limit {frame_limit} bytes"
+    )]
+    OriginalOperationTooLarge {
+        operation: usize,
+        bytes: usize,
+        batch_limit: usize,
+        frame_limit: usize,
+    },
 }
 
 impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
@@ -140,6 +160,10 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
+        // Preflight all originals before opening the exchange. The Ready may
+        // narrow the frame budget; re-batch again before sending any content.
+        let originals =
+            batching::bounded_originals(originals, &opening.client_operation_id, 512 * 1024)?;
         originals.validate_bounds()?;
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
@@ -197,6 +221,9 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         if !(1024..=512 * 1024).contains(&frame_limit) {
             return Err(Error::Invalid("unsupported publication frame budget"));
         }
+        let originals =
+            batching::bounded_originals(&originals, &opening.client_operation_id, frame_limit)?;
+        originals.validate_bounds()?;
         let upload = async {
             for body in originals
                 .geneses
@@ -420,6 +447,7 @@ mod tests {
     }
     pub(super) struct Peer {
         wrong_receipt: bool,
+        original_count: usize,
     }
     impl RpcTransport for Peer {
         type Error = transport::Error;
@@ -462,6 +490,7 @@ mod tests {
             let (tx, mut incoming) = mpsc::channel::<Vec<u8>>(1);
             let (outgoing, rx) = mpsc::channel(1);
             let wrong_receipt = self.wrong_receipt;
+            let original_count = self.original_count;
             tokio::spawn(async move {
                 let send = |body| {
                     let outgoing = &outgoing;
@@ -487,6 +516,7 @@ mod tests {
                 let mut lengths = [0_u64; 2];
                 let mut original_counts = [0usize; 2];
                 while let Some(bytes) = incoming.recv().await {
+                    assert!(bytes.len() <= 2048, "negotiated frame size");
                     let frame = PublishContentClientFrame::decode(bytes.as_slice()).expect("frame");
                     assert_eq!(frame.client_operation_id, opening.client_operation_id);
                     match frame.body {
@@ -502,7 +532,7 @@ mod tests {
                         }
                         Some(publish_content_client_frame::Body::Operations(batch)) => {
                             assert_eq!(lengths, [0, 0]);
-                            assert_eq!(batch.operations.len(), 1);
+                            assert!((1..=128).contains(&batch.operations.len()));
                             assert!(!batch.operations[0].canonical_record.is_empty());
                             original_counts[1] += batch.operations.len();
                             send(publish_content_server_frame::Body::Checkpoint(
@@ -514,7 +544,7 @@ mod tests {
                         Some(publish_content_client_frame::Body::Pack(chunk)) => {
                             assert_eq!(
                                 original_counts,
-                                [1, 1],
+                                [1, original_count],
                                 "original proofs precede source artifacts"
                             );
                             let extent = chunk.extent.expect("extent");
@@ -595,7 +625,10 @@ mod tests {
         };
         let remote = Remote {
             api: api::v2::client::Client::new(
-                Peer { wrong_receipt },
+                Peer {
+                    wrong_receipt,
+                    original_count: 1,
+                },
                 ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
             ),
             description: DescribeEndpointResponse {
@@ -713,6 +746,30 @@ mod tests {
         .expect("publication");
         assert_eq!(receipt.client_operation_id, "op-test");
     }
+    #[tokio::test]
+    async fn publication_rebatches_after_ready_before_upload() {
+        let (mut remote, open, artifacts) = fixture(false);
+        remote.api = api::v2::client::Client::new(
+            Peer {
+                wrong_receipt: false,
+                original_count: 140,
+            },
+            ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
+        );
+        let mut originals = originals();
+        let mut record = originals.operations[0].operations[0].clone();
+        record.canonical_record = vec![1; 300];
+        originals.operations[0].operations = vec![record; 140];
+        let receipt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            remote.publish_content(&open, &originals, artifacts),
+        )
+        .await
+        .expect("must not deadlock")
+        .expect("negotiated bounded publication");
+        assert_eq!(receipt.client_operation_id, "op-test");
+    }
+
     #[tokio::test]
     async fn publication_refuses_a_receipt_for_another_scope() {
         let (remote, open, artifacts) = fixture(true);

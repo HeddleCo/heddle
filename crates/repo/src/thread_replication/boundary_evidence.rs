@@ -126,6 +126,7 @@ pub(super) fn add_wire(
 pub(super) fn load_many(
     connection: &Connection,
     ids: &std::collections::BTreeSet<ContentHash>,
+    original_bytes: usize,
     max_bytes: usize,
 ) -> Result<std::collections::BTreeMap<ContentHash, std::sync::Arc<SignedBoundaryAcceptance>>> {
     if ids.len() > 128 {
@@ -142,7 +143,7 @@ pub(super) fn load_many(
     let mut rows = statement.query(rusqlite::params_from_iter(
         ids.iter().map(|id| id.as_bytes().as_slice()),
     ))?;
-    let mut bytes = 0usize;
+    let mut bytes = original_bytes;
     while let Some(row) = rows.next()? {
         let canonical_len = usize::try_from(row.get::<_, i64>(1)?)
             .map_err(|_| Error::Invalid("invalid evidence length".into()))?;
@@ -152,10 +153,18 @@ pub(super) fn load_many(
             .checked_add(canonical_len)
             .and_then(|n| n.checked_add(signature_len))
             .ok_or_else(|| Error::Invalid("boundary evidence byte overflow".into()))?;
-        if canonical_len > 96 * 1024 || signature_len != 64 || bytes > max_bytes {
+        if canonical_len > 96 * 1024 || signature_len != 64 {
             return Err(Error::Invalid(
                 "source boundary evidence exceeds transfer budget".into(),
             ));
+        }
+        if bytes > max_bytes {
+            return Err(Error::SourceAncestryBudgetExceeded {
+                records: output.len() + 1,
+                bytes,
+                max_records: 128,
+                max_bytes,
+            });
         }
         let id = super::hash(&row.get::<_, Vec<u8>>(0)?)?;
         let signed = SignedBoundaryAcceptance {
