@@ -543,6 +543,108 @@ fn recovered_away_fixture(rotations: &[u8]) -> TimelineFixture {
     fixture
 }
 
+fn long_owner_history_fixture() -> TimelineFixture {
+    let mut fixture = TimelineFixture::new();
+    let paper = TestKey::new(2);
+    let social = TestKey::new(3);
+    let mut state =
+        verify_owner_root(fixture.bundle.owner_root.as_ref().expect("root")).expect("root state");
+    for seed in 30..50 {
+        let next = TestKey::new(seed);
+        let rotate = rotation(&state, &fixture.owner, &next);
+        state = apply_accepted_transition(&state, &rotate, NOW, limits()).expect("rotation");
+        fixture.bundle.owner_state_chain.push(rotate);
+        fixture.owner = next;
+    }
+    let recovered = TestKey::new(50);
+    let recover = recovery_transition(
+        &state,
+        &[&paper, &social],
+        &recovered,
+        state.recovery_policy().clone(),
+        NOW,
+    );
+    verify_transition_timelock(&state, &recover, NOW - 604_800).expect("recovery window elapsed");
+    state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("recovery");
+    fixture.bundle.owner_state_chain.push(recover);
+    fixture.owner = recovered;
+    fixture.state_hash = state.state_hash();
+    fixture.capability_mut().issuer_state_hash = state.state_hash().to_vec();
+    fixture.capability_mut().not_before_unix_seconds = NOW;
+    fixture.resign();
+    fixture
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn timeline_acceptance_with_twenty_rotations_and_recovery() {
+    let fixture = long_owner_history_fixture();
+    assert_eq!(fixture.bundle.owner_state_chain.len(), 21);
+    assert!(fixture.bundle.encoded_len() > 8192);
+    assert!(fixture.bundle.encoded_len() < 65_536);
+    let verified = fixture
+        .verify(NOW, &[], &[])
+        .expect("fresh recovered-owner acceptance");
+    assert_eq!(
+        verified.capability().capability().issuer_state_hash,
+        fixture.state_hash
+    );
+    #[cfg(target_arch = "wasm32")]
+    assert!(
+        crate::wasm::verify_timeline_acceptance_binding(
+            &fixture.origin.encode_to_vec(),
+            &fixture.acceptance.encode_to_vec(),
+            &fixture.state_hash,
+            path(),
+            &[11; 32],
+            4,
+            1,
+            vec![],
+            vec![],
+            NOW,
+            3600,
+        )
+        .expect("WASM acceptance binding")
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn timeline_acceptance_rejects_bundle_over_64_kib() {
+    let fixture = oversized_bundle_fixture();
+    assert!(
+        matches!(fixture.verify(NOW, &[], &[]), Err(Error::Invalid(reason)) if reason.contains("acceptance capability"))
+    );
+    #[cfg(target_arch = "wasm32")]
+    assert!(
+        !crate::wasm::verify_timeline_acceptance_binding(
+            &fixture.origin.encode_to_vec(),
+            &fixture.acceptance.encode_to_vec(),
+            &fixture.state_hash,
+            path(),
+            &[11; 32],
+            4,
+            1,
+            vec![],
+            vec![],
+            NOW,
+            3600,
+        )
+        .expect("WASM acceptance binding")
+    );
+}
+
+fn oversized_bundle_fixture() -> TimelineFixture {
+    let mut fixture = TimelineFixture::new();
+    fixture.bundle.subject_biscuit.resize(65_537, 0);
+    let overhead = fixture.bundle.encoded_len() - 65_537;
+    fixture.bundle.subject_biscuit.truncate(65_537 - overhead);
+    let bytes = fixture.bundle.encode_to_vec();
+    assert_eq!(bytes.len(), 65_537);
+    fixture.acceptance.authority = Some(Authority::OwnerDerivedCapability(bytes));
+    fixture
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn producer_layout_round_trips_through_format_three_verifier() {
@@ -797,9 +899,7 @@ fn direct_grant_shape_validity_start_and_issuer_signature_are_checked() {
     );
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn timeline_v3_parity_fixture_is_current() {
+fn timeline_v3_fixture_json() -> String {
     fn case(
         name: &str,
         fixture: &TimelineFixture,
@@ -844,6 +944,8 @@ fn timeline_v3_parity_fixture_is_current() {
     let recovered = recovered_away_fixture(&[]);
     let recovered_away = recovered_away_fixture(&[12]);
     let recovered_after_rotations = recovered_away_fixture(&[12, 13, 14]);
+    let long_history = long_owner_history_fixture();
+    let oversized = oversized_bundle_fixture();
     let mut retired = TimelineFixture::new();
     let root_state =
         verify_owner_root(retired.bundle.owner_root.as_ref().expect("root")).expect("state");
@@ -879,10 +981,25 @@ fn timeline_v3_parity_fixture_is_current() {
             case("recovered-root-issuer", &recovered, false, NOW, vec![], vec![]),
             case("recovered-away-issuer", &recovered_away, false, NOW, vec![], vec![]),
             case("recovered-after-three-rotations", &recovered_after_rotations, false, NOW, vec![], vec![]),
+            case("twenty-rotations-and-recovery", &long_history, true, NOW, vec![], vec![]),
+            case("bundle-over-64-kib", &oversized, false, NOW, vec![], vec![]),
             case("retired-issuer", &retired, false, NOW + 101, vec![], vec![]),
         ]
     });
-    let json = serde_json::to_string_pretty(&fixture).expect("fixture JSON") + "\n";
+    serde_json::to_string_pretty(&fixture).expect("fixture JSON") + "\n"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[ignore = "maintainer-only fixture regeneration"]
+fn print_timeline_v3_fixture_json() {
+    println!("{}", timeline_v3_fixture_json());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn timeline_v3_parity_fixture_is_current() {
+    let json = timeline_v3_fixture_json();
     assert_eq!(
         json,
         include_str!("../conformance/fixtures/timeline-v3.json")

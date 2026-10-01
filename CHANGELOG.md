@@ -15,6 +15,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Pin `heddle-api` 0.31.0-alpha.12 and accept timeline owner-authorization
+  bundles up to the API's 64 KiB bound, including long rotation and recovery
+  histories, in the hosted client and native/WASM capability verifier.
+  The dependency-version guard requires a patch bump from 0.28.0 to 0.28.1.
 - Capability-verifier and its npm/WASM package now follow the workspace version.
   The workspace is 0.27.2: the dependency-version guard requires a bump for the
   updated verifier requirements. All publishable crates must inherit the version.
