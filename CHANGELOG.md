@@ -15,6 +15,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Adopt heddle-api 0.31.0-alpha.13 (blocking-discussion resolve rule,
+  additive). The workspace moves to 0.28.3: the dependency-version guard
+  requires a bump for the new pin.
 - Pin `heddle-api` 0.31.0-alpha.12 and accept timeline owner-authorization
   bundles up to the API's 64 KiB bound, including long rotation and recovery
   histories, in the hosted client and native/WASM capability verifier.
