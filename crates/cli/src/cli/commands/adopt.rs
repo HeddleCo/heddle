@@ -211,6 +211,13 @@ fn import_ingest_for_adopt(
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 
+    // A failed initial import retains its seed and partially admitted Threads.
+    // Resume that graph before switching the checkout to native authority.
+    let initialize_native_threads = initialize_native_threads
+        || repo
+            .store()
+            .get_state(&synthetic_initial_base()?.id())?
+            .is_some();
     let root_parent = initialize_native_threads
         .then(|| seed_hosted_publishable_base(repo))
         .transpose()?;
@@ -258,7 +265,7 @@ fn register_imported_native_threads(repo: &Repository, base: StateId) -> Result<
     for (name, tip) in repo.refs().list_threads_with_states()? {
         let name = name.to_string();
         repo.create_native_thread(&name, base, None, "")?;
-        repo.record_native_source(&name, tip)?;
+        repo.record_native_imported_source(&name, tip)?;
     }
     Ok(())
 }

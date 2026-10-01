@@ -439,7 +439,26 @@ impl Repository {
             }
             self.create_native_thread(name, state_id, None, "")?;
         }
+        self.record_native_source_graph(name, state_id, |state| {
+            classify_attached_source(self, name, state)
+        })
+    }
 
+    /// Admit an imported branch's existing ancestry into its already created
+    /// Thread. Git merges belong to that graph, even when a sibling Thread has
+    /// already imported the same revisions; they are not new local landings.
+    /// Capture admission still verifies every real parent in this Thread.
+    pub fn record_native_imported_source(&self, name: &str, state_id: StateId) -> Result<()> {
+        self.native_thread(name)?;
+        self.record_native_source_graph(name, state_id, |_| Ok(AttachedSourceKind::Capture))
+    }
+
+    fn record_native_source_graph(
+        &self,
+        name: &str,
+        state_id: StateId,
+        classify: impl Fn(&State) -> Result<AttachedSourceKind>,
+    ) -> Result<()> {
         enum Work {
             Visit(StateId),
             AdmitCaptureParents {
@@ -468,7 +487,7 @@ impl Repository {
                     if state.parents.is_empty() {
                         continue;
                     }
-                    match classify_attached_source(self, name, &state)? {
+                    match classify(&state)? {
                         AttachedSourceKind::Capture => {
                             let replica = self.native_thread(name)?;
                             let base = replica.genesis()?.base;
