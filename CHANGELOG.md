@@ -15,6 +15,7 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Adopt heddle-api 0.31.0-alpha.15 (operation context, landing-assessment status, spool default thread, client SemanticIndex ingestion messages, code-navigation reads, tip-only search docs; additive). The workspace moves to 0.28.5: the dependency-version guard requires a bump for the new pin.
 - Release 0.28.4 (batch #1953); `heddle-api` stays pinned at 0.31.0-alpha.13.
   The capability verifier makes Recover require a replacement recovery policy
   (BREAKING verifier behavior change, #1952; see the capability-verifier
