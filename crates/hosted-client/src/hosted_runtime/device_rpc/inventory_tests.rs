@@ -46,6 +46,24 @@ fn required_daemon_handler(path: &str) -> bool {
         // is aspirational (heddle#1776), rather than represented by a fake handler.
         return false;
     }
+    if matches!(
+        path,
+        "/heddle.api.v1alpha2.ContentService/GetDefinition"
+            | "/heddle.api.v1alpha2.ContentService/GetFileSymbols"
+            | "/heddle.api.v1alpha2.ContentService/GetSemanticImporters"
+            | "/heddle.api.v1alpha2.ContentService/GetSemanticRefs"
+            | "/heddle.api.v1alpha2.ContentService/ListPaths"
+    ) {
+        // heddle-api 0.31.0-alpha.15 targets the v2 code-navigation reads at
+        // the daemon, but the daemon has no semantic-index-backed handlers
+        // yet. They stay out of `METHODS`, so the endpoint description does
+        // not advertise them and calls fail Unimplemented, rather than being
+        // answered by a stub. Tracked in HeddleCo/heddle#1956 ("daemon
+        // handlers for v2 code-navigation reads"). ListPaths (alpha.16) is the
+        // same case, tracked in HeddleCo/heddle#1957. Remove each exemption
+        // when its handler lands.
+        return false;
+    }
     if path == "/heddle.api.v1alpha2.AnalysisService/StartAnalysis" {
         return cfg!(feature = "semantic");
     }

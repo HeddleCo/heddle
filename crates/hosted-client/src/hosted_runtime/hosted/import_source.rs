@@ -183,6 +183,10 @@ impl HostedClient {
                 installation_id: String::new(),
                 // Server-side read projection; an import request names none.
                 linked_spools: Vec::new(),
+                // Provider read projections; an import request names none.
+                default_branch: String::new(),
+                refs: Vec::new(),
+                refs_status: None,
             }),
             expected_destination_version: overview.version,
             branches,
@@ -491,6 +495,9 @@ mod tests {
             private: false,
             installation_id: String::new(),
             linked_spools: Vec::new(),
+            default_branch: String::new(),
+            refs: Vec::new(),
+            refs_status: None,
         };
         assert!(source.connection.is_none());
         assert_eq!(source.provider_repository_id, source.clone_url);

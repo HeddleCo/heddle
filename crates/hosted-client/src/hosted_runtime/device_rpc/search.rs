@@ -585,6 +585,9 @@ impl DeviceRpc {
                                     }),
                                     match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
                                     symbol_name: (hit.kind == 4).then_some(hit.symbol_name),
+                                    // Live display metadata is a server projection; the local daemon withholds it.
+                                    thread_name: String::new(),
+                                    spool_path: Vec::new(),
                                 })),
                             });
                             visible += 1;
