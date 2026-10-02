@@ -4,6 +4,7 @@
 //! Selecting a method never configures telemetry export, credentials or a proxy.
 use crate::{IdentityCursor, OperationEventPhase};
 use objects::object::{AttributionCollectionMethod, AttributionEvidenceV1};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Explicit coverage of one installed adapter, not a prediction based on a
@@ -43,7 +44,8 @@ pub fn select_attribution_methods<'a>(
 
 /// Every collection method crosses the same typed boundary. Raw source events,
 /// URLs, credentials, transcripts, prompts and tool arguments are excluded.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributionObservation {
     pub method: AttributionCollectionMethod,
     pub identity: AttributionEvidenceV1,
@@ -55,6 +57,15 @@ pub fn record_attribution_observation(
     root: &Path,
     observation: &AttributionObservation,
 ) -> std::io::Result<()> {
+    if observation.paths.len() > 32
+        || observation.paths.iter().any(|p| p.as_os_str().len() > 1024)
+        || (observation.phase == OperationEventPhase::Observe && !observation.paths.is_empty())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid attribution paths",
+        ));
+    }
     observation.identity.validate().map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

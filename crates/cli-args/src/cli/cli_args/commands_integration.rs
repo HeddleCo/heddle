@@ -8,6 +8,10 @@ pub enum IntegrationCommands {
     /// List Heddle-managed harness integrations.
     List,
 
+    /// Record one bounded normalized attribution observation from stdin.
+    /// Accepts metadata only; does not configure or start a collector.
+    Collect,
+
     /// Install harness integrations.
     Install(IntegrationInstallArgs),
 

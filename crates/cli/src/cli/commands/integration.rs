@@ -167,6 +167,18 @@ struct IntegrationManifest {
 pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {
     let repo = cli.open_repo()?;
     match command {
+        IntegrationCommands::Collect => {
+            let mut bytes = Vec::new();
+            io::stdin().take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= 64 * 1024,
+                "attribution observation exceeds 64 KiB"
+            );
+            let observation: verbs::AttributionObservation = serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow!("invalid normalized attribution observation"))?;
+            verbs::record_attribution_observation(repo.root(), &observation)?;
+            Ok(())
+        }
         IntegrationCommands::List => list_integrations(cli, &repo),
         IntegrationCommands::Install(args) => install_integrations(cli, &repo, args),
         IntegrationCommands::Doctor => doctor_integrations(cli, &repo),

@@ -20,8 +20,11 @@ const MAX_PATHS: usize = 32;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 2 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationEventPhase {
+    /// Enrich an existing causal operation without sampling filesystem state.
+    Observe,
     Before,
     After,
     Failed,
@@ -268,6 +271,9 @@ pub(crate) fn record_with_method(
         let mut identity = evidence.operation_identity();
         identity.collection_methods = vec![method];
         let Some(key) = key(evidence) else {
+            if phase == OperationEventPhase::Observe {
+                return Ok(());
+            }
             journal.incomplete = true;
             let unknown_key = format!(
                 "unresolved:{}",
@@ -314,6 +320,25 @@ pub(crate) fn record_with_method(
             names.is_empty() || names.len() > MAX_PATHS || paths.len() != names.len();
         names.truncate(MAX_PATHS);
         match phase {
+            OperationEventPhase::Observe => {
+                // Metadata never opens/closes an operation or resamples bytes.
+                if let Some(pending) = journal.pending.iter_mut().find(|p| p.key == key)
+                    && merge_identity(&mut pending.identity, &identity)
+                {
+                    pending.ambiguous = true;
+                    journal.incomplete = true;
+                    if journal.completed.len() < MAX_OPERATIONS {
+                        journal.completed.push((
+                            format!("conflict:{key}:{}", journal.completed.len()),
+                            AttributionOperation {
+                                identity,
+                                changes: Vec::new(),
+                                resolution: AttributionOperationResolution::Unresolved,
+                            },
+                        ));
+                    }
+                }
+            }
             OperationEventPhase::Before => {
                 if let Some(pending) = journal.pending.iter_mut().find(|p| p.key == key) {
                     if invalid_paths

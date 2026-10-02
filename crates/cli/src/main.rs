@@ -962,7 +962,9 @@ fn is_harness_relay_invocation(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Integration {
-            command: IntegrationCommands::Relay(_) | IntegrationCommands::Stamp(_),
+            command: IntegrationCommands::Relay(_)
+                | IntegrationCommands::Stamp(_)
+                | IntegrationCommands::Collect,
         }
     )
 }

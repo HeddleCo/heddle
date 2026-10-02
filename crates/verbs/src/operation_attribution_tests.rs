@@ -393,3 +393,102 @@ fn replay_index_keeps_old_ids_after_many_later_operations() {
     .unwrap();
     assert!(frozen(dir.path()).operations.is_empty());
 }
+
+#[test]
+fn metadata_observation_does_not_close_or_resnapshot_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = event(None, "turn", "tool");
+    fs::write(dir.path().join("file"), "before").unwrap();
+    record_operation_event(
+        dir.path(),
+        &before,
+        OperationEventPhase::Before,
+        &["file".into()],
+    )
+    .unwrap();
+    let observed = event(Some("response-model"), "turn", "tool");
+    record_with_method(
+        dir.path(),
+        &observed,
+        OperationEventPhase::Observe,
+        &[],
+        AttributionCollectionMethod::EventStream,
+    )
+    .unwrap();
+    fs::write(dir.path().join("file"), "after").unwrap();
+    record_operation_event(
+        dir.path(),
+        &before,
+        OperationEventPhase::After,
+        &["file".into()],
+    )
+    .unwrap();
+    let evidence = frozen(dir.path());
+    assert_eq!(evidence.operations.len(), 1);
+    let operation = &evidence.operations[0];
+    assert_eq!(
+        operation.resolution,
+        AttributionOperationResolution::ContentBound
+    );
+    assert_eq!(
+        operation.identity.selected.model.as_ref().unwrap().value,
+        "response-model"
+    );
+    assert_eq!(
+        operation.changes[0].before,
+        Some(Blob::new(b"before".to_vec()).hash())
+    );
+    assert_eq!(
+        operation.changes[0].after,
+        Some(Blob::new(b"after".to_vec()).hash())
+    );
+    assert_eq!(operation.identity.collection_methods.len(), 2);
+}
+
+#[test]
+fn late_metadata_conflict_keeps_completed_operation_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = event(Some("first"), "turn", "tool");
+    operation(dir.path(), &before, "file", "after");
+    let late = event(Some("second"), "turn", "tool");
+    record_with_method(
+        dir.path(),
+        &late,
+        OperationEventPhase::Observe,
+        &[],
+        AttributionCollectionMethod::EventStream,
+    )
+    .unwrap();
+    record_with_method(
+        dir.path(),
+        &before,
+        OperationEventPhase::Observe,
+        &[],
+        AttributionCollectionMethod::EventStream,
+    )
+    .unwrap();
+    let evidence = frozen(dir.path());
+    assert_eq!(evidence.operations.len(), 2);
+    assert!(evidence.operations_incomplete);
+    assert!(
+        evidence
+            .operations
+            .iter()
+            .all(|op| op.resolution == AttributionOperationResolution::Unresolved)
+    );
+}
+
+#[test]
+fn metadata_without_tool_boundary_does_not_create_a_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = event(Some("model"), "turn", "tool");
+    record_with_method(
+        dir.path(),
+        &e,
+        OperationEventPhase::Observe,
+        &[],
+        AttributionCollectionMethod::EventStream,
+    )
+    .unwrap();
+    assert!(frozen(dir.path()).operations.is_empty());
+}

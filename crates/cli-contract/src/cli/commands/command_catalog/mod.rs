@@ -2424,6 +2424,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         )),
     ),
     entry(
+        &["integration", "collect"],
+        surface(
+            opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["integration collect"]),
+            "admin",
+        ),
+    ),
+    entry(
         &["integration", "stamp"],
         hidden(surface(
             opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["integration stamp"]),
@@ -5085,6 +5092,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
             IntegrationCommands::Relay(_) => vec!["integration", "relay"],
             IntegrationCommands::Stamp(_) => vec!["integration", "stamp"],
+            IntegrationCommands::Collect => vec!["integration", "collect"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {

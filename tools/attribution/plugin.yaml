@@ -1,0 +1,7 @@
+name: heddle-attribution
+version: "0.1.0"
+description: "Project-local exact-operation metadata collection for Hermes 0.21.0."
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - post_api_request
