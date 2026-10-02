@@ -2,7 +2,7 @@
 //! Local adapter for the canonical Git import State converter.
 
 use objects::object::{
-    Attribution, ContentHash, State, StateId,
+    Attribution, Blob, ContentHash, HeddleNote, State, StateId,
     thread_replication::{
         git_import_converter::{
             GitImportCommit, GitImportGraph, GitImportParentPolicy, GitImportSignature,
@@ -89,6 +89,19 @@ fn convert(
         },
     )
     .map_err(IngestError::from)
+}
+
+/// Extract the evidence before publishing a converted State into local storage.
+/// Note decoding verifies canonical bytes and the embedded State's blob address.
+pub(crate) fn attribution_evidence_from_commit(
+    commit: &CommitEntry,
+) -> crate::Result<Option<Blob>> {
+    let Some(bytes) = &commit.heddle_note else {
+        return Ok(None);
+    };
+    let note = HeddleNote::from_json_bytes(bytes)
+        .map_err(|error| IngestError::Git(format!("invalid Heddle note: {error}")))?;
+    note.attribution_evidence_blob().map_err(IngestError::from)
 }
 
 fn signature(value: &GitSignature, time: chrono::DateTime<chrono::Utc>) -> GitImportSignature {
@@ -674,5 +687,58 @@ mod tests {
             .expect("certified rewrite");
         assert_eq!(converted.parents, vec![new_parent]);
         assert_ne!(converted.id(), source.id());
+    }
+    #[test]
+    fn git_note_preserves_attribution_on_exact_and_rewritten_source_states() {
+        use objects::object::{
+            AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+        };
+        let evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::Observed,
+                AttributionSource::Process,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("evidence");
+        let tree = empty_tree_hash();
+        let state = State::new(
+            tree,
+            vec![],
+            Attribution::human(Principal::new("Test", "test@example.test")),
+        )
+        .with_attribution_evidence(evidence.hash());
+        let mut note = HeddleNote::from_state(&state);
+        note.attribution_evidence = Some(evidence.content().to_vec());
+        let mut commit = make_commit(&"ab".repeat(20), vec![], "attribution\n");
+        commit.heddle_note = Some(note.to_json_bytes().expect("note"));
+        assert_eq!(
+            state_from_commit(&commit, tree, vec![], false).expect("converted"),
+            state
+        );
+        assert_eq!(
+            attribution_evidence_from_commit(&commit)
+                .expect("evidence")
+                .expect("blob")
+                .hash(),
+            evidence.hash()
+        );
+        note.source_state = None;
+        note.parents_rewritten = true;
+        commit.message = b"attribution\n\nCo-authored-by: Claude <claude@example.test>\n".to_vec();
+        commit.heddle_note = Some(note.to_json_bytes().expect("rewritten note"));
+        let rebuilt = state_from_commit(&commit, tree, vec![], false).expect("rebuilt state");
+        assert_ne!(rebuilt.id(), state.id());
+        assert_eq!(rebuilt.attribution_evidence, Some(evidence.hash()));
+        assert!(
+            rebuilt.attribution.agent.is_none(),
+            "a legacy trailer cannot invent a model absent from bound evidence"
+        );
+        note.attribution_evidence = None;
+        note.source_state = Some(state);
+        commit.heddle_note = Some(serde_json::to_vec(&note).expect("hostile note"));
+        assert!(state_from_commit(&commit, tree, vec![], false).is_err());
     }
 }

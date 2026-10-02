@@ -42,6 +42,18 @@ impl DeviceRpc {
         let Some(publish_content_client_frame::Body::Open(open)) = request.body.clone() else {
             bail!("publication requires Open")
         };
+        if let Err(error) = api::source_format::require_native_source_formats(
+            &open.required_native_source_formats,
+            thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS,
+        ) {
+            writer
+                .fail(&super::failure(
+                    api::heddle::api::common::CallFailureCode::FailedPrecondition,
+                    error.to_string(),
+                ))
+                .await?;
+            return Ok(());
+        }
         let operation = request.client_operation_id.parse::<OperationId>()?;
         let reference = open.thread.as_ref().context("Thread required")?;
         let spool = reference.spool.as_ref().context("Spool required")?;
@@ -118,6 +130,7 @@ impl DeviceRpc {
                 PublishContentServerFrame {
                     body: Some(publish_content_server_frame::Body::Ready(TransferReady {
                         endpoint: Some(self.endpoint()),
+                        native_source_formats: open.required_native_source_formats.clone(),
                         thread: open.thread.clone(),
                         current: open.revision.clone(),
                         checkpoint: Some(checkpoint.clone()),

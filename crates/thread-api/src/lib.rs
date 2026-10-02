@@ -36,6 +36,7 @@ pub mod replication_rpc;
 pub mod request_proof;
 #[cfg(feature = "root-attachment")]
 pub mod root_attachment;
+pub mod source_format;
 #[cfg(feature = "replication")]
 pub mod thread_control;
 #[cfg(feature = "replication")]

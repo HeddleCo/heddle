@@ -28,6 +28,7 @@ mod collaboration_targets;
 #[cfg(test)]
 mod collaboration_tests;
 mod content;
+mod content_attribution;
 mod content_detail;
 mod content_summary;
 #[cfg(test)]

@@ -167,7 +167,7 @@ impl LocalStateReview {
             hidden_signal_count: 0,
         };
 
-        let agent_narrative = if state.attribution.agent.is_some() {
+        let agent_narrative = if state.is_agent_authored() {
             state.intent.clone()
         } else {
             None

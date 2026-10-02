@@ -19,6 +19,7 @@ hex.workspace = true
 heddle-format.workspace = true
 rand.workspace = true
 rmp-serde.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true

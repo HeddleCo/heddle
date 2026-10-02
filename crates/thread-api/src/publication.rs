@@ -36,6 +36,23 @@ pub struct PublicationOriginals {
     pub operations: Vec<ReplicationOperations>,
 }
 impl PublicationOriginals {
+    /// Requirements of every signed source ancestor, including foreign
+    /// integration dependencies. Selected-source bytes alone are insufficient.
+    #[cfg(feature = "replication")]
+    pub fn required_native_source_formats(&self) -> Result<Vec<i32>, Error> {
+        let mut required = std::collections::BTreeSet::new();
+        for record in self.operations.iter().flat_map(|batch| &batch.operations) {
+            let operation = crate::replication::decode_record(record.clone())
+                .and_then(|signed| signed.verify().map_err(crate::replication::Error::from))
+                .map_err(|error| transport::Error::Io(error.to_string()))?;
+            required.extend(
+                crate::source_format::operation_required_formats(&operation)
+                    .map_err(|error| transport::Error::Io(error.to_string()))?,
+            );
+        }
+        Ok(required.into_iter().collect())
+    }
+
     fn validate_bounds(&self) -> Result<(), Error> {
         if self.geneses.is_empty()
             || self.geneses.len() > 128
@@ -122,6 +139,8 @@ impl PublicationOriginals {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
+    NativeSourceFormat(#[from] api::source_format::NativeSourceFormatError),
+    #[error(transparent)]
     Client(#[from] ClientError<transport::Error>),
     #[error(transparent)]
     Transport(#[from] transport::Error),
@@ -180,6 +199,15 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 "endpoint, capture and ordered native artifacts required",
             ));
         }
+        crate::source_format::require_native_source_formats(
+            &open.required_native_source_formats,
+            &self.description.understood_native_source_formats,
+        )?;
+        #[cfg(feature = "replication")]
+        crate::source_format::require_native_source_formats(
+            &originals.required_native_source_formats()?,
+            &open.required_native_source_formats,
+        )?;
         let inventory = inventory_digest(&open.packs)?;
         let mut logical = opening.clone();
         if let Some(publish_content_client_frame::Body::Open(open)) = logical.body.as_mut() {
@@ -211,6 +239,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             || ready.thread != open.thread
             || ready.current != open.revision
             || ready.checkpoint.as_ref() != Some(&expected)
+            || ready.native_source_formats != open.required_native_source_formats
         {
             return Err(Error::Invalid("admission differs from publication plan"));
         }
@@ -448,6 +477,7 @@ mod tests {
     pub(super) struct Peer {
         wrong_receipt: bool,
         original_count: usize,
+        omit_source_formats: bool,
     }
     impl RpcTransport for Peer {
         type Error = transport::Error;
@@ -491,6 +521,7 @@ mod tests {
             let (outgoing, rx) = mpsc::channel(1);
             let wrong_receipt = self.wrong_receipt;
             let original_count = self.original_count;
+            let omit_source_formats = self.omit_source_formats;
             tokio::spawn(async move {
                 let send = |body| {
                     let outgoing = &outgoing;
@@ -502,6 +533,11 @@ mod tests {
                 };
                 send(publish_content_server_frame::Body::Ready(TransferReady {
                     endpoint: open.destination.clone(),
+                    native_source_formats: if omit_source_formats {
+                        vec![]
+                    } else {
+                        open.required_native_source_formats.clone()
+                    },
                     thread: open.thread.clone(),
                     current: open.revision.clone(),
                     checkpoint: Some(checkpoint.clone()),
@@ -628,6 +664,7 @@ mod tests {
                 Peer {
                     wrong_receipt,
                     original_count: 1,
+                    omit_source_formats: false,
                 },
                 ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
             ),
@@ -674,6 +711,42 @@ mod tests {
     // These byte fixtures exercise framing/backpressure, not original authority
     // admission; real Iroh tests independently verify canonical signatures.
     fn originals() -> PublicationOriginals {
+        #[cfg(feature = "replication")]
+        let record = {
+            use crypto::{Ed25519Signer, Signer};
+            use heddle_object_model::object::{
+                Attribution, ContentHash, Principal, State, Tree,
+                thread_replication::{
+                    AuthoredCapture, OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
+                },
+            };
+            let signer = Ed25519Signer::from_seed(&[2; 32]).expect("signer");
+            let state = State::new_snapshot(
+                Tree::new().hash(),
+                vec![],
+                Attribution::human(Principal::new("test", "test@example.test")),
+            );
+            let operation = ThreadOperation {
+                version: 1,
+                thread: ContentHash::from_bytes([1; 32]),
+                parents: Default::default(),
+                publisher: signer.public_key().try_into().expect("key"),
+                body: ThreadOperationBody::Capture(AuthoredCapture::local(
+                    state.encode_current_msgpack().expect("state").into(),
+                )),
+            };
+            let signed = crypto::thread_operation::SignedOperation::sign(&operation, &signer)
+                .expect("signed");
+            SignedRecord {
+                format: OPERATION_FORMAT.into(),
+                canonical_record: signed.canonical,
+                signatures: vec![RecordSignature {
+                    public_key: signer.public_key().to_vec(),
+                    signature: signed.signature,
+                }],
+            }
+        };
+        #[cfg(not(feature = "replication"))]
         let record = SignedRecord {
             format: "transport-fixture".into(),
             canonical_record: vec![1],
@@ -753,12 +826,12 @@ mod tests {
             Peer {
                 wrong_receipt: false,
                 original_count: 140,
+                omit_source_formats: false,
             },
             ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
         );
         let mut originals = originals();
-        let mut record = originals.operations[0].operations[0].clone();
-        record.canonical_record = vec![1; 300];
+        let record = originals.operations[0].operations[0].clone();
         originals.operations[0].operations = vec![record; 140];
         let receipt = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -904,5 +977,207 @@ mod tests {
                 ))
             })
         );
+    }
+    #[cfg(feature = "replication")]
+    fn rich_originals() -> PublicationOriginals {
+        use crypto::{Ed25519Signer, Signer};
+        use heddle_object_model::object::{
+            ContentHash,
+            thread_replication::{AuthoredCapture, ThreadOperationBody},
+        };
+        let mut originals = originals();
+        let record = &mut originals.operations[0].operations[0];
+        let mut operation = crate::replication::decode_record(record.clone())
+            .expect("signed original")
+            .verify()
+            .expect("capture");
+        let state = operation
+            .source_state()
+            .expect("state")
+            .expect("capture")
+            .with_attribution_evidence(ContentHash::from_bytes([71; 32]));
+        operation.body = ThreadOperationBody::Capture(AuthoredCapture::local(
+            state.encode_current_msgpack().expect("state").into(),
+        ));
+        let signer = Ed25519Signer::from_seed(&[2; 32]).expect("signer");
+        let signed = crypto::thread_operation::SignedOperation::sign(&operation, &signer)
+            .expect("signature");
+        record.canonical_record = signed.canonical;
+        record.signatures = vec![RecordSignature {
+            public_key: signer.public_key().to_vec(),
+            signature: signed.signature,
+        }];
+        originals
+    }
+
+    #[cfg(feature = "replication")]
+    #[tokio::test]
+    async fn publication_source_formats_require_endpoint_support_and_exact_ready_echo() {
+        use api::source_format::{NativeSourceFormatError, STATE_V6_ATTRIBUTION_V1 as V6};
+        let originals = rich_originals();
+        for support in [vec![], vec![0], vec![99]] {
+            let (mut remote, mut opening, artifacts) = fixture(false);
+            remote.description.understood_native_source_formats = support;
+            let Some(publish_content_client_frame::Body::Open(open)) = &mut opening.body else {
+                panic!("Open")
+            };
+            open.required_native_source_formats = vec![V6];
+            assert!(matches!(
+                remote
+                    .publish_content(&opening, &originals, artifacts)
+                    .await,
+                Err(Error::NativeSourceFormat(
+                    NativeSourceFormatError::UnsupportedByPeer(V6)
+                ))
+            ));
+        }
+        let (mut remote, mut opening, artifacts) = fixture(false);
+        remote.description.understood_native_source_formats = vec![V6];
+        assert!(
+            matches!(
+                remote
+                    .publish_content(&opening, &originals, artifacts)
+                    .await,
+                Err(Error::NativeSourceFormat(
+                    NativeSourceFormatError::UnsupportedByPeer(V6)
+                ))
+            ),
+            "a legacy declaration cannot conceal a rich ancestor"
+        );
+        let Some(publish_content_client_frame::Body::Open(open)) = &mut opening.body else {
+            panic!("Open")
+        };
+        open.required_native_source_formats = vec![V6];
+        remote.api = api::v2::client::Client::new(
+            Peer {
+                wrong_receipt: false,
+                original_count: 1,
+                omit_source_formats: true,
+            },
+            ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
+        );
+        let (_, _, artifacts) = fixture(false);
+        assert!(
+            matches!(
+                remote
+                    .publish_content(&opening, &originals, artifacts)
+                    .await,
+                Err(Error::Invalid("admission differs from publication plan"))
+            ),
+            "Ready cannot drop required formats"
+        );
+        let (mut remote, _, artifacts) = fixture(false);
+        remote.description.understood_native_source_formats = vec![99, V6];
+        remote
+            .publish_content(&opening, &originals, artifacts)
+            .await
+            .expect("explicit support and matching Ready preserve rich publication");
+    }
+
+    #[cfg(feature = "replication")]
+    #[test]
+    fn publication_source_formats_preserve_legacy_plan_and_bind_rich_plan_digest() {
+        use api::source_format::STATE_V6_ATTRIBUTION_V1;
+        let (_, mut opening, _) = fixture(false);
+        let legacy = typed_digest("thread-source-transfer-v1", &opening.encode_to_vec());
+        assert!(
+            originals()
+                .required_native_source_formats()
+                .expect("legacy")
+                .is_empty()
+        );
+        assert_eq!(
+            rich_originals()
+                .required_native_source_formats()
+                .expect("rich"),
+            [STATE_V6_ATTRIBUTION_V1]
+        );
+        let Some(publish_content_client_frame::Body::Open(open)) = &mut opening.body else {
+            panic!("Open")
+        };
+        open.required_native_source_formats = vec![STATE_V6_ATTRIBUTION_V1];
+        assert_ne!(
+            legacy,
+            typed_digest("thread-source-transfer-v1", &opening.encode_to_vec())
+        );
+    }
+    #[cfg(feature = "source-transfer")]
+    #[tokio::test]
+    async fn selected_source_pack_declares_evidence_even_with_legacy_originals() {
+        use objects::{
+            object::{
+                Attribution, AttributionBasis, AttributionClaim, AttributionEvidenceV1,
+                AttributionSource, Principal, State, Tree,
+            },
+            store::{FsStore, ObjectStore},
+        };
+        let root = tempfile::tempdir().expect("source scratch");
+        let store = FsStore::new(root.path().join("objects"));
+        store.init().expect("store");
+        let tree = Tree::new();
+        store.put_tree(&tree).expect("tree");
+        let evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::RequestReported,
+                AttributionSource::HarnessHook,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("evidence");
+        store.put_blob(&evidence).expect("required evidence");
+        let state = State::new_snapshot(
+            tree.hash(),
+            vec![],
+            Attribution::human(Principal::new("Author", "author@example.test")),
+        )
+        .with_attribution_evidence(evidence.hash());
+        let source = SourcePack::prepare(
+            &store,
+            &state,
+            root.path(),
+            SourceBudget {
+                max_objects: 16,
+                max_decoded_bytes: 256 * 1024,
+            },
+        )
+        .expect("exact source and evidence closure");
+        assert_eq!(
+            source.required_native_source_formats(),
+            crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS
+        );
+        let (mut remote, _, _) = fixture(false);
+        let thread = ThreadRef {
+            spool: Some(SpoolRef {
+                id: "test-spool".into(),
+            }),
+            id: Some(ThreadId { value: vec![1; 32] }),
+        };
+        let options = || PublicationOptions {
+            client_operation_id: "rich-source".into(),
+            source: EndpointRef {
+                public_key: vec![2; 32],
+                kind: EndpointKind::Device as i32,
+            },
+            sharing_policy_version: vec![],
+            checkpoint: None,
+        };
+        assert!(matches!(
+            remote
+                .thread(thread.clone())
+                .publish_source(&source, &originals(), options())
+                .await,
+            Err(Error::NativeSourceFormat(
+                api::source_format::NativeSourceFormatError::UnsupportedByPeer(_)
+            ))
+        ));
+        remote.description.understood_native_source_formats =
+            crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec();
+        remote
+            .thread(thread)
+            .publish_source(&source, &originals(), options())
+            .await
+            .expect("supported peer receives declared source closure");
     }
 }

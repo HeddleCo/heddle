@@ -169,6 +169,9 @@ impl GitImportGraph {
             state = state.with_confidence(confidence);
         }
         if let Some(note) = note {
+            if let Some(blob) = note.attribution_evidence_blob()? {
+                state = state.with_attribution_evidence(blob.hash());
+            }
             let source_state = StateId::parse(&note.state_id)
                 .map_err(|error| invalid(format!("invalid Heddle note StateId: {error}")))?;
             if state.id() != source_state {
@@ -270,7 +273,15 @@ pub fn parse_git_attribution(
         .and_then(|attribution| attribution.agent.as_ref())
         .or_else(|| note.and_then(|value| value.agent.as_ref()))
         .cloned()
-        .or_else(|| detect_agent_in_message(message))
+        // State-bound evidence is authoritative about which fields are absent.
+        // A legacy co-author trailer cannot fill in an unobserved model.
+        .or_else(|| {
+            if note.is_some_and(|value| value.attribution_evidence.is_some()) {
+                None
+            } else {
+                detect_agent_in_message(message)
+            }
+        })
     {
         Attribution::with_agent(principal, agent)
     } else {

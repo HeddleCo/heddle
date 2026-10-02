@@ -125,10 +125,7 @@ pub(crate) fn hook_session_id(harness: &str, stdin: &str) -> Option<String> {
         "claude-code" | "claude" => {
             first_value_string(&payload, &[&["session_id"], &["sessionId"]])
         }
-        "codex" => first_value_string(
-            &payload,
-            &[&["session_id"], &["sessionId"], &["conversation_id"]],
-        ),
+        "codex" => verbs::codex_cursor_patch(&payload).session,
         "opencode" => first_value_string(
             &payload,
             &[&["sessionID"], &["session_id"], &["session", "id"]],
@@ -156,6 +153,9 @@ fn apply_identity_stamp(
     stdin: &str,
     expire: bool,
 ) -> io::Result<IdentityCursor> {
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin.trim()) {
+        agent_relay::record_harness_operation(repo_root, harness, None, &payload)?;
+    }
     let expires = expire
         || serde_json::from_str::<serde_json::Value>(stdin.trim())
             .ok()
@@ -375,6 +375,19 @@ mod tests {
         assert!(
             cursor.parent.is_none(),
             "later parent-session stamp must not keep the subagent parent"
+        );
+    }
+
+    #[test]
+    fn codex_lease_and_cursor_agree_on_official_notify_thread_id() {
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1"}"#;
+        assert_eq!(
+            hook_session_id("codex", payload).as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(
+            hook_session_id("codex", payload),
+            verbs::cursor_patch_from_stdin("codex", payload).session,
         );
     }
 }

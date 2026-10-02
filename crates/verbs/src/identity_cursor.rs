@@ -44,36 +44,67 @@ pub struct IdentityCursor {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Typed observations frozen with the next state, separate from legacy fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
 }
 
 impl IdentityCursor {
     /// Drop empty / `unknown` placeholders so unpublished fields stay omitted.
     pub fn omit_unpublished(mut self) -> Self {
-        self.provider = published_owned(self.provider);
-        self.model = published_owned(self.model);
-        self.thought_level = published_owned(self.thought_level);
-        self.session = published_owned(self.session);
-        self.parent = published_owned(self.parent);
+        self.provider = published_identity(self.provider);
+        self.model = published_identity(self.model);
+        self.thought_level = published_identity(self.thought_level);
+        self.session = published_identity(self.session);
+        self.parent = published_identity(self.parent);
         self
     }
 
-    /// Merge an event patch: missing incoming fields keep the last cursor value.
+    /// Merge an event patch, retaining missing fields only for the same actor.
     ///
-    /// `parent` is the exception:
-    /// - incoming `parent` equal to incoming `session` is the main agent
-    ///   (Claude omits `agent_id`) and clears a stale subagent parent
-    /// - incoming `session` equal to the stored parent (Codex parent-session)
-    ///   also clears it
+    /// A distinct session or effective parent clears unpublished identity fields.
+    /// Sparse events without a session still update the current actor. Claude's
+    /// `parent == session` main-agent sentinel is normalized before comparison.
     pub fn merge_event(&self, patch: &IdentityCursor) -> Self {
-        Self {
-            provider: published_owned(patch.provider.clone()).or_else(|| self.provider.clone()),
-            model: published_owned(patch.model.clone()).or_else(|| self.model.clone()),
-            thought_level: published_owned(patch.thought_level.clone())
-                .or_else(|| self.thought_level.clone()),
-            session: published_owned(patch.session.clone()).or_else(|| self.session.clone()),
-            parent: merge_parent(self, patch),
+        let current = self.clone().omit_unpublished();
+        let mut next = patch.clone().omit_unpublished();
+        let session_changed = next
+            .session
+            .as_ref()
+            .is_some_and(|session| current.session.as_ref() != Some(session));
+        if !session_changed {
+            next.session = next.session.or(current.session.clone());
+            next.parent = next.parent.or(current.parent.clone());
         }
-        .omit_unpublished()
+        if next.parent == next.session {
+            next.parent = None;
+        }
+        let current_parent = current
+            .parent
+            .filter(|parent| Some(parent) != current.session.as_ref());
+        let same_actor = !session_changed && next.parent == current_parent;
+        let same_model_scope = crate::identity_evidence::same_model_scope(
+            current.attribution_evidence.as_ref(),
+            next.attribution_evidence.as_ref(),
+        );
+        next.attribution_evidence = crate::identity_evidence::merge(
+            current.attribution_evidence.as_ref(),
+            next.attribution_evidence.as_ref(),
+            same_actor,
+        );
+        if same_actor && same_model_scope {
+            next.provider = next.provider.or(current.provider);
+            next.model = next.model.or(current.model);
+            next.thought_level = next.thought_level.or(current.thought_level);
+        }
+        next
+    }
+
+    pub(crate) fn with_harness_evidence(mut self, harness: &str, payload: &Value) -> Self {
+        self.attribution_evidence = Some(crate::identity_evidence::from_payload(
+            harness, payload, &self,
+        ));
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -82,6 +113,7 @@ impl IdentityCursor {
             && self.thought_level.is_none()
             && self.session.is_none()
             && self.parent.is_none()
+            && self.attribution_evidence.is_none()
     }
 
     /// Compact JSON (~200 bytes) for the sidecar hot path.
@@ -97,31 +129,17 @@ pub fn published_field(value: Option<&str>) -> Option<&str> {
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
 }
 
-fn published_owned(value: Option<String>) -> Option<String> {
-    published_field(value.as_deref()).map(str::to_string)
+fn published_identity(value: Option<String>) -> Option<String> {
+    crate::identity_evidence::claim(
+        published_owned(value),
+        objects::object::AttributionBasis::Legacy,
+        objects::object::AttributionSource::Legacy,
+    )
+    .map(|claim| claim.value)
 }
 
-fn merge_parent(current: &IdentityCursor, patch: &IdentityCursor) -> Option<String> {
-    let incoming_parent = published_owned(patch.parent.clone());
-    let incoming_session = published_owned(patch.session.clone());
-    if incoming_parent
-        .as_ref()
-        .zip(incoming_session.as_ref())
-        .is_some_and(|(parent, session)| parent == session)
-    {
-        return None;
-    }
-    if let Some(incoming) = incoming_parent {
-        return Some(incoming);
-    }
-    if incoming_session
-        .as_ref()
-        .zip(current.parent.as_ref())
-        .is_some_and(|(session, parent)| session == parent)
-    {
-        return None;
-    }
-    current.parent.clone()
+fn published_owned(value: Option<String>) -> Option<String> {
+    published_field(value.as_deref()).map(str::to_string)
 }
 
 /// Workspace sidecar path.
@@ -322,6 +340,7 @@ mod tests {
             thought_level: Some("high".into()),
             session: Some("sess-1".into()),
             parent: Some("agent-1".into()),
+            attribution_evidence: None,
         };
         let next = current.merge_event(&IdentityCursor {
             thought_level: Some("low".into()),
@@ -341,6 +360,7 @@ mod tests {
             thought_level: None,
             session: Some("sub-1".into()),
             parent: Some("parent-1".into()),
+            attribution_evidence: None,
         };
         let back_on_parent = current.merge_event(&IdentityCursor {
             session: Some("parent-1".into()),
@@ -369,6 +389,7 @@ mod tests {
             thought_level: None,
             session: Some("sess-1".into()),
             parent: Some("agent-sub".into()),
+            attribution_evidence: None,
         };
         let back_on_main = current.merge_event(&IdentityCursor {
             session: Some("sess-1".into()),
@@ -390,6 +411,7 @@ mod tests {
             thought_level: Some("".into()),
             session: Some("  ".into()),
             parent: None,
+            attribution_evidence: None,
         }
         .omit_unpublished();
         assert_eq!(cursor.provider.as_deref(), Some("anthropic"));
@@ -436,6 +458,7 @@ mod tests {
                 thought_level: None,
                 session: Some("s1".into()),
                 parent: None,
+                attribution_evidence: None,
             },
         )
         .unwrap();
@@ -558,3 +581,7 @@ mod tests {
         assert!(!identity_cursor_path(dir.path()).exists());
     }
 }
+
+#[cfg(test)]
+#[path = "identity_cursor_merge_tests.rs"]
+mod merge_tests;

@@ -390,7 +390,10 @@ fn export_selected(
         dir.path().join("buckets"),
     )?;
     let (pack, stats) = build_source_pack(builder, source, state, max_objects, max_bytes)?;
-    assert_eq!(stats.object_count, 3);
+    assert_eq!(
+        stats.object_count,
+        3 + u64::from(state.attribution_evidence.is_some())
+    );
     PackReader::from_bytes(pack.into_inner(), std::fs::read(index_path)?)
 }
 #[test]
@@ -440,4 +443,121 @@ fn source_export_checks_address_and_budget_before_publication() {
         export_selected(&source, &state, 16, 65536).is_err(),
         "producer must reject a corrupt source address"
     );
+}
+
+fn fixture_with_attribution() -> (State, Vec<(PackObjectId, ObjectType, Vec<u8>)>, Blob) {
+    use crate::object::{
+        AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+    };
+    let (state, mut entries) = fixture();
+    let evidence = AttributionEvidenceV1 {
+        harness: Some(AttributionClaim::new(
+            "codex",
+            AttributionBasis::Observed,
+            AttributionSource::Process,
+        )),
+        ..Default::default()
+    }
+    .to_blob()
+    .expect("evidence");
+    let state = state.with_attribution_evidence(evidence.hash());
+    entries[0] = (
+        PackObjectId::StateId(state.id()),
+        ObjectType::State,
+        state.encode_current_msgpack().expect("state"),
+    );
+    entries.push((
+        PackObjectId::Hash(evidence.hash()),
+        ObjectType::Blob,
+        evidence.content().to_vec(),
+    ));
+    (state, entries, evidence)
+}
+
+#[test]
+fn source_attribution_is_required_validated_and_exported_by_default() {
+    let (state, entries, evidence) = fixture_with_attribution();
+    let verified = reader(entries.clone())
+        .validate_source_closure(&state, 16, 65536)
+        .expect("complete source");
+    assert_eq!(verified.len(), 4);
+    assert!(verified.contains(&PackObjectId::Hash(evidence.hash())));
+    let source = SelectedSource {
+        entries: entries.clone(),
+        blob_reads: std::cell::Cell::new(0),
+    };
+    let exported = export_selected(&source, &state, 16, 65536).expect("export attribution");
+    assert_eq!(
+        exported
+            .validate_source_closure(&state, 16, 65536)
+            .expect("full closure")
+            .len(),
+        4
+    );
+    assert!(
+        export_selected(&source, &state, 3, 65536).is_err(),
+        "evidence consumes object budget"
+    );
+
+    let mut missing = entries;
+    missing.pop();
+    assert!(
+        reader(missing.clone())
+            .validate_source_closure(&state, 16, 65536)
+            .is_err(),
+        "source publication requires evidence"
+    );
+    assert!(
+        reader(missing.clone())
+            .validate_visible_source_closure(&state, 16, 65536)
+            .is_err(),
+        "partial source also requires attribution"
+    );
+    let source = SelectedSource {
+        entries: missing,
+        blob_reads: std::cell::Cell::new(0),
+    };
+    assert!(export_selected(&source, &state, 16, 65536).is_err());
+}
+
+#[test]
+fn source_attribution_cannot_be_an_untyped_or_contradictory_blob() {
+    let (state, mut entries, _) = fixture_with_attribution();
+    let mut contradicted = state.clone();
+    contradicted.attribution.agent = Some(crate::object::Agent::new("unobserved", "unobserved"));
+    contradicted.state_id = contradicted.id();
+    let mut contradictory_entries = entries.clone();
+    contradictory_entries[0] = (
+        PackObjectId::StateId(contradicted.id()),
+        ObjectType::State,
+        contradicted.encode_current_msgpack().expect("state"),
+    );
+    assert!(
+        reader(contradictory_entries)
+            .validate_source_closure(&contradicted, 16, 65536)
+            .is_err(),
+        "legacy Agent cannot contradict committed evidence"
+    );
+    let bad = Blob::new(b"not a typed attribution record".to_vec());
+    let state = state.with_attribution_evidence(bad.hash());
+    entries[0] = (
+        PackObjectId::StateId(state.id()),
+        ObjectType::State,
+        state.encode_current_msgpack().expect("state"),
+    );
+    *entries.last_mut().expect("evidence entry") = (
+        PackObjectId::Hash(bad.hash()),
+        ObjectType::Blob,
+        bad.into_content(),
+    );
+    assert!(
+        reader(entries.clone())
+            .validate_source_closure(&state, 16, 65536)
+            .is_err()
+    );
+    let source = SelectedSource {
+        entries,
+        blob_reads: std::cell::Cell::new(0),
+    };
+    assert!(export_selected(&source, &state, 16, 65536).is_err());
 }

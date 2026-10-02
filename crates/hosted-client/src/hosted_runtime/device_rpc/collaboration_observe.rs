@@ -277,6 +277,7 @@ impl DeviceRpc {
                                 .iter()
                                 .map(|id| id.as_bytes().to_vec())
                                 .collect(),
+                            ..Default::default()
                         })
                     }
                 }
@@ -351,6 +352,7 @@ impl DeviceRpc {
                             .iter()
                             .map(|id| id.as_bytes().to_vec())
                             .collect(),
+                        ..Default::default()
                     })
                 }
                 3 => {

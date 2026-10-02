@@ -129,6 +129,15 @@ pub fn note_for_state(
     if tree.scheme() == TreeScheme::V4Salted || omits_hosted_seed {
         note.source_state = None;
     }
+    if let Some(hash) = state.attribution_evidence {
+        let blob = repo.store().get_blob(&hash)?.ok_or_else(|| {
+            GitProjectionError::Git(format!("state attribution evidence {hash} is missing"))
+        })?;
+        objects::object::AttributionEvidenceV1::from_blob_with_hash(&blob, hash).map_err(
+            |error| GitProjectionError::Git(format!("invalid attribution evidence: {error}")),
+        )?;
+        note.attribution_evidence = Some(blob.into_content());
+    }
     Ok(note)
 }
 
@@ -261,6 +270,51 @@ mod tests {
         assert!(
             !note.parents_rewritten,
             "portable ancestry does not authorize a rewrite"
+        );
+    }
+    #[test]
+    fn projected_note_requires_and_carries_attribution_evidence() {
+        use objects::object::{
+            AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+        };
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let repo = HeddleRepository::init_default(temp.path()).expect("init");
+        let tree = Tree::new();
+        repo.store().put_tree(&tree).expect("tree");
+        let evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::Observed,
+                AttributionSource::Process,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("evidence");
+        let state = State::new(
+            tree.hash(),
+            vec![],
+            Attribution::human(Principal::new("Test", "test@example.test")),
+        )
+        .with_attribution_evidence(evidence.hash());
+        assert!(
+            note_for_state(&repo, &state, false).is_err(),
+            "cannot project unavailable required metadata"
+        );
+        repo.store().put_blob(&evidence).expect("evidence");
+        let note = note_for_state(&repo, &state, false).expect("note");
+        assert_eq!(
+            note.attribution_evidence_blob()
+                .expect("evidence")
+                .expect("present")
+                .hash(),
+            evidence.hash()
+        );
+        assert_eq!(
+            HeddleNote::from_json_bytes(&note.to_json_bytes().expect("encoded"))
+                .expect("decoded")
+                .source_state,
+            Some(state)
         );
     }
 }

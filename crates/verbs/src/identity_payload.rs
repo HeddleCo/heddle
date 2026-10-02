@@ -52,30 +52,45 @@ pub fn cursor_patch_from_stdin(harness: &str, stdin: &str) -> IdentityCursor {
 pub fn claude_cursor_patch(payload: &Value) -> IdentityCursor {
     let session = first_value_string(payload, &[&["session_id"], &["sessionId"]]);
     IdentityCursor {
+        attribution_evidence: None,
         provider: Some("anthropic".to_string()),
-        model: value_string_or_named(payload, &["model"], &["id"])
-            .or_else(|| value_string(payload, &["model", "display_name"])),
+        model: if payload.get("hook_event_name").and_then(Value::as_str) == Some("PostModelSwitch")
+        {
+            value_string(payload, &["to_model"])
+        } else {
+            value_string_or_named(payload, &["model"], &["id"])
+        },
         thought_level: thought_level_from_payload(payload),
         session: session.clone(),
         parent: value_string(payload, &["agent_id"]).or_else(|| session.clone()),
     }
     .omit_unpublished()
+    .with_harness_evidence("claude-code", payload)
 }
 
 /// Codex hook stdin: `model` + session. Effort only if present on stdin
 /// (`reasoning_effort` or `turn_context`). Do not read `transcript_path`.
 pub fn codex_cursor_patch(payload: &Value) -> IdentityCursor {
     IdentityCursor {
-        provider: Some("openai".to_string()),
+        attribution_evidence: None,
+        provider: first_value_string(payload, &[&["model_provider"], &["provider"]])
+            .or_else(|| Some("openai".to_string())),
         model: value_string_or_named(payload, &["model"], &["id", "slug"]),
         thought_level: thought_level_from_payload(payload),
         session: first_value_string(
             payload,
-            &[&["session_id"], &["sessionId"], &["conversation_id"]],
+            &[
+                &["thread_id"],
+                &["thread-id"],
+                &["session_id"],
+                &["sessionId"],
+                &["conversation_id"],
+            ],
         ),
         parent: first_value_string(payload, &[&["parent_id"], &["parentId"], &["agent_id"]]),
     }
     .omit_unpublished()
+    .with_harness_evidence("codex", payload)
 }
 
 /// OpenCode event payload. Use `event.type` (not `event.name`). Object
@@ -86,29 +101,59 @@ pub fn opencode_cursor_patch(payload: &Value) -> IdentityCursor {
         .get("properties")
         .or_else(|| payload.get("properties"))
         .unwrap_or(payload);
+    // An assistant message describes the harness-resolved request model.
+    // User-message `model` is only configuration; `parentID` on a message
+    // points at a user message, not a parent agent/session.
+    let assistant = properties
+        .get("info")
+        .filter(|info| info.get("role").and_then(Value::as_str) == Some("assistant"));
+    let session_info = properties.get("info").filter(|info| {
+        info.get("role").is_none()
+            && matches!(
+                opencode_event_type(payload).as_deref(),
+                Some("session.created" | "session.updated" | "session.deleted")
+            )
+    });
     IdentityCursor {
-        provider: value_string(properties, &["model", "providerID"])
+        attribution_evidence: None,
+        provider: assistant
+            .and_then(|info| value_string(info, &["providerID"]))
+            .or_else(|| value_string(properties, &["model", "providerID"]))
             .or_else(|| value_string(properties, &["provider"]))
-            .or_else(|| value_string(payload, &["model", "providerID"])),
-        model: value_string_or_named(properties, &["model"], &["id"])
-            .or_else(|| value_string_or_named(payload, &["model"], &["id"])),
-        thought_level: value_string(properties, &["model", "variant"])
+            .or_else(|| value_string(payload, &["model", "providerID"]))
+            .or_else(|| value_string(payload, &["provider"])),
+        model: assistant
+            .and_then(|info| value_string(info, &["modelID"]))
+            .or_else(|| value_string_or_named(properties, &["model"], &["modelID", "id"]))
+            .or_else(|| value_string_or_named(payload, &["model"], &["modelID", "id"])),
+        thought_level: assistant
+            .and_then(|info| value_string(info, &["variant"]))
+            .or_else(|| value_string(properties, &["model", "variant"]))
             .or_else(|| thought_level_from_payload(properties))
             .or_else(|| thought_level_from_payload(payload)),
-        session: first_value_string(
-            payload,
-            &[&["sessionID"], &["session_id"], &["session", "id"]],
-        )
-        .or_else(|| first_value_string(properties, &[&["sessionID"], &["session_id"]])),
-        parent: first_value_string(payload, &[&["parentID"], &["parent_id"]])
+        session: assistant
+            .and_then(|info| value_string(info, &["sessionID"]))
+            .or_else(|| session_info.and_then(|info| value_string(info, &["id"])))
+            .or_else(|| {
+                first_value_string(
+                    payload,
+                    &[&["sessionID"], &["session_id"], &["session", "id"]],
+                )
+            })
+            .or_else(|| first_value_string(properties, &[&["sessionID"], &["session_id"]])),
+        parent: session_info
+            .and_then(|info| value_string(info, &["parentID"]))
+            .or_else(|| first_value_string(payload, &[&["parentID"], &["parent_id"]]))
             .or_else(|| first_value_string(properties, &[&["parentID"], &["parent_id"]])),
     }
     .omit_unpublished()
+    .with_harness_evidence("opencode", payload)
 }
 
 /// Pi payload or already-shaped cursor JSON (`PI_*` maps at the caller).
 pub fn pi_cursor_patch(payload: &Value) -> IdentityCursor {
     IdentityCursor {
+        attribution_evidence: None,
         provider: first_value_string(payload, &[&["provider"], &["PI_PROVIDER"]]),
         model: first_value_string(payload, &[&["model"], &["PI_MODEL"]]),
         thought_level: first_value_string(
@@ -122,31 +167,38 @@ pub fn pi_cursor_patch(payload: &Value) -> IdentityCursor {
         parent: first_value_string(payload, &[&["parent"], &["PI_PARENT_ID"]]),
     }
     .omit_unpublished()
+    .with_harness_evidence("pi", payload)
 }
 
 /// Child-process fallback env. Claude: session + effort only — never
 /// `$ANTHROPIC_MODEL`. Pi: model + reasoning + session.
 pub fn cursor_patch_from_child_env(env: &BTreeMap<String, String>) -> IdentityCursor {
-    let claude_session = env.get("CLAUDE_CODE_SESSION_ID").cloned();
-    let claude_effort = env.get("CLAUDE_EFFORT").cloned();
-    let pi_model = env.get("PI_MODEL").cloned();
-    let pi_effort = env.get("PI_REASONING_LEVEL").cloned();
-    let pi_session = env.get("PI_SESSION_ID").cloned();
-    let provider = if pi_model.is_some() {
-        env.get("PI_PROVIDER").cloned()
-    } else if claude_session.is_some() || claude_effort.is_some() {
-        Some("anthropic".to_string())
-    } else {
-        None
-    };
-    IdentityCursor {
-        provider,
-        model: pi_model,
-        thought_level: claude_effort.or(pi_effort),
-        session: claude_session.or(pi_session),
-        parent: env.get("PI_PARENT_ID").cloned(),
+    // Choose one harness before reading any identity fields. Inherited markers
+    // must never join a Codex actor with a Claude/Pi model or session.
+    let mut cursor = match crate::identity_evidence::environment_harness(env) {
+        Some("codex") => IdentityCursor {
+            session: env.get("CODEX_THREAD_ID").cloned(),
+            ..Default::default()
+        },
+        Some("claude-code") => IdentityCursor {
+            provider: Some("anthropic".into()),
+            session: env.get("CLAUDE_CODE_SESSION_ID").cloned(),
+            thought_level: env.get("CLAUDE_EFFORT").cloned(),
+            ..Default::default()
+        },
+        Some("pi") => IdentityCursor {
+            provider: env.get("PI_PROVIDER").cloned(),
+            model: env.get("PI_MODEL").cloned(),
+            session: env.get("PI_SESSION_ID").cloned(),
+            thought_level: env.get("PI_REASONING_LEVEL").cloned(),
+            parent: env.get("PI_PARENT_ID").cloned(),
+            ..Default::default()
+        },
+        _ => IdentityCursor::default(),
     }
-    .omit_unpublished()
+    .omit_unpublished();
+    cursor.attribution_evidence = crate::identity_evidence::from_environment(env, &cursor);
+    cursor
 }
 
 /// SessionEnd / session.deleted / session.closed expire the live cursor.
@@ -367,3 +419,7 @@ mod tests {
         assert_eq!(patch.session.as_deref(), Some("c1"));
     }
 }
+
+#[cfg(test)]
+#[path = "identity_payload_attribution_tests.rs"]
+mod attribution_tests;

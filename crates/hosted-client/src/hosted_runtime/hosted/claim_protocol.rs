@@ -363,6 +363,8 @@ fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>
         ..Default::default()
     };
     if device {
+        description.understood_native_source_formats =
+            thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec();
         description.implemented_methods.extend(
             super::super::device_rpc::METHODS
                 .iter()

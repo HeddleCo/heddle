@@ -585,6 +585,7 @@ impl DeviceRpc {
                                     }),
                                     match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
                                     symbol_name: (hit.kind == 4).then_some(hit.symbol_name),
+                                    ..Default::default()
                                 })),
                             });
                             visible += 1;

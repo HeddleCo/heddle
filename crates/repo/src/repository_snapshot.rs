@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Attribution, Blob, ChangeId, ChangeLineage, ContentHash, State, StateAttachment,
-        StateAttachmentBody, StateId, Tree, TreeEntry,
+        Attribution, AttributionEvidenceV1, Blob, ChangeId, ChangeLineage, ContentHash, State,
+        StateAttachment, StateAttachmentBody, StateId, Tree, TreeEntry,
     },
     store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
     worktree::WorktreeStatus,
@@ -128,6 +128,8 @@ struct SnapshotDetails {
     intent: Option<String>,
     confidence: Option<f32>,
     attribution: Attribution,
+    /// Validated once before retrying; the exact bytes travel with the State.
+    attribution_evidence: Option<Blob>,
     lineage: Vec<ChangeLineage>,
 }
 
@@ -146,6 +148,7 @@ struct SnapshotMutation<'a> {
     prev_head: Option<StateId>,
     head: Head,
     transaction_id: String,
+    fold_default_visibility: bool,
     /// Set by `apply` when the automatic capture-time default-visibility binding
     /// folds a `StateVisibilitySet` into this snapshot's batch (heddle#317 / PR
     /// #529 P1): `(state, sidecar-before-the-binding)`. `rewind` restores the
@@ -198,6 +201,7 @@ impl<'a> SnapshotMutation<'a> {
             prev_head,
             head,
             transaction_id: String::new(),
+            fold_default_visibility: true,
             staged_visibility_rewind: None,
             staged_entry_visibility: None,
             staged_entry_visibility_rewind: None,
@@ -296,10 +300,11 @@ impl AtomicMutation for SnapshotMutation<'_> {
         // sidecar). `apply` runs under the snapshot write lock, so the sidecar
         // write must not re-enter the non-reentrant repo lock (`lock_held =
         // true`); `rewind` restores the sidecar if this batch fails to commit.
-        if let Some(binding) = self
-            .repo
-            .stage_default_visibility_binding(&execution.state.id(), true)
-            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
+        if self.fold_default_visibility
+            && let Some(binding) = self
+                .repo
+                .stage_default_visibility_binding(&execution.state.id(), true)
+                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
         {
             self.staged_visibility_rewind = Some((execution.state.id(), binding.prior_sidecar));
             records.push(binding.record);
@@ -370,12 +375,22 @@ impl AtomicMutation for SnapshotMutation<'_> {
             return Ok(this_run);
         };
         if this_run.state.id() == committed_state {
+            self.validate_replayed_attribution_evidence(&this_run.state)?;
             return Ok(this_run);
         }
         let Some(state) = self.repo.store.get_state(&committed_state)? else {
+            if self.details.attribution_evidence.is_some() {
+                return Err(HeddleError::StateNotFound(committed_state));
+            }
             return Ok(this_run);
         };
+        self.validate_replayed_attribution_evidence(&state)?;
         let Some(tree) = self.repo.store.get_tree(&state.tree)? else {
+            if self.details.attribution_evidence.is_some() {
+                return Err(HeddleError::NotFound(
+                    "replayed snapshot tree missing".into(),
+                ));
+            }
             return Ok(this_run);
         };
         Ok(SnapshotExecution {
@@ -388,6 +403,42 @@ impl AtomicMutation for SnapshotMutation<'_> {
 }
 
 impl SnapshotMutation<'_> {
+    fn validate_replayed_attribution_evidence(&self, state: &State) -> Result<()> {
+        let expected = self.details.attribution_evidence.as_ref().map(Blob::hash);
+        if state.attribution_evidence != expected {
+            return Err(HeddleError::InvalidObject(
+                "replayed snapshot attribution evidence differs from capture".into(),
+            ));
+        }
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        let blob = self.repo.store.get_blob(&expected)?.ok_or_else(|| {
+            HeddleError::NotFound("replayed snapshot attribution evidence missing".into())
+        })?;
+        let evidence = AttributionEvidenceV1::from_blob_with_hash(&blob, expected)
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+        evidence.validate_attribution(&state.attribution)?;
+        if evidence.operations.iter().any(|operation| {
+            operation.resolution == objects::object::AttributionOperationResolution::ContentBound
+        }) {
+            let tree = self.repo.store.get_tree(&state.tree)?.ok_or_else(|| {
+                HeddleError::MissingObject {
+                    object_type: "replayed attribution tree".into(),
+                    id: state.tree.to_hex(),
+                }
+            })?;
+            crate::attribution_transition::validate_snapshot_attribution(
+                &self.repo.store,
+                &blob,
+                state.parents.first().copied(),
+                &tree,
+                &Default::default(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn prepared_worktree_matches(&self) -> Result<bool> {
         if !matches!(&self.source, SnapshotSource::Worktree) {
             return Ok(true);
@@ -518,6 +569,29 @@ impl SnapshotMutation<'_> {
         };
 
         let mut state = State::new_snapshot(tree_hash, parents, self.details.attribution.clone());
+        if let Some(evidence) = &self.details.attribution_evidence {
+            let pending_trees = supplied_blobs
+                .as_ref()
+                .map(|(_, trees)| {
+                    trees
+                        .iter()
+                        .map(|write| (write.tree.hash(), &write.tree))
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::attribution_transition::validate_snapshot_attribution(
+                &self.repo.store,
+                evidence,
+                self.prev_head,
+                &tree,
+                &pending_trees,
+            )?;
+            state = state.with_attribution_evidence(evidence.hash());
+            supplied_blobs
+                .get_or_insert_with(|| (Vec::new(), Vec::new()))
+                .0
+                .push((evidence.hash(), evidence.content().to_vec()));
+        }
 
         if let Some(intent) = self.details.intent.clone() {
             state = state.with_intent(intent);
@@ -1148,6 +1222,10 @@ fn snapshot_transaction_id(
         hasher.update(b"\0");
         hasher.update(agent.parent.as_deref().unwrap_or_default().as_bytes());
     }
+    if let Some(evidence) = &details.attribution_evidence {
+        hasher.update(b"\0attribution-evidence\0");
+        hasher.update(evidence.hash().as_bytes());
+    }
     hasher.update(b"\0lineage\0");
     hasher.update(
         &rmp_serde::to_vec_named(&details.lineage).expect("lineage encoding is infallible"),
@@ -1367,6 +1445,7 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
             Vec::new(),
             None,
             false,
@@ -1389,6 +1468,7 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
             Vec::new(),
             Some(status),
             require_worktree_change,
@@ -1407,9 +1487,35 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
             Vec::new(),
             None,
             true,
+        )
+    }
+
+    /// Capture state-bound evidence alongside the legacy attribution projection.
+    /// Validation occurs before writes and the same canonical bytes are retained
+    /// across worktree/head retries. Unknown model identity needs no legacy agent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot_with_attribution_evidence_profiled(
+        &self,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        attribution_evidence: Option<AttributionEvidenceV1>,
+        status: Option<WorktreeStatus>,
+        require_worktree_change: bool,
+    ) -> Result<SnapshotExecution> {
+        let evidence = prepare_attribution_evidence(&attribution, attribution_evidence)?;
+        self.snapshot_with_attribution_profiled_locked(
+            intent,
+            confidence,
+            attribution,
+            evidence,
+            Vec::new(),
+            status,
+            require_worktree_change,
         )
     }
 
@@ -1449,6 +1555,7 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
             lineage,
             None,
             false,
@@ -1456,12 +1563,14 @@ impl Repository {
         .map(|execution| execution.state)
     }
 
-    #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, attribution, attribution_evidence), fields(intent = ?intent, confidence))]
     fn snapshot_with_attribution_profiled_locked(
         &self,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
+        attribution_evidence: Option<Blob>,
         lineage: Vec<ChangeLineage>,
         mut known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
@@ -1525,6 +1634,7 @@ impl Repository {
                             intent: merge_intent,
                             confidence,
                             attribution: attribution.clone(),
+                            attribution_evidence: attribution_evidence.clone(),
                             lineage: lineage.clone(),
                         },
                         base,
@@ -1564,6 +1674,7 @@ impl Repository {
                     intent: intent.clone(),
                     confidence,
                     attribution: attribution.clone(),
+                    attribution_evidence: attribution_evidence.clone(),
                     lineage: lineage.clone(),
                 },
                 prev_head,
@@ -1673,6 +1784,7 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
         )
     }
 
@@ -1693,16 +1805,59 @@ impl Repository {
             intent,
             confidence,
             attribution,
+            None,
         )
     }
 
-    #[instrument(skip(self, source, attribution), fields(intent = ?intent, confidence))]
+    /// Capture a supplied tree with optional state-bound attribution evidence.
+    pub fn snapshot_tree_with_attribution_evidence_profiled(
+        &self,
+        tree: Tree,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        attribution_evidence: Option<AttributionEvidenceV1>,
+    ) -> Result<SnapshotExecution> {
+        let evidence = prepare_attribution_evidence(&attribution, attribution_evidence)?;
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTree(tree),
+            intent,
+            confidence,
+            attribution,
+            evidence,
+        )
+    }
+
+    /// Atomically install supplied source blobs and attribution evidence with
+    /// their State and authored signatures in the same snapshot artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot_tree_with_blobs_with_attribution_evidence_profiled(
+        &self,
+        tree: Tree,
+        blobs: Vec<Blob>,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        attribution_evidence: Option<AttributionEvidenceV1>,
+    ) -> Result<SnapshotExecution> {
+        let evidence = prepare_attribution_evidence(&attribution, attribution_evidence)?;
+        self.snapshot_tree_source_with_attribution_profiled_locked(
+            SnapshotSource::SuppliedTreeWithBlobs { tree, blobs },
+            intent,
+            confidence,
+            attribution,
+            evidence,
+        )
+    }
+
+    #[instrument(skip(self, source, attribution, attribution_evidence), fields(intent = ?intent, confidence))]
     fn snapshot_tree_source_with_attribution_profiled_locked(
         &self,
         source: SnapshotSource,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
+        attribution_evidence: Option<Blob>,
     ) -> Result<SnapshotExecution> {
         let mut head_change_attempts = 0;
         // Drain queued entry-visibility marks ONCE (see the worktree loop) so a
@@ -1725,6 +1880,7 @@ impl Repository {
                     intent: intent.clone(),
                     confidence,
                     attribution: attribution.clone(),
+                    attribution_evidence: attribution_evidence.clone(),
                     lineage: Vec::new(),
                 },
                 prev_head,
@@ -1847,11 +2003,40 @@ impl Repository {
                 intent,
                 confidence,
                 attribution,
+                attribution_evidence: None,
                 lineage: Vec::new(),
             },
             merge_base,
             fold_default_visibility,
             transaction_id,
+        )
+    }
+
+    /// Create a merge with capture-time evidence committed in its object pack.
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot_merge_with_attribution_evidence(
+        &self,
+        merge_parent: &StateId,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        attribution_evidence: Option<AttributionEvidenceV1>,
+        merge_base: Option<StateId>,
+        fold_default_visibility: bool,
+    ) -> Result<State> {
+        let evidence = prepare_attribution_evidence(&attribution, attribution_evidence)?;
+        self.snapshot_merge_with_attribution_and_lineage(
+            merge_parent,
+            SnapshotDetails {
+                intent,
+                confidence,
+                attribution,
+                attribution_evidence: evidence,
+                lineage: Vec::new(),
+            },
+            merge_base,
+            fold_default_visibility,
+            None,
         )
     }
 
@@ -1909,9 +2094,19 @@ impl Repository {
 
         let parents = vec![first_parent, *merge_parent];
 
-        let mut state = State::new_merge(tree_hash, parents, details.attribution);
+        let mut state = State::new_merge(tree_hash, parents, details.attribution.clone());
+        if let Some(evidence) = &details.attribution_evidence {
+            crate::attribution_transition::validate_snapshot_attribution(
+                &self.store,
+                evidence,
+                Some(first_parent),
+                &tree,
+                &Default::default(),
+            )?;
+            state = state.with_attribution_evidence(evidence.hash());
+        }
 
-        if let Some(intent) = details.intent {
+        if let Some(intent) = details.intent.clone() {
             state = state.with_intent(intent);
         }
 
@@ -1920,7 +2115,7 @@ impl Repository {
         }
 
         if !details.lineage.is_empty() {
-            state = state.with_lineage(details.lineage);
+            state = state.with_lineage(details.lineage.clone());
         }
 
         let ours_state = self
@@ -1948,6 +2143,78 @@ impl Repository {
         // ride forward. Same-id collisions resolve to the newest revision;
         // see `union_parent_contexts` for the merge rules.
         let merged_context = self.union_parent_contexts(&[&ours_state, &theirs_state])?;
+
+        if let Some(evidence) = &details.attribution_evidence {
+            // Evidence-bearing merges use the same durable pack barrier as
+            // ordinary capture. No State, signature or ref can outlive a missing
+            // required evidence blob, including recovery after an interrupted
+            // commit. Legacy merges keep their existing record-first behavior.
+            let head = self.head_ref()?;
+            let source = SnapshotSource::SuppliedTree(tree.clone());
+            let base_transaction =
+                snapshot_transaction_id(self, &source, &details, &head, Some(tree_hash));
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"merge-snapshot-v1\0");
+            hasher.update(base_transaction.as_bytes());
+            hasher.update(merge_parent.as_bytes());
+            if let Some(transaction_id) = transaction_id {
+                hasher.update(b"\0transaction\0");
+                hasher.update(transaction_id.as_bytes());
+            }
+            let mut attachments = self
+                .authored_state_signature_attachment(&state)
+                .into_iter()
+                .collect::<Vec<_>>();
+            if let Some(context) = merged_context {
+                attachments.push(StateAttachment {
+                    state_id: state.id(),
+                    body: StateAttachmentBody::Context(context),
+                    attribution: state.attribution.clone(),
+                    created_at: chrono::Utc::now(),
+                    supersedes: None,
+                });
+            }
+            let prepared = PreparedSnapshotArtifact {
+                blobs: vec![(evidence.hash(), evidence.content().to_vec())],
+                trees: Vec::new(),
+                tree: TreeWrite::anchor(tree.clone()),
+                state: state.clone(),
+                attachments,
+            };
+            let mut mutation = SnapshotMutation::new(
+                self,
+                source,
+                details,
+                Some(first_parent),
+                head.clone(),
+                None,
+                false,
+                Vec::new(),
+            );
+            mutation.fold_default_visibility = fold_default_visibility;
+            mutation.transaction_id = format!("snapshot-{}", hasher.finalize().to_hex());
+            mutation.prepared_artifact = Some(prepared);
+            mutation.prepared_execution = Some(SnapshotExecution {
+                state,
+                tree,
+                profile: SnapshotProfile::default(),
+                worktree_tree_chain: Vec::new(),
+            });
+            let committed =
+                execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                    mutation.install_prepared_artifact(base_head_id, records)
+                })?;
+            let state = committed.output.state;
+            objects::fault_inject::maybe_panic_at(
+                "snapshot_after_atomic_commit_before_ref_publish",
+            );
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
+            self.record_attached_native_source(state.id())
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
+            reconcile_snapshot_ref(self, &head, &state, committed.committed_tip)?;
+            return Ok(state);
+        }
 
         // Persist the immutable merge before its independently-addressed context.
         self.put_authored_state(&state)?;
@@ -2010,6 +2277,22 @@ impl Repository {
 
         Ok(state)
     }
+}
+
+/// Canonicalize before capture writes so invalid claims cannot publish a State
+/// and retrying does not resample or re-encode mutable attribution inputs.
+fn prepare_attribution_evidence(
+    attribution: &Attribution,
+    evidence: Option<AttributionEvidenceV1>,
+) -> Result<Option<Blob>> {
+    evidence
+        .map(|evidence| {
+            evidence
+                .validate_legacy_agent(attribution.agent.as_ref())
+                .and_then(|()| evidence.to_blob())
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))
+        })
+        .transpose()
 }
 
 fn snapshot_profile_from_tree(
@@ -2116,3 +2399,7 @@ fn refresh_materialized_thread_manifest(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "repository_snapshot_attribution_tests.rs"]
+mod attribution_tests;

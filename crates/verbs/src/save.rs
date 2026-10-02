@@ -15,7 +15,10 @@ use heddle_git_projection::{GitProjection, WriteThroughOutcome};
 use objects::{
     HeddleError, RecoveryDetails,
     lock::RepositoryLockExt,
-    object::{Agent, Attribution, ContentHash, Principal, State, StateId, ThreadName, Tree},
+    object::{
+        Agent, Attribution, AttributionBasis, AttributionEvidenceV1, AttributionSource,
+        ContentHash, Principal, State, StateId, ThreadName, Tree,
+    },
     store::ObjectStore,
     worktree::WorktreeStatus,
 };
@@ -84,6 +87,7 @@ pub struct CaptureAgentOptions {
 #[derive(Debug, Clone)]
 struct CaptureAttribution {
     attribution: Attribution,
+    attribution_evidence: Option<AttributionEvidenceV1>,
     principal_source: String,
     /// Native harness session from the workspace identity stamp. This remains
     /// distinct from Heddle `Session.id` and only advances the last-turn cursor.
@@ -117,6 +121,7 @@ pub struct CaptureReport {
     pub principal: CapturePrincipalReport,
     pub principal_source: String,
     pub agent: Option<CaptureAgentReport>,
+    pub attribution_evidence: Option<AttributionEvidenceV1>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
     pub captured_path_count: usize,
@@ -210,6 +215,7 @@ pub struct SavePlan {
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub attribution: Attribution,
+    pub attribution_evidence: Option<AttributionEvidenceV1>,
     pub git_scope: GitScope,
     /// When set, snapshot this tree instead of walking the worktree
     /// (staged-index commits).
@@ -251,6 +257,7 @@ impl SavePlan {
             intent: Some(intent.into()),
             confidence: None,
             attribution,
+            attribution_evidence: None,
             git_scope: GitScope::None,
             supplied_tree: None,
             reuse_current_state: false,
@@ -272,6 +279,7 @@ impl SavePlan {
             intent: message,
             confidence: None,
             attribution,
+            attribution_evidence: None,
             git_scope: if staged {
                 GitScope::Staged
             } else {
@@ -329,6 +337,7 @@ pub struct SaveReport {
     pub summary: String,
     pub principal: Principal,
     pub agent: Option<Agent>,
+    pub attribution_evidence: Option<AttributionEvidenceV1>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
     /// Number of paths changed by this save relative to the state that was
@@ -445,21 +454,25 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
     }
     let preflight_ms = preflight_started.elapsed().as_millis();
     let attribution_started = Instant::now();
-    let resolved_attribution = resolve_capture_attribution(
+    let mut resolved_attribution = resolve_capture_attribution(
         repo,
         ctx.principal_fallback(),
         ctx.hosted_principal(),
         ctx.hosted_account_unclaimed(),
         &options.agent,
     )?;
-    let harness_session_id = resolved_attribution
-        .attribution
-        .agent
-        .is_some()
-        .then(|| resolved_attribution.harness_session_id.clone())
-        .flatten();
+    if let Some(evidence) = &mut resolved_attribution.attribution_evidence {
+        mark_operation_coverage(evidence, known_worktree_changes.as_ref());
+        crate::operation_attribution::bind(repo, evidence)?;
+        if evidence.operations_incomplete {
+            resolved_attribution.attribution.agent = None;
+        }
+    }
+    let harness_session_id = resolved_attribution.harness_session_id.clone();
     let mut warnings = resolved_attribution.warnings;
-    let pending_context_receipt = if resolved_attribution.attribution.agent.is_some() {
+    let pending_context_receipt = if resolved_attribution.attribution.agent.is_some()
+        || resolved_attribution.attribution_evidence.is_some()
+    {
         repo.pending_context_receipt()?
     } else {
         None
@@ -475,6 +488,7 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         intent: Some(options.intent),
         confidence: options.confidence,
         attribution: resolved_attribution.attribution,
+        attribution_evidence: resolved_attribution.attribution_evidence,
         git_scope: if git_overlay {
             GitScope::WorktreeAll
         } else {
@@ -568,6 +582,7 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         principal,
         principal_source,
         agent,
+        attribution_evidence: save.attribution_evidence,
         promotion_suggested: save.promotion_suggested,
         heavy_impact_paths: save.heavy_impact_paths.clone(),
         captured_path_count: save.captured_path_count,
@@ -602,6 +617,47 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
 /// This remains public for internal save paths that have not yet moved to the
 /// complete [`capture`] operation. New capture callers should use [`capture`]
 /// so safety checks continue to run before identity/session mutation.
+fn mark_operation_coverage(evidence: &mut AttributionEvidenceV1, status: Option<&WorktreeStatus>) {
+    let Some(status) = status else {
+        evidence.operations_incomplete = true;
+        return;
+    };
+    let captured_paths: std::collections::BTreeSet<_> = status
+        .modified
+        .iter()
+        .chain(&status.added)
+        .chain(&status.deleted)
+        .filter_map(|path| path.to_str())
+        .collect();
+    for operation in &mut evidence.operations {
+        if operation
+            .changes
+            .iter()
+            .any(|change| !captured_paths.contains(change.path.as_str()))
+        {
+            operation.resolution = objects::object::AttributionOperationResolution::Unresolved;
+            evidence.operations_incomplete = true;
+        }
+    }
+    for path in status
+        .modified
+        .iter()
+        .chain(&status.added)
+        .chain(&status.deleted)
+    {
+        let Some(path) = path.to_str() else {
+            evidence.operations_incomplete = true;
+            continue;
+        };
+        if !evidence.operations.iter().any(|operation| {
+            operation.resolution == objects::object::AttributionOperationResolution::ContentBound
+                && operation.changes.iter().any(|change| change.path == path)
+        }) {
+            evidence.operations_incomplete = true;
+        }
+    }
+}
+
 fn resolve_capture_attribution(
     repo: &Repository,
     principal_fallback: Option<(&str, &str)>,
@@ -650,25 +706,18 @@ fn resolve_capture_attribution(
     if options.no_agent {
         return Ok(CaptureAttribution {
             attribution: Attribution::human(principal),
+            attribution_evidence: None,
             principal_source,
             harness_session_id: None,
             warnings: Vec::new(),
         });
     }
 
-    // Identity cursor persistence and Heddle session rotation are part of the
-    // capture transaction's semantic prelude. Failure remains best-effort to
-    // preserve the existing rule that missing agent metadata never blocks a
-    // human-attributed capture.
-    let (frozen, warnings) = match freeze_identity_for_capture(repo, &options.identity_patch) {
-        Ok(frozen) => (frozen, Vec::new()),
-        Err(error) => (
-            FrozenCaptureIdentity::default(),
-            vec![format!(
-                "could not freeze agent identity for this capture; recorded human attribution: {error}"
-            )],
-        ),
-    };
+    // Attribution is part of source identity. An I/O failure must not silently
+    // rewrite known agent activity as human-only history.
+    let frozen = freeze_identity_for_capture(repo, &options.identity_patch)
+        .context("could not freeze state-bound attribution; capture was not published")?;
+    let mut warnings = Vec::new();
     let harness_session_id = frozen.session.clone();
     let current_session = SessionManager::new(repo.root()).get_current_session()?;
     let provider = options
@@ -713,27 +762,82 @@ fn resolve_capture_attribution(
             .or_else(|| repo.config().policies.default_policy.clone())
     };
 
-    let attribution = match (provider, model) {
-        (Some(provider), Some(model)) => {
-            let mut agent = Agent::new(provider, model);
-            if let (Some(session_id), Some(segment_id)) = (session_id, segment_id) {
-                agent = agent.with_session(session_id, segment_id);
-            }
-            if let Some(policy) = policy {
-                agent = agent.with_policy(policy);
-            }
-            if let Some(thought_level) = frozen.thought_level {
-                agent = agent.with_thought_level(thought_level);
-            }
-            if let Some(parent) = frozen.parent {
-                agent = agent.with_parent(parent);
-            }
-            Attribution::with_agent(principal, agent)
+    let had_scoped_evidence = frozen.attribution_evidence.is_some();
+    let mut evidence = frozen.attribution_evidence;
+    if evidence.is_none() && (model.is_some() || harness_session_id.is_some()) {
+        evidence = Some(AttributionEvidenceV1::default());
+    }
+    let mut observed = evidence.take().unwrap_or_default();
+    crate::operation_attribution::freeze(repo.root(), &mut observed)?;
+    if had_scoped_evidence
+        || observed.harness.is_some()
+        || observed.selected.model.is_some()
+        || !observed.operations.is_empty()
+        || model.is_some()
+        || harness_session_id.is_some()
+    {
+        crate::operation_attribution::bind(repo, &mut observed)?;
+        evidence = Some(observed);
+    }
+    if let Some(evidence) = &mut evidence {
+        let basis = AttributionBasis::Legacy;
+        let source = AttributionSource::Legacy;
+        if !had_scoped_evidence && evidence.selected.provider.is_none() {
+            evidence.selected.provider =
+                crate::identity_evidence::claim(provider.clone(), basis, source);
         }
-        _ => Attribution::human(principal),
-    };
+        if !had_scoped_evidence && evidence.selected.model.is_none() {
+            evidence.selected.model = crate::identity_evidence::claim(model.clone(), basis, source);
+        }
+        if options.provider.is_some() {
+            evidence.selected.provider = crate::identity_evidence::claim(
+                options.provider.clone(),
+                AttributionBasis::Explicit,
+                AttributionSource::ExplicitArgument,
+            );
+        }
+        if options.model.is_some() {
+            evidence.selected.model = crate::identity_evidence::claim(
+                options.model.clone(),
+                AttributionBasis::Explicit,
+                AttributionSource::ExplicitArgument,
+            );
+            evidence.selected.version = None;
+        }
+        evidence.scope.heddle_session_id = session_id;
+        evidence.scope.heddle_segment_id =
+            evidence.scope.heddle_session_id.as_ref().and(segment_id);
+        evidence.scope.harness_session_id = evidence
+            .scope
+            .harness_session_id
+            .clone()
+            .or(harness_session_id.clone());
+        if !had_scoped_evidence {
+            evidence.scope.parent_actor_id = frozen.parent.clone();
+        }
+        evidence.selected.thought_level = evidence
+            .selected
+            .thought_level
+            .clone()
+            .or_else(|| crate::identity_evidence::claim(frozen.thought_level, basis, source));
+        evidence.validate()?;
+    }
+    if evidence
+        .as_ref()
+        .is_some_and(|evidence| evidence.operations_incomplete)
+    {
+        warnings.push("Operation attribution is incomplete; unresolved observations are retained, and capture-time model selection is not edit ownership.".into());
+    }
+    let mut attribution = Attribution::human(principal);
+    attribution.agent = evidence
+        .as_ref()
+        .and_then(AttributionEvidenceV1::legacy_agent);
+    if let Some(agent) = &mut attribution.agent {
+        agent.policy_id = policy;
+    }
     Ok(CaptureAttribution {
         attribution,
+        attribution_evidence: evidence,
         principal_source,
         harness_session_id,
         warnings,
@@ -753,8 +857,20 @@ pub fn resolve_capture_author(
         .map(|resolved| resolved.attribution)
 }
 
+/// Resolve both compatibility attribution and the authoritative state-bound claims.
+/// Call after the same capture preflight as `resolve_capture_author`.
+pub fn resolve_capture_identity(
+    repo: &Repository,
+    principal_fallback: Option<(&str, &str)>,
+    options: &CaptureAgentOptions,
+) -> Result<(Attribution, Option<AttributionEvidenceV1>)> {
+    let resolved = resolve_capture_attribution(repo, principal_fallback, None, false, options)?;
+    Ok((resolved.attribution, resolved.attribution_evidence))
+}
+
 #[derive(Clone, Debug, Default)]
 struct FrozenCaptureIdentity {
+    attribution_evidence: Option<AttributionEvidenceV1>,
     provider: Option<String>,
     model: Option<String>,
     thought_level: Option<String>,
@@ -776,6 +892,7 @@ fn freeze_identity_for_capture(
     let session = manager.get_current_session()?;
     let segment_id = apply_capture_segment_policy(&mut manager, session.as_ref(), &cursor)?;
     Ok(FrozenCaptureIdentity {
+        attribution_evidence: cursor.attribution_evidence,
         provider: cursor.provider,
         model: cursor.model,
         thought_level: cursor.thought_level,
@@ -1399,7 +1516,42 @@ fn preview_paths(paths: &[String]) -> String {
 /// Callers own clap validation (missing message/intent) and plain-Git refusal.
 /// Mutation composition, hooks, thread metadata, Git write-through, and post
 /// verification live here.
-pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
+pub fn execute_save(repo: &Repository, mut plan: SavePlan) -> Result<SaveReport> {
+    if plan.attribution_evidence.is_none()
+        && let Some(agent) = &plan.attribution.agent
+    {
+        let mut evidence = AttributionEvidenceV1::default();
+        evidence.selected.provider = crate::identity_evidence::claim(
+            Some(agent.provider.clone()),
+            AttributionBasis::Legacy,
+            AttributionSource::Legacy,
+        );
+        evidence.selected.model = crate::identity_evidence::claim(
+            Some(agent.model.clone()),
+            AttributionBasis::Legacy,
+            AttributionSource::Legacy,
+        );
+        evidence.selected.thought_level = crate::identity_evidence::claim(
+            agent.thought_level.clone(),
+            AttributionBasis::Legacy,
+            AttributionSource::Legacy,
+        );
+        evidence.scope.heddle_session_id = agent.session_id.clone();
+        evidence.scope.heddle_segment_id = agent.segment_id.clone();
+        evidence.scope.parent_actor_id = agent.parent.clone();
+        evidence.validate_legacy_agent(Some(agent))?;
+        plan.attribution_evidence = Some(evidence);
+    }
+    if let Some(evidence) = &mut plan.attribution_evidence {
+        if !evidence.operations.is_empty() {
+            let status = capture_worktree_status(repo, &plan.worktree_status_options)?;
+            mark_operation_coverage(evidence, Some(&status));
+            crate::operation_attribution::bind(repo, evidence)?;
+        }
+        if evidence.operations_incomplete || !evidence.operations.is_empty() {
+            plan.attribution.agent = None;
+        }
+    }
     // A plan that asks for a Git checkpoint on a non-overlay repo is a hard
     // error: `plan_writes_git_checkpoint` silently returns false for native
     // repos, so guard on the raw `git_scope` intent instead (the previous
@@ -1633,6 +1785,16 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let signature_lookup_started = Instant::now();
     let signed = repo.get_state_signature(&state.id())?.is_some();
     let signature_lookup_ms = signature_lookup_started.elapsed().as_millis();
+    if let Some(evidence) = &plan.attribution_evidence {
+        // Publication already succeeded. A failed cleanup must retain events
+        // for retry rather than falsely report a failed capture.
+        if let Err(error) = crate::operation_attribution::acknowledge(repo.root(), evidence) {
+            tracing::warn!(
+                ?error,
+                "could not acknowledge captured operation attribution"
+            );
+        }
+    }
     let report = SaveReport {
         verb: plan.verb,
         state_id: state.state_id,
@@ -1645,6 +1807,16 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         summary,
         principal: state.attribution.principal.clone(),
         agent: state.attribution.agent.clone(),
+        attribution_evidence: state
+            .attribution_evidence
+            .map(|hash| {
+                let blob = repo
+                    .store()
+                    .get_blob(&hash)?
+                    .ok_or_else(|| anyhow!("state attribution evidence is missing"))?;
+                AttributionEvidenceV1::from_blob_with_hash(&blob, hash).map_err(anyhow::Error::from)
+            })
+            .transpose()?,
         promotion_suggested,
         heavy_impact_paths,
         captured_path_count,
@@ -1734,33 +1906,21 @@ fn create_heddle_state(
         post_hook_worktree_changes = Some(capture_worktree_status(repo, &authoritative_options)?);
     }
     let mut execution = if let Some(tree) = plan.supplied_tree.clone() {
-        repo.snapshot_tree_with_attribution_profiled(
+        repo.snapshot_tree_with_attribution_evidence_profiled(
             tree,
             plan.intent.clone(),
             plan.confidence,
             plan.attribution.clone(),
-        )?
-    } else if let Some(status) =
-        post_hook_worktree_changes.or_else(|| plan.known_worktree_changes.clone())
-    {
-        repo.snapshot_with_attribution_profiled_from_status(
-            plan.intent.clone(),
-            plan.confidence,
-            plan.attribution.clone(),
-            status,
-            plan.require_worktree_change,
-        )?
-    } else if plan.require_worktree_change {
-        repo.snapshot_with_attribution_profiled_if_changed(
-            plan.intent.clone(),
-            plan.confidence,
-            plan.attribution.clone(),
+            plan.attribution_evidence.clone(),
         )?
     } else {
-        repo.snapshot_with_attribution_profiled(
+        repo.snapshot_with_attribution_evidence_profiled(
             plan.intent.clone(),
             plan.confidence,
             plan.attribution.clone(),
+            plan.attribution_evidence.clone(),
+            post_hook_worktree_changes.or_else(|| plan.known_worktree_changes.clone()),
+            plan.require_worktree_change,
         )?
     };
 
@@ -2224,3 +2384,7 @@ mod tests {
         assert_eq!(tree_leaf_name("solo"), "solo");
     }
 }
+
+#[cfg(test)]
+#[path = "save_attribution_tests.rs"]
+mod attribution_tests;

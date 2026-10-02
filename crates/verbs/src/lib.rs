@@ -2,6 +2,11 @@
 //! Embeddable Heddle facade scaffolding.
 
 pub mod actor;
+pub mod attribution_collection;
+pub use attribution_collection::{
+    AttributionCollectionCapability, AttributionObservation, record_attribution_observation,
+    select_attribution_methods,
+};
 pub mod agent_fanout;
 pub mod agent_ops;
 pub mod approval_plan;
@@ -22,6 +27,7 @@ pub mod harness_json;
 pub mod harness_policy;
 pub mod hook_plan;
 pub mod identity_cursor;
+mod identity_evidence;
 pub mod identity_payload;
 pub mod index_plan;
 pub mod init_plan;
@@ -31,7 +37,9 @@ pub mod maintenance_plan;
 pub mod marker_plan;
 pub mod merge;
 pub mod onboarding;
+pub mod operation_attribution;
 pub mod oplog_plan;
+pub use operation_attribution::{OperationEventPhase, record_operation_event};
 pub mod oss_plan;
 pub mod principal;
 pub mod prove_plan;
@@ -286,7 +294,7 @@ pub use save::{
     CapturePrincipalReport, CaptureProfile, CaptureReport, GitScope, SavePlan, SaveReport,
     SaveVerb, capture, complete_current_thread_manual_resolution, execute_save,
     plan_creates_new_state, plan_writes_git_checkpoint, recover_published_git_checkpoint,
-    resolve_capture_author, tree_leaf_name,
+    resolve_capture_author, resolve_capture_identity, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,

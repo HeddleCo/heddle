@@ -532,3 +532,105 @@ fn test_cli_show_accepts_short_state_id() {
         output
     );
 }
+
+#[test]
+fn test_cli_show_and_log_read_committed_attribution_without_timeline() {
+    use objects::object::{
+        Attribution, AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+        Principal,
+    };
+    let temp = TempDir::new().expect("repo");
+    let repository = init_test_repository(temp.path()).expect("init");
+    std::fs::write(temp.path().join("file.txt"), "content").expect("write");
+    let mut evidence = AttributionEvidenceV1 {
+        harness: Some(AttributionClaim::new(
+            "codex",
+            AttributionBasis::Observed,
+            AttributionSource::Process,
+        )),
+        ..Default::default()
+    };
+    for (reported_model, label) in [
+        (None, "codex (model unknown)"),
+        (Some("actual-model"), "codex (actual-model)"),
+    ] {
+        evidence.response.model = reported_model.map(|model| {
+            AttributionClaim::new(
+                model,
+                AttributionBasis::ResponseReported,
+                AttributionSource::Response,
+            )
+        });
+        let capture = repository
+            .snapshot_with_attribution_evidence_profiled(
+                Some("committed attribution".into()),
+                None,
+                Attribution::human(Principal::new("Ada", "ada@example.test")),
+                Some(evidence.clone()),
+                None,
+                false,
+            )
+            .expect("capture");
+        let state_id = capture.state.id().to_string_full();
+        let show: Value = serde_json::from_str(
+            &heddle(&["show", &state_id, "--output", "json"], Some(temp.path())).expect("show"),
+        )
+        .expect("show json");
+        assert_eq!(show["state_id_full"], state_id);
+        assert_eq!(show["is_agent_authored"], true);
+        assert!(
+            show["agent"].is_null(),
+            "partial model must not manufacture a provider"
+        );
+        assert_eq!(
+            show["attribution_evidence"],
+            serde_json::to_value(&evidence).expect("evidence")
+        );
+        let human = heddle(&["show", &state_id, "--output", "text"], Some(temp.path()))
+            .expect("human show");
+        assert!(human.contains(label), "{human}");
+        let log: Value = serde_json::from_str(
+            &heddle(&["log", "--output", "json"], Some(temp.path())).expect("log"),
+        )
+        .expect("log json");
+        let entry = log["states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .find(|entry| entry["state_id"] == capture.state.id().short())
+            .expect("capture in log");
+        assert_eq!(entry["is_agent_authored"], true);
+        assert_eq!(entry["agent"], label);
+        assert_eq!(entry["attribution_evidence"], show["attribution_evidence"]);
+        let human_log =
+            heddle(&["log", "-v", "--output", "text"], Some(temp.path())).expect("human log");
+        assert!(human_log.contains(label), "{human_log}");
+    }
+}
+
+#[test]
+fn test_cli_show_rejects_missing_committed_attribution_evidence() {
+    use objects::object::{Attribution, ContentHash, Principal, State, Tree};
+    let temp = TempDir::new().expect("repo");
+    let repository = init_test_repository(temp.path()).expect("init");
+    let state = State::new(
+        Tree::new().hash(),
+        vec![],
+        Attribution::human(Principal::new("Ada", "ada@example.test")),
+    )
+    .with_attribution_evidence(ContentHash::compute(b"missing evidence"));
+    repository.store().put_state(&state).expect("state");
+    let result = heddle(
+        &["show", &state.id().to_string_full(), "--output", "json"],
+        Some(temp.path()),
+    );
+    assert!(
+        result.is_err(),
+        "missing required evidence must not become agent=null success"
+    );
+    assert!(
+        result
+            .expect_err("missing")
+            .contains("attribution evidence")
+    );
+}

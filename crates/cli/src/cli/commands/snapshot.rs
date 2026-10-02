@@ -138,6 +138,7 @@ pub fn cmd_snapshot(
 
     let as_json = should_output_json(cli, Some(repo.config()));
     let git_overlay = repo.capability() == RepositoryCapability::GitOverlay;
+    let agent = capture_agent_options(&repo, &user_config, &agent);
     let ctx = execution_context_from_cli_parts(start, Some(repo), &user_config);
     let snapshot_start = Instant::now();
     let capture_report = verbs::capture(
@@ -146,7 +147,7 @@ pub fn cmd_snapshot(
             intent,
             confidence,
             force,
-            agent: capture_agent_options(&user_config, &agent),
+            agent,
             machine_contract_input: Some(MachineContractInput::from_coverage(
                 machine_contract_coverage(),
             )),
@@ -185,7 +186,25 @@ pub fn cmd_snapshot(
             style::principal(&output.principal.name, &output.principal.email),
             verbs::principal_source_display(&output.principal_source)
         );
-        if let Some(agent) = &output.agent {
+        if let Some(evidence) = &output.attribution_evidence {
+            let harness = evidence
+                .harness
+                .as_ref()
+                .map(|claim| claim.value.as_str())
+                .unwrap_or("agent");
+            let model = evidence
+                .response
+                .model
+                .as_ref()
+                .or(evidence.selected.model.as_ref())
+                .map(|claim| claim.value.as_str())
+                .unwrap_or("unknown");
+            println!(
+                "Agent: {} (model {})",
+                style::bold(harness),
+                style::dim(model)
+            );
+        } else if let Some(agent) = &output.agent {
             println!(
                 "Agent: {}/{}",
                 style::bold(&agent.provider),
@@ -507,6 +526,24 @@ pub(crate) fn create_snapshot_profiled(
     confidence: Option<f32>,
     agent: SnapshotAgentOverrides,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    create_snapshot_with_agent_options(
+        repo,
+        user_config,
+        intent,
+        confidence,
+        capture_agent_options(repo, user_config, &agent),
+    )
+}
+
+/// Relay captures already stamped a producing hook identity. Keeping their
+/// options separate prevents an ambient parent process from relabelling it.
+pub(crate) fn create_snapshot_with_agent_options(
+    repo: &Repository,
+    user_config: &UserConfig,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: CaptureAgentOptions,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot");
 
     let preflight_start = Instant::now();
@@ -520,7 +557,8 @@ pub(crate) fn create_snapshot_profiled(
     let preflight_ms = preflight_start.elapsed().as_millis();
 
     let attribution_start = Instant::now();
-    let attribution = build_attribution(repo, user_config, &agent)?;
+    let (attribution, attribution_evidence) =
+        verbs::resolve_capture_identity(repo, user_config.principal_pair(), &agent)?;
     let attribution_ms = attribution_start.elapsed().as_millis();
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
@@ -532,6 +570,7 @@ pub(crate) fn create_snapshot_profiled(
         intent,
         confidence,
         attribution,
+        attribution_evidence,
         git_scope: GitScope::None,
         supplied_tree: None,
         reuse_current_state: false,
@@ -577,7 +616,11 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         return Err(anyhow!(advice));
     }
 
-    let attribution = build_attribution(repo, user_config, &agent)?;
+    let (attribution, attribution_evidence) = verbs::resolve_capture_identity(
+        repo,
+        user_config.principal_pair(),
+        &capture_agent_options(repo, user_config, &agent),
+    )?;
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
@@ -587,6 +630,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         intent,
         confidence,
         attribution,
+        attribution_evidence,
         git_scope: GitScope::None,
         supplied_tree: Some(tree),
         reuse_current_state: false,
@@ -639,6 +683,7 @@ fn snapshot_output_from_capture_report(
             thought_level: agent.thought_level,
             parent: agent.parent,
         }),
+        attribution_evidence: report.attribution_evidence.clone(),
         promotion_suggested: report.promotion_suggested,
         heavy_impact_paths: report.heavy_impact_paths,
         captured_path_count: report.captured_path_count,
@@ -717,6 +762,7 @@ fn snapshot_output_from_save_report(
         principal: (&report.principal).into(),
         principal_source,
         agent: report.agent.as_ref().map(SnapshotAgentOutput::from),
+        attribution_evidence: report.attribution_evidence.clone(),
         promotion_suggested: report.promotion_suggested,
         heavy_impact_paths: report.heavy_impact_paths.clone(),
         captured_path_count: report.captured_path_count,
@@ -818,11 +864,12 @@ pub(crate) fn build_attribution(
     verbs::resolve_capture_author(
         repo,
         user_config.principal_pair(),
-        &capture_agent_options(user_config, agent),
+        &capture_agent_options(repo, user_config, agent),
     )
 }
 
 pub(crate) fn capture_agent_options(
+    repo: &Repository,
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
 ) -> CaptureAgentOptions {
@@ -832,6 +879,9 @@ pub(crate) fn capture_agent_options(
                 && matches!(
                     key.as_str(),
                     "CLAUDE_CODE_SESSION_ID"
+                        | "CLAUDECODE"
+                        | "CODEX_THREAD_ID"
+                        | "OPENCODE_CLIENT"
                         | "CLAUDE_EFFORT"
                         | "PI_MODEL"
                         | "PI_REASONING_LEVEL"
@@ -841,6 +891,18 @@ pub(crate) fn capture_agent_options(
                 )
         })
         .collect();
+    let current = verbs::read_identity_cursor(repo.root());
+    let identity_patch = if has_stamped_harness_identity(&current) {
+        // Hook/status data names the producing event. A later process probe
+        // cannot establish that this capture belongs to its latest turn.
+        verbs::IdentityCursor::default()
+    } else {
+        let child = verbs::cursor_patch_from_child_env(&child_environment);
+        match crate::harness::probe_current_process_harness(repo, None, None, None) {
+            Ok(probe) => capture_probe_patch(&current, child, probe),
+            Err(_) => child,
+        }
+    };
     CaptureAgentOptions {
         provider: agent.provider.clone(),
         model: agent.model.clone(),
@@ -849,9 +911,65 @@ pub(crate) fn capture_agent_options(
         policy: agent.policy.clone(),
         environment_policy: std::env::var("HEDDLE_AGENT_POLICY").ok(),
         default_policy: user_config.agent.default_policy.clone(),
-        identity_patch: verbs::cursor_patch_from_child_env(&child_environment),
+        identity_patch,
         no_policy: agent.no_policy,
         no_agent: agent.no_agent,
+    }
+}
+
+fn has_stamped_harness_identity(cursor: &verbs::IdentityCursor) -> bool {
+    use objects::object::AttributionSource;
+    cursor
+        .attribution_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.harness.as_ref())
+        .is_some_and(|claim| {
+            matches!(
+                claim.source,
+                AttributionSource::HarnessHook | AttributionSource::StatusLine
+            )
+        })
+}
+
+fn capture_probe_patch(
+    current: &verbs::IdentityCursor,
+    child: verbs::IdentityCursor,
+    probe: agent_relay::HarnessProbeResult,
+) -> verbs::IdentityCursor {
+    let Some(evidence) = probe.attribution_evidence else {
+        return child;
+    };
+    let unscoped_process_hint = evidence.scope.harness_session_id.is_none()
+        && evidence.selected.model.is_none()
+        && evidence.selected.provider.is_none();
+    if unscoped_process_hint && (!current.is_empty() || !child.is_empty()) {
+        return child;
+    }
+    // The probe owns its scope and provenance. Never mix its session with
+    // legacy fields from an inherited, different harness environment.
+    verbs::IdentityCursor {
+        provider: evidence
+            .selected
+            .provider
+            .as_ref()
+            .map(|claim| claim.value.clone()),
+        model: evidence
+            .selected
+            .model
+            .as_ref()
+            .map(|claim| claim.value.clone()),
+        thought_level: evidence
+            .selected
+            .thought_level
+            .as_ref()
+            .map(|claim| claim.value.clone()),
+        session: evidence.scope.harness_session_id.clone(),
+        parent: evidence
+            .scope
+            .parent_actor_id
+            .clone()
+            .or(evidence.scope.parent_harness_session_id.clone()),
+        attribution_evidence: Some(evidence),
     }
 }
 
@@ -889,13 +1007,13 @@ mod tests {
 
     use super::*;
 
-    struct EnvVarGuard {
+    pub(super) struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(super) fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
@@ -908,8 +1026,14 @@ mod tests {
         }
     }
 
-    fn isolate_child_identity_env() -> Vec<EnvVarGuard> {
+    pub(super) fn isolate_child_identity_env() -> Vec<EnvVarGuard> {
         [
+            "CODEX_THREAD_ID",
+            "CODEX_SANDBOX",
+            "CODEX_CI",
+            "CLAUDECODE",
+            "CLAUDE_CODE",
+            "OPENCODE_CLIENT",
             "CLAUDE_CODE_SESSION_ID",
             "CLAUDE_EFFORT",
             "PI_MODEL",
@@ -932,7 +1056,7 @@ mod tests {
         }
     }
 
-    fn user_config_with_principal() -> UserConfig {
+    pub(super) fn user_config_with_principal() -> UserConfig {
         UserConfig {
             principal: Some(crate::config::UserPrincipalConfig {
                 name: "Ada Lovelace".to_string(),
@@ -986,7 +1110,7 @@ mod tests {
         entry
     }
 
-    fn empty_agent_overrides() -> SnapshotAgentOverrides {
+    pub(super) fn empty_agent_overrides() -> SnapshotAgentOverrides {
         SnapshotAgentOverrides {
             provider: None,
             model: None,
@@ -1048,6 +1172,7 @@ mod tests {
                 thought_level: Some("high".into()),
                 session: Some("sess-live".into()),
                 parent: Some("agent-1".into()),
+                attribution_evidence: None,
             },
         )
         .unwrap();
@@ -1071,6 +1196,7 @@ mod tests {
                 thought_level: Some("low".into()),
                 session: Some("sess-live".into()),
                 parent: Some("agent-1".into()),
+                attribution_evidence: None,
             },
         )
         .unwrap();
@@ -1103,6 +1229,7 @@ mod tests {
                 thought_level: Some("high".into()),
                 session: Some("dead-session".into()),
                 parent: Some("agent-1".into()),
+                attribution_evidence: None,
             },
         )
         .unwrap();
@@ -1330,3 +1457,7 @@ mod tests {
         assert!(warning.contains(".heddleignore"));
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_probe_tests.rs"]
+mod snapshot_probe_tests;

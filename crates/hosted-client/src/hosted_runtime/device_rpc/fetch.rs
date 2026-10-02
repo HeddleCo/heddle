@@ -137,7 +137,13 @@ impl DeviceRpc {
             Ok::<_, anyhow::Error>(value)
         })
         .await??;
+        let native_source_formats = required_native_source_formats(&prepared)?;
+        api::source_format::require_native_source_formats(
+            &native_source_formats,
+            &open.understood_native_source_formats,
+        )?;
         let mut ready = TransferReady {
+            native_source_formats,
             endpoint: Some(self.endpoint()),
             thread: open.thread,
             current: open.revision,
@@ -293,6 +299,20 @@ impl DeviceRpc {
         writer.finish().await?;
         Ok(())
     }
+}
+fn required_native_source_formats(prepared: &Prepared) -> Result<Vec<i32>> {
+    let mut required: BTreeSet<_> = prepared
+        .pack
+        .required_native_source_formats()
+        .iter()
+        .copied()
+        .collect();
+    for stored in &prepared.operations {
+        required.extend(thread_api::source_format::operation_required_formats(
+            &stored.original.verify()?,
+        )?);
+    }
+    Ok(required.into_iter().collect())
 }
 async fn send_frame(
     home: &std::path::Path,

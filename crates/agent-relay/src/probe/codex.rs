@@ -17,7 +17,7 @@ use super::{
 
 pub(crate) struct CodexProbe;
 
-/// Resolve the effective model from the durable rollout for the Codex thread
+/// Resolve request-selected model metadata from the durable rollout for the Codex thread
 /// that launched this command. Missing or mismatched session evidence stays
 /// empty so attribution never turns a provider-only detection into a guess.
 pub(crate) fn codex_session_probe_metadata(
@@ -74,10 +74,26 @@ fn read_codex_session_metadata(
         let payload = event.get("payload").and_then(Value::as_object);
         match event.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
+                metadata.clear();
                 matched_session = payload
                     .and_then(|payload| payload.get("id"))
                     .and_then(Value::as_str)
                     == Some(thread_id);
+                if !matched_session {
+                    continue;
+                }
+                metadata.insert("thread_id".into(), thread_id.into());
+                metadata.insert("session_source".into(), "rollout_session_meta".into());
+                for key in [
+                    "cli_version",
+                    "session_id",
+                    "parent_thread_id",
+                    "forked_from_id",
+                ] {
+                    if let Some(value) = payload.and_then(|p| p.get(key)).and_then(Value::as_str) {
+                        metadata.insert(key.to_string(), value.to_string());
+                    }
+                }
                 if let Some(provider) = payload
                     .and_then(|payload| payload.get("model_provider"))
                     .and_then(Value::as_str)
@@ -86,13 +102,27 @@ fn read_codex_session_metadata(
                     metadata.insert("model_provider".to_string(), provider.to_string());
                 }
             }
-            Some("turn_context") => {
+            Some("turn_context") if matched_session => {
+                // A sparse or malformed new turn must not borrow the previous model.
+                for key in ["model", "model_reasoning_effort", "turn_id", "model_source"] {
+                    metadata.remove(key);
+                }
+                if let Some(turn_id) = payload
+                    .and_then(|p| p.get("turn_id"))
+                    .and_then(Value::as_str)
+                {
+                    metadata.insert("turn_id".to_string(), turn_id.to_string());
+                }
                 if let Some(model) = payload
                     .and_then(|payload| payload.get("model"))
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                 {
                     metadata.insert("model".to_string(), model.to_string());
+                    metadata.insert(
+                        "model_source".to_string(),
+                        "rollout_turn_context".to_string(),
+                    );
                 }
                 if let Some(effort) = payload
                     .and_then(|payload| payload.get("effort"))
@@ -121,7 +151,6 @@ impl HarnessActorProbe for CodexProbe {
     fn matches(&self, input: &HarnessProbeInput) -> bool {
         input.explicit_harness.as_deref() == Some(self.harness_name())
             || input.probe_metadata.contains_key("thread_id")
-            || input.probe_metadata.contains_key("client_name")
             || input.env_hints.contains_key("CODEX_SANDBOX")
             || input.env_hints.contains_key("CODEX_THREAD_ID")
             || input.env_hints.contains_key("CODEX_CI")
@@ -156,16 +185,21 @@ impl HarnessActorProbe for CodexProbe {
             .or_else(|| metadata.get("model_provider").cloned())
             .or_else(|| input.current_provider.clone())
             .or(Some("openai".to_string()));
-        let thinking_level = metadata
-            .get("model_reasoning_effort")
-            .cloned()
+        let thinking_level = input
+            .explicit_thinking_level
+            .clone()
+            .or_else(|| metadata.get("model_reasoning_effort").cloned())
             .or_else(|| metadata.get("reasoning_effort").cloned())
             .or_else(|| input.env_hints.get("CODEX_REASONING_EFFORT").cloned())
             .or_else(|| input.env_hints.get("OPENAI_REASONING_EFFORT").cloned());
-        let probe_source = if thread_id.is_some() {
-            ProbeSource::AppProtocol
-        } else if client_name.is_some() {
+        let probe_source = if metadata.contains_key("hook_event") {
             ProbeSource::HookPayload
+        } else if metadata.get("session_source").map(String::as_str) == Some("rollout_session_meta")
+            || metadata.get("model_source").map(String::as_str) == Some("rollout_turn_context")
+        {
+            ProbeSource::SessionTranscript
+        } else if metadata.contains_key("thread_id") {
+            ProbeSource::AppProtocol
         } else {
             ProbeSource::ArgvEnv
         };
@@ -179,8 +213,16 @@ impl HarnessActorProbe for CodexProbe {
                 .clone()
                 .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_POLICY"))
                 .or_else(|| input.current_policy.clone()),
-            native_actor_key: thread_id.map(|id| format!("codex:thread:{id}")),
-            native_parent_actor_key: None,
+            native_actor_key: metadata
+                .get("agent_id")
+                .cloned()
+                .or(thread_id.clone())
+                .map(|id| format!("codex:thread:{id}")),
+            native_parent_actor_key: metadata
+                .get("parent_thread_id")
+                .cloned()
+                .or_else(|| metadata.get("agent_id").and(thread_id))
+                .map(|id| format!("codex:thread:{id}")),
             native_instance_key: client_name.map(|id| format!("codex:client:{id}")),
             usage_totals: wire::UsageTotals {
                 input_tokens: parse_u64(metadata.get("input_tokens")),
@@ -193,14 +235,22 @@ impl HarnessActorProbe for CodexProbe {
             },
             touched_paths: csv_paths(metadata.get("touched_paths")),
             transcript_refs: Vec::new(),
-            attach_hints: HarnessAttachHints { root_actor: true },
-            confidence: Some(if matches!(probe_source, ProbeSource::AppProtocol) {
-                0.98
-            } else if matches!(probe_source, ProbeSource::HookPayload) {
-                0.85
-            } else {
-                0.55
-            }),
+            attach_hints: HarnessAttachHints {
+                root_actor: !metadata.contains_key("parent_thread_id")
+                    && !metadata.contains_key("agent_id"),
+            },
+            confidence: Some(
+                if matches!(
+                    probe_source,
+                    ProbeSource::AppProtocol | ProbeSource::SessionTranscript
+                ) {
+                    0.98
+                } else if matches!(probe_source, ProbeSource::HookPayload) {
+                    0.85
+                } else {
+                    0.55
+                },
+            ),
             probe_source: Some(probe_source.as_str().to_string()),
             ..HarnessProbeResult::default()
         })
@@ -255,3 +305,7 @@ mod tests {
         assert!(codex_session_probe_metadata(&BTreeMap::new()).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "codex_metadata_tests.rs"]
+mod metadata_tests;

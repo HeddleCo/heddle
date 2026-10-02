@@ -15,10 +15,10 @@ use crate::store::AsyncObjectSource;
 use crate::{
     error::{HeddleError, Result},
     object::{
-        AnnotatedTag, BindingDelta, ContentHash, RedactionsBlob, ReverseDependencyIndex,
-        SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
-        StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
-        decode_tree_delta_header, is_delta_tree,
+        AnnotatedTag, AttributionEvidenceV1, BindingDelta, ContentHash, RedactionsBlob,
+        ReverseDependencyIndex, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
+        StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
+        TreeEntryTarget, decode_tree_delta_header, is_delta_tree,
     },
     store::{ObjectSource, ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -506,6 +506,21 @@ fn walk_state_closure_with_exclusions(
                 id: id.to_string(),
             })?;
 
+        if let Some(hash) = state.attribution_evidence {
+            // Required source metadata is never excused by redaction/purge or
+            // by a generic file-blob visit that happened to share its address.
+            let blob = store.get_blob(&hash)?.ok_or_else(|| missing_blob(hash))?;
+            AttributionEvidenceV1::from_blob_with_hash(&blob, hash)
+                .and_then(|evidence| {
+                    evidence.validate_legacy_agent(state.attribution.agent.as_ref())
+                })
+                .map_err(|error| {
+                    HeddleError::InvalidObject(format!(
+                        "invalid attribution evidence {hash}: {error}"
+                    ))
+                })?;
+            walk_blob_filtered(store, hash, &excluded_hashes, &mut seen_hashes, &mut visit)?;
+        }
         visit(StateClosureEvent::State { id, state: &state })?;
         if store.has_state_visibility_for_state(&id)? {
             visit(StateClosureEvent::StateVisibility { state: id })?;
@@ -1120,6 +1135,9 @@ fn collect_excluded(
             queue.push_back(*parent);
         }
 
+        if let Some(hash) = state.attribution_evidence {
+            excluded_hashes.insert(hash);
+        }
         collect_tree_hashes(store, state.tree, &mut excluded_hashes)?;
         if let Some(provenance_root) = state.provenance {
             collect_tree_hashes(store, provenance_root, &mut excluded_hashes)?;

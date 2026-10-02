@@ -2110,7 +2110,7 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
         });
     current_state
         .and_then(|id| repo.store().get_state(&id).ok().flatten())
-        .map(|state| state.attribution.agent.is_some())
+        .map(|state| state.is_agent_authored())
         .unwrap_or(false)
 }
 

@@ -62,11 +62,26 @@ fn capture(
     genesis: &ThreadGenesis,
 ) -> ContentHash {
     let signer = Ed25519Signer::from_seed(&[17; 32]).expect("publisher");
+    let evidence = objects::object::AttributionEvidenceV1 {
+        harness: Some(objects::object::AttributionClaim::new(
+            "codex",
+            objects::object::AttributionBasis::RequestReported,
+            objects::object::AttributionSource::HarnessHook,
+        )),
+        ..Default::default()
+    }
+    .to_blob()
+    .expect("canonical evidence");
+    repository
+        .store()
+        .put_blob(&evidence)
+        .expect("required source evidence");
     let state = State::new_snapshot(
         Tree::new().hash(),
         vec![genesis.base],
         Attribution::human(Principal::new("Agent", "agent@example.test")),
-    );
+    )
+    .with_attribution_evidence(evidence.hash());
     let operation = ThreadOperation {
         version: 1,
         thread: replica.thread_id(),
@@ -106,11 +121,17 @@ async fn endpoint() -> Endpoint {
 async fn accepted(replica: &ThreadReplica, id: ContentHash) {
     tokio::time::timeout(Duration::from_secs(6), async {
         loop {
-            if replica
-                .operation(&id)
-                .expect("lookup")
-                .is_some_and(|(_, status)| status == Admission::Accepted)
-            {
+            if let Some((signed, Admission::Accepted)) = replica.operation(&id).expect("lookup") {
+                let state = signed
+                    .verify()
+                    .expect("original signature")
+                    .source_state()
+                    .expect("source")
+                    .expect("capture");
+                assert!(
+                    state.attribution_evidence.is_some(),
+                    "both directions preserve committed attribution after negotiation"
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

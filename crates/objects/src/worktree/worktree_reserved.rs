@@ -38,6 +38,8 @@ fn is_reserved_root_name(name: &std::ffi::OsStr) -> bool {
     name == ".heddle"
         || name == ".heddle.identity"
         || name == ".heddle.last-turn"
+        || name == ".heddle.operations"
+        || name.starts_with(".heddle.operations-")
         || name == ".identity.lock"
         || name == ".identity.tmp"
         || name.starts_with(".identity.tmp.")
@@ -87,6 +89,11 @@ mod tests {
             ".heddle.identity",
             "./.heddle.identity",
             ".heddle.last-turn",
+            ".heddle.operations",
+            ".heddle.operations-lock",
+            ".heddle.operations-tmp-123-0",
+            ".heddle.operations-seen.sqlite3",
+            ".heddle.operations-seen.sqlite3-journal",
             ".identity.lock",
             ".identity.tmp.123.0",
             ".identity.tmp",
@@ -111,6 +118,7 @@ mod tests {
             "examples/calculator/.heddle",
             "examples/foo/.heddle.identity",
             "examples/foo/.heddle.last-turn",
+            "examples/foo/.heddle.operations",
             "examples/foo/.identity.lock",
             "src/.identity.tmp.1.2",
             "../.heddle/identity.toml",

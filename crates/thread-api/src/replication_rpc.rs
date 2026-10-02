@@ -131,6 +131,8 @@ impl Peer {
                 max_snapshot_bytes: 0,
             }),
             record_formats: vec![OPERATION_FORMAT.into()],
+            understood_native_source_formats:
+                crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec(),
             session_nonce: uuid::Uuid::new_v4().as_bytes().to_vec(),
             source: Some(self.endpoint.clone()),
             destination: Some(destination.clone()),
@@ -155,7 +157,8 @@ impl Peer {
         };
         let (facets, max_items) =
             opening::validate_ready(&ready, &thread, &destination, &self.facets, 64)?;
-        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?
+            .with_peer_native_source_formats(ready.understood_native_source_formats);
         live_replication::run(
             session,
             reader,
@@ -263,11 +266,17 @@ impl Peer {
                 "write",
                 &peer.replica,
             )?;
-            Ok((verified, facets, max_items, ready))
+            Ok((
+                verified,
+                facets,
+                max_items,
+                ready,
+                open.understood_native_source_formats,
+            ))
         })
         .await
         .map_err(|e| transport::Error::Io(e.to_string()))?;
-        let (verified, facets, max_items, ready) = match checked {
+        let (verified, facets, max_items, ready, peer_formats) = match checked {
             Ok(value) => value,
             Err(error) => {
                 writer
@@ -288,7 +297,8 @@ impl Peer {
                 .encode_to_vec(),
             )
             .await?;
-        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?
+            .with_peer_native_source_formats(peer_formats);
         live_replication::run(
             session,
             reader,

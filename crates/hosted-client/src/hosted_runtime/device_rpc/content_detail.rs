@@ -71,11 +71,16 @@ fn blob(
     Ok(value)
 }
 pub(super) fn state(
+    repository: &repo::Repository,
     state: &State,
     revision: &RevisionRef,
     emit: &mut impl FnMut(Payload) -> Result<()>,
 ) -> Result<()> {
-    emit(Payload::State(super::content_summary::summary(state, None)))?;
+    emit(Payload::State(super::content_summary::summary(
+        repository.store(),
+        state,
+        None,
+    )?))?;
     emit(Payload::SelectionComplete(complete(
         "state",
         revision,

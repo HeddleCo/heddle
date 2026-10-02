@@ -393,7 +393,7 @@ fn capture_ready_worktree(
             intent: message,
             confidence,
             force: false,
-            agent: capture_agent_options(user_config, &agent),
+            agent: capture_agent_options(ctx.require_repo()?, user_config, &agent),
             machine_contract_input: Some(MachineContractInput::from_coverage(
                 machine_contract_coverage(),
             )),

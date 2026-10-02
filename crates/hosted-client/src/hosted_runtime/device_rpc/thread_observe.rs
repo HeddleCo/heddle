@@ -290,7 +290,10 @@ impl DeviceRpc {
                     for (id, signed) in records {
                         let operation = signed.verify()?;
                         let state = operation.source_state()?.context("source operation")?;
+                        let attribution =
+                            super::content_attribution::attribution(repository.store(), &state)?;
                         let payload = CaptureSummary {
+                            attribution,
                             revision: Some(revision(&reference, state.id())),
                             thread: Some(reference.clone()),
                             summary: state.intent.unwrap_or_default(),

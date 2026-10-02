@@ -24,7 +24,11 @@ impl HarnessActorProbe for ClaudeCodeProbe {
 
     fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
         let metadata = &input.probe_metadata;
-        let argv = input.argv.as_deref().unwrap_or(&[]);
+        let argv = input
+            .argv
+            .as_deref()
+            .filter(|_| argv_matches_harness(input, HarnessKind::ClaudeCode))
+            .unwrap_or(&[]);
         let session_id = metadata
             .get("session_id")
             .cloned()
@@ -34,10 +38,10 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             .get("transcript_path")
             .cloned()
             .or_else(|| input.env_hints.get("CLAUDE_TRANSCRIPT_PATH").cloned());
-        let probe_source = if metadata.get("hook_event").is_some() {
-            ProbeSource::HookPayload
-        } else if metadata.get("status_line").is_some() {
+        let probe_source = if metadata.get("status_line").is_some() {
             ProbeSource::StatusPayload
+        } else if metadata.get("hook_event").is_some() {
+            ProbeSource::HookPayload
         } else if session_id.is_some() {
             ProbeSource::AppProtocol
         } else {
@@ -56,9 +60,10 @@ impl HarnessActorProbe for ClaudeCodeProbe {
                 .clone()
                 .or_else(|| metadata.get("model").cloned())
                 .or_else(|| input.current_model.clone()),
-            thinking_level: metadata
-                .get("effort")
-                .cloned()
+            thinking_level: input
+                .explicit_thinking_level
+                .clone()
+                .or_else(|| metadata.get("effort").cloned())
                 .or_else(|| argv_value(argv, "--effort"))
                 .or_else(|| input.env_hints.get("THINKING_LEVEL").cloned()),
             native_actor_key: claude_actor_key(session_id.as_deref(), agent_id.as_deref()),

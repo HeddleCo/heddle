@@ -183,6 +183,7 @@ impl HostedClient {
                 installation_id: String::new(),
                 // Server-side read projection; an import request names none.
                 linked_spools: Vec::new(),
+                ..Default::default()
             }),
             expected_destination_version: overview.version,
             branches,

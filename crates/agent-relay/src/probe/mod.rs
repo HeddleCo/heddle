@@ -8,6 +8,7 @@ use wire::{TranscriptAttachmentRef, UsageTotals};
 
 mod claude_code;
 mod codex;
+mod evidence;
 mod opencode;
 
 pub(crate) use claude_code::ClaudeCodeProbe;
@@ -40,6 +41,8 @@ pub struct HarnessAttachHints {
 
 #[derive(Debug, Clone, Default)]
 pub struct HarnessProbeResult {
+    /// Structured source observations, including explicit unknown model fields.
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
     pub harness: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -65,13 +68,18 @@ pub(crate) trait HarnessActorProbe {
 }
 
 pub(crate) fn probe_harness_actor(input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
+    let mut result = probe_harness_actor_inner(input)?;
+    result.attribution_evidence = evidence::from_probe(input, &result);
+    Ok(result)
+}
+
+fn probe_harness_actor_inner(input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
     let probes: [&dyn HarnessActorProbe; 3] = [&CodexProbe, &OpenCodeProbe, &ClaudeCodeProbe];
-    if let Some(explicit) = input.explicit_harness.as_deref()
-        && let Some(probe) = probes
+    if let Some(explicit) = input.explicit_harness.as_deref() {
+        return probes
             .into_iter()
             .find(|probe| probe.harness_name() == explicit)
-    {
-        return probe.probe(input);
+            .map_or_else(|| Ok(generic_probe(input)), |probe| probe.probe(input));
     }
 
     // Environment markers belong to this process and are stronger than an
@@ -104,11 +112,13 @@ pub(crate) fn probe_harness_actor(input: &HarnessProbeInput) -> Result<HarnessPr
 }
 
 fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
-    let decision = decide_harness_probe(
-        input.explicit_harness.as_deref(),
-        input.argv.as_deref(),
-        &input.env_hints,
-    );
+    let decision = if input.explicit_harness.is_some() {
+        // A declared custom harness must not inherit a different parent's
+        // built-in provider fingerprint.
+        decide_harness_probe(input.explicit_harness.as_deref(), None, &BTreeMap::new())
+    } else {
+        decide_harness_probe(None, input.argv.as_deref(), &input.env_hints)
+    };
     let fingerprint = decision.fingerprint;
     let probe_source = if input.explicit_harness.is_some() {
         ProbeSource::ExplicitPayload
@@ -120,6 +130,12 @@ fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
         provider: input
             .explicit_provider
             .clone()
+            .or_else(|| {
+                input
+                    .explicit_harness
+                    .as_ref()
+                    .and_then(|_| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_PROVIDER"))
+            })
             .or(fingerprint.provider)
             .or_else(|| input.current_provider.clone()),
         model: input
@@ -146,6 +162,7 @@ fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
 pub(crate) enum ProbeSource {
     ExplicitPayload,
     AppProtocol,
+    SessionTranscript,
     HookPayload,
     StatusPayload,
     SseOrRest,
@@ -159,6 +176,7 @@ impl ProbeSource {
         match self {
             Self::ExplicitPayload => "explicit_payload",
             Self::AppProtocol => "app_protocol",
+            Self::SessionTranscript => "session_transcript",
             Self::HookPayload => "hook_payload",
             Self::StatusPayload => "status_payload",
             Self::SseOrRest => "sse_or_rest",
@@ -498,3 +516,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod attribution_tests;

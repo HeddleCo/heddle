@@ -37,6 +37,7 @@ pub struct PublicationOptions {
 pub struct SourcePack {
     directory: tempfile::TempDir,
     revision: StateId,
+    required_native_source_formats: Vec<i32>,
     artifacts: [PackExtent; 2],
 }
 
@@ -71,6 +72,10 @@ impl VisibleSourcePack {
     }
 
     /// Whether the pack proves full source and selected descriptor availability.
+    pub fn required_native_source_formats(&self) -> &[i32] {
+        self.source.required_native_source_formats()
+    }
+
     pub fn is_complete(&self) -> bool {
         self.complete
     }
@@ -166,6 +171,9 @@ impl SourcePack {
             Self {
                 directory,
                 revision: selected.id(),
+                required_native_source_formats: crate::source_format::state_required_formats(
+                    selected,
+                ),
                 artifacts,
             },
             complete,
@@ -188,6 +196,10 @@ impl SourcePack {
         ])
     }
 
+    pub fn required_native_source_formats(&self) -> &[i32] {
+        &self.required_native_source_formats
+    }
+
     pub fn revision(&self) -> StateId {
         self.revision
     }
@@ -208,7 +220,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         originals: &PublicationOriginals,
         options: PublicationOptions,
     ) -> Result<PublicationReceipt, Error> {
-        let opening = self.publication_opening(source, options)?;
+        let opening = self.publication_opening(source, originals, options)?;
         let [pack, index] = source.open_artifacts().await?;
         self.remote
             .publish_content(&opening, originals, [pack, index])
@@ -224,7 +236,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         spool_genesis: heddle_object_model::object::ContentHash,
     ) -> Result<PreparedPublication, Error> {
         Ok(PreparedPublication::new(
-            self.publication_opening(source, options)?,
+            self.publication_opening(source, &originals, options)?,
             originals,
             spool_genesis,
         )?)
@@ -241,6 +253,8 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         if open.thread.as_ref() != Some(&self.reference)
             || open.packs.as_slice() != source.artifacts()
             || prepared.plan().intent().revision != source.revision()
+            || open.required_native_source_formats
+                != source_requirements(source, prepared.originals())?
         {
             return Err(Error::Invalid(
                 "prepared publication differs from selected source",
@@ -255,6 +269,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
     fn publication_opening(
         &self,
         source: &SourcePack,
+        originals: &PublicationOriginals,
         options: PublicationOptions,
     ) -> Result<PublishContentClientFrame, Error> {
         if self
@@ -281,6 +296,11 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             .endpoint
             .clone()
             .ok_or(Error::Invalid("remote endpoint identity missing"))?;
+        let required_native_source_formats = source_requirements(source, originals)?;
+        crate::source_format::require_native_source_formats(
+            &required_native_source_formats,
+            &self.remote.description.understood_native_source_formats,
+        )?;
         Ok(PublishContentClientFrame {
             client_operation_id: options.client_operation_id,
             body: Some(publish_content_client_frame::Body::Open(
@@ -299,10 +319,23 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     checkpoint: options.checkpoint,
                     source: Some(options.source),
                     destination: Some(destination),
+                    required_native_source_formats,
+                    semantic_indexes: Vec::new(),
                 },
             )),
         })
     }
+}
+
+fn source_requirements(
+    source: &SourcePack,
+    originals: &PublicationOriginals,
+) -> Result<Vec<i32>, Error> {
+    let mut required = std::collections::BTreeSet::from_iter(
+        source.required_native_source_formats().iter().copied(),
+    );
+    required.extend(originals.required_native_source_formats()?);
+    Ok(required.into_iter().collect())
 }
 
 fn artifact(path: &Path, kind: pack_extent::Kind) -> Result<PackExtent, Error> {

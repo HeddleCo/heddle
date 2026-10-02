@@ -7,7 +7,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
+    object::{AttributionEvidenceV1, Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
     util::{
         GitTreeNameClassification, LineDiffLimits, classify_git_tree_name,
@@ -35,6 +35,7 @@ pub struct OverlayTipProjection {
     pub git_oid: String,
     pub state: State,
     pub parent_ids: Vec<StateId>,
+    pub attribution_evidence: Option<AttributionEvidenceV1>,
 }
 
 /// One bounded, descriptor-shaped commit returned by an unbound overlay log.
@@ -42,6 +43,7 @@ pub struct OverlayLogEntry {
     pub git_oid: String,
     pub state: State,
     pub parent_ids: Vec<StateId>,
+    pub attribution_evidence: Option<AttributionEvidenceV1>,
 }
 
 /// One target-file line and the Git commit that last introduced it.
@@ -60,10 +62,12 @@ impl OverlayHistory {
         let mut states = HashMap::new();
         let (state, parent_ids) =
             project_descriptor_commit(&git, &store, &git_oid, &mut trees, &mut states)?;
+        let attribution_evidence = projected_attribution(&git.read_commit(&git_oid)?)?;
         Ok(OverlayTipProjection {
             git_oid,
             state,
             parent_ids,
+            attribution_evidence,
         })
     }
 
@@ -107,12 +111,22 @@ impl OverlayHistory {
             }
             let (state, parent_ids) =
                 project_descriptor_commit(&git, &store, &git_oid, &mut trees, &mut states)?;
-            if let Some(filter) = agent_model_substring
-                && !state
+            let attribution_evidence = projected_attribution(&commit)?;
+            let model = match attribution_evidence.as_ref() {
+                Some(evidence) => evidence
+                    .response
+                    .model
+                    .as_ref()
+                    .or(evidence.selected.model.as_ref())
+                    .map(|claim| claim.value.as_str()),
+                None => state
                     .attribution
                     .agent
                     .as_ref()
-                    .is_some_and(|agent| agent.model.contains(filter))
+                    .map(|agent| agent.model.as_str()),
+            };
+            if let Some(filter) = agent_model_substring
+                && !model.is_some_and(|model| model.contains(filter))
             {
                 continue;
             }
@@ -120,6 +134,7 @@ impl OverlayHistory {
                 git_oid,
                 state,
                 parent_ids,
+                attribution_evidence,
             });
         }
         Ok(entries)
@@ -357,6 +372,15 @@ fn commit_is_on_first_parent_chain(
     Ok(false)
 }
 
+fn projected_attribution(commit: &CommitEntry) -> crate::Result<Option<AttributionEvidenceV1>> {
+    crate::state_writer::attribution_evidence_from_commit(commit)?
+        .map(|blob| {
+            AttributionEvidenceV1::from_blob(&blob)
+                .map_err(|error| IngestError::Other(error.to_string()))
+        })
+        .transpose()
+}
+
 fn project_descriptor_commit(
     git: &GitSource,
     store: &InMemoryStore,
@@ -554,6 +578,91 @@ mod tests {
             .expect("git output utf8")
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn tip_and_log_preserve_bound_attribution_without_import_or_timeline() {
+        use objects::object::{
+            Attribution, AttributionBasis, AttributionClaim, AttributionSource, HeddleNote,
+            Principal,
+        };
+        let repository = TempDir::new().expect("repo");
+        git(repository.path(), &["init", "-q", "-b", "main"], None);
+        let tree = git(repository.path(), &["mktree"], Some(b""));
+        let tip = git(
+            repository.path(),
+            &["commit-tree", &tree, "-m", "capture"],
+            None,
+        );
+        git(
+            repository.path(),
+            &["update-ref", "refs/heads/main", &tip],
+            None,
+        );
+        let mut evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::Observed,
+                AttributionSource::Process,
+            )),
+            ..Default::default()
+        };
+        evidence.selected.provider = Some(AttributionClaim::new(
+            "router",
+            AttributionBasis::Configured,
+            AttributionSource::Configuration,
+        ));
+        evidence.selected.model = Some(AttributionClaim::new(
+            "auto",
+            AttributionBasis::Configured,
+            AttributionSource::Configuration,
+        ));
+        evidence.response.model = Some(AttributionClaim::new(
+            "actual",
+            AttributionBasis::ResponseReported,
+            AttributionSource::Response,
+        ));
+        let blob = evidence.to_blob().expect("blob");
+        let state = State::new(
+            Tree::new().hash(),
+            vec![],
+            Attribution {
+                principal: Principal::new("Overlay Test", "overlay@example.com"),
+                agent: evidence.legacy_agent(),
+            },
+        )
+        .with_attribution_evidence(blob.hash());
+        let mut note = HeddleNote::from_state(&state);
+        note.attribution_evidence = Some(blob.content().to_vec());
+        git(
+            repository.path(),
+            &["notes", "--ref=heddle", "add", "-F", "-", &tip],
+            Some(&note.to_json_bytes().expect("note")),
+        );
+        let projected = OverlayHistory::project_tip(repository.path(), "HEAD").expect("tip");
+        assert_eq!(projected.state.id(), state.id());
+        assert_eq!(projected.attribution_evidence, Some(evidence.clone()));
+        let log =
+            OverlayHistory::project_log(repository.path(), "HEAD", 10, None, Some("actual"), &[])
+                .expect("log");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].state.id(), projected.state.id());
+        assert_eq!(log[0].attribution_evidence, Some(evidence));
+        assert!(
+            OverlayHistory::project_log(repository.path(), "HEAD", 10, None, Some("auto"), &[])
+                .expect("selected filter")
+                .is_empty()
+        );
+        note.attribution_evidence = None;
+        git(
+            repository.path(),
+            &["notes", "--ref=heddle", "add", "-f", "-F", "-", &tip],
+            Some(&serde_json::to_vec(&note).expect("hostile note")),
+        );
+        assert!(OverlayHistory::project_tip(repository.path(), "HEAD").is_err());
+        assert!(
+            OverlayHistory::project_log(repository.path(), "HEAD", 10, None, None, &[]).is_err()
+        );
     }
 
     #[test]

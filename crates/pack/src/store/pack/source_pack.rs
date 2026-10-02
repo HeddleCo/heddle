@@ -8,7 +8,8 @@ use std::{
 use super::{ObjectType, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 use crate::{
     object::{
-        ContentHash, EntryRedactions, ObjectSource, PartialTree, State, Tree, TreeEntryTarget,
+        AttributionEvidenceV1, ContentHash, EntryRedactions, ObjectSource, PartialTree, State,
+        Tree, TreeEntryTarget,
     },
     store::{Result, StoreError},
 };
@@ -67,7 +68,20 @@ pub(super) fn validate_disclosure(
             (PackObjectId::StateId(id), ObjectType::State)
                 if id == selected.id() && data == canonical => {}
             (PackObjectId::Hash(hash), ObjectType::Blob)
-                if ContentHash::compute_typed("blob", data) == hash => {}
+                if ContentHash::compute_typed("blob", data) == hash =>
+            {
+                if selected.attribution_evidence == Some(hash) {
+                    AttributionEvidenceV1::from_bytes(data)
+                        .and_then(|evidence| {
+                            evidence.validate_legacy_agent(selected.attribution.agent.as_ref())
+                        })
+                        .map_err(|error| {
+                            StoreError::InvalidObject(format!(
+                                "invalid attribution evidence: {error}"
+                            ))
+                        })?;
+                }
+            }
             (PackObjectId::Hash(hash), ObjectType::Tree) => {
                 if allow_partial && crate::object::is_redacted_tree(data) {
                     let partial = crate::object::decode_redacted_projection(data)?;
@@ -103,6 +117,9 @@ pub(super) fn validate_disclosure(
         (PackObjectId::StateId(selected.id()), ObjectType::State),
         (PackObjectId::Hash(selected.tree), ObjectType::Tree),
     ];
+    if let Some(hash) = selected.attribution_evidence {
+        pending.push((PackObjectId::Hash(hash), ObjectType::Blob));
+    }
     while let Some((id, kind)) = pending.pop() {
         if available.get(&id) != Some(&kind) {
             return Err(invalid("source closure is incomplete"));
@@ -266,6 +283,16 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
         &canonical,
     )?;
     let mut discovered = BTreeMap::from([(selected.tree, ObjectType::Tree)]);
+    if let Some(hash) = selected.attribution_evidence {
+        if discovered.insert(hash, ObjectType::Blob).is_some() {
+            return Err(invalid(
+                "source object is referenced with conflicting types",
+            ));
+        }
+        if discovered.len().saturating_add(1) > max_objects {
+            return Err(invalid("source pack object budget exceeded"));
+        }
+    }
     let mut partial = false;
     let mut pending = discovered.clone();
     while let Some((hash, kind)) = pending.pop_first() {
@@ -318,6 +345,11 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
                 let length = source
                     .decoded_blob_len(&hash)?
                     .ok_or_else(|| invalid("selected source blob is missing"))?;
+                if selected.attribution_evidence == Some(hash)
+                    && length > crate::object::ATTRIBUTION_EVIDENCE_MAX_BYTES as u64
+                {
+                    return Err(invalid("attribution evidence exceeds its size limit"));
+                }
                 if length > max_decoded_bytes.saturating_sub(decoded) {
                     return Err(invalid("source pack decoded byte budget exceeded"));
                 }
@@ -330,6 +362,17 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
                     return Err(invalid(
                         "source blob differs from its address or declared size",
                     ));
+                }
+                if selected.attribution_evidence == Some(hash) {
+                    AttributionEvidenceV1::from_bytes(&bytes)
+                        .and_then(|evidence| {
+                            evidence.validate_legacy_agent(selected.attribution.agent.as_ref())
+                        })
+                        .map_err(|error| {
+                            StoreError::InvalidObject(format!(
+                                "invalid attribution evidence: {error}"
+                            ))
+                        })?;
                 }
                 charge_bytes(&mut decoded, length, max_decoded_bytes)?;
                 builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;

@@ -20,6 +20,8 @@ use crate::contract::*;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
+    NativeSourceFormat(#[from] api::source_format::NativeSourceFormatError),
+    #[error(transparent)]
     Operation(#[from] heddle_object_model::error::HeddleError),
     #[error(transparent)]
     Signature(#[from] crypto::thread_operation::Error),
@@ -106,6 +108,7 @@ pub struct Session<B: ReplicaStore> {
     destination: [u8; 32],
     facets: BTreeSet<ThreadFacet>,
     max_items: usize,
+    peer_native_source_formats: Vec<i32>,
     in_flight: BTreeSet<ContentHash>,
     generation: i64,
     announce_generation: i64,
@@ -130,6 +133,7 @@ impl<B: ReplicaStore> Session<B> {
             destination,
             facets,
             max_items,
+            peer_native_source_formats: Vec::new(),
             in_flight: BTreeSet::new(),
             generation: -1,
             announce_generation: -1,
@@ -138,6 +142,24 @@ impl<B: ReplicaStore> Session<B> {
             pending_input_bookkeeping: None,
         })
     }
+    /// Use only the peer's authenticated Open or Ready advertisement. Default
+    /// sessions are legacy-only; signed-record support does not imply State support.
+    pub fn with_peer_native_source_formats(mut self, formats: Vec<i32>) -> Self {
+        self.peer_native_source_formats = formats;
+        self
+    }
+
+    fn check_peer_source_formats(
+        &self,
+        operation: &heddle_object_model::object::thread_replication::ThreadOperation,
+    ) -> Result<()> {
+        crate::source_format::require_native_source_formats(
+            &crate::source_format::operation_required_formats(operation)?,
+            &self.peer_native_source_formats,
+        )?;
+        Ok(())
+    }
+
     pub async fn export_facets(&self) -> StoreResult<BTreeSet<ThreadFacet>, B::Error> {
         let sharing = self
             .replica
@@ -357,6 +379,7 @@ impl<B: ReplicaStore> Session<B> {
                             Error::Protocol("operation is outside current sharing policy").into(),
                         );
                     }
+                    self.check_peer_source_formats(&operation)?;
                     responses.push(Outbound::Operation(id));
                 }
             }
@@ -493,6 +516,7 @@ impl<B: ReplicaStore> Session<B> {
         if !self.export_facets().await?.contains(&operation.facet()) {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
+        self.check_peer_source_formats(&operation)?;
         Ok(Frame::Operations(ReplicationOperations {
             boundary_acceptances: crate::boundary_acceptance::authority_evidence(
                 record.authority_admission.as_ref(),
@@ -593,3 +617,7 @@ mod tests;
 #[cfg(all(test, feature = "native"))]
 #[path = "replication_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(all(test, feature = "native"))]
+#[path = "replication_source_format_tests.rs"]
+mod source_format_tests;

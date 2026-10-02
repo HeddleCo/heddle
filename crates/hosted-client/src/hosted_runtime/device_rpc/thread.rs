@@ -666,6 +666,7 @@ impl DeviceRpc {
                         }),
                     }),
                     kind: thread_relationship::Kind::Parent as i32,
+                    ..Default::default()
                 });
             }
         }

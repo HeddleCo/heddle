@@ -8,6 +8,7 @@ mod action_id;
 mod action_operation;
 mod action_struct;
 mod annotated_tag;
+mod attribution_evidence;
 mod audience_tier;
 mod blob;
 pub mod check_evidence;
@@ -65,6 +66,14 @@ pub use action_id::ActionId;
 pub use action_operation::Operation;
 pub use action_struct::Action;
 pub use annotated_tag::{AnnotatedTag, AnnotatedTagError, AnnotatedTagMarker};
+pub use attribution_evidence::{
+    ATTRIBUTION_EVIDENCE_MAGIC, ATTRIBUTION_EVIDENCE_MAX_BYTES, ATTRIBUTION_MAX_COLLECTION_METHODS,
+    ATTRIBUTION_MAX_FILE_CHANGES, ATTRIBUTION_MAX_OPERATIONS, ATTRIBUTION_PATH_MAX_BYTES,
+    ATTRIBUTION_VALUE_MAX_BYTES, AttributionBasis, AttributionClaim, AttributionCollectionMethod,
+    AttributionEvidenceError, AttributionEvidenceV1, AttributionFileChange, AttributionOperation,
+    AttributionOperationIdentity, AttributionOperationResolution, AttributionScope,
+    AttributionSource, HarnessVersionScope, ModelAttribution,
+};
 pub use audience_tier::{AudienceParseError, AudienceTier, visible};
 pub use blob::Blob;
 pub use collaboration::*;

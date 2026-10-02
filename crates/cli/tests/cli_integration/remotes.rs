@@ -1906,6 +1906,7 @@ fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, SleyRepository) {
         main,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            attribution_evidence: None,
             parents_rewritten: false,
             state_id: "hs-fixture".to_string(),
             change_id: "hc-fixture".to_string(),

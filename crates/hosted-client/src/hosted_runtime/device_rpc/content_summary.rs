@@ -1,11 +1,13 @@
-//! Shared pure mapping of one exact native State.
+//! Shared mapping of one exact native State and its required evidence.
+use anyhow::Result;
 use api::heddle::api::common as shared;
 use objects::object::State;
 
 pub(super) fn summary(
+    source: &(impl objects::store::ObjectSource + ?Sized),
     state: &State,
     terminal_status: Option<shared::StateStatus>,
-) -> shared::StateSummary {
+) -> Result<shared::StateSummary> {
     let agent = state
         .attribution
         .agent
@@ -24,7 +26,7 @@ pub(super) fn summary(
             coverage_delta: verification.coverage_delta,
             lint_warnings: verification.lint_warnings.unwrap_or_default(),
         });
-    shared::StateSummary {
+    Ok(shared::StateSummary {
         state_id: Some(shared::StateId {
             value: state.id().as_bytes().to_vec(),
         }),
@@ -53,5 +55,6 @@ pub(super) fn summary(
             value: state.change_id.as_bytes().to_vec(),
         }),
         agent_run_id: None,
-    }
+        attribution: super::content_attribution::attribution(source, state)?,
+    })
 }

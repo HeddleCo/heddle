@@ -183,19 +183,7 @@ pub(crate) fn handle_stop_capture(
         .and_then(Value::as_str)
         .map(|s| s.to_string())
         .unwrap_or_else(|| intent_hint.to_string());
-    let state_id = bridge.capture_snapshot(
-        repo,
-        user_config,
-        RelayCapture {
-            intent,
-            provider: Some("anthropic".to_string()),
-            model: resolve_model(payload),
-            session: payload
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(|s| s.to_string()),
-        },
-    )?;
+    let state_id = bridge.capture_snapshot(repo, user_config, RelayCapture { intent })?;
     debug!(state_id = %state_id, "heddle stop-hook captured state");
     Ok(Some(state_id))
 }
@@ -309,24 +297,7 @@ pub(crate) fn worktree_dirty(repo: &Repository) -> Result<bool> {
 }
 
 fn resolve_model(payload: &Value) -> Option<String> {
-    if let Some(display) = payload
-        .get("model")
-        .and_then(|m| m.get("display_name"))
-        .and_then(Value::as_str)
-    {
-        return Some(display.to_string());
-    }
-    if let Some(id) = payload
-        .get("model")
-        .and_then(|m| m.get("id"))
-        .and_then(Value::as_str)
-    {
-        return Some(id.to_string());
-    }
-    payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
+    verbs::claude_cursor_patch(payload).model
 }
 
 fn emit_hook_specific_output(event: &str, context_body: &str) {
@@ -451,13 +422,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_prefers_display_then_id_then_flat() {
+    fn resolve_model_uses_id_or_flat_never_display_label() {
         let display = serde_json::json!({"model": {"display_name": "Claude Opus 4.7", "id": "claude-opus-4-7"}});
-        assert_eq!(resolve_model(&display).as_deref(), Some("Claude Opus 4.7"));
+        assert_eq!(resolve_model(&display).as_deref(), Some("claude-opus-4-7"));
         let id = serde_json::json!({"model": {"id": "claude-opus-4-7"}});
         assert_eq!(resolve_model(&id).as_deref(), Some("claude-opus-4-7"));
         let flat = serde_json::json!({"model": "claude-sonnet-4-6"});
         assert_eq!(resolve_model(&flat).as_deref(), Some("claude-sonnet-4-6"));
+        let display_only = serde_json::json!({"model": {"display_name": "Claude Opus"}});
+        assert_eq!(resolve_model(&display_only), None);
         let none = serde_json::json!({});
         assert_eq!(resolve_model(&none), None);
     }

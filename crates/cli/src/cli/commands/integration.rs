@@ -767,7 +767,13 @@ fn install_codex(
             "codex", "hooks"
         ))
     })?;
-    for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
+    for event in [
+        "SessionStart",
+        "SubagentStart",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+    ] {
         let command = if event == "Stop" {
             format!("{heddle} integration relay codex Stop")
         } else {
@@ -841,6 +847,7 @@ fn install_claude(
         "PreToolUse",
         "PermissionRequest",
         "PostToolUse",
+        "PostToolUseFailure",
         "SubagentStart",
         "SubagentStop",
         "Stop",
@@ -965,18 +972,39 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
         None => String::new(),
     };
     format!(
-        r#"export default async function() {{
+        r#"export default async function(context = {{}}) {{
+  let harnessVersion;
+  // Join only exact tool-call -> assistant-message IDs. Never use the latest
+  // session model: concurrent/late tools may belong to an older request.
+  const assistantModels = new Map();
+  const toolMessages = new Map();
+  const key = (session, id) => JSON.stringify([session, id]);
+  const remember = (map, id, value) => {{
+    if (map.size >= 4096 && !map.has(id)) map.delete(map.keys().next().value);
+    map.set(id, value);
+  }};
+  const toolPayload = (input, args) => {{
+    const messageID = input?.messageID || toolMessages.get(key(input?.sessionID, input?.callID));
+    const identity = typeof messageID === "string" ? assistantModels.get(key(input?.sessionID, messageID)) : undefined;
+    return {{...input, args, cwd: context.directory, ...(identity || {{}}), ...(messageID ? {{messageID}} : {{}})}};
+  }};
+  try {{
+    const health = await context.client?.global?.health?.();
+    if (typeof health?.data?.version === "string") harnessVersion = health.data.version;
+  }} catch {{ /* version remains unknown when this SDK/server lacks health */ }}
   const relay = (event, input) => {{
+      const payload = {{...input, heddle_hook_event: event, ...(harnessVersion ? {{heddle_harness_version: harnessVersion}} : {{}})}};
       const expire = ["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event);
       const stamp = [{repo_args}"integration", "stamp", "opencode"];
       if (expire) stamp.push("--expire");
       Bun.spawnSync([{exe:?}, ...stamp], {{
-        stdin: new TextEncoder().encode(JSON.stringify(input)),
+        stdin: new TextEncoder().encode(JSON.stringify(payload)),
       }});
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
-      if (allowed.has(event)) {{
+      const assistantModel = event === "message.updated" && payload?.event?.properties?.info?.role === "assistant";
+      if (allowed.has(event) || assistantModel) {{
         Bun.spawnSync([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
-          stdin: new TextEncoder().encode(JSON.stringify(input)),
+          stdin: new TextEncoder().encode(JSON.stringify(payload)),
         }});
       }}
   }};
@@ -984,10 +1012,26 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
     event: async (input) => {{
       const eventObj = input?.event || input;
       const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+      const info = eventObj?.properties?.info;
+      if (event === "message.updated" && info?.role === "assistant" && typeof info.id === "string" && typeof info.sessionID === "string") {{
+        remember(assistantModels, key(info.sessionID, info.id), {{
+          heddle_model_source: "assistant_message",
+          ...(typeof info.modelID === "string" ? {{model: info.modelID}} : {{}}),
+          ...(typeof info.providerID === "string" ? {{provider: info.providerID}} : {{}}),
+          ...(typeof info.variant === "string" ? {{variant: info.variant}} : {{}}),
+        }});
+      }}
+      const part = eventObj?.properties?.part;
+      if (event === "message.part.updated" && part?.type === "tool" && typeof part.callID === "string" && typeof part.sessionID === "string" && typeof part.messageID === "string") {{
+        remember(toolMessages, key(part.sessionID, part.callID), part.messageID);
+      }}
       relay(event, input);
     }},
-    "tool.execute.before": async (input, output) => relay("tool.execute.before", input),
-    "tool.execute.after": async (input, output) => relay("tool.execute.after", input),
+    "tool.execute.before": async (input, output) => relay("tool.execute.before", toolPayload(input, output?.args)),
+    "tool.execute.after": async (input, output) => {{
+      relay("tool.execute.after", toolPayload(input, input?.args));
+      toolMessages.delete(key(input?.sessionID, input?.callID));
+    }},
   }};
 }}
 "#,
@@ -1098,7 +1142,13 @@ fn uninstall_one(
                         toml::from_str(&fs::read_to_string(&config_path)?)?;
                     if let Some(table) = value.as_table_mut() {
                         if let Some(hooks) = table.get_mut("hooks").and_then(|v| v.as_table_mut()) {
-                            for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
+                            for event in [
+                                "SessionStart",
+                                "SubagentStart",
+                                "PreToolUse",
+                                "PostToolUse",
+                                "Stop",
+                            ] {
                                 if let Some(groups) =
                                     hooks.get_mut(event).and_then(|v| v.as_array_mut())
                                 {
@@ -1765,6 +1815,8 @@ mod tests {
         assert!(contents.contains("integration stamp codex"));
         assert!(contents.contains("SessionStart"));
         assert!(contents.contains("PreToolUse"));
+        assert!(contents.contains("PostToolUse"));
+        assert!(!contents.contains("PostToolUseFailure"));
         assert!(!contents.contains("notify ="));
         assert!(!contents.contains("/bin/sh"));
         assert!(
@@ -1784,8 +1836,8 @@ mod tests {
         );
         assert_eq!(
             contents.matches("heddle integration stamp codex\"").count(),
-            3,
-            "SessionStart/SubagentStart/PreToolUse must stamp without expiring, got: {contents}"
+            4,
+            "SessionStart/SubagentStart/PreToolUse/PostToolUse must stamp without expiring, got: {contents}"
         );
         assert!(
             contents.contains("[[hooks.Stop]]")

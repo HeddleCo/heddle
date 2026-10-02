@@ -185,7 +185,8 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         states: visible_states
             .into_iter()
             .map(|state| {
-                let mut entry = StateEntry::from(state);
+                let evidence = repo::load_attribution_evidence(repo.store(), state)?;
+                let mut entry = StateEntry::from_state(state, evidence);
                 entry.git_checkpoint = repo
                     .latest_git_checkpoint_for_state(&state.state_id)
                     .ok()
@@ -195,9 +196,9 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
                     .get(&state.state_id)
                     .copied()
                     .map(CollapsedEntry::from);
-                entry
+                Ok(entry)
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         omitted_genesis,
     };
 
@@ -251,7 +252,7 @@ fn render_unbound_overlay_log(
     )?
     .into_iter()
     .map(|projected| {
-        let mut entry = StateEntry::from(&projected.state);
+        let mut entry = StateEntry::from_state(&projected.state, projected.attribution_evidence);
         entry.parents = projected
             .parent_ids
             .iter()
@@ -903,6 +904,8 @@ mod tests {
             principal_name: "Ada".to_string(),
             principal_email: "ada@example.com".to_string(),
             agent: Some("anthropic/claude-opus-4".to_string()),
+            is_agent_authored: true,
+            attribution_evidence: None,
             confidence: Some(0.95),
             created_at: "2026-05-01 12:00:00".to_string(),
             parents: vec![],

@@ -1,0 +1,62 @@
+# Attribution validation on macOS
+
+This checkpoint adds operation-bound attribution, source-format negotiation,
+collection-method provenance, and source-pack preservation. Missing causal
+identity remains unknown; a current model is never assumed to be the producer.
+
+## Real harness checks (2026-10-02)
+
+| Harness | Version | Tested models | Result |
+|---|---|---|---|
+| Codex | 0.159.3 | gpt-6-luna, gpt-6-sol | Native hooks, request-reported, two edits in one capture |
+| Claude Code | 2.1.287 | claude-opus-5-5, claude-haiku-4-5-20251001 | Native hooks omit model; a test-only exact session/tool ID stream join supplies response-reported identities |
+| OpenCode | 1.18.30 | gpt-6-luna, gpt-6-sol | Plugin hook/event joins; native apply_patch path adapter corrected |
+| Hermes | 0.21.0 | None certified | Existing provider authentication failed before tool execution; no adapter included |
+
+All successful captures survived source-pack export, fresh-store import and
+complete typed evidence comparison. Models changed across invocations. Claude
+subagent identity was observed separately. These are bounded synthetic-source
+smokes, not whole-platform certification. No private source or transcripts are
+part of this commit.
+
+Eight focused operation-hook tests and eight earlier CLI harness tests passed
+on macOS. Synthetic fault injection checked delayed completion, duplicate
+hooks and published-ID replay. A Mac /var symlink alias fix canonicalizes the
+repository path while retaining SQLite NOFOLLOW and rejecting index symlinks.
+
+The Claude stream collector is still a local proof, not a shipped adapter.
+Hermes, generic telemetry/proxy collectors, full backend rollout, in-session
+model switching and broader subagent coverage remain unverified.
+
+The API dependency is pinned to the companion feature commit rather than a
+new registry release. Native format writes require explicit capability
+negotiation. The API feature branch is based on alpha.16; historical state
+bytes and existing protobuf field numbers remain unchanged.
+
+## Reproduce the branch checks
+
+The companion API commit is
+`1b97aa7951441814b2c74eeb8b4defad88f976b1` in `HeddleCo/api`.
+It passed 226 Rust tests, five TypeScript attribution tests, protobuf lint/format,
+and three Python attention-contract tests. No registry package was published.
+The Heddle dependency and lockfile use that Git revision directly.
+
+```sh
+export HEDDLE_HOME="$(mktemp -d)"
+cargo build --locked -p heddle-cli --no-default-features \
+  --features git-overlay,native,local,semantic,zstd,client --bin heddle
+cargo test --locked -p heddle-agent-relay --lib operation_hook::tests
+cargo test --locked -p heddle-cli --no-default-features \
+  --features git-overlay,native,local,semantic,zstd,client --lib harness::tests
+cargo test --locked -p heddle-verbs --lib save::attribution_tests
+cargo fmt --all --check
+```
+
+The alpha.16 reconciliation initializes newly added optional display/search,
+provider-ref and thread-lifecycle fields with protobuf defaults; it does not
+manufacture metadata. Source-only publication declares no semantic indexes.
+Mount was excluded from these Mac checks. Existing disabled-mount/dead-code
+warnings are not evidence of a warning-clean full workspace clippy run.
+
+The first restricted Mac CLI rerun could not open the default user database.
+Rerunning with an isolated HEDDLE_HOME avoids touching user configuration.

@@ -250,7 +250,7 @@ impl DeviceRpc {
                                 );
                             }
                         }
-                        super::content_detail::state(&state, &revision, &mut emit)?
+                        super::content_detail::state(&repository, &state, &revision, &mut emit)?
                     }
                     content_read::Selection::Diff(read) => super::content_detail::diff(
                         &repository,

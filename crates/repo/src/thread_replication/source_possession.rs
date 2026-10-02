@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use crypto::thread_operation::SignedOperation;
 use objects::{
-    object::{ContentHash, StateId, TreeEntryTarget, thread_replication::ThreadOperation},
+    object::{
+        AttributionEvidenceV1, ContentHash, State, StateId, TreeEntryTarget,
+        thread_replication::ThreadOperation,
+    },
     store::ObjectStore,
 };
 use rusqlite::{Transaction, params};
@@ -87,6 +90,7 @@ impl ThreadReplica {
         self.require_local_integration_source(&operation)?;
         authorize(&operation)?;
         self.validate_reference_capture(&operation, store)?;
+        validate_attribution_evidence(store, &state)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let admission = self.receive_in(
@@ -125,9 +129,10 @@ impl ThreadReplica {
         let state = store
             .get_state(&revision)?
             .ok_or_else(|| Error::Invalid("initial source State missing".into()))?;
+        let evidence_bytes = validate_attribution_evidence(store, &state)?;
         let mut trees = vec![state.tree];
         let mut seen = BTreeSet::<ContentHash>::new();
-        let mut bytes = 0u64;
+        let mut bytes = evidence_bytes;
         while let Some(hash) = trees.pop() {
             if !seen.insert(hash) {
                 continue;
@@ -161,5 +166,178 @@ impl ThreadReplica {
             }
         }
         self.record_source_possession(revision)
+    }
+}
+
+/// Required State metadata belongs to source possession even when no file tree
+/// points to it. Causal metadata admission remains independent of possession.
+pub(super) fn validate_attribution_evidence(
+    store: &impl ObjectStore,
+    state: &State,
+) -> Result<u64> {
+    let Some(hash) = state.attribution_evidence else {
+        return Ok(0);
+    };
+    let blob = store
+        .get_blob(&hash)?
+        .ok_or_else(|| Error::Invalid("source attribution evidence missing".into()))?;
+    AttributionEvidenceV1::from_blob_with_hash(&blob, hash)
+        .and_then(|evidence| evidence.validate_legacy_agent(state.attribution.agent.as_ref()))
+        .map_err(|error| Error::Invalid(format!("invalid source attribution evidence: {error}")))?;
+    Ok(blob.size() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::{
+        object::{
+            Attribution, AttributionBasis, AttributionClaim, AttributionSource, Blob, Principal,
+            Tree,
+        },
+        store::InMemoryStore,
+    };
+
+    #[test]
+    fn source_possession_requires_valid_state_bound_attribution() {
+        let store = InMemoryStore::new();
+        let evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::Observed,
+                AttributionSource::Process,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("evidence");
+        let legacy = State::new(
+            Tree::new().hash(),
+            vec![],
+            Attribution::human(Principal::new("Test", "test@example.test")),
+        );
+        assert_eq!(
+            validate_attribution_evidence(&store, &legacy).expect("legacy"),
+            0
+        );
+        let state = legacy.with_attribution_evidence(evidence.hash());
+        assert!(validate_attribution_evidence(&store, &state).is_err());
+        store.put_blob(&evidence).expect("blob");
+        assert_eq!(
+            validate_attribution_evidence(&store, &state).expect("bound evidence"),
+            evidence.size() as u64
+        );
+        let bad = Blob::new(b"ordinary file bytes".to_vec());
+        store.put_blob(&bad).expect("bad blob");
+        assert!(
+            validate_attribution_evidence(&store, &state.with_attribution_evidence(bad.hash()))
+                .is_err()
+        );
+    }
+    #[test]
+    fn attribution_metadata_survives_without_claiming_full_source_possession() {
+        use crypto::{Ed25519Signer, Signer, thread_operation::SignedGenesis};
+        use objects::object::thread_replication::{
+            AuthoredCapture, GenesisOwner, ThreadGenesis, ThreadOperationBody,
+        };
+        let directory = tempfile::tempdir().expect("repository");
+        let repository = crate::Repository::init_default(directory.path()).expect("init");
+        let signer = Ed25519Signer::from_seed(&[47; 32]).expect("signer");
+        let key = signer.public_key().try_into().expect("key");
+        let base = repository.head().expect("head").expect("base");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: uuid::Uuid::from_u128(47).to_string(),
+            owner: GenesisOwner::LocalKey(key),
+            creator: key,
+            parent: None,
+            base,
+            name: "attribution".into(),
+            intent: "source metadata".into(),
+            nonce: vec![],
+        };
+        let replica = ThreadReplica::create(
+            repository.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).expect("genesis"),
+        )
+        .expect("thread");
+        let evidence = AttributionEvidenceV1 {
+            harness: Some(AttributionClaim::new(
+                "codex",
+                AttributionBasis::Observed,
+                AttributionSource::Process,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("evidence");
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![base],
+            Attribution::human(Principal::new("Test", "test@example.test")),
+        )
+        .with_attribution_evidence(evidence.hash());
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: Default::default(),
+            publisher: key,
+            body: ThreadOperationBody::Capture(AuthoredCapture::local(
+                state.encode_current_msgpack().expect("state").into(),
+            )),
+        };
+        let signed = SignedOperation::sign(&operation, &signer).expect("signed metadata");
+        assert_eq!(
+            replica
+                .receive_source_metadata(&signed, repository.store(), None, |_| Ok(()))
+                .expect("metadata accepted"),
+            Admission::Accepted
+        );
+        assert!(
+            !replica
+                .has_source_possession(state.id())
+                .expect("no possession")
+        );
+        assert!(
+            replica
+                .receive_prepared_source(&signed, repository.store(), |_| Ok(()))
+                .is_err(),
+            "missing required evidence cannot claim full possession"
+        );
+        assert_eq!(
+            replica
+                .operation(&operation.id().expect("ID"))
+                .expect("lookup")
+                .expect("retained metadata")
+                .1,
+            Admission::Accepted
+        );
+        repository
+            .store()
+            .put_blob(&evidence)
+            .expect("hydrate evidence");
+        assert_eq!(
+            replica
+                .receive_prepared_source(&signed, repository.store(), |_| Ok(()))
+                .expect("complete source"),
+            Admission::Accepted
+        );
+        assert!(
+            replica
+                .has_source_possession(state.id())
+                .expect("possession")
+        );
+
+        let mut pending = operation.clone();
+        pending
+            .parents
+            .insert(ContentHash::compute(b"not yet received causal parent"));
+        let pending = SignedOperation::sign(&pending, &signer).expect("pending metadata");
+        assert_eq!(
+            replica
+                .receive_source_metadata(&pending, repository.store(), None, |_| Ok(()))
+                .expect("pending source metadata"),
+            Admission::Pending
+        );
     }
 }

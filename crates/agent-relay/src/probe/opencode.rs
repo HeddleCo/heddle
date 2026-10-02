@@ -16,14 +16,17 @@ impl HarnessActorProbe for OpenCodeProbe {
 
     fn matches(&self, input: &HarnessProbeInput) -> bool {
         input.explicit_harness.as_deref() == Some(self.harness_name())
-            || input.probe_metadata.contains_key("session_id")
             || input.env_hints.contains_key("OPENCODE_CLIENT")
             || argv_matches_harness(input, HarnessKind::OpenCode)
     }
 
     fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
         let metadata = &input.probe_metadata;
-        let argv = input.argv.as_deref().unwrap_or(&[]);
+        let argv = input
+            .argv
+            .as_deref()
+            .filter(|_| argv_matches_harness(input, HarnessKind::OpenCode))
+            .unwrap_or(&[]);
         let session_id = metadata
             .get("session_id")
             .cloned()

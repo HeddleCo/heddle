@@ -263,3 +263,83 @@ fn native_fetch_rejects_cross_spool_genesis_before_source() {
         ))
     ));
 }
+
+#[test]
+fn native_source_formats_are_checked_before_download_bytes() {
+    use api::source_format::STATE_V6_ATTRIBUTION_V1;
+    for declared in [vec![STATE_V6_ATTRIBUTION_V1], vec![0], vec![99], vec![1, 1]] {
+        let (open, mut ready, endpoint, _) = fixture();
+        ready.native_source_formats = declared;
+        assert!(Validation::new(open, ready, Some(&endpoint), Limits::default()).is_err());
+    }
+    let (mut open, mut ready, endpoint, _) = fixture();
+    open.understood_native_source_formats = vec![99];
+    ready.native_source_formats = vec![STATE_V6_ATTRIBUTION_V1];
+    assert!(
+        Validation::new(
+            open.clone(),
+            ready.clone(),
+            Some(&endpoint),
+            Limits::default()
+        )
+        .is_err()
+    );
+    open.understood_native_source_formats
+        .push(STATE_V6_ATTRIBUTION_V1);
+    assert!(Validation::new(open, ready, Some(&endpoint), Limits::default()).is_ok());
+}
+
+#[test]
+fn embedded_attribution_state_cannot_enter_a_legacy_declared_download() {
+    use objects::object::{
+        Attribution, ContentHash, Principal, State, Tree,
+        thread_replication::{
+            AuthoredCapture, OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
+        },
+    };
+    let (open, ready, endpoint, _) = fixture();
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("signer");
+    let genesis = verify_origin(
+        ready.thread_genesis.as_ref().expect("genesis"),
+        ready.thread.as_ref().expect("thread"),
+    )
+    .expect("valid genesis");
+    let state = State::new_snapshot(
+        Tree::new().hash(),
+        vec![genesis.base],
+        Attribution::human(Principal::new("author", "author@example.test")),
+    )
+    .with_attribution_evidence(ContentHash::compute(b"evidence"));
+    let operation = ThreadOperation {
+        version: 1,
+        thread: genesis.id().expect("thread id"),
+        parents: Default::default(),
+        publisher: signer.public_key().try_into().expect("key"),
+        body: ThreadOperationBody::Capture(AuthoredCapture::local(
+            state.encode_current_msgpack().expect("State").into(),
+        )),
+    };
+    let signed =
+        crypto::thread_operation::SignedOperation::sign(&operation, &signer).expect("signature");
+    let frame = FetchServerFrame {
+        body: Some(fetch_server_frame::Body::Operations(
+            ReplicationOperations {
+                operations: vec![SignedRecord {
+                    format: OPERATION_FORMAT.into(),
+                    canonical_record: signed.canonical,
+                    signatures: vec![RecordSignature {
+                        public_key: signer.public_key().to_vec(),
+                        signature: signed.signature,
+                    }],
+                }],
+                ..Default::default()
+            },
+        )),
+    };
+    let mut validation =
+        Validation::new(open, ready, Some(&endpoint), Limits::default()).expect("legacy admission");
+    assert!(matches!(
+        validation.accept(frame),
+        Err(Error::SourceFormat(_))
+    ));
+}

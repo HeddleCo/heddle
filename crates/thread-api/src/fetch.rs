@@ -26,6 +26,8 @@ pub enum Error {
     Transport(#[from] transport::Error),
     #[error(transparent)]
     Replication(#[from] replication::Error),
+    #[error(transparent)]
+    SourceFormat(#[from] api::source_format::NativeSourceFormatError),
     #[error("source download I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("source preparation: {0}")]
@@ -170,6 +172,14 @@ impl Validation {
         endpoint: Option<&EndpointRef>,
         limits: Limits,
     ) -> Result<Self, Error> {
+        api::source_format::require_native_source_formats(
+            &ready.native_source_formats,
+            crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS,
+        )?;
+        api::source_format::require_native_source_formats(
+            &ready.native_source_formats,
+            &open.understood_native_source_formats,
+        )?;
         let thread = open
             .thread
             .as_ref()
@@ -385,6 +395,11 @@ impl Validation {
                         .original
                         .verify()
                         .map_err(|_| Error::Invalid("invalid original operation signature"))?;
+                    api::source_format::require_native_source_formats(
+                        &crate::source_format::operation_required_formats(&operation)
+                            .map_err(|error| Error::Preparation(error.to_string()))?,
+                        &self.ready.native_source_formats,
+                    )?;
                     if !self.threads.contains(&operation.thread)
                         || !self
                             .facets

@@ -155,8 +155,16 @@ mod stash;
 /// continue to import `repo::symbol_resolver::*` unchanged.
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
+mod attribution_transition;
 mod stack_snapshot;
 mod state_attachments;
+pub use attribution_transition::attribution_path_blob;
+mod state_attribution;
+#[cfg(feature = "async-source")]
+pub use state_attribution::load_attribution_evidence_async;
+pub use state_attribution::{
+    attribution_agent_label, attribution_model, load_attribution_evidence,
+};
 mod thread_advice;
 pub mod thread_manifest;
 mod thread_model;

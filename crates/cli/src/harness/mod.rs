@@ -39,19 +39,15 @@ impl HarnessCliBridge for CliAgentBridge {
         user_config: &UserConfig,
         capture: RelayCapture,
     ) -> Result<String> {
-        crate::cli::commands::snapshot::create_snapshot(
+        crate::cli::commands::snapshot::create_snapshot_with_agent_options(
             repo,
             user_config,
             Some(capture.intent),
             None,
-            crate::cli::commands::snapshot::SnapshotAgentOverrides {
-                provider: capture.provider,
-                model: capture.model,
-                session: capture.session,
-                segment: None,
-                policy: None,
-                no_policy: false,
-                no_agent: false,
+            verbs::CaptureAgentOptions {
+                environment_policy: std::env::var("HEDDLE_AGENT_POLICY").ok(),
+                default_policy: user_config.agent.default_policy.clone(),
+                ..Default::default()
             },
         )?;
         Ok(repo
@@ -151,9 +147,36 @@ mod tests {
             .get_state(&head_id)
             .unwrap()
             .expect("state for HEAD");
-        let agent = state.attribution.agent.expect("agent attribution on state");
-        assert_eq!(agent.provider, "anthropic");
-        assert_eq!(agent.model, "Claude Opus 4.7");
+        let evidence = repo::load_attribution_evidence(verify.store(), &state)
+            .unwrap()
+            .unwrap();
+        let model = evidence
+            .selected
+            .model
+            .as_ref()
+            .expect("selected model on state");
+        assert_eq!(model.value, "claude-opus-4-7");
+        assert_eq!(
+            model.basis,
+            objects::object::AttributionBasis::RequestReported
+        );
+        assert_eq!(
+            model.source,
+            objects::object::AttributionSource::HarnessHook
+        );
+        assert!(
+            evidence.selected.provider.is_none(),
+            "a Claude harness does not prove its backend provider"
+        );
+        assert!(evidence.response.model.is_none());
+        assert_eq!(
+            evidence.scope.harness_session_id.as_deref(),
+            Some("claude-sess-123")
+        );
+        assert_ne!(
+            evidence.scope.heddle_session_id,
+            evidence.scope.harness_session_id
+        );
         assert_eq!(
             state.intent.as_deref(),
             Some("hook-driven capture test"),
@@ -187,6 +210,23 @@ mod tests {
 
         let head = runtime.repo.head().unwrap().expect("capture advanced HEAD");
         assert_ne!(head, seed.state_id);
+        let state = runtime.repo.store().get_state(&head).unwrap().unwrap();
+        let evidence = repo::load_attribution_evidence(runtime.repo.store(), &state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.selected.model.as_ref().unwrap().value, "gpt-5.4");
+        assert_eq!(
+            evidence.selected.model.as_ref().unwrap().basis,
+            objects::object::AttributionBasis::RequestReported
+        );
+        assert_eq!(
+            evidence.selected.model.as_ref().unwrap().source,
+            objects::object::AttributionSource::HarnessHook
+        );
+        assert_eq!(
+            evidence.scope.harness_session_id.as_deref(),
+            Some("opencode-session")
+        );
         let store = repo::TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
         let view = repo::TimelineView::rebuild(&store).unwrap();
         let steps = view.steps_for_thread("main");
@@ -394,6 +434,186 @@ mod tests {
             child.native_parent_actor_key.as_deref(),
             Some("opencode:session:root-1")
         );
+    }
+
+    #[test]
+    fn codex_operation_capture_keeps_each_producing_model_after_switch() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("file.txt"), "seed").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        let user_config = UserConfig {
+            principal: Some(config::config::UserPrincipalConfig {
+                name: "Ada Lovelace".into(),
+                email: "ada@example.com".into(),
+            }),
+            ..Default::default()
+        };
+        let mut runtime = agent_relay::HarnessBridgeRuntime::new(repo, user_config, cli_bridge());
+        for (turn, model, contents) in [
+            ("turn-one", "model-one", "one"),
+            ("turn-two", "model-two", "two"),
+        ] {
+            let payload = serde_json::json!({
+                "session_id": "codex-session", "turn_id": turn, "tool_use_id": turn,
+                "model": model, "model_provider": "route", "tool_name": "apply_patch",
+                "tool_input": {"command": "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch"}
+            });
+            runtime.relay("codex", "PreToolUse", &payload).unwrap();
+            std::fs::write(root.join("file.txt"), contents).unwrap();
+            // A newer cursor must not be used to label the original completion.
+            let mut later = payload.clone();
+            later["model"] = serde_json::json!("later-model");
+            later["turn_id"] = serde_json::json!("later-turn");
+            verbs::stamp_identity_cursor(runtime.repo.root(), &verbs::codex_cursor_patch(&later))
+                .unwrap();
+            runtime.relay("codex", "PostToolUse", &payload).unwrap();
+        }
+        runtime
+            .relay(
+                "codex",
+                "Stop",
+                &serde_json::json!({
+                    "session_id":"codex-session", "turn_id":"turn-three", "model":"latest-model",
+                    "model_provider":"route", "last_assistant_message":"mixed capture"
+                }),
+            )
+            .unwrap();
+        let head = runtime.repo.head().unwrap().unwrap();
+        let state = runtime.repo.store().get_state(&head).unwrap().unwrap();
+        let evidence = repo::load_attribution_evidence(runtime.repo.store(), &state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.operations.len(), 2);
+        let models: Vec<_> = evidence
+            .operations
+            .iter()
+            .map(|op| op.identity.selected.model.as_ref().unwrap().value.as_str())
+            .collect();
+        assert_eq!(models, ["model-one", "model-two"]);
+        assert!(evidence.operations.iter().all(
+            |op| op.resolution == objects::object::AttributionOperationResolution::ContentBound
+        ));
+        assert!(
+            evidence
+                .operations
+                .iter()
+                .all(|op| op.identity.response.model.is_none())
+        );
+        // Real source-only pack export/import preserves the committed record,
+        // including both causal model observations and file transition hashes.
+        let spool = tempfile::tempdir().unwrap();
+        let index_path = spool.path().join("source.idx");
+        let builder = objects::store::StreamingPackBuilder::new(
+            std::io::Cursor::new(Vec::new()),
+            index_path.clone(),
+            objects::store::CompressionConfig::default(),
+            spool.path().join("buckets"),
+        )
+        .unwrap();
+        let (pack, _) = objects::store::pack::build_source_pack(
+            builder,
+            runtime.repo.store(),
+            &state,
+            100,
+            1024 * 1024,
+        )
+        .unwrap();
+        let reader = objects::store::PackReader::from_bytes(
+            pack.into_inner(),
+            std::fs::read(index_path).unwrap(),
+        )
+        .unwrap();
+        reader
+            .validate_source_closure(&state, 100, 1024 * 1024)
+            .unwrap();
+        let (_receiver_dir, receiver) = init_repo();
+        reader
+            .visit_objects(|_, kind, bytes| {
+                use objects::store::pack::ObjectType;
+                match kind {
+                    ObjectType::State => {
+                        receiver
+                            .store()
+                            .put_state(
+                                &objects::object::State::decode_current_msgpack(bytes).unwrap(),
+                            )
+                            .unwrap();
+                    }
+                    ObjectType::Tree => {
+                        receiver
+                            .store()
+                            .put_tree(&objects::object::Tree::decode_canonical(bytes).unwrap())
+                            .unwrap();
+                    }
+                    ObjectType::Blob => {
+                        receiver
+                            .store()
+                            .put_blob(&objects::object::Blob::new(bytes.to_vec()))
+                            .unwrap();
+                    }
+                    _ => panic!("unexpected selected source object"),
+                }
+                Ok(())
+            })
+            .unwrap();
+        let received_state = receiver.store().get_state(&state.id()).unwrap().unwrap();
+        assert_eq!(received_state.id(), state.id());
+        assert_eq!(
+            received_state.attribution_evidence,
+            state.attribution_evidence
+        );
+        let received = repo::load_attribution_evidence(receiver.store(), &received_state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, evidence);
+        assert_eq!(
+            received.operations[0].changes[0].after,
+            received.operations[1].changes[0].before
+        );
+    }
+
+    #[test]
+    fn codex_rejected_patch_stays_unresolved_after_another_edit() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("file.txt"), "seed").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        let config = UserConfig {
+            principal: Some(config::config::UserPrincipalConfig {
+                name: "Ada Lovelace".into(),
+                email: "ada@example.com".into(),
+            }),
+            ..Default::default()
+        };
+        let mut runtime = agent_relay::HarnessBridgeRuntime::new(repo, config, cli_bridge());
+        runtime.relay("codex", "PreToolUse", &serde_json::json!({
+            "session_id":"session", "turn_id":"turn", "tool_use_id":"rejected-call",
+            "model":"selected", "model_provider":"route", "tool_name":"apply_patch",
+            "tool_input":{"command":"*** Begin Patch\n*** Update File: file.txt\n@@\n-missing-line\n+new\n*** End Patch"}
+        })).unwrap();
+        // Rejection has no successful PostToolUse. A later external write
+        // must never be credited to the pending rejected invocation.
+        std::fs::write(root.join("file.txt"), "somebody else's edit").unwrap();
+        runtime.relay("codex", "Stop", &serde_json::json!({
+            "session_id":"session", "turn_id":"turn", "model":"selected", "model_provider":"route"
+        })).unwrap();
+        let state = runtime
+            .repo
+            .store()
+            .get_state(&runtime.repo.head().unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let evidence = repo::load_attribution_evidence(runtime.repo.store(), &state)
+            .unwrap()
+            .unwrap();
+        assert!(evidence.operations_incomplete);
+        assert_eq!(evidence.operations.len(), 1);
+        assert_eq!(
+            evidence.operations[0].resolution,
+            objects::object::AttributionOperationResolution::Unresolved
+        );
+        assert!(evidence.operations[0].changes.is_empty());
     }
 
     fn opencode_tool_payload(call_id: &str) -> Value {

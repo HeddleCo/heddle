@@ -16,14 +16,11 @@ use config::UserConfig;
 use objects::object::StateId;
 use repo::Repository;
 
-/// One agent-attributed capture request, in the shape the CLI's
-/// `create_snapshot` consumes via its agent overrides.
+/// Capture a hook event whose source-qualified identity is already stamped.
+/// Hook metadata must not be passed as explicit CLI attribution overrides.
 #[derive(Debug, Clone)]
 pub struct RelayCapture {
     pub intent: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub session: Option<String>,
 }
 
 pub trait HarnessCliBridge: Send + Sync {

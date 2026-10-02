@@ -157,6 +157,7 @@ struct DisclosureInput {
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
     allow_partial: bool,
+    native_source_formats: Vec<i32>,
 }
 
 pub(super) fn validate_with_receipts(
@@ -185,6 +186,7 @@ pub(super) fn validate_with_receipts(
             dependency_records: dependencies,
             receipt_records,
             allow_partial: !ready.full_closure_available,
+            native_source_formats: ready.native_source_formats.clone(),
         },
     )?;
     Ok(StagedSource {
@@ -239,6 +241,7 @@ pub(crate) fn validate_artifacts(
     operations: Vec<SignedOperation>,
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    native_source_formats: &[i32],
 ) -> Result<ValidatedSourceArtifacts, Error> {
     validate_disclosure_artifacts(
         thread,
@@ -250,6 +253,7 @@ pub(crate) fn validate_artifacts(
             dependency_records,
             receipt_records,
             allow_partial: false,
+            native_source_formats: native_source_formats.to_vec(),
         },
     )
 }
@@ -266,7 +270,12 @@ fn validate_disclosure_artifacts(
         dependency_records,
         receipt_records,
         allow_partial,
+        native_source_formats,
     } = input;
+    api::source_format::require_native_source_formats(
+        &native_source_formats,
+        crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS,
+    )?;
     if operations.len() > 10_000
         || dependency_records.len() >= 128
         || receipt_records.len() > operations.len()
@@ -343,13 +352,13 @@ fn validate_disclosure_artifacts(
                 "selected initial source differs from canonical seed",
             ));
         }
-        PackReader::open(
+        let pack = PackReader::open(
             &directory.path().join("source.pack"),
             &directory.path().join("source.idx"),
         )
-        .map_err(preparation)?
-        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
         .map_err(preparation)?;
+        pack.validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
+            .map_err(preparation)?;
         return Ok(ValidatedSourceArtifacts {
             directory,
             operations,
@@ -456,6 +465,10 @@ fn validate_disclosure_artifacts(
     }
     for signed in &operations {
         let operation = signed.verify().map_err(preparation)?;
+        api::source_format::require_native_source_formats(
+            &crate::source_format::operation_required_formats(&operation).map_err(preparation)?,
+            &native_source_formats,
+        )?;
         let id = operation.id().map_err(preparation)?;
         let state = operation
             .source_state()
@@ -637,6 +650,13 @@ fn validate_disclosure_artifacts(
         &directory.path().join("source.idx"),
     )
     .map_err(preparation)?;
+    api::source_format::require_native_source_formats(
+        &crate::source_format::state_required_formats(&state),
+        &native_source_formats,
+    )?;
+    // Closure validation visits every physical object and admits only this
+    // exact State's canonical bytes. It therefore checks actual decoded pack
+    // States against the same declared format gate, including compact frames.
     let partial_trees = if allow_partial {
         pack.validate_visible_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
             .map_err(preparation)?

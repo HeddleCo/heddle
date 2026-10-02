@@ -18,7 +18,9 @@ pub mod bridge;
 mod claude_hook;
 #[cfg(feature = "client")]
 mod device_runs;
+mod operation_hook;
 mod probe;
+pub use operation_hook::record_harness_operation;
 mod relay;
 #[cfg(feature = "client")]
 mod run_permissions;

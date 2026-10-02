@@ -60,6 +60,7 @@ fn cmd_show_with_output_kind(
     let id = resolve_state_id(&repo, &state_spec)?;
 
     let state = require_resolved_state(&repo, &id)?;
+    let evidence = repo::load_attribution_evidence(repo.store(), &state)?;
 
     let output = ShowOutput {
         output_kind,
@@ -90,6 +91,8 @@ fn cmd_show_with_output_kind(
             session_id: a.session_id.clone(),
             policy_id: a.policy_id.clone(),
         }),
+        is_agent_authored: state.is_agent_authored(),
+        attribution_evidence: evidence,
         created_at: state.created_at.to_rfc3339(),
         status: format!("{:?}", state.status),
         verification: state.verification.as_ref().map(|v| VerificationInfo {
@@ -127,6 +130,7 @@ fn render_unbound_overlay_show(
     let projection = ingest::OverlayHistory::project_tip(repo.root(), revision)?;
     let git_oid = projection.git_oid;
     let state = projection.state;
+    let evidence = projection.attribution_evidence;
     let output = ShowOutput {
         output_kind,
         repository_capability: repo.capability_label().to_string(),
@@ -160,6 +164,8 @@ fn render_unbound_overlay_show(
             session_id: agent.session_id.clone(),
             policy_id: agent.policy_id.clone(),
         }),
+        is_agent_authored: state.is_agent_authored(),
+        attribution_evidence: evidence,
         created_at: state.created_at.to_rfc3339(),
         status: format!("{:?}", state.status),
         verification: state
@@ -312,11 +318,18 @@ fn render_state(output: &ShowOutput, verbose: bool) {
         style::principal(&output.principal.name, &output.principal.email)
     );
 
+    let agent_label = if output.attribution_evidence.is_some() {
+        repo::attribution_agent_label(None, output.attribution_evidence.as_ref())
+    } else {
+        output
+            .agent
+            .as_ref()
+            .map(|agent| format!("{}/{}", agent.provider, agent.model))
+    };
+    if let Some(label) = agent_label {
+        println!("Agent: {}", style::dim(&style::human_text(&label)));
+    }
     if let Some(agent) = &output.agent {
-        println!(
-            "Agent: {}",
-            style::dim(&format!("{}/{}", agent.provider, agent.model))
-        );
         if let Some(session) = &agent.session_id {
             println!("  Session: {}", style::dim(&style::human_text(session)));
         }

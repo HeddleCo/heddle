@@ -226,6 +226,19 @@ fn fixture(
     Vec<SignedOperation>,
     State,
 ) {
+    fixture_with_evidence(scratch, extra_blob, None)
+}
+
+fn fixture_with_evidence(
+    scratch: &Path,
+    extra_blob: bool,
+    evidence: Option<Blob>,
+) -> (
+    tempfile::TempDir,
+    TransferReady,
+    Vec<SignedOperation>,
+    State,
+) {
     let (_, mut ready, _, _) = crate::fetch::tests::fixture();
     let signer = Ed25519Signer::from_seed(&[61; 32]).expect("original creator");
     let genesis = replication::opening::verify_genesis(
@@ -245,11 +258,15 @@ fn fixture(
         vec![[22; 32]],
     )
     .expect("native salted source");
-    let state = State::new_snapshot(
+    let mut state = State::new_snapshot(
         tree.hash(),
         vec![genesis.base],
         Attribution::human(Principal::new("author", "author@example.test")),
     );
+    if let Some(evidence) = &evidence {
+        state = state.with_attribution_evidence(evidence.hash());
+        ready.native_source_formats = vec![api::source_format::STATE_V6_ATTRIBUTION_V1];
+    }
     ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
         api::heddle::api::common::StateId {
             value: state.id().as_bytes().to_vec(),
@@ -286,6 +303,13 @@ fn fixture(
         ObjectType::Blob,
         blob.into_content(),
     );
+    if let Some(evidence) = evidence {
+        builder.add_id(
+            PackObjectId::Hash(evidence.hash()),
+            ObjectType::Blob,
+            evidence.into_content(),
+        );
+    }
     if extra_blob {
         let extra = Blob::new(b"private source outside the selected closure".to_vec());
         builder.add_id(
@@ -889,6 +913,161 @@ fn source_staging_binds_signed_entry_privacy_to_selected_salted_closure() {
                 error.to_string().contains(expected),
                 "specific binding failure: {error}"
             );
+        }
+    }
+}
+
+fn harness_evidence() -> Blob {
+    use objects::object::{
+        AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+    };
+    AttributionEvidenceV1 {
+        harness: Some(AttributionClaim::new(
+            "codex",
+            AttributionBasis::RequestReported,
+            AttributionSource::HarnessHook,
+        )),
+        ..Default::default()
+    }
+    .to_blob()
+    .expect("canonical harness evidence")
+}
+
+#[test]
+fn attribution_source_requires_declared_format_and_keeps_exact_evidence() {
+    for declared in [false, true] {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let evidence = harness_evidence();
+        let (directory, mut ready, operations, state) =
+            fixture_with_evidence(scratch.path(), false, Some(evidence.clone()));
+        if !declared {
+            ready.native_source_formats.clear();
+        }
+        let result = validate(directory, ready, operations, vec![]);
+        if declared {
+            let staged = result.expect("negotiated complete source");
+            assert_eq!(staged.state(), &state);
+            let pack = PackReader::open(&staged.artifact_paths()[0], &staged.artifact_paths()[1])
+                .expect("staged pack");
+            let (_, bytes) = pack
+                .get_hashed_object(&evidence.hash())
+                .expect("evidence read")
+                .expect("evidence retained");
+            assert_eq!(bytes.as_slice(), evidence.content());
+        } else {
+            assert!(
+                matches!(result, Err(Error::SourceFormat(_))),
+                "legacy declaration cannot carry attribution"
+            );
+            assert_eq!(
+                std::fs::read_dir(scratch.path()).expect("scratch").count(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn attribution_source_missing_evidence_fails_before_installation() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let evidence = harness_evidence();
+    let (directory, ready, operations, _) =
+        fixture_with_evidence(scratch.path(), false, Some(evidence.clone()));
+    let pack = PackReader::open(
+        &directory.path().join("source.pack"),
+        &directory.path().join("source.idx"),
+    )
+    .expect("pack");
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    pack.visit_objects(|id, kind, bytes| {
+        if id != PackObjectId::Hash(evidence.hash()) {
+            builder.add_id(id, kind, bytes.to_vec());
+        }
+        Ok(())
+    })
+    .expect("copy source without evidence");
+    let (bytes, index, _) = builder.build().expect("incomplete pack");
+    drop(pack);
+    std::fs::write(directory.path().join("source.pack"), bytes).expect("pack");
+    std::fs::write(directory.path().join("source.idx"), index).expect("index");
+    assert!(validate(directory, ready, operations, vec![]).is_err());
+    assert_eq!(
+        std::fs::read_dir(scratch.path()).expect("scratch").count(),
+        0
+    );
+}
+
+#[test]
+fn legacy_selected_state_still_requires_attribution_ancestor_format() {
+    use objects::object::thread_replication::AuthoredCapture;
+    for declared in [false, true] {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let (directory, mut ready, originals, mut selected) = fixture(scratch.path(), false);
+        let signer = Ed25519Signer::from_seed(&[61; 32]).expect("creator");
+        let mut ancestor = originals[0].verify().expect("source operation");
+        let rich_state = selected
+            .clone()
+            .with_attribution_evidence(harness_evidence().hash());
+        ancestor.body = ThreadOperationBody::Capture(AuthoredCapture::local(
+            rich_state
+                .encode_current_msgpack()
+                .expect("rich State")
+                .into(),
+        ));
+        let signed_ancestor = SignedOperation::sign(&ancestor, &signer).expect("signed ancestor");
+        selected.parents = vec![rich_state.id()];
+        let mut child = ancestor.clone();
+        child.parents = BTreeSet::from([ancestor.id().expect("ancestor identity")]);
+        child.body = ThreadOperationBody::Capture(AuthoredCapture::local(
+            selected
+                .encode_current_msgpack()
+                .expect("legacy State")
+                .into(),
+        ));
+        let signed_child = SignedOperation::sign(&child, &signer).expect("signed child");
+        ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
+            api::heddle::api::common::StateId {
+                value: selected.id().as_bytes().to_vec(),
+            },
+        ));
+        if declared {
+            ready.native_source_formats = vec![api::source_format::STATE_V6_ATTRIBUTION_V1];
+        }
+        let pack = PackReader::open(
+            &directory.path().join("source.pack"),
+            &directory.path().join("source.idx"),
+        )
+        .expect("pack");
+        let mut builder = PackBuilder::for_repack(Default::default(), 0);
+        pack.visit_objects(|id, kind, bytes| {
+            if kind != ObjectType::State {
+                builder.add_id(id, kind, bytes.to_vec());
+            }
+            Ok(())
+        })
+        .expect("copy selected tree");
+        builder.add_id(
+            PackObjectId::StateId(selected.id()),
+            ObjectType::State,
+            selected.encode_current_msgpack().expect("selected State"),
+        );
+        let (bytes, index, _) = builder.build().expect("legacy selected pack");
+        drop(pack);
+        std::fs::write(directory.path().join("source.pack"), bytes).expect("pack");
+        std::fs::write(directory.path().join("source.idx"), index).expect("index");
+        let result = validate(
+            directory,
+            ready,
+            vec![signed_child, signed_ancestor],
+            vec![],
+        );
+        if declared {
+            let staged = result.expect("declared rich ancestry with legacy selected closure");
+            assert!(staged.state().attribution_evidence.is_none());
+            assert_eq!(staged.state().id(), selected.id());
+            assert_eq!(staged.operations().len(), 2);
+        } else {
+            assert!(matches!(result, Err(Error::SourceFormat(_))));
         }
     }
 }

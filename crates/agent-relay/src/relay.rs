@@ -230,6 +230,7 @@ pub fn relay_harness_event(
     }
     #[cfg(feature = "client")]
     if harness == "claude-code" && matches!(event, "PreToolUse" | "PermissionRequest") {
+        crate::record_harness_operation(repo.root(), harness, Some(event), &json)?;
         return crate::device_runs::claude_tool_edge(
             repo,
             event,
@@ -317,6 +318,7 @@ struct AttachmentResolutionInput<'a> {
 }
 
 fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    let cursor = verbs::codex_cursor_patch(payload);
     let captured_revision = if event == "Stop" && claude_hook::worktree_dirty(&runtime.repo)? {
         Some(
             runtime.bridge.capture_snapshot(
@@ -325,12 +327,6 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value)
                 RelayCapture {
                     intent: value_string(payload, &["last_assistant_message"])
                         .unwrap_or_else(|| "Codex turn".to_string()),
-                    provider: Some("openai".to_string()),
-                    model: value_string(payload, &["model"]),
-                    session: first_value_string(
-                        payload,
-                        &[&["session_id"], &["sessionId"], &["conversation_id"]],
-                    ),
                 },
             )?,
         )
@@ -340,25 +336,29 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value)
     let tool_name =
         first_value_string(payload, &[&["tool_name"], &["toolName"], &["tool", "name"]]);
     let metadata = map_from_pairs([
+        ("thread_id", cursor.session.clone()),
+        (
+            "parent_thread_id",
+            value_string(payload, &["parent_thread_id"])
+                .or_else(|| value_string(payload, &["agent_id"]).and(cursor.session)),
+        ),
+        ("agent_id", value_string(payload, &["agent_id"])),
+        ("hook_event", Some(event.to_string())),
         (
             "client_name",
-            value_string(payload, &["client"]).or_else(|| value_string(payload, &["client_name"])),
+            first_value_string(payload, &[&["client"], &["client_name"]]),
         ),
-        ("model", value_string(payload, &["model"])),
+        ("model", cursor.model),
         (
             "model_provider",
-            value_string(payload, &["model_provider"])
-                .or_else(|| value_string(payload, &["provider"])),
+            first_value_string(payload, &[&["model_provider"], &["provider"]]),
         ),
-        (
-            "model_reasoning_effort",
-            value_string(payload, &["reasoning_effort"]),
-        ),
+        ("model_reasoning_effort", cursor.thought_level),
     ]);
     let opened = runtime.open_session(OpenSessionParams {
         harness: Some("codex".to_string()),
         summary: value_string(payload, &["message"]),
-        probe_metadata: metadata,
+        probe_metadata: metadata.clone(),
         ..OpenSessionParams::default()
     })?;
     runtime.update_progress(UpdateProgressParams {
@@ -383,6 +383,7 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value)
         tool_name,
         captured_revision,
         harness: Some("codex".to_string()),
+        probe_metadata: metadata,
         ..UpdateProgressParams::default()
     })?;
     Ok(())
@@ -440,9 +441,7 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
     ]);
     let opened = runtime.open_session(OpenSessionParams {
         harness: Some("claude-code".to_string()),
-        model: value_string(payload, &["model", "display_name"])
-            .or_else(|| value_string(payload, &["model", "id"]))
-            .or_else(|| value_string(payload, &["model"])),
+        model: verbs::claude_cursor_patch(payload).model,
         summary: value_string(payload, &["message"]).or_else(|| value_string(payload, &["reason"])),
         probe_metadata: metadata.clone(),
         ..OpenSessionParams::default()
@@ -633,22 +632,16 @@ fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Val
     if verbs::cursor_event_expires(payload, Some(event)) {
         verbs::expire_identity_cursor(runtime.repo.root())?;
     }
+    let cursor = verbs::opencode_cursor_patch(payload);
     let metadata = map_from_pairs([
-        (
-            "session_id",
-            value_string(payload, &["sessionID"])
-                .or_else(|| value_string(payload, &["session_id"])),
-        ),
-        (
-            "parent_id",
-            value_string(payload, &["parentID"]).or_else(|| value_string(payload, &["parent_id"])),
-        ),
+        ("session_id", cursor.session),
+        ("parent_id", cursor.parent),
         (
             "client_name",
             value_string(payload, &["client"]).or_else(|| std::env::var("OPENCODE_CLIENT").ok()),
         ),
-        ("model", value_string(payload, &["model"])),
-        ("provider", value_string(payload, &["provider"])),
+        ("model", cursor.model.clone()),
+        ("provider", cursor.provider.clone()),
         ("hook_event", Some(event.to_string())),
         (
             "touched_paths",
@@ -657,8 +650,8 @@ fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Val
     ]);
     let opened = runtime.open_session(OpenSessionParams {
         harness: Some("opencode".to_string()),
-        model: value_string(payload, &["model"]),
-        provider: value_string(payload, &["provider"]),
+        model: cursor.model,
+        provider: cursor.provider,
         probe_metadata: metadata.clone(),
         ..OpenSessionParams::default()
     })?;
@@ -924,12 +917,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         match runtime.bridge.capture_snapshot(
             &runtime.repo,
             &runtime.user_config,
-            RelayCapture {
-                intent,
-                provider: opened.provider.clone(),
-                model: opened.model.clone(),
-                session: native.session_id.clone(),
-            },
+            RelayCapture { intent },
         ) {
             Ok(_) => runtime.repo.head()?,
             Err(err) => {
@@ -1110,6 +1098,16 @@ impl HarnessBridgeRuntime {
 
     /// Dispatch one harness event payload through the relay.
     pub fn relay(&mut self, harness: &str, event: &str, payload: &Value) -> Result<()> {
+        crate::record_harness_operation(self.repo.root(), harness, Some(event), payload)?;
+        let patch = match harness {
+            "codex" => verbs::codex_cursor_patch(payload),
+            "claude-code" => verbs::claude_cursor_patch(payload),
+            "opencode" => verbs::opencode_cursor_patch(payload),
+            _ => verbs::IdentityCursor::default(),
+        };
+        if !patch.is_empty() {
+            verbs::stamp_identity_cursor(self.repo.root(), &patch)?;
+        }
         match harness {
             "codex" => relay_codex(self, event, payload),
             "claude-code" => relay_claude(self, event, payload),
@@ -1218,8 +1216,12 @@ impl HarnessBridgeRuntime {
             }
         };
 
-        let (thread_name, thread_id) =
-            self.resolve_harness_thread_binding(&params, &probe, &identity)?;
+        let (thread_name, thread_id) = self.resolve_harness_thread_binding(
+            &params,
+            &probe,
+            &identity,
+            attach.matched_entry.as_ref(),
+        )?;
         let entry = self.ensure_registry_entry(RegistryEntryRequest {
             heddle_session_id: &session.id,
             thread_name: thread_name.as_deref(),
@@ -1434,10 +1436,19 @@ impl HarnessBridgeRuntime {
         params: &OpenSessionParams,
         probe: &HarnessProbeResult,
         identity: &ResolvedIdentity,
+        matched_entry: Option<&ActorPresence>,
     ) -> Result<(Option<String>, Option<String>)> {
         if let Some(thread) = params.thread.clone() {
             let thread_id = thread_id_for_name(&self.repo, Some(&thread))?;
             return Ok((Some(thread), thread_id));
+        }
+
+        if let Some(entry) = matched_entry
+            && entry.native_actor_key == probe.native_actor_key
+            && probe.native_actor_key.is_some()
+            && let Some(thread_id) = thread_id_for_name(&self.repo, Some(&entry.thread))?
+        {
+            return Ok((Some(entry.thread.clone()), Some(thread_id)));
         }
 
         let current_attached = match self.repo.head_ref()? {
@@ -4687,5 +4698,74 @@ mod tests {
                 .map(|s| (s.id.clone(), s.segments.len()))
                 .collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn codex_hook_identity_survives_open_progress_and_model_switch() {
+        let (_temp, repo) = init_repo();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default(), test_bridge());
+        for model in ["model-a", "model-b"] {
+            relay_codex(
+                &mut runtime,
+                "PreToolUse",
+                &serde_json::json!({
+                    "session_id": "codex-root", "model": model, "model_provider": "local"
+                }),
+            )
+            .unwrap();
+        }
+        relay_codex(
+            &mut runtime,
+            "PreToolUse",
+            &serde_json::json!({
+                "session_id": "codex-root", "model": "model-b"
+            }),
+        )
+        .unwrap();
+        let entry = ActorPresenceStore::new(runtime.repo.heddle_dir())
+            .find_active_by_native_actor_key("codex:thread:codex-root")
+            .unwrap()
+            .unwrap();
+        let report = runtime
+            .reports
+            .load(entry.heddle_session_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.harness.model.as_deref(), Some("model-b"));
+        assert_eq!(report.harness.provider.as_deref(), Some("local"));
+        assert_eq!(
+            report.native_actor_key.as_deref(),
+            Some("codex:thread:codex-root")
+        );
+        assert_eq!(report.probe_source.as_deref(), Some("hook_payload"));
+    }
+
+    #[test]
+    fn opencode_native_assistant_event_reaches_session_report() {
+        let (_temp, repo) = init_repo();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default(), test_bridge());
+        relay_opencode(
+            &mut runtime,
+            "message.updated",
+            &serde_json::json!({
+                "event": {"type": "message.updated", "properties": {"info": {
+                    "id": "assistant-message", "role": "assistant", "sessionID": "oc-session",
+                    "parentID": "user-message", "modelID": "model-a", "providerID": "local"
+                }}}
+            }),
+        )
+        .unwrap();
+        let entry = ActorPresenceStore::new(runtime.repo.heddle_dir())
+            .find_active_by_native_actor_key("opencode:session:oc-session")
+            .unwrap()
+            .unwrap();
+        let report = runtime
+            .reports
+            .load(entry.heddle_session_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.harness.model.as_deref(), Some("model-a"));
+        assert_eq!(report.harness.provider.as_deref(), Some("local"));
+        assert!(report.native_parent_actor_key.is_none());
     }
 }

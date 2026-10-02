@@ -258,6 +258,10 @@ impl DeviceRpc {
                     .source_state()?
                     .context("capture state missing")?;
                 let capture = CaptureSummary {
+                    attribution: super::content_attribution::attribution(
+                        checkout.repository.store(),
+                        &state,
+                    )?,
                     revision: Some(wire_revision(session, state.id())),
                     thread: Some(wire_thread(session, checkout.binding.thread)),
                     summary: request.summary,

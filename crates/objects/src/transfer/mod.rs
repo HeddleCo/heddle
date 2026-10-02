@@ -60,3 +60,6 @@ mod tests {
         assert!(ObjectType::StateAttachment.packable_for_pull());
     }
 }
+
+#[cfg(test)]
+mod attribution_tests;

@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{Attribution, ChangeId, ContentHash, Principal, StateId};
 
+// Format 6 is selected only by a present attribution-evidence reference and
+// uses the dedicated typed hash prefix "state-v6" plus this body marker.
+// Legacy states retain the exact old "state" prefix/transcript, including length.
+const ATTRIBUTION_HASH_DOMAIN: &[u8] = b"heddle-state-v6\0";
+
 // ── Status ──────────────────────────────────────────────────────────
 
 /// Lifecycle status of a state.
@@ -328,6 +333,12 @@ pub struct State {
     #[serde(default)]
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
     pub lineage: Vec<ChangeLineage>,
+    /// Hash of a canonical AttributionEvidenceV1 Blob in this state's source
+    /// closure. Present selects hash format 6; absence preserves format 5/4.
+    /// The existing state signature commits the reference and therefore claims,
+    /// not proof that a provider actually executed a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_evidence: Option<ContentHash>,
 }
 
 impl State {
@@ -393,6 +404,7 @@ impl State {
             git_lossy: false,
             extra_headers: Vec::new(),
             lineage: Vec::new(),
+            attribution_evidence: None,
             status: Status::Draft,
         };
         state.refresh_state_id();
@@ -413,6 +425,14 @@ impl State {
 
     pub fn with_verification(mut self, verification: Verification) -> Self {
         self.verification = Some(verification);
+        self.refresh_state_id();
+        self
+    }
+
+    /// Bind structured attribution before state publication/signing. The caller
+    /// must persist the validated evidence Blob as part of the source closure.
+    pub fn with_attribution_evidence(mut self, evidence: ContentHash) -> Self {
+        self.attribution_evidence = Some(evidence);
         self.refresh_state_id();
         self
     }
@@ -513,7 +533,12 @@ impl State {
 
     pub fn compute_hash(&self) -> ContentHash {
         let content_len = self.hash_len();
-        ContentHash::compute_typed_with_len("state", content_len, |hasher| {
+        let type_prefix = if self.attribution_evidence.is_some() {
+            "state-v6"
+        } else {
+            "state"
+        };
+        ContentHash::compute_typed_with_len(type_prefix, content_len, |hasher| {
             self.update_hash(hasher);
         })
     }
@@ -543,16 +568,21 @@ impl State {
     }
 
     /// Format-4 identity for agent states hashed before `thought_level` and
-    /// `parent` entered the transcript. Graph edges keep this id.
+    /// `parent` entered the transcript. Graph edges keep this id. States that
+    /// commit attribution evidence never accept this legacy identity.
     pub fn pre_cursor_id(&self) -> StateId {
         StateId::from_content_hash(self.compute_pre_cursor_hash())
     }
 
     /// Accept the current id, or a format-4 agent id that omitted unpublished
-    /// cursor fields. Published cursor fields require the current hash.
+    /// cursor fields. Published cursor fields or attribution evidence require
+    /// the current hash; neither can be downgraded through a legacy id.
     pub fn accepts_stored_id(&self, stored: &StateId) -> bool {
         if self.id() == *stored {
             return true;
+        }
+        if self.attribution_evidence.is_some() {
+            return false;
         }
         let unpublished_cursor = self
             .attribution
@@ -565,7 +595,7 @@ impl State {
     /// Content hash that produced `stored` when this state accepts that id.
     ///
     /// Format-4 agent states keep a pre-cursor id. Verification and re-signing
-    /// must use that hash, not the current format-5 [`Self::compute_hash`].
+    /// must use that hash, not a current-format [`Self::compute_hash`].
     pub fn hash_for_stored_id(&self, stored: &StateId) -> ContentHash {
         if self.id() == *stored {
             self.compute_hash()
@@ -584,8 +614,10 @@ impl State {
         self.parents.len() > 1
     }
 
+    /// Whether this State records agent participation, including evidence with
+    /// an unknown model. Claim integrity is separate from execution attestation.
     pub fn is_agent_authored(&self) -> bool {
-        self.attribution.agent.is_some()
+        self.attribution.agent.is_some() || self.attribution_evidence.is_some()
     }
 
     pub fn first_parent(&self) -> Option<&StateId> {
@@ -593,7 +625,13 @@ impl State {
     }
 
     fn hash_len(&self) -> u64 {
-        self.hash_len_core() + self.hash_len_fidelity()
+        self.hash_len_core()
+            + self.hash_len_fidelity()
+            + if self.attribution_evidence.is_some() {
+                ATTRIBUTION_HASH_DOMAIN.len() as u64 + 32
+            } else {
+                0
+            }
     }
 
     fn hash_len_pre_cursor(&self) -> u64 {
@@ -724,8 +762,14 @@ impl State {
     }
 
     fn update_hash(&self, hasher: &mut blake3::Hasher) {
+        if self.attribution_evidence.is_some() {
+            hasher.update(ATTRIBUTION_HASH_DOMAIN);
+        }
         self.update_hash_core(hasher);
         self.update_hash_fidelity(hasher);
+        if let Some(evidence) = self.attribution_evidence {
+            hasher.update(evidence.as_bytes());
+        }
     }
 
     fn compute_pre_cursor_hash(&self) -> ContentHash {

@@ -50,7 +50,7 @@ use crate::{
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
     sha_map::ShaMap,
-    state_writer::state_from_commit_with_rewrites,
+    state_writer::{attribution_evidence_from_commit, state_from_commit_with_rewrites},
 };
 
 static IMPORT_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -805,6 +805,7 @@ struct PackedImport<'a, B: ImportPackSink> {
     repair_mapped_objects: bool,
     materialized_trees: HashSet<String>,
     materialized_blobs: HashSet<String>,
+    emitted_blobs: HashSet<ContentHash>,
 }
 
 impl<'a, B: ImportPackSink> PackedImport<'a, B> {
@@ -819,6 +820,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             repair_mapped_objects: false,
             materialized_trees: HashSet::new(),
             materialized_blobs: HashSet::new(),
+            emitted_blobs: HashSet::new(),
         }
     }
 
@@ -980,7 +982,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         let bytes = self.git.read_blob(git_blob_sha)?;
         let blob = Blob::from_slice(&bytes);
         let hash = blob.hash();
-        if self.emit_objects {
+        if self.emit_objects && self.emitted_blobs.insert(hash) {
             self.builder.add(hash, PackObjectType::Blob, bytes)?;
             self.stats.object_count += 1;
         }
@@ -1094,6 +1096,16 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             .encode_current_msgpack()
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         if self.emit_objects {
+            if let Some(blob) = attribution_evidence_from_commit(commit)?
+                && self.emitted_blobs.insert(blob.hash())
+            {
+                self.builder.add_id(
+                    PackObjectId::Hash(blob.hash()),
+                    PackObjectType::Blob,
+                    blob.into_content(),
+                )?;
+                self.stats.object_count += 1;
+            }
             self.builder.add_id(
                 PackObjectId::StateId(state.id()),
                 PackObjectType::State,
@@ -1406,6 +1418,9 @@ pub fn bind_single_git_commit_overlay(
             .map
             .insert_commit(&commit.sha, state.state_id)
             .map_err(IngestError::from)?;
+        if let Some(blob) = attribution_evidence_from_commit(&commit)? {
+            repo.store().put_blob(&blob)?;
+        }
         let descriptor_dir = repo.heddle_dir().join("ingest").join("overlay-states");
         objects::fs_atomic::create_private_dir_all(&descriptor_dir)?;
         let path = descriptor_dir.join(format!("{}.state", state.state_id.to_string_full()));
@@ -2374,9 +2389,21 @@ mod tests {
             1,
             "fixture tip must be non-root"
         );
-        let note = objects::object::HeddleNote::from_state(&source_state)
-            .to_json_bytes()
-            .expect("encode canonical note");
+        let evidence = objects::object::AttributionEvidenceV1 {
+            harness: Some(objects::object::AttributionClaim::new(
+                "codex",
+                objects::object::AttributionBasis::Observed,
+                objects::object::AttributionSource::Process,
+            )),
+            ..Default::default()
+        }
+        .to_blob()
+        .expect("attribution evidence");
+        let source_state = source_state.with_attribution_evidence(evidence.hash());
+        let source_id = source_state.id();
+        let mut note = objects::object::HeddleNote::from_state(&source_state);
+        note.attribution_evidence = Some(evidence.content().to_vec());
+        let note = note.to_json_bytes().expect("encode canonical note");
         git_output(
             &source,
             &["notes", "--ref=heddle", "add", "-f", "-F", "-", &tip],
@@ -2425,6 +2452,15 @@ mod tests {
             source_state,
             "lazy bind must retain the exact portable source State"
         );
+        assert_eq!(
+            clone_repo
+                .store()
+                .get_blob(&evidence.hash())
+                .expect("read bound evidence")
+                .expect("bound evidence")
+                .content(),
+            evidence.content()
+        );
         drop(clone_repo);
 
         let (_, repaired_map) =
@@ -2437,6 +2473,15 @@ mod tests {
             .expect("read repaired state")
             .expect("repaired state");
         assert_eq!(repaired_state, source_state);
+        assert_eq!(
+            repaired
+                .store()
+                .get_blob(&evidence.hash())
+                .expect("read imported evidence")
+                .expect("imported evidence")
+                .content(),
+            evidence.content()
+        );
         assert!(
             repaired
                 .store()

@@ -44,6 +44,8 @@ const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
     ".heddle/",
     ".heddle.identity",
     ".heddle.last-turn",
+    ".heddle.operations",
+    ".heddle.operations-*",
     ".identity.lock",
     ".identity.tmp.*",
     ".last-turn.tmp.*",

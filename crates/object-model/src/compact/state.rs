@@ -11,19 +11,31 @@ use crate::object::{ChangeLineageKind, State};
 
 pub(super) const STATE_MAGIC_V1: &[u8; 4] = b"HCS1";
 pub(super) const STATE_MAGIC: &[u8; 4] = b"HCS2";
+pub(super) const STATE_MAGIC_V3: &[u8; 4] = b"HCS3";
 
 /// Whether `bytes` begin with a compact-state frame discriminator.
 pub fn is_state_frame(bytes: &[u8]) -> bool {
-    bytes.starts_with(STATE_MAGIC) || bytes.starts_with(STATE_MAGIC_V1)
+    bytes.starts_with(STATE_MAGIC)
+        || bytes.starts_with(STATE_MAGIC_V1)
+        || bytes.starts_with(STATE_MAGIC_V3)
 }
 
 /// Encode states as lossless columns, omitting only the derivable state id.
 ///
 /// Format-4 agent states keep their accepted stored id through
 /// [`crate::object::State::accepts_stored_id`] after decode; the frame
-/// stays HCS2.
+/// stays HCS2 unless at least one state commits attribution evidence, in which
+/// case HCS3 appends its required reference column. Legacy batches are exact.
 pub fn encode_state_frame(states: &[State]) -> Result<Vec<u8>> {
-    encode_state_frame_versioned(states, STATE_MAGIC)
+    let magic = if states
+        .iter()
+        .any(|state| state.attribution_evidence.is_some())
+    {
+        STATE_MAGIC_V3
+    } else {
+        STATE_MAGIC
+    };
+    encode_state_frame_versioned(states, magic)
 }
 
 #[cfg(test)]
@@ -38,16 +50,36 @@ fn encode_state_frame_versioned(states: &[State], magic: &[u8; 4]) -> Result<Vec
             states.len()
         )));
     }
+    if magic != STATE_MAGIC_V3
+        && states
+            .iter()
+            .any(|state| state.attribution_evidence.is_some())
+    {
+        return Err(invalid(
+            "legacy state frame cannot discard attribution evidence",
+        ));
+    }
     let dictionaries = StateDictionaries::from_states(states);
     let mut output = Writer::new(magic);
     output.put_u64(states.len() as u64);
-    encode_dictionaries(&mut output, &dictionaries, magic == STATE_MAGIC);
+    encode_dictionaries(&mut output, &dictionaries, magic != STATE_MAGIC_V1);
     encode_structure(&mut output, states);
     encode_attribution(&mut output, states, &dictionaries);
     encode_intent_and_verification(&mut output, states)?;
     encode_timestamps(&mut output, states);
     encode_fidelity(&mut output, states, &dictionaries);
     encode_lineage(&mut output, states);
+    if magic == STATE_MAGIC_V3 {
+        for state in states {
+            match state.attribution_evidence {
+                Some(hash) => {
+                    output.put_u8(1);
+                    output.put_fixed(hash.as_bytes());
+                }
+                None => output.put_u8(0),
+            }
+        }
+    }
     Ok(output.finish())
 }
 

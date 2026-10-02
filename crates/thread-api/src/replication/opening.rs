@@ -117,6 +117,8 @@ pub fn accept(
                 max_snapshot_bytes: 0,
             }),
             record_formats: vec![OPERATION_FORMAT.into()],
+            understood_native_source_formats:
+                crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec(),
         },
     })
 }
@@ -402,6 +404,15 @@ mod tests {
             (allowed.clone(), 1)
         );
         assert_eq!(ready.sharing_policy_version, vec![5; 32]);
+        assert_eq!(
+            ready.understood_native_source_formats,
+            crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS,
+            "Ready advertises actual native support independently of record_formats"
+        );
+        assert!(
+            open.understood_native_source_formats.is_empty(),
+            "legacy opening stays admissible"
+        );
         assert!(accept(&open, &thread, &local, [7; 32], &allowed, vec![]).is_err());
         let mut changed = open.clone();
         changed

@@ -356,7 +356,8 @@ where
         current = state.parents.first().copied();
 
         if let Some(ref filter) = query.agent_model_substring {
-            match state.attribution.agent.as_ref().map(|agent| &agent.model) {
+            let evidence = crate::load_attribution_evidence_async(&history_source, &state).await?;
+            match crate::attribution_model(state.attribution.agent.as_ref(), evidence.as_ref()) {
                 Some(model) if model.contains(filter.as_str()) => {}
                 _ => continue,
             }

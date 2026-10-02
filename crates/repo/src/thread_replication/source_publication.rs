@@ -64,10 +64,11 @@ impl ThreadReplica {
         let mut prepared = Vec::<(&ThreadReplica, &SignedOperation, ThreadOperation)>::new();
         for signed in operations {
             let operation = signed.verify()?;
-            if operation.source_state()?.is_none() {
-                return Err(Error::Invalid(
-                    "publication accepts source originals only".into(),
-                ));
+            let state = operation.source_state()?.ok_or_else(|| {
+                Error::Invalid("publication accepts source originals only".into())
+            })?;
+            if state.id() == revision {
+                super::source_possession::validate_attribution_evidence(store, &state)?;
             }
             let replica = guards
                 .iter()

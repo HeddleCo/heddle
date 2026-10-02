@@ -54,10 +54,12 @@ impl HostedClient {
     /// missing routes or a failed negotiation still complete over direct Fetch.
     pub async fn fetch_native_source(
         &self,
-        open: FetchOpen,
+        mut open: FetchOpen,
         limits: Limits,
         scratch: &Path,
     ) -> anyhow::Result<StagedSource> {
+        open.understood_native_source_formats =
+            thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec();
         let delivery = fetch_open::Delivery::try_from(open.delivery)
             .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
         let remote = self.native().await?;

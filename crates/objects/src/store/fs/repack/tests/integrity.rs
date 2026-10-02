@@ -258,6 +258,62 @@ fn deliberately_corrupted_repack_output_is_rejected_before_cutover() {
 }
 
 #[test]
+fn attribution_states_and_evidence_survive_repeated_repack() {
+    use crate::object::{
+        AttributionBasis, AttributionClaim, AttributionEvidenceV1, AttributionSource,
+    };
+
+    let (_temp, store) = create_store();
+    let tree = Tree::new();
+    store.put_tree(&tree).expect("tree");
+    let evidence = AttributionEvidenceV1 {
+        harness: Some(AttributionClaim::new(
+            "codex",
+            AttributionBasis::Observed,
+            AttributionSource::Process,
+        )),
+        ..Default::default()
+    }
+    .to_blob()
+    .expect("evidence");
+    store.put_blob(&evidence).expect("evidence blob");
+    let legacy = State::new(
+        tree.hash(),
+        vec![],
+        Attribution::human(Principal::new("Repack", "repack@example.test")),
+    );
+    let rich = State::new(tree.hash(), vec![legacy.id()], legacy.attribution.clone())
+        .with_attribution_evidence(evidence.hash());
+    store.put_state(&legacy).expect("legacy state");
+    store.put_state(&rich).expect("evidence state");
+
+    for _ in 0..2 {
+        let operation = Arc::new(FsRepackOperation::new(store.clone()));
+        let report = started_handle(scheduler(None).repack_now(operation).expect("repack"))
+            .wait()
+            .expect("completed repack");
+        assert_eq!(report.objects_repacked, 4);
+        let reopened = crate::store::FsStore::new(store.root());
+        for expected in [&legacy, &rich] {
+            let actual = reopened
+                .get_state(&expected.id())
+                .expect("read state")
+                .expect("state preserved");
+            assert_eq!(actual.id(), expected.id());
+            assert_eq!(
+                actual.encode_current_msgpack().expect("actual bytes"),
+                expected.encode_current_msgpack().expect("expected bytes")
+            );
+        }
+        let actual = reopened
+            .get_blob(&evidence.hash())
+            .expect("read evidence")
+            .expect("required evidence preserved");
+        assert_eq!(actual.content(), evidence.content());
+    }
+}
+
+#[test]
 fn corrupted_compact_metadata_frame_is_rejected_before_cutover() {
     let (_temp, store) = create_store();
     let tree = Tree::from_entries(Vec::new());

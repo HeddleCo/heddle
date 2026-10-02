@@ -87,6 +87,7 @@ pub(crate) fn create_git_checkpoint(
         }),
         confidence: None,
         attribution,
+        attribution_evidence: None,
         git_scope: GitScope::WorktreeAll,
         supplied_tree: None,
         reuse_current_state: true,

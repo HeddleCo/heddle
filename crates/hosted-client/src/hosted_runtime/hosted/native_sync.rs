@@ -1063,6 +1063,8 @@ impl HostedClient {
         // a caller supplies usable routes here.
         let open = preferred_fetch_open(
             FetchOpen {
+                understood_native_source_formats:
+                    thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec(),
                 thread: Some(reference.clone()),
                 revision: Some(revision),
                 selection: Some(TransferSelection {

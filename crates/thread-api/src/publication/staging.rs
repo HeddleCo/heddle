@@ -19,6 +19,18 @@ pub fn validate_source_artifacts(
     originals: PublicationOriginals,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     originals.validate_bounds().map_err(preparation)?;
+    crate::source_format::require_native_source_formats(
+        &opening.required_native_source_formats,
+        crate::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS,
+    )
+    .map_err(preparation)?;
+    crate::source_format::require_native_source_formats(
+        &originals
+            .required_native_source_formats()
+            .map_err(preparation)?,
+        &opening.required_native_source_formats,
+    )
+    .map_err(preparation)?;
     let thread = opening
         .thread
         .as_ref()
@@ -107,6 +119,7 @@ pub fn validate_source_artifacts(
         operations,
         dependencies,
         receipts,
+        &opening.required_native_source_formats,
     )
 }
 fn preparation(error: impl std::fmt::Display) -> Error {

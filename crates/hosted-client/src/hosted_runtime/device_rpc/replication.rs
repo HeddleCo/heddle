@@ -138,7 +138,8 @@ impl DeviceRpc {
             LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
                 .with_device_authority(self.home.clone()),
         );
-        let causal = replication::Session::new(backend, peer, negotiated, max_items)?;
+        let causal = replication::Session::new(backend, peer, negotiated, max_items)?
+            .with_peer_native_source_formats(open.understood_native_source_formats);
         session.check_current(&self.home)?;
         writer
             .send(

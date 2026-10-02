@@ -64,6 +64,29 @@ fn check_state_integrity(
             ));
         }
     }
+    if let Some(hash) = state.attribution_evidence {
+        match repo.store().get_blob(&hash)? {
+            Some(blob) => {
+                let verified =
+                    objects::object::AttributionEvidenceV1::from_blob_with_hash(&blob, hash)
+                        .and_then(|evidence| {
+                            evidence.validate_legacy_agent(state.attribution.agent.as_ref())
+                        });
+                if verified.is_err() {
+                    errors.push(make_error(
+                        "invalid_attribution_evidence",
+                        "State attribution evidence is invalid or contradictory",
+                        Some(hash.short()),
+                    ));
+                }
+            }
+            None => errors.push(make_error(
+                "missing_attribution_evidence",
+                "State requires missing attribution evidence",
+                Some(hash.short()),
+            )),
+        }
+    }
     if thorough && repo.verify_state_signature(&state.state_id)? == SignatureStatus::Invalid {
         errors.push(make_error(
             "invalid_signature",

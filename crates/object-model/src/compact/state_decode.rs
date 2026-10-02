@@ -14,7 +14,7 @@ use super::{
         MIN_PRINCIPAL_BYTES, MIN_STATE_COLUMN_BYTES, MIN_STATE_PARENT_BYTES,
         MIN_VERIFICATION_CUSTOM_BYTES, admit_count,
     },
-    state::{STATE_MAGIC, STATE_MAGIC_V1},
+    state::{STATE_MAGIC, STATE_MAGIC_V1, STATE_MAGIC_V3},
 };
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal, State,
@@ -26,7 +26,7 @@ pub fn decode_state_frame(bytes: &[u8]) -> Result<Vec<State>> {
     let magic = state_frame_magic(bytes)?;
     let mut input = Reader::verified(bytes, magic)?;
     let count = input.get_count_at_most("state frame", 1, MAX_COMPACT_STATE_COUNT)?;
-    let (principals, agents) = decode_dictionaries(&mut input, magic == STATE_MAGIC)?;
+    let (principals, agents) = decode_dictionaries(&mut input, magic != STATE_MAGIC_V1)?;
     admit_count(
         "state frame",
         count,
@@ -41,6 +41,27 @@ pub fn decode_state_frame(bytes: &[u8]) -> Result<Vec<State>> {
     decode_timestamps(&mut input, &mut states)?;
     decode_fidelity(&mut input, &mut states, &principals)?;
     decode_lineage(&mut input, &mut states)?;
+    if magic == STATE_MAGIC_V3 {
+        for state in &mut states {
+            state.attribution_evidence = match input.get_u8()? {
+                0 => None,
+                1 => Some(ContentHash::from_bytes(input.get_fixed()?)),
+                value => {
+                    return Err(invalid(format!(
+                        "invalid attribution evidence option tag {value}"
+                    )));
+                }
+            };
+        }
+        if states
+            .iter()
+            .all(|state| state.attribution_evidence.is_none())
+        {
+            return Err(invalid(
+                "HCS3 requires at least one attribution evidence reference",
+            ));
+        }
+    }
     input.finish()?;
     for state in &mut states {
         state.state_id = state.id();
@@ -214,7 +235,9 @@ fn decode_verification(input: &mut Reader<'_>) -> Result<Option<Verification>> {
 }
 
 fn state_frame_magic(bytes: &[u8]) -> Result<&'static [u8; 4]> {
-    if bytes.starts_with(STATE_MAGIC) {
+    if bytes.starts_with(STATE_MAGIC_V3) {
+        Ok(STATE_MAGIC_V3)
+    } else if bytes.starts_with(STATE_MAGIC) {
         Ok(STATE_MAGIC)
     } else if bytes.starts_with(STATE_MAGIC_V1) {
         Ok(STATE_MAGIC_V1)
@@ -380,5 +403,6 @@ fn blank_state() -> State {
         git_lossy: false,
         extra_headers: Vec::new(),
         lineage: Vec::new(),
+        attribution_evidence: None,
     }
 }

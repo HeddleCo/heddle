@@ -2156,8 +2156,8 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.31.0-alpha.13"
-source = "git+https://github.com/HeddleCo/api.git?rev=dc636bb5019f0cbd01e9cf5935be5fde22fa8461#dc636bb5019f0cbd01e9cf5935be5fde22fa8461"
+version = "0.31.0-alpha.16"
+source = "git+https://github.com/HeddleCo/api.git?rev=1b97aa7951441814b2c74eeb8b4defad88f976b1#1b97aa7951441814b2c74eeb8b4defad88f976b1"
 dependencies = [
  "blake3",
  "bytes",
@@ -2634,6 +2634,7 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rmp-serde",
+ "schemars",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2882,7 +2883,9 @@ dependencies = [
  "heddle-state-review",
  "hex",
  "ignore",
+ "libc",
  "rmp-serde",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

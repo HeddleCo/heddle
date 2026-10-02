@@ -60,11 +60,26 @@ pub(super) async fn partial_roundtrip(
     )
     .expect("salted tree");
     repository.store().put_tree(&tree).expect("source tree");
+    let evidence = objects::object::AttributionEvidenceV1 {
+        harness: Some(objects::object::AttributionClaim::new(
+            "codex",
+            objects::object::AttributionBasis::RequestReported,
+            objects::object::AttributionSource::HarnessHook,
+        )),
+        ..Default::default()
+    }
+    .to_blob()
+    .expect("canonical harness evidence");
+    repository
+        .store()
+        .put_blob(&evidence)
+        .expect("source evidence");
     let state = State::new_snapshot(
         tree.hash(),
         vec![replica.genesis().expect("genesis").base],
         Attribution::human(Principal::new("Owner", "owner@test")),
-    );
+    )
+    .with_attribution_evidence(evidence.hash());
     repository.store().put_state(&state).expect("source state");
     let hidden_index = tree
         .entries()
@@ -360,10 +375,46 @@ pub(super) async fn partial_roundtrip(
     );
     let mut request = open(&genesis, state.id());
     request.selection.as_mut().expect("selection").allow_partial = true;
+    assert_eq!(
+        remote.description.understood_native_source_formats,
+        thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS
+    );
+    let mut legacy = request.clone();
+    legacy.understood_native_source_formats.clear();
+    let unsupported = remote
+        .fetch_content(legacy, Default::default())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("legacy receiver must fail before Ready or source bytes"));
+    assert!(
+        matches!(&unsupported,
+            thread_api::fetch::Error::Client(api::v2::client::ClientError::Transport(
+                thread_api::transport::Error::Remote(failure)
+            )) if failure.code == api::heddle::api::common::CallFailureCode::FailedPrecondition as i32
+                && failure.message.contains("upgrade the peer")
+        ),
+        "actionable explicit format failure: {unsupported}"
+    );
     let download = remote
         .fetch_content(request, Default::default())
         .await
         .expect("partial source Fetch");
+    assert_eq!(
+        download.ready().native_source_formats,
+        thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS
+    );
+    let mut plan = download.ready().clone();
+    let checkpoint = plan.checkpoint.take().expect("format-bound checkpoint");
+    assert_eq!(
+        checkpoint.plan_digest,
+        blake3::hash(&plan.encode_to_vec()).as_bytes()
+    );
+    plan.native_source_formats.clear();
+    assert_ne!(
+        checkpoint.plan_digest,
+        blake3::hash(&plan.encode_to_vec()).as_bytes(),
+        "checkpoint cannot retain its digest after weakening the format set"
+    );
     assert!(
         !download.ready().full_closure_available,
         "hidden leaf requires partial closure"
@@ -440,6 +491,14 @@ pub(super) async fn partial_roundtrip(
             )
             .expect("install metadata and visible HRT1 closure"),
         state.id()
+    );
+    assert_eq!(
+        receiving_repository
+            .store()
+            .get_blob(&evidence.hash())
+            .expect("evidence lookup")
+            .expect("evidence preserved"),
+        evidence
     );
     let installed = repo::thread_replication::ThreadReplica::open(
         receiving_repository.heddle_dir(),
@@ -877,6 +936,8 @@ fn open(genesis: &ThreadGenesis, state: objects::object::StateId) -> FetchOpen {
         id: genesis.spool.clone(),
     };
     FetchOpen {
+        understood_native_source_formats:
+            thread_api::source_format::UNDERSTOOD_NATIVE_SOURCE_FORMATS.to_vec(),
         thread: Some(ThreadRef {
             spool: Some(spool.clone()),
             id: Some(ThreadId {

@@ -40,7 +40,11 @@ pub fn cmd_expand(cli: &Cli, repo: &Repository, reference: String) -> Result<()>
     let captures = collapse
         .sources
         .iter()
-        .map(|source| require_resolved_state(repo, source).map(ExpandedCaptureOutput::from))
+        .map(|source| {
+            let state = require_resolved_state(repo, source)?;
+            let evidence = repo::load_attribution_evidence(repo.store(), &state)?;
+            Ok(ExpandedCaptureOutput::from_state(state, evidence))
+        })
         .collect::<Result<Vec<_>>>()?;
     let git_commit = repo
         .latest_git_checkpoint_for_state(&collapse.result)

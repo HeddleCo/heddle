@@ -391,14 +391,21 @@ where
 
     fn load_state_data(&self, state_id: StateId) -> Result<Option<CommitGraphStateData>> {
         let source = HistoryObjectSource::new(self.source);
-        Ok(source.get_state(&state_id)?.map(|state| {
-            (
-                state.parents,
-                state.tree,
-                state.created_at.timestamp(),
-                state.attribution.agent.map(|a| a.model),
-            )
-        }))
+        source
+            .get_state(&state_id)?
+            .map(|state| {
+                let evidence = crate::load_attribution_evidence(&source, &state)?;
+                let model =
+                    crate::attribution_model(state.attribution.agent.as_ref(), evidence.as_ref())
+                        .map(str::to_string);
+                Ok((
+                    state.parents,
+                    state.tree,
+                    state.created_at.timestamp(),
+                    model,
+                ))
+            })
+            .transpose()
     }
 
     fn generation(&self, state_id: StateId) -> Option<usize> {

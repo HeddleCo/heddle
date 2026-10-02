@@ -35,6 +35,8 @@ pub struct SnapshotOutput {
     pub principal: SnapshotPrincipalOutput,
     pub principal_source: String,
     pub agent: Option<SnapshotAgentOutput>,
+    /// Authoritative immutable claims, including known harness with unknown model.
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
     pub captured_path_count: usize,

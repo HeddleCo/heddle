@@ -70,6 +70,8 @@ pub struct ExpandedCaptureOutput {
     pub intent: Option<String>,
     pub principal: String,
     pub agent: Option<String>,
+    pub is_agent_authored: bool,
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
     pub confidence: Option<f32>,
     pub created_at: String,
     pub parents: Vec<String>,
@@ -160,6 +162,8 @@ pub struct ShowOutput {
     pub confidence: Option<f32>,
     pub principal: ShowPrincipalInfo,
     pub agent: Option<ShowAgentInfo>,
+    pub is_agent_authored: bool,
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
     pub created_at: String,
     pub status: String,
     pub verification: Option<ShowVerificationInfo>,
@@ -207,19 +211,24 @@ pub struct ShowVerificationInfo {
     pub lint_warnings: Option<u32>,
 }
 
-impl From<objects::object::State> for ExpandedCaptureOutput {
-    fn from(state: objects::object::State) -> Self {
+impl ExpandedCaptureOutput {
+    pub fn from_state(
+        state: objects::object::State,
+        evidence: Option<objects::object::AttributionEvidenceV1>,
+    ) -> Self {
+        let is_agent_authored = state.is_agent_authored();
         Self {
             state_id: state.state_id.short(),
             state_id_full: state.state_id.to_string_full(),
             content_hash: state.compute_hash().short(),
             intent: state.intent,
             principal: state.attribution.principal.to_string(),
-            agent: state
-                .attribution
-                .agent
-                .as_ref()
-                .map(objects::object::Agent::to_string),
+            agent: repo::attribution_agent_label(
+                state.attribution.agent.as_ref(),
+                evidence.as_ref(),
+            ),
+            is_agent_authored,
+            attribution_evidence: evidence,
             confidence: state.confidence,
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             parents: state
@@ -279,6 +288,8 @@ pub struct StateEntry {
     #[schemars(skip)]
     pub principal_email: String,
     pub agent: Option<String>,
+    pub is_agent_authored: bool,
+    pub attribution_evidence: Option<objects::object::AttributionEvidenceV1>,
     pub confidence: Option<f32>,
     pub created_at: String,
     pub parents: Vec<String>,
@@ -329,8 +340,12 @@ impl From<verbs::ReflogLine> for ReflogEntry {
     }
 }
 
-impl From<&objects::object::State> for StateEntry {
-    fn from(state: &objects::object::State) -> Self {
+impl StateEntry {
+    pub fn from_state(
+        state: &objects::object::State,
+        evidence: Option<objects::object::AttributionEvidenceV1>,
+    ) -> Self {
+        let is_agent_authored = state.is_agent_authored();
         Self {
             state_id: state.state_id.short(),
             content_hash: state.compute_hash().short(),
@@ -338,11 +353,12 @@ impl From<&objects::object::State> for StateEntry {
             principal: state.attribution.principal.to_string(),
             principal_name: state.attribution.principal.name_lossy().into_owned(),
             principal_email: state.attribution.principal.email_lossy().into_owned(),
-            agent: state
-                .attribution
-                .agent
-                .as_ref()
-                .map(objects::object::Agent::to_string),
+            agent: repo::attribution_agent_label(
+                state.attribution.agent.as_ref(),
+                evidence.as_ref(),
+            ),
+            is_agent_authored,
+            attribution_evidence: evidence,
             confidence: state.confidence,
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             parents: state
@@ -663,3 +679,7 @@ pub struct TimelineRecoveryOutput {
     pub moved_at_ms: i64,
     pub checkout_state: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "history_attribution_tests.rs"]
+mod attribution_tests;

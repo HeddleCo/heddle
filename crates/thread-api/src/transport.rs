@@ -16,6 +16,8 @@ pub use iroh::{IrohTransport, Reader, Writer, accepted_stream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    NativeSourceFormat(#[from] api::source_format::NativeSourceFormatError),
     #[error("transport I/O: {0}")]
     Io(String),
     #[error("RPC made no progress before its timeout")]

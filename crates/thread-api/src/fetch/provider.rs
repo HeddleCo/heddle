@@ -525,6 +525,11 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 state,
             })));
         }
+        if !ready.native_source_formats.is_empty() {
+            return Err(Error::Invalid(
+                "provider plans do not bind native source formats; use direct Fetch",
+            ));
+        }
         let state = Validation::new(open.clone(), ready, Some(&issuer), limits)?;
         Ok(ProviderFetch::Provider(Box::new(ProviderDownload {
             sender,
@@ -954,6 +959,50 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn provider_attribution_formats_fail_before_offer_or_consent() {
+        let (mut open, mut ready, endpoint, _) = super::super::tests::fixture();
+        open.delivery = fetch_open::Delivery::ProviderPreferred as i32;
+        open.understood_native_source_formats = vec![api::source_format::STATE_V6_ATTRIBUTION_V1];
+        open.routes = vec![ProviderDialRoute {
+            provider: Some(EndpointRef {
+                public_key: vec![9; 32],
+                kind: EndpointKind::Provider as i32,
+            }),
+            address: Some(provider_dial_route::Address::RelayUrl(
+                "https://relay.example/".into(),
+            )),
+        }];
+        ready.packs.clear();
+        ready.native_source_formats = vec![api::source_format::STATE_V6_ATTRIBUTION_V1];
+        let finished = Arc::new(AtomicBool::new(false));
+        let remote = Remote {
+            api: Client::new(
+                Peer {
+                    frames: vec![
+                        FetchServerFrame {
+                            body: Some(fetch_server_frame::Body::Ready(ready)),
+                        }
+                        .encode_to_vec(),
+                    ],
+                    finished: Arc::clone(&finished),
+                },
+                [rpc::SyncServiceFetch::METHOD.path.into()],
+            ),
+            description: DescribeEndpointResponse {
+                endpoint: Some(endpoint),
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            remote.begin_provider_fetch(open, Limits::default()).await,
+            Err(Error::Invalid(
+                "provider plans do not bind native source formats; use direct Fetch"
+            ))
+        ));
+        assert!(!finished.load(Ordering::Acquire));
     }
 
     #[test]
