@@ -262,6 +262,8 @@ impl DeviceRpc {
                             body: turn.body.clone(),
                             principal_id: metadata.actor.principal_id.to_string(),
                             agent_id: metadata.actor.agent_id.unwrap_or_default(),
+                            // Live display names are a server projection; unresolved here.
+                            author_display_name: String::new(),
                             mentions: metadata
                                 .mentions
                                 .iter()
@@ -336,6 +338,8 @@ impl DeviceRpc {
                             .collect(),
                         principal_id: record.metadata.actor.principal_id.to_string(),
                         agent_id: record.metadata.actor.agent_id.unwrap_or_default(),
+                        // Live display names are a server projection; unresolved here.
+                        author_display_name: String::new(),
                         supersedes: record.supersedes.map(|id| reference(id.to_string())),
                         extracted_from: record.extracted_from.map(|id| reference(id.to_string())),
                         anchor_coverage: anchor_coverage as i32,

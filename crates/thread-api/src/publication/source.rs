@@ -299,6 +299,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     checkpoint: options.checkpoint,
                     source: Some(options.source),
                     destination: Some(destination),
+                    semantic_indexes: Vec::new(),
                 },
             )),
         })

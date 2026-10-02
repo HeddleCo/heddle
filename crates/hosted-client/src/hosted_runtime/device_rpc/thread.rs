@@ -666,6 +666,9 @@ impl DeviceRpc {
                         }),
                     }),
                     kind: thread_relationship::Kind::Parent as i32,
+                    // Related-Thread display metadata is not projected by the daemon; unknown.
+                    name: String::new(),
+                    lifecycle: ThreadLifecycle::Unspecified as i32,
                 });
             }
         }
