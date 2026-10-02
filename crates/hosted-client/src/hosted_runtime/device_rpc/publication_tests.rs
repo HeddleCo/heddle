@@ -144,6 +144,7 @@ pub(super) async fn roundtrip(
         let originals = PublicationOriginals {
             geneses: vec![replica.genesis_record().expect("creator wrapper")],
             operations: vec![ReplicationOperations {
+                import_authority: None,
                 boundary_acceptances: Vec::new(),
                 operations: vec![super::thread::signed_record(&original).expect("original wire")],
                 authority_admissions: vec![],
@@ -168,6 +169,46 @@ pub(super) async fn roundtrip(
             sharing_policy_version: vec![],
             checkpoint: None,
         };
+        // The daemon is not a HYBRID peer (api#307): an otherwise valid opening
+        // that carries import authority is refused before staging, never
+        // published with the bundle silently ignored.
+        let hybrid = PublishContentClientFrame {
+            client_operation_id: uuid::Uuid::new_v4().to_string(),
+            body: Some(publish_content_client_frame::Body::Open(
+                PublishContentOpen {
+                    thread: Some(reference.clone()),
+                    revision: Some(RevisionRef {
+                        spool: reference.spool.clone(),
+                        revision: Some(revision_ref::Revision::State(
+                            api::heddle::api::common::StateId {
+                                value: pack.revision().as_bytes().to_vec(),
+                            },
+                        )),
+                    }),
+                    packs: pack.artifacts().to_vec(),
+                    source: Some(options().source),
+                    destination: remote.description.endpoint.clone(),
+                    import_authority: Some(ImportPublicProofBundleV1::default()),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(
+            remote
+                .publish_content(
+                    &hybrid,
+                    &originals,
+                    pack.open_artifacts().await.expect("artifacts")
+                )
+                .await
+                .is_err(),
+            "a publication opening carrying HYBRID import authority must be refused"
+        );
+        assert!(
+            !replica
+                .has_source_possession(state.id())
+                .expect("source still absent")
+        );
         let receipt = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             remote
@@ -234,6 +275,7 @@ pub(super) async fn roundtrip(
         let wrong = PublicationOriginals {
             geneses: originals.geneses.clone(),
             operations: vec![ReplicationOperations {
+                import_authority: None,
                 boundary_acceptances: Vec::new(),
                 operations: vec![super::thread::signed_record(&denied).expect("wire")],
                 authority_admissions: vec![],

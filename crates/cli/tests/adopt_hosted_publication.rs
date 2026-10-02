@@ -57,8 +57,12 @@ impl Drop for ProcessHeddleHome {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
+#[test]
+fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
+    on_large_stack(adopted_history_round_trip);
+}
+
+async fn adopted_history_round_trip() {
     let temp = TempDir::new().expect("test directory");
     let source_home = temp.path().join("source-home");
     std::fs::create_dir(&source_home).expect("source HEDDLE_HOME");
@@ -297,14 +301,14 @@ async fn native_hosted_review_verbs_fit_weft_budget() {
     server.await.expect("native hosted server");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hosted_publication_batches_140_states_and_clones_full_history() {
-    large_history_round_trip(140, false).await;
+#[test]
+fn hosted_publication_batches_140_states_and_clones_full_history() {
+    on_large_stack(|| large_history_round_trip(140, false));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hosted_publication_batches_1000_states_and_later_capture() {
-    large_history_round_trip(1000, true).await;
+#[test]
+fn hosted_publication_batches_1000_states_and_later_capture() {
+    on_large_stack(|| large_history_round_trip(1000, true));
 }
 
 async fn large_history_round_trip(states: usize, capture_again: bool) {

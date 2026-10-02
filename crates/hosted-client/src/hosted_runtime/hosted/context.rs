@@ -341,6 +341,8 @@ impl CallContextFactory {
             // empty = legacy scan fallback (weft#1960 leg C cutover)
             bearer_authority_key_selector: Vec::new(),
             bearer_authority_proof: Vec::new(),
+            // No HYBRID protocol support is claimed.
+            protocol: None,
         })
     }
 

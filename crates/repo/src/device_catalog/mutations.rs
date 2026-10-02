@@ -119,6 +119,10 @@ pub fn bookmark(
         version: version.to_be_bytes().to_vec(),
         label: request.label.clone(),
         bookmarked: request.bookmarked,
+        // The local catalog records no save/edit times; the contract leaves
+        // them unset when unknown rather than fabricating one.
+        bookmarked_at: None,
+        updated_at: None,
     };
     bounded(&result)?;
     tx.execute("INSERT INTO bookmarks(account,target,record,version) VALUES(?1,?2,?3,?4) ON CONFLICT(account,target) DO UPDATE SET record=excluded.record,version=excluded.version",params![account,target,result.encode_to_vec(),version])?;

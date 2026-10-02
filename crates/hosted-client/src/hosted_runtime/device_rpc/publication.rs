@@ -42,6 +42,7 @@ impl DeviceRpc {
         let Some(publish_content_client_frame::Body::Open(open)) = request.body.clone() else {
             bail!("publication requires Open")
         };
+        thread_api::hybrid::publish_open(&open).map_err(anyhow::Error::msg)?;
         let operation = request.client_operation_id.parse::<OperationId>()?;
         let reference = open.thread.as_ref().context("Thread required")?;
         let spool = reference.spool.as_ref().context("Spool required")?;
@@ -163,6 +164,7 @@ impl DeviceRpc {
                     originals.geneses.push(value);
                 }
                 publish_content_client_frame::Body::Operations(value) => {
+                    thread_api::hybrid::operations(&value).map_err(anyhow::Error::msg)?;
                     operation_count = operation_count
                         .checked_add(value.operations.len())
                         .context("source operation count overflow")?;
@@ -302,6 +304,8 @@ impl DeviceRpc {
                     digest: inventory.as_bytes().to_vec(),
                 }),
                 outcome: Some(publication_receipt::Outcome::Accepted(Applied::default())),
+                // Native publication carries no import-authority proof bundle.
+                import_authority: None,
             };
             let bytes = replica.publish_prepared_source(
                 repo::thread_replication::source_publication::PreparedPublication {

@@ -298,6 +298,7 @@ mod tests {
                     operations,
                     authority_admissions,
                     boundary_acceptances: vec![],
+                    import_authority: None,
                 },
             )),
         }
@@ -339,6 +340,7 @@ mod tests {
                         operations: vec![valid.clone()],
                         authority_admissions: vec![],
                         boundary_acceptances: records,
+                        import_authority: None,
                     },
                 )),
             }

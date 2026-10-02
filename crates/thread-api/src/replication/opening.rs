@@ -55,6 +55,7 @@ pub fn accept(
     admission: &BTreeSet<ThreadFacet>,
     sharing_policy_version: Vec<u8>,
 ) -> Result<AcceptedOpening, Error> {
+    crate::hybrid::replication_open(open).map_err(Error::Protocol)?;
     validate_endpoint(local)?;
     if open.thread.as_ref() != Some(thread) {
         return Err(Error::Protocol(
@@ -117,6 +118,9 @@ pub fn accept(
                 max_snapshot_bytes: 0,
             }),
             record_formats: vec![OPERATION_FORMAT.into()],
+            // No HYBRID import-authority support is claimed; no proof bundle.
+            protocol: None,
+            import_authority: None,
         },
     })
 }
@@ -218,6 +222,7 @@ pub fn validate_ready(
     requested_facets: &BTreeSet<ThreadFacet>,
     requested_max_items: u32,
 ) -> Result<(BTreeSet<ThreadFacet>, usize), Error> {
+    crate::hybrid::replication_ready(ready).map_err(Error::Protocol)?;
     validate_endpoint(destination)?;
     if ready.endpoint.as_ref() != Some(destination)
         || ready.thread.as_ref() != Some(thread)
@@ -435,5 +440,58 @@ mod tests {
         widened = ready;
         widened.facets.push(SharedFacet::Collaboration as i32);
         assert!(validate_ready(&widened, &thread, &local, &allowed, 1).is_err());
+    }
+
+    #[test]
+    fn hybrid_opening_and_ready_fields_are_rejected_before_admission() {
+        use api::heddle::api::common::ProtocolCompatibility;
+        let thread = ThreadRef {
+            spool: Some(SpoolRef { id: "spool".into() }),
+            id: Some(ThreadId { value: vec![3; 32] }),
+        };
+        let local = EndpointRef {
+            kind: EndpointKind::Weft as i32,
+            public_key: vec![1; 32],
+        };
+        let facets = BTreeSet::from([ThreadFacet::Source]);
+        let open = ReplicationOpen {
+            thread: Some(thread.clone()),
+            source: Some(EndpointRef {
+                kind: EndpointKind::Device as i32,
+                public_key: vec![2; 32],
+            }),
+            destination: Some(local.clone()),
+            facets: vec![SharedFacet::Source as i32],
+            session_nonce: vec![4; 16],
+            record_formats: vec![OPERATION_FORMAT.into()],
+            budget: Some(ReadBudget {
+                max_items: 1,
+                max_frame_bytes: FRAME_LIMIT as u32,
+                max_snapshot_bytes: 0,
+            }),
+            ..Default::default()
+        };
+        let ready = accept(&open, &thread, &local, [2; 32], &facets, vec![5; 32])
+            .expect("a non-HYBRID opening is accepted")
+            .ready;
+        validate_ready(&ready, &thread, &local, &facets, 1).expect("non-HYBRID ready");
+        let hybrid = |result: Result<(), Error>| {
+            assert!(
+                matches!(result, Err(Error::Protocol(message)) if message.contains("api#307")),
+                "HYBRID fields must be refused, never ignored"
+            );
+        };
+        let mut changed = open.clone();
+        changed.import_authority = Some(ImportPublicProofBundleV1::default());
+        hybrid(accept(&changed, &thread, &local, [2; 32], &facets, vec![]).map(|_| ()));
+        changed = open;
+        changed.protocol = Some(ProtocolCompatibility::default());
+        hybrid(accept(&changed, &thread, &local, [2; 32], &facets, vec![]).map(|_| ()));
+        let mut widened = ready.clone();
+        widened.import_authority = Some(ImportPublicProofBundleV1::default());
+        hybrid(validate_ready(&widened, &thread, &local, &facets, 1).map(|_| ()));
+        widened = ready;
+        widened.protocol = Some(ProtocolCompatibility::default());
+        hybrid(validate_ready(&widened, &thread, &local, &facets, 1).map(|_| ()));
     }
 }

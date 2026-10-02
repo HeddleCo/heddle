@@ -269,6 +269,8 @@ pub(super) fn resolution_for(
         start_line,
         end_line,
         thread: Some(wire_thread(session.spool.id, target_id)),
+        // The local daemon does not classify paths; unknown.
+        path_kind: wire::SourcePathKind::Unspecified as i32,
     });
     Ok(result)
 }

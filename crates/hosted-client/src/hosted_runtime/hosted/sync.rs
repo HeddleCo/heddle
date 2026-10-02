@@ -373,6 +373,10 @@ mod native_exchange_tests {
     #[tokio::test]
     async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
         let _process_env_guard = crate::test_process_env::shared().await;
+        crate::on_large_stack(native_push_and_clone_pull);
+    }
+
+    async fn native_push_and_clone_pull() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let (mut client, server, captured) = native_server(&repo).await;
@@ -500,6 +504,10 @@ mod native_exchange_tests {
     #[tokio::test]
     async fn complete_local_state_exercises_each_public_pull_mode() {
         let _process_env_guard = crate::test_process_env::shared().await;
+        crate::on_large_stack(complete_local_state_pull_modes);
+    }
+
+    async fn complete_local_state_pull_modes() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let (mut client, server, _) = native_server(&repo).await;
@@ -565,6 +573,10 @@ mod native_exchange_tests {
     #[tokio::test]
     async fn clone_pull_installs_a_complete_native_pack() {
         let _process_env_guard = crate::test_process_env::shared().await;
+        crate::on_large_stack(clone_pull_complete_native_pack);
+    }
+
+    async fn clone_pull_complete_native_pack() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let (mut client, server, _) = native_server(&repo).await;

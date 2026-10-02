@@ -38,6 +38,7 @@ pub enum StoreError<E: std::error::Error + 'static> {
 pub type StoreResult<T, E> = std::result::Result<T, StoreError<E>>;
 
 /// Internal frames carry the same typed payloads in both directions.
+#[allow(clippy::large_enum_variant)] // heddle-api's inline import-authority bundle; boxing adds a heap hop per frame
 pub enum Frame {
     Have(ReplicationHave),
     Need(ReplicationNeed),
@@ -46,6 +47,7 @@ pub enum Frame {
 }
 /// Validated originals retain shared evidence without re-encoding a wire batch
 /// for every committed-prefix unit.
+#[allow(clippy::large_enum_variant)] // heddle-api's inline import-authority bundle; boxing adds a heap hop per frame
 pub(crate) enum InputUnit {
     Frame(Frame),
     Operation(store::ReceivedOperation),
@@ -78,7 +80,10 @@ impl Frame {
         Ok(match request.body {
             Some(Body::Have(v)) => Self::Have(v),
             Some(Body::Need(v)) => Self::Need(v),
-            Some(Body::Operations(v)) => Self::Operations(v),
+            Some(Body::Operations(v)) => {
+                crate::hybrid::operations(&v).map_err(Error::Protocol)?;
+                Self::Operations(v)
+            }
             Some(Body::Receipt(v)) => Self::Receipt(v),
             _ => return Err(Error::Protocol("unexpected replication opening")),
         })
@@ -88,13 +93,17 @@ impl Frame {
         Ok(match response.body {
             Some(Body::Have(v)) => Self::Have(v),
             Some(Body::Need(v)) => Self::Need(v),
-            Some(Body::Operations(v)) => Self::Operations(v),
+            Some(Body::Operations(v)) => {
+                crate::hybrid::operations(&v).map_err(Error::Protocol)?;
+                Self::Operations(v)
+            }
             Some(Body::Receipt(v)) => Self::Receipt(v),
             _ => return Err(Error::Protocol("unexpected replication ready")),
         })
     }
 }
 
+#[allow(clippy::large_enum_variant)] // heddle-api's inline import-authority bundle; boxing adds a heap hop per frame
 pub enum Outbound {
     Frame(Frame),
     Operation(ContentHash),
@@ -514,6 +523,8 @@ impl<B: ReplicaStore> Session<B> {
                     signature: record.original.signature,
                 }],
             }],
+            // Native replication carries no import-authority proof bundle.
+            import_authority: None,
         }))
     }
 

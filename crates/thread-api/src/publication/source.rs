@@ -300,6 +300,9 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     source: Some(options.source),
                     destination: Some(destination),
                     semantic_indexes: Vec::new(),
+                    // No HYBRID import-authority support is claimed; no proof bundle.
+                    protocol: None,
+                    import_authority: None,
                 },
             )),
         })

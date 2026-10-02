@@ -269,6 +269,7 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
             operations: records,
             authority_admissions: vec![],
             boundary_acceptances: vec![],
+            import_authority: None,
         })
         .request()
         .encode_to_vec();

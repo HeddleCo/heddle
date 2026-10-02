@@ -19,13 +19,13 @@ use crate::hosted_runtime::{
 #[tokio::test]
 async fn real_device_content_obeys_exact_thread_and_entry_visibility() {
     let _process_env_guard = crate::test_process_env::exclusive().await;
-    real_device_roundtrip(true).await;
+    crate::on_large_stack(|| real_device_roundtrip(true));
 }
 
 #[tokio::test]
 async fn real_device_partial_fetch_preserves_signed_source_until_reference_hydration() {
     let _process_env_guard = crate::test_process_env::exclusive().await;
-    real_device_roundtrip_partial().await;
+    crate::on_large_stack(real_device_roundtrip_partial);
 }
 
 async fn real_device_roundtrip_partial() {
@@ -35,7 +35,7 @@ async fn real_device_roundtrip_partial() {
 #[tokio::test]
 async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let _process_env_guard = crate::test_process_env::exclusive().await;
-    real_device_roundtrip(false).await;
+    crate::on_large_stack(|| real_device_roundtrip(false));
 }
 
 // reason: `lock_test_env` serializes process-global HEDDLE_HOME/credential

@@ -160,6 +160,11 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
+        // Re-batching rebuilds each unit, so refuse HYBRID import authority
+        // here rather than relay originals with it silently dropped (api#307).
+        for batch in &originals.operations {
+            crate::hybrid::operations(batch).map_err(Error::Invalid)?;
+        }
         // Preflight all originals before opening the exchange. The Ready may
         // narrow the frame budget; re-batch again before sending any content.
         let originals =
@@ -207,6 +212,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             Some(publish_content_server_frame::Body::Ready(ready)) => ready,
             _ => return Err(Error::Invalid("Ready or replay receipt required")),
         };
+        crate::hybrid::transfer_ready(&ready).map_err(Error::Invalid)?;
         if ready.endpoint != open.destination
             || ready.thread != open.thread
             || ready.current != open.revision
@@ -335,6 +341,7 @@ fn validate_receipt(
     let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
         return Err(Error::Invalid("Open required"));
     };
+    crate::hybrid::publication_receipt(&receipt).map_err(Error::Invalid)?;
     if receipt.client_operation_id != opening.client_operation_id
         || receipt.destination != open.destination
         || receipt.thread != open.thread
@@ -596,6 +603,7 @@ mod tests {
                                 outcome: Some(publication_receipt::Outcome::Accepted(
                                     Applied::default(),
                                 )),
+                                import_authority: None,
                             };
                             if wrong_receipt {
                                 receipt.thread = None;
@@ -692,6 +700,7 @@ mod tests {
                 boundary_acceptances: Vec::new(),
                 operations: vec![record],
                 authority_admissions: vec![],
+                import_authority: None,
             }],
         }
     }
@@ -771,6 +780,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publication_refuses_originals_carrying_hybrid_import_authority() {
+        let (remote, open, artifacts) = fixture(false);
+        let mut originals = originals();
+        originals.operations[0].import_authority = Some(ImportPublicProofBundleV1::default());
+        let error = remote
+            .publish_content(&open, &originals, artifacts)
+            .await
+            .expect_err("HYBRID originals must not be relayed with the bundle dropped");
+        assert!(
+            matches!(error, Error::Invalid(message) if message.contains("api#307")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn publication_refuses_a_receipt_for_another_scope() {
         let (remote, open, artifacts) = fixture(true);
         let error = remote
@@ -800,9 +824,19 @@ mod tests {
                 digest: inventory.to_vec(),
             }),
             outcome: Some(publication_receipt::Outcome::Accepted(Applied::default())),
+            import_authority: None,
         };
         validate_receipt(receipt.clone(), &opening, &inventory)
             .expect("one-shot upload returns actual policy without CAS");
+        let mut hybrid = receipt.clone();
+        hybrid.import_authority = Some(ImportPublicProofBundleV1::default());
+        assert!(
+            matches!(
+                validate_receipt(hybrid, &opening, &inventory),
+                Err(Error::Invalid(message)) if message.contains("api#307")
+            ),
+            "a receipt carrying HYBRID import authority must be refused, never ignored"
+        );
         let mut absent = receipt.clone();
         absent.sharing_policy_version.clear();
         assert!(

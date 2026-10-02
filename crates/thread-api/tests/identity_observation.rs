@@ -176,3 +176,50 @@ async fn identity_observation_delivers_only_committed_identity_and_rejects_cross
         ))
     ));
 }
+
+#[tokio::test]
+async fn stream_open_declaring_hybrid_support_is_rejected_not_ignored() {
+    let hybrid_opens = [
+        StreamOpen {
+            protocol: Some(api::heddle::api::common::ProtocolCompatibility::default()),
+            ..Default::default()
+        },
+        StreamOpen {
+            witness_set: Some(api::heddle::api::common::SignedHostedWitnessSetV1::default()),
+            ..Default::default()
+        },
+    ];
+    for hybrid in hybrid_opens {
+        let stream_frame::Body::Open(base) = open().frame.expect("frame").body.expect("body")
+        else {
+            panic!("open fixture")
+        };
+        let opening = control(
+            1,
+            stream_frame::Body::Open(StreamOpen {
+                protocol: hybrid.protocol,
+                witness_set: hybrid.witness_set,
+                ..base
+            }),
+        );
+        let remote = remote(vec![
+            opening,
+            change(2, "human", StreamDataKind::Snapshot),
+            checkpoint(3, 1, vec![]),
+        ]);
+        let result = match remote
+            .observe::<heddle_thread_api::rpc::IdentityServiceObserveIdentity>(
+                ObserveIdentityRequest::default(),
+                None,
+            )
+            .await
+        {
+            Ok(mut view) => view.next_commit().await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        assert!(
+            matches!(&result, Err(Error::Invalid(message)) if message.contains("api#307")),
+            "HYBRID stream opening must be refused: {result:?}"
+        );
+    }
+}

@@ -134,6 +134,9 @@ impl Peer {
             session_nonce: uuid::Uuid::new_v4().as_bytes().to_vec(),
             source: Some(self.endpoint.clone()),
             destination: Some(destination.clone()),
+            // No HYBRID import-authority support is claimed; no proof bundle.
+            protocol: None,
+            import_authority: None,
         };
         let transport = IrohTransport::new(connection, signer, FRAME_LIMIT, TIMEOUT)?;
         let (writer, mut reader) = transport

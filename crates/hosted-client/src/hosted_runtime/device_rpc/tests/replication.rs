@@ -234,6 +234,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
@@ -356,6 +357,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
@@ -441,6 +443,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {

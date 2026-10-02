@@ -42,6 +42,7 @@ pub fn annotation_source(
     value: &api::AnnotationSourceReference,
 ) -> Result<model::AnnotationSourceReference, Error> {
     let source = required(value.source.as_ref())?;
+    super::references::reject_path_kind(source)?;
     let revision = required(source.revision.as_ref())?;
     let spool = required(revision.spool.as_ref())?
         .id
@@ -133,6 +134,9 @@ pub fn annotation_source_ref(
                     value: id.as_bytes().to_vec(),
                 }),
             }),
+            // Native source maps record no path kind; unknown, never derived here.
+            path_kind: api::SourcePathKind::Unspecified as i32,
+            path_kind_source: api::SourcePathKindSource::Unspecified as i32,
         }),
     }
 }

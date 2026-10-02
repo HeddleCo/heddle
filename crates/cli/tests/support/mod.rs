@@ -873,3 +873,33 @@ pub fn git_create_annotated_tag(
     tx.commit().expect("update tag ref");
     TestTag { id: tag_id }
 }
+
+/// Polls one very large test future on a thread with an explicit stack.
+///
+/// In-process hosted publication and fetch round trips nest many awaits over
+/// the Sync messages, which carry heddle-api 0.31.0-alpha.17's inline 2.3 KB
+/// import-authority bundle. Unoptimized builds give each nested future its own
+/// stack slots, which outgrew the default 2 MiB test thread. Release builds and
+/// the CLI's 8 MiB main thread are unaffected.
+pub fn on_large_stack<F, Fut>(test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let outcome = std::thread::Builder::new()
+        .name("large-stack-test".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(test())
+        })
+        .expect("large-stack test thread")
+        .join();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

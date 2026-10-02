@@ -20,6 +20,7 @@ pub mod credentials;
 pub mod evidence;
 #[cfg(feature = "source-transfer")]
 pub mod fetch;
+pub mod hybrid;
 #[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;

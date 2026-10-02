@@ -263,3 +263,34 @@ fn native_fetch_rejects_cross_spool_genesis_before_source() {
         ))
     ));
 }
+#[test]
+fn native_fetch_rejects_hybrid_ready_and_operations_before_staging() {
+    use api::heddle::api::common::ProtocolCompatibility;
+    let refused = |result: Result<(), Error>| {
+        assert!(
+            matches!(result, Err(Error::Invalid(message)) if message.contains("api#307")),
+            "HYBRID fields must be refused, never ignored"
+        );
+    };
+    let (open, ready, endpoint, _) = fixture();
+    let mut hybrid = ready.clone();
+    hybrid.import_authority = Some(ImportPublicProofBundleV1::default());
+    refused(Validation::new(open.clone(), hybrid, Some(&endpoint), Limits::default()).map(|_| ()));
+    let mut hybrid = ready.clone();
+    hybrid.protocol = Some(ProtocolCompatibility::default());
+    refused(Validation::new(open.clone(), hybrid, Some(&endpoint), Limits::default()).map(|_| ()));
+    let mut download =
+        Validation::new(open, ready, Some(&endpoint), Limits::default()).expect("admission");
+    refused(
+        download
+            .accept(FetchServerFrame {
+                body: Some(fetch_server_frame::Body::Operations(
+                    ReplicationOperations {
+                        import_authority: Some(ImportPublicProofBundleV1::default()),
+                        ..Default::default()
+                    },
+                )),
+            })
+            .map(|_| ()),
+    );
+}
