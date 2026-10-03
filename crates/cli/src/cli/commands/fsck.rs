@@ -2,6 +2,7 @@
 //! Fsck command - verify repository integrity.
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "git-overlay")]
 use repo::RepositorySourceAuthority;
 use verbs::{FsckOptions, FsckRepair, fsck};
 
@@ -237,6 +238,7 @@ fn repair_git_ref(
     }
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "git_repair_ref_required",
@@ -250,6 +252,7 @@ fn git_repair_ref_required_advice() -> RecoveryAdvice {
     )
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_native_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "git_repair_native_ref_required",
@@ -263,6 +266,7 @@ fn git_repair_native_ref_required_advice() -> RecoveryAdvice {
     )
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_authority_mismatch_advice(
     authority: RepositorySourceAuthority,
     requested: &str,
@@ -300,6 +304,7 @@ fn git_repair_authority_mismatch_advice(
     }
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
     use verbs::status::next_action::canonical_git_import_ref_command;
 
@@ -316,6 +321,7 @@ fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
     )
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_write_through_skipped_advice(ref_name: &str, reason: String) -> RecoveryAdvice {
     let preview_command = git_repair_ref_command("heddle", ref_name, true);
     RecoveryAdvice::safety_refusal(
@@ -340,6 +346,7 @@ fn repair_git(
     Err(anyhow!("fsck repair git requires the git-overlay feature"))
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_repair_ref_command(prefer: &str, ref_name: &str, preview: bool) -> String {
     let mut command = format!(
         "heddle maintenance fsck repair git --prefer {} --ref {}",

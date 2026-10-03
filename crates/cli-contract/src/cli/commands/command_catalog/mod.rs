@@ -5022,6 +5022,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             None => vec!["invite"],
             Some(crate::cli::AuthInviteCommands::List) => vec!["invite", "list"],
         },
+        #[cfg(feature = "client")]
         Commands::Auth { command } => match command {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],

@@ -83,6 +83,24 @@ installation can occur before full verification; no replica transaction can
 commit before the pack is locally installed. Existing `hybrid_import_bundle`
 supplies exact retained closure for relay.
 
+Historical selections carry the handoff prefix at each authenticated statement,
+not the bundle's final owner/transfer state. The draft's
+`require_public_selection` currently compares `bundle.ownership_transfers ==
+selection.keyring.wire().ownership_transfers`; this must instead verify the
+exact accepted prefix within the complete independently selected chain. A
+later verified handoff cannot erase an earlier exact original admission.
+
+The draft also verifies a `NativeClosure` but installs only converted delegated
+operations. Every supplied native original must have a verified admission path
+or reject before the callback; signature verification alone does not authorize
+ordinary account operations, ownership claims/resolutions or dependencies.
+
+Part 2's `AcceptedHistory` reconstructs exact historical owner contexts from an
+independently verified Spool observation. Its eventual `AcceptedAuthority`
+adapter must resolve typed revocations against the exact signed policy and
+authenticated accepted-order witness. A generic `false` predicate is forbidden;
+unknown keys, credentials, cancellation namespaces or unbound statements reject.
+
 ## Receiver trust and mutation serialization (repo)
 
 ```rust

@@ -161,3 +161,30 @@ fn learned_revocation_and_changed_original_invalidate_a_resolved_context() {
     changed.signature[0] ^= 1;
     assert!(api::witness_trust::recheck_context(&resolved, &current, &changed, now).is_err());
 }
+
+#[test]
+fn receiver_refresh_preserves_every_original_and_rejects_authority_substitution() {
+    let mut original: crate::contract::ImportPublicProofBundleV1 =
+        wire("wire_vectors", "complete_renewed_export");
+    let before = original.clone();
+    let mut refreshed = original.clone();
+    refreshed.witness_set = Some(wire("signed_vectors", "revoked_set"));
+    replace_receiver_metadata(&mut original, refreshed.clone())
+        .expect("receiver metadata refresh is structural, never authority");
+    assert_eq!(original.original_geneses, before.original_geneses);
+    assert_eq!(original.genesis_authorities, before.genesis_authorities);
+    assert_eq!(original.delegations, before.delegations);
+    assert_eq!(original.operations, before.operations);
+    assert_eq!(original.statements, before.statements);
+    assert_eq!(original.witness_set, refreshed.witness_set);
+    // Proof-only refresh cannot replace retained signed authority bytes.
+    let mut substituted = refreshed.clone();
+    substituted.statements[0].signature[0] ^= 1;
+    let unchanged = original.clone();
+    assert_eq!(
+        replace_receiver_metadata(&mut original, substituted),
+        Err(api::hybrid_codec::Reject::Scope)
+    );
+    assert_eq!(original, unchanged);
+    replace_receiver_metadata(&mut original, refreshed).expect("exact originals remain usable");
+}

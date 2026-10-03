@@ -293,8 +293,41 @@ impl HostedClient {
                 }
             })?;
         prepared.witness_set = Some(signed);
-        api::import_authority::validate_public_bundle(&prepared)?;
-        *bundle = prepared;
+        thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
+        Ok(verified)
+    }
+    /// Revalidate retained proof metadata without redownloading staged content.
+    /// Installation must independently recheck the latest durable context.
+    pub async fn refresh_staged_import_proofs(
+        &self,
+        staged: &mut thread_api::fetch::StagedSource,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let mut bundle = staged
+            .import_authority()
+            .ok_or(api::hybrid_codec::Reject::Scope)?
+            .clone();
+        let verified = self
+            .refresh_import_proofs(
+                &mut bundle,
+                previous,
+                root_epoch,
+                clock_floor_millis,
+                known_job_keys,
+            )
+            .await?;
+        staged
+            .refresh_import_authority(bundle)
+            .map_err(|error| match error {
+                thread_api::fetch::Error::Hybrid(reject) => super::HostedError::Hybrid(reject),
+                thread_api::fetch::Error::HostedTrustRequired => {
+                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Root)
+                }
+                error => super::HostedError::framing(error),
+            })?;
         Ok(verified)
     }
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {

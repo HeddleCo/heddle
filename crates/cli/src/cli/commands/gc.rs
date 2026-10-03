@@ -18,12 +18,16 @@ use objects::store::{
     ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
     recover_pack_install_intents,
 };
-use repo::{RepositoryCapability, TimelineStore};
+#[cfg(feature = "git-overlay")]
+use repo::RepositoryCapability;
+use repo::TimelineStore;
 use serde::Serialize;
+#[cfg(feature = "git-overlay")]
+use verbs::gc_plan::gc_pruned_git_mapping_message;
 use verbs::{
     gc_plan::{
         gc_dry_run_messages, gc_pack_message, gc_preserved_redactions_message,
-        gc_prune_loose_message, gc_pruned_git_mapping_message, gc_status_token, plan_gc_dry_run,
+        gc_prune_loose_message, gc_status_token, plan_gc_dry_run,
     },
     maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };

@@ -3877,6 +3877,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "client")]
     fn reject_unsupported_for_monorepo_blocks_depth_lazy_filter() {
         let depth = CloneOptions {
             thread: None,
@@ -4003,6 +4004,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "client")]
     fn hosted_clone_origin_url_joins_endpoint_and_repo_path() {
         assert_eq!(
             hosted_clone_origin_url("weft.local:8421", "acme/widgets"),
@@ -4011,6 +4013,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "client")]
     fn validate_monorepo_destination_rejects_escape_and_accepts_nested() {
         let temp = tempfile::TempDir::new().expect("temp");
         let root = temp.path().join("clone-root");

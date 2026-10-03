@@ -47,6 +47,24 @@ pub fn request(
     Ok(request)
 }
 
+/// Refresh public receiver metadata without replacing any original authority,
+/// operation or accepted witness. This does not authorize installation: the
+/// receiver still resolves the complete closure under its mutation lock.
+pub fn replace_receiver_metadata(
+    original: &mut crate::contract::ImportPublicProofBundleV1,
+    refreshed: crate::contract::ImportPublicProofBundleV1,
+) -> Result<(), Reject> {
+    api::import_authority::validate_public_bundle(&refreshed)?;
+    let mut unchanged = refreshed.clone();
+    unchanged.witness_set = original.witness_set.clone();
+    unchanged.history_proofs = original.history_proofs.clone();
+    if &unchanged != original {
+        return Err(Reject::Scope);
+    }
+    *original = refreshed;
+    Ok(())
+}
+
 /// Recover and verify the exact original's path against independently selected
 /// fresh trust. A neighboring statement's valid proof never satisfies this one.
 pub async fn retrieve<L: HistoryProofLookup>(

@@ -47,6 +47,24 @@ impl StagedSource {
     pub fn ready(&self) -> &TransferReady {
         &self.ready
     }
+    /// Retained bytes are structural evidence, never installation authority.
+    pub fn import_authority(&self) -> Option<&crate::contract::ImportPublicProofBundleV1> {
+        self.ready.import_authority.as_ref()
+    }
+    /// Refresh witness-set/proof metadata after retirement or freshness renewal
+    /// while keeping the downloaded pack and every original signed byte.
+    pub fn refresh_import_authority(
+        &mut self,
+        refreshed: crate::contract::ImportPublicProofBundleV1,
+    ) -> Result<(), Error> {
+        let original = self
+            .ready
+            .import_authority
+            .as_mut()
+            .ok_or(Error::HostedTrustRequired)?;
+        crate::hybrid::history::replace_receiver_metadata(original, refreshed)?;
+        Ok(())
+    }
     pub fn state(&self) -> &State {
         &self.state
     }
