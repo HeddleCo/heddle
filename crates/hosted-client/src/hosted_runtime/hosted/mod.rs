@@ -532,9 +532,9 @@ impl HostedClient {
         }
         let mut signed = context.unary(method, encoded, client_operation_id)?;
         if !descriptor.mandatory_features.is_empty() {
-            let remote = self.native().await.map_err(HostedError::transport)?;
-            api::import_authority::require_hybrid_peer(remote.description.protocol.as_ref())?;
+            self.require_import_authority_protocol().await?;
             signed.context.protocol = Some(thread_api::hybrid::protocol());
+            import_source::require_request_authority(method, encoded)?;
         }
         match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),

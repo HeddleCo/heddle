@@ -1823,18 +1823,12 @@ mod tests {
         "task",
     ];
 
-    fn with_isolated_heddle_home<T>(f: impl FnOnce() -> T) -> T {
-        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = TempDir::new().expect("heddle home");
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe { std::env::set_var("HEDDLE_HOME", home.path()) };
-        let result = f();
-        match previous {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+    fn with_isolated_heddle_home(f: impl FnOnce()) {
+        let thread = std::thread::current();
+        let test = thread.name().expect("named test thread");
+        if !crate::run_with_isolated_test_home(test) {
+            f();
         }
-        result
     }
 
     fn status_cli(repo_dir: &std::path::Path) -> crate::cli::Cli {

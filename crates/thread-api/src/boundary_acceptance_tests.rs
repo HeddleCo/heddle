@@ -260,174 +260,91 @@ fn boundary_receipt_cannot_relabel_original_scope_or_use_old_authorize_path() {
 
 #[cfg(feature = "native")]
 #[tokio::test]
-async fn boundary_native_two_receiver_relay_preserves_exact_testimony_without_credential() {
+async fn boundary_native_receive_requires_selected_witness_binding() {
+    use crate::replication::{
+        native::{Error as NativeError, LocalReplica},
+        store::{ReceivedOperation, ReplicaStore},
+    };
+    use crypto::thread_operation::SignedGenesis;
+    use objects::object::thread_replication::{GenesisOwner, ThreadGenesis};
     use std::sync::Arc;
-
-    use crypto::{
-        thread_genesis_admission::SignedGenesisAdmission, thread_operation::SignedGenesis,
-    };
-    use heddle_object_model::object::{
-        thread_genesis_admission::{ENVELOPE_FORMAT, ThreadGenesisAdmission},
-        thread_replication::{
-            GenesisOwner, ThreadFacet, ThreadGenesis, integration::SPOOL_GENESIS_TRUST_FORMAT,
-        },
-    };
-    use prost::Message;
-    use repo::{Repository, thread_replication::ThreadReplica};
-
-    use crate::replication::{Frame, Session, native::LocalReplica};
-    let paths = [
-        tempfile::tempdir().expect("sender"),
-        tempfile::tempdir().expect("receiver"),
-        tempfile::tempdir().expect("next receiver"),
-    ];
-    let repositories = paths
-        .iter()
-        .map(|path| Repository::init_default(path.path()).expect("repository"))
-        .collect::<Vec<_>>();
-    let (mut batch, mut trust) = fixture(1);
-    let account = uuid::Uuid::from_u128(502);
-    let spool_genesis = repo::sign_spool_owner_genesis(&key(54), *trust.spool.as_bytes())
-        .expect("independent Spool root");
-    trust.spool_genesis = ContentHash::compute_typed(
-        SPOOL_GENESIS_TRUST_FORMAT,
-        &spool_genesis
-            .genesis
-            .as_ref()
-            .expect("genesis")
-            .encode_to_vec(),
-    );
+    let directory = tempfile::tempdir().expect("receiver");
+    let repository = repo::Repository::init_default(directory.path()).expect("repository");
+    let (mut batch, trust) = fixture(1);
     let genesis = ThreadGenesis {
         version: 1,
         spool: trust.spool.to_string(),
         parent: None,
-        base: repositories[0].head().expect("head").expect("base"),
-        name: "historical boundary relay".into(),
-        intent: "no original live bearer".into(),
+        base: repository.head().expect("head").expect("base"),
+        name: "closed boundary".into(),
+        intent: String::new(),
         creator: key(51).public_key().try_into().expect("key"),
-        owner: GenesisOwner::Account(account),
+        owner: GenesisOwner::LocalKey(key(51).public_key().try_into().expect("key")),
         nonce: vec![1],
     };
-    let original_genesis = SignedGenesis::sign(&genesis, &key(51)).expect("genesis");
-    let genesis_receipt = ThreadGenesisAdmission {
-        version: 2,
-        basis: AdmissionBasis::OriginalAuthority,
-        spool: trust.spool,
-        spool_genesis: trust.spool_genesis,
-        thread: genesis.id().expect("id"),
-        owner: account,
-        creator: genesis.creator,
-        authority_digest: ContentHash::compute_typed(
-            ENVELOPE_FORMAT,
-            b"retained original genesis envelope",
-        ),
-        executor: trust.executor,
-        admitted_at_ms: 8000,
-    };
-    let genesis_receipt = SignedGenesisAdmission::sign(&genesis_receipt, &key(53))
-        .expect("pinned executor testimony");
-    let replicas = repositories
-        .iter()
-        .map(|repository| {
-            let replica = ThreadReplica::create_from_genesis_admission(
-                repository.heddle_dir(),
-                &original_genesis,
-                b"retained original genesis envelope",
-                &genesis_receipt,
-                &trust,
-            )
-            .expect("independent genesis pin");
-            repository
-                .verify_and_pin_owner_genesis(
-                    2,
-                    Some(&spool_genesis.encode_to_vec()),
-                    &["selected".into(), "shared".into()],
-                )
-                .expect("independent trust setup");
-            repository
-                .pin_thread_hosted_executor(&replica, trust.executor)
-                .expect("independent executor pin");
-            replica
-                .set_sharing([86; 32], &[ThreadFacet::Source].into())
-                .expect("explicit export consent");
-            replica
-        })
-        .collect::<Vec<_>>();
+    let replica = repo::thread_replication::ThreadReplica::create(
+        repository.heddle_dir(),
+        &SignedGenesis::sign(&genesis, &key(51)).expect("genesis"),
+    )
+    .expect("replica");
     let mut original = crate::replication::decode_record(batch.operations.remove(0))
         .expect("original")
         .verify()
-        .expect("operation");
-    original.thread = genesis.id().expect("Thread");
+        .expect("signature");
+    original.thread = replica.thread_id();
+    let state = State::new_snapshot(
+        Tree::new().hash(),
+        vec![genesis.base],
+        Attribution::human(Principal::new("local control", "")),
+    );
     if let ThreadOperationBody::Capture(capture) = &mut original.body {
-        let state = State::new_snapshot(
-            Tree::new().hash(),
-            vec![genesis.base],
-            Attribution::human(Principal::new("offline work", "")),
-        );
         capture.result.state = state.encode_current_msgpack().expect("state");
     }
     let signed = SignedOperation::sign(&original, &key(51)).expect("original signature");
     let id = original.id().expect("ID");
     let mut statement =
         crate::authority_admission::verify_signature(&batch.authority_admissions[0])
-            .expect("receipt");
+            .expect("receipt signature");
     statement.thread = original.thread;
     statement.subject = OriginalAuthoritySubject::Operation(id);
-    statement.spool_genesis = trust.spool_genesis;
-    let mut receipt = SignedAuthorityAdmission::sign(&statement, &key(53)).expect("pinned receipt");
+    let mut receipt = SignedAuthorityAdmission::sign(&statement, &key(53)).expect("receipt");
     receipt.boundary_acceptance = Some(Arc::new(
-        decode(&batch.boundary_acceptances[0]).expect("evidence"),
+        decode(&batch.boundary_acceptances[0]).expect("original acceptance"),
     ));
-    replicas[0]
-        .receive_with_authority_admission(&signed, &receipt, repositories[0].store(), |_| Ok(()))
-        .expect("original pinned admission");
-    let session = |index: usize| {
-        Session::new(
-            LocalReplica::new(
-                replicas[index].clone(),
-                Arc::new(repositories[index].store().clone()),
-            ),
-            [86; 32],
-            [ThreadFacet::Source].into(),
-            8,
-        )
-        .expect("exact source session")
-    };
-    let mut exported = session(0)
-        .export_operation(id)
-        .await
-        .expect("export evidence");
-    for index in 1..3 {
-        let Frame::Operations(batch) = exported else {
-            panic!("originals")
-        };
-        assert_eq!(batch.boundary_acceptances.len(), 1);
-        let mut missing = batch.clone();
-        missing.boundary_acceptances.clear();
-        let mut receiver = session(index);
-        assert!(
-            receiver.handle(Frame::Operations(missing)).await.is_err(),
-            "no evidence cannot authorize new receiver"
-        );
-        assert!(replicas[index].operation(&id).expect("unchanged").is_none());
-        receiver
-            .handle(Frame::Operations(batch))
+    batch = crate::authority_admission::batches(
+        [ReceivedOperation {
+            original: signed,
+            authority_admission: Some(receipt),
+            import_authority: None,
+        }],
+        1024 * 1024,
+        128,
+    )
+    .expect("batch bounds")
+    .next()
+    .expect("one batch")
+    .expect("exact boundary evidence");
+    let matched = crate::authority_admission::match_batch(&batch)
+        .expect("exact structural boundary evidence");
+    let local = LocalReplica::new(replica.clone(), Arc::new(repository.store().clone()));
+    let generation = replica.generation().expect("generation");
+    assert!(matches!(
+        local.receive(matched[0].clone()).await,
+        Err(NativeError::HostedTrustRequired)
+    ));
+    assert!(replica.operation(&id).expect("unchanged").is_none());
+    assert_eq!(replica.generation().expect("generation"), generation);
+    original.body = ThreadOperationBody::Capture(AuthoredCapture::local(
+        state.encode_current_msgpack().expect("state").into(),
+    ));
+    let local_source = SignedOperation::sign(&original, &key(51)).expect("local source");
+    assert_eq!(
+        local
+            .receive(ReceivedOperation::from(local_source))
             .await
-            .expect("actual native receive");
-        let reopened =
-            ThreadReplica::open(repositories[index].heddle_dir(), genesis.id().expect("ID"))
-                .expect("reopen");
-        let retained = reopened
-            .operation_with_authority_admission(&id)
-            .expect("lookup")
-            .expect("original");
-        assert_eq!(retained.original, signed);
-        assert_eq!(retained.authority_admission, Some(receipt.clone()));
-        exported = session(index)
-            .export_operation(id)
-            .await
-            .expect("relay exact acceptance");
-    }
+            .expect("independently owned source control"),
+        objects::object::thread_replication::Admission::Accepted
+    );
 }
 
 #[test]

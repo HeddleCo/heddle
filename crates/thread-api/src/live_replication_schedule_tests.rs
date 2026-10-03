@@ -28,6 +28,7 @@ struct Store {
     accepted: Arc<StdMutex<Vec<ContentHash>>>,
     pending: bool,
     receipt_written: Arc<AtomicBool>,
+    exported: Option<ReceivedOperation>,
 }
 impl ReplicaStore for Store {
     type Error = transport::Error;
@@ -57,9 +58,18 @@ impl ReplicaStore for Store {
     }
     async fn operation(
         &self,
-        _: ContentHash,
+        id: ContentHash,
     ) -> std::result::Result<Option<(ReceivedOperation, Admission)>, Self::Error> {
-        Ok(None)
+        Ok(self.exported.as_ref().and_then(|record| {
+            (record
+                .original
+                .verify()
+                .expect("original")
+                .id()
+                .expect("ID")
+                == id)
+                .then(|| (record.clone(), Admission::Accepted))
+        }))
     }
     async fn receive(
         &self,
@@ -290,6 +300,7 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
             accepted: Arc::new(StdMutex::new(vec![])),
             pending,
             receipt_written: receipt_written.clone(),
+            exported: None,
         };
         let accepted = store.accepted.clone();
         let session = Session::new(
@@ -495,6 +506,63 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
             "one batch preflight plus one admission per input; no empty bookkeeping gate"
         );
     }
+}
+
+#[tokio::test]
+async fn hybrid_relay_preserves_the_complete_bundle_only_after_exact_negotiation() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha18.json"))
+            .expect("alpha.18 fixed vectors");
+    let decode = |name: &str| {
+        hex::decode(
+            fixture["wire_vectors"][name]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex")
+    };
+    let wire = SignedRecord::decode(decode("converted_main").as_slice()).expect("original wire");
+    let original = crate::replication::decode_record(wire.clone()).expect("original signature");
+    let operation = original.verify().expect("original");
+    let id = operation.id().expect("ID");
+    let bundle = crate::contract::ImportPublicProofBundleV1::decode(
+        decode("complete_renewed_export").as_slice(),
+    )
+    .expect("complete original bundle");
+    crate::hybrid::bundle(Some(&bundle)).expect("structurally complete bundle");
+    let store = Store {
+        thread: operation.thread,
+        accepted: Arc::new(StdMutex::new(vec![id])),
+        pending: false,
+        receipt_written: Arc::new(AtomicBool::new(false)),
+        exported: Some(ReceivedOperation {
+            original,
+            authority_admission: None,
+            import_authority: Some(Arc::new(bundle.clone())),
+        }),
+    };
+    // This fixture models an admitted store record; this test checks transport,
+    // while admission tests exercise the native store's independent authority.
+    let session = Session::new(store, [8; 32], ThreadFacet::ALL.into(), 64).expect("session");
+    assert!(session.export_operation(id).await.is_err());
+    let protocol = crate::hybrid::protocol();
+    let mut old = protocol.clone();
+    old.protocol_version = 1;
+    assert!(
+        session
+            .clone()
+            .with_protocol(Some(&protocol), Some(&old))
+            .is_err()
+    );
+    let session = session
+        .with_protocol(Some(&protocol), Some(&protocol))
+        .expect("exact protocol");
+    let Frame::Operations(exported) = session.export_operation(id).await.expect("HYBRID relay")
+    else {
+        panic!("operation frame");
+    };
+    assert_eq!(exported.operations, vec![wire]);
+    assert_eq!(exported.import_authority.as_ref(), Some(&bundle));
 }
 #[tokio::test]
 async fn queued_metadata_progresses_when_input_owns_all_output_bytes() {

@@ -329,8 +329,6 @@ fn is_human_verification_required(lowered_message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, sync::MutexGuard};
-
     use api::heddle::api::v1alpha2::{GrantRecord, ResourceRole};
     use clap::Parser;
     use wire::ProtocolError;
@@ -355,40 +353,13 @@ mod tests {
         ])
     }
 
-    struct IsolatedHeddleHome {
-        _guard: MutexGuard<'static, ()>,
-        _temp: tempfile::TempDir,
-        previous_home: Option<OsString>,
-    }
-
-    impl IsolatedHeddleHome {
-        fn new() -> Self {
-            let guard = ::config::credentials::lock_test_env();
-            let temp = tempfile::TempDir::new().expect("temporary Heddle home");
-            let previous_home = std::env::var_os("HEDDLE_HOME");
-            unsafe { std::env::set_var("HEDDLE_HOME", temp.path()) };
-            Self {
-                _guard: guard,
-                _temp: temp,
-                previous_home,
-            }
-        }
-    }
-
-    impl Drop for IsolatedHeddleHome {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous_home {
-                    Some(value) => std::env::set_var("HEDDLE_HOME", value),
-                    None => std::env::remove_var("HEDDLE_HOME"),
-                }
-            }
-        }
-    }
-
     #[tokio::test]
     async fn create_then_list_returns_the_grant_row() {
-        let _home = IsolatedHeddleHome::new();
+        if crate::run_with_isolated_test_home(
+            "cli::commands::grant::tests::create_then_list_returns_the_grant_row",
+        ) {
+            return;
+        }
         let (mut client, server) =
             hosted_client::hosted_runtime::hosted::test_server::start().await;
         let spool = "spool/willow-ibis-8e7264/notes";

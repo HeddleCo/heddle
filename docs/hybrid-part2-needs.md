@@ -23,6 +23,13 @@ Drafted in Part 1's working tree, not landed:
 `repo::thread_replication::hosted_trust::{RootSelection, Clock, SystemClock,
 HostedTrust, TrustTransaction, select_root, replace_root}`. Part 2 will use
 `HostedTrust::mutate` as the sole witness update/installation serialization.
+The newer repo draft also supplies
+`delegated_import::{HostedAdmission, NativeSubject, NativeEvidence}` and
+`ThreadReplica::{hosted_admission, receive_witnessed}`. `receive_witnessed`
+re-resolves trust/policy/originals and calls current disclosure authorization
+inside `mutate`; it still requires every native dependency to be separately
+admitted. Fetch needs the complete selected closure admitted atomically before
+any actual pack or Spool mutation, using the same callback seam below.
 
 ## Narrow repo mutation seam still needed
 
@@ -100,8 +107,49 @@ independently verified Spool observation. Its eventual `AcceptedAuthority`
 adapter must resolve typed revocations against the exact signed policy and
 authenticated accepted-order witness. A generic `false` predicate is forbidden;
 unknown keys, credentials, cancellation namespaces or unbound statements reject.
+The draft's new `authorize_import(bundle, now_millis) -> Result<()>` callback
+must likewise check independently selected **current** disclosure/source access
+under the mutation lock. Historical conversion permission cannot supply it.
+
+Fetch selects one source revision and replication splits originals into bounded
+batches. Their complete public bundle can include signed delegated results and
+manifests from other branches/earlier slots whose converted native records are
+not selected for installation. The draft loops over every bundle operation and
+requires a matching converted native record, then installs every branch genesis.
+That seam cannot serve a single-branch Fetch or a split replication batch.
+Verify the complete public delegation/publication/slot history, but require and
+admit converted-native counterparts only for the exact requested originals and
+their selected causal dependencies. Never install an unrelated branch merely
+because its public proof was carried. Alternatively expose a per-original
+verification/installation API under `TrustTransaction`; the public closure must
+remain intact through batching, and every requested native original must be
+covered or fail closed before the callback.
 
 ## Receiver trust and mutation serialization (repo)
+
+The concrete snapshot requested from the newer draft is:
+
+```rust
+pub struct TrustSnapshot {
+    pub root: RootSelection,
+    pub root_epoch: u64,
+    pub previous: Option<api::witness_trust::VerifiedWitnessSet>,
+    pub clock_floor_millis: i64,
+    pub known_job_associations: Vec<(Vec<u8>, Vec<u8>)>,
+}
+impl<C: Clock> HostedTrust<C> {
+    pub fn snapshot(&self) -> Result<TrustSnapshot>;
+}
+```
+
+Restore `previous` from the persisted original signed set using its retained
+history root, including expired snapshots only as a high-water/history floor.
+Return the independently selected current root and epoch separately. Do not
+claim an expired snapshot is fresh authority. Reading the snapshot never
+changes the durable clock floor or set; reject detected clock rollback. Part 2
+derives known job keys from the associations, performs bounded async lookup,
+then `mutate` reloads and verifies newest trust at use. A set learned during
+async lookup can still invalidate the prepared result before installation.
 
 ```rust
 pub struct HostedRootContext {
@@ -171,3 +219,13 @@ public bundle attached to stored operations, never just signatures.
 Part 2 implements proof-only retrieval using api's exact leaf preimage, bounded
 DTOs and inclusion verification, and re-resolves staged originals against newest
 trust rather than treating structural staging or cached contexts as authority.
+
+## Required concurrent guard-removal evidence
+
+Part 1 owns the production `HostedTrust` high-water/re-resolution guards.
+Please run its cached-context/concurrent-install test with the relevant guard
+temporarily removed, record the failing run, restore it, and record the passing
+run. Part 2 cannot edit that production code under the owner's file split.
+Direct API context tests are useful controls but do not prove durable install
+serialization. Part 2 will add the transport install interleaving test after the
+actual transaction seam lands in integration.

@@ -22,6 +22,16 @@ impl PreparedImportJob {
 }
 
 impl HostedClient {
+    /// Check semantic support before provisioning an import destination or
+    /// staging an import job. Method discovery alone cannot establish support.
+    pub async fn require_import_authority_protocol(&self) -> Result<()> {
+        let remote = self
+            .native()
+            .await
+            .map_err(super::super::HostedError::transport)?;
+        authority::require_hybrid_peer(remote.description.protocol.as_ref())?;
+        Ok(())
+    }
     pub async fn prepare_import_job(
         &self,
         request: &wire::PrepareImportJobRequest,
@@ -196,7 +206,9 @@ fn exact_signed_proposal<'a>(
     Ok(signed)
 }
 
-fn verify_delegating_signature(signed: &wire::SignedImportJobDelegationV1) -> Result<()> {
+pub(super) fn verify_delegating_signature(
+    signed: &wire::SignedImportJobDelegationV1,
+) -> Result<()> {
     let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
     authority::verify_authorization_signature(
         &body.delegating_public_key,

@@ -549,8 +549,7 @@ impl<B: ReplicaStore> Session<B> {
                     signature: record.original.signature,
                 }],
             }],
-            // Native replication carries no import-authority proof bundle.
-            import_authority: None,
+            import_authority: record.import_authority.as_deref().cloned(),
         }))
     }
 

@@ -18,6 +18,64 @@ pub use job::PreparedImportJob;
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
 const RETRY_IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/RetryImportSource";
 
+/// Completeness at the client transport boundary. This grants no authority;
+/// the host still verifies independently selected owner permission and the
+/// current job/CAS fence. An old unsigned request never reaches a capable peer.
+pub(super) fn require_request_authority(method: &str, encoded: &[u8]) -> super::Result<()> {
+    use api::hybrid_codec::Reject;
+    use prost::Message;
+    match method.trim_start_matches('/') {
+        "heddle.api.v1alpha2.IntegrationService/ImportSource" => {
+            let request = contract::ImportSourceRequest::decode(encoded)?;
+            let signed = request_delegation(request.import_authority.as_ref())?;
+            let scope = signed
+                .body
+                .as_ref()
+                .and_then(|body| body.scope.as_ref())
+                .ok_or(Reject::Scope)?;
+            if request
+                .source
+                .as_ref()
+                .is_none_or(|source| source.clone_url != scope.source_url)
+                || request.expected_destination_version != scope.destination_version
+            {
+                return Err(Reject::Scope.into());
+            }
+        }
+        "heddle.api.v1alpha2.IntegrationService/SynchronizeRemote" => {
+            let request = contract::SynchronizeRemoteRequest::decode(encoded)?;
+            // Recurring sync needs its own explicit caller-signed proposal;
+            // the host checks Own authority and that proposal's exact scope.
+            request_delegation(request.import_authority.as_ref())?;
+        }
+        "heddle.api.v1alpha2.IntegrationService/RetryImportSource" => {
+            let request = contract::RetryImportSourceRequest::decode(encoded)?;
+            if request.logical_job_id.len() != 16
+                || request.active_delegation_digest.len() != 32
+                || request.expected_authority_epoch == 0
+            {
+                return Err(Reject::ImportPermission.into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn request_delegation(
+    proof: Option<&contract::ImportPublicProofBundleV1>,
+) -> super::Result<&contract::SignedImportJobDelegationV1> {
+    use api::hybrid_codec::Reject;
+    use prost::Message;
+    let proof = proof.ok_or(Reject::ImportPermission)?;
+    if proof.format_version != 1 || proof.encoded_len() > api::import_authority::MAX_BUNDLE_BYTES {
+        return Err(Reject::Bounds.into());
+    }
+    let signed = proof.delegations.last().ok_or(Reject::ImportPermission)?;
+    job::verify_delegating_signature(signed)?;
+    Ok(signed)
+}
+
 /// Source admission failures carry exact branch and tag counts.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportSourceRefError {
@@ -125,6 +183,9 @@ impl HostedClient {
         refs: &ImportSourceRefs,
         caller_operation_id: impl Into<String>,
     ) -> Result<ImportSourceStart, ProtocolError> {
+        self.require_import_authority_protocol()
+            .await
+            .map_err(super::helpers::hosted_to_protocol_error)?;
         let operation_id = ClientOperationId::caller_or_fresh(IMPORT_SOURCE, caller_operation_id);
         let overview = self.native_spool_overview(destination_path).await?;
         let destination = overview.r#ref.clone().ok_or_else(|| {
@@ -457,8 +518,126 @@ fn protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use api::v2::client::Rpc as _;
+    use prost::Message;
 
     use super::*;
+
+    fn signed_import_request() -> contract::ImportSourceRequest {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../thread-api/tests/fixtures/hybrid-alpha18.json"
+        )))
+        .expect("alpha.18 fixed vectors");
+        let bytes = hex::decode(
+            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex");
+        let proof = contract::ImportPublicProofBundleV1::decode(bytes.as_slice()).expect("bundle");
+        let scope = proof
+            .delegations
+            .last()
+            .expect("delegation")
+            .body
+            .as_ref()
+            .expect("body")
+            .scope
+            .as_ref()
+            .expect("scope");
+        contract::ImportSourceRequest {
+            source: Some(contract::ProviderRepository {
+                clone_url: scope.source_url.clone(),
+                ..Default::default()
+            }),
+            expected_destination_version: scope.destination_version.clone(),
+            import_authority: Some(proof),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn import_transport_requires_the_original_signature_and_exact_request_scope() {
+        let control = signed_import_request();
+        require_request_authority(IMPORT_SOURCE, &control.encode_to_vec()).expect("signed control");
+        let mut unsigned = control.clone();
+        unsigned.import_authority = None;
+        assert!(require_request_authority(IMPORT_SOURCE, &unsigned.encode_to_vec()).is_err());
+        let mut substituted = control.clone();
+        substituted
+            .import_authority
+            .as_mut()
+            .expect("proof")
+            .delegations
+            .last_mut()
+            .expect("delegation")
+            .delegating_signature = None;
+        assert!(require_request_authority(IMPORT_SOURCE, &substituted.encode_to_vec()).is_err());
+        let mut changed = control.clone();
+        changed
+            .source
+            .as_mut()
+            .expect("source")
+            .clone_url
+            .push_str("/other");
+        assert!(require_request_authority(IMPORT_SOURCE, &changed.encode_to_vec()).is_err());
+        let mut changed = control.clone();
+        changed.expected_destination_version[0] ^= 1;
+        assert!(require_request_authority(IMPORT_SOURCE, &changed.encode_to_vec()).is_err());
+        require_request_authority(IMPORT_SOURCE, &control.encode_to_vec())
+            .expect("unchanged control");
+    }
+
+    #[test]
+    fn retry_transport_requires_the_complete_observed_job_fence() {
+        let control = contract::RetryImportSourceRequest {
+            logical_job_id: vec![1; 16],
+            active_delegation_digest: vec![2; 32],
+            expected_authority_epoch: 1,
+            ..Default::default()
+        };
+        require_request_authority(RETRY_IMPORT_SOURCE, &control.encode_to_vec())
+            .expect("complete CAS control");
+        for field in 0..3 {
+            let mut missing = control.clone();
+            match field {
+                0 => missing.logical_job_id.clear(),
+                1 => missing.active_delegation_digest.clear(),
+                _ => missing.expected_authority_epoch = 0,
+            }
+            assert!(
+                require_request_authority(RETRY_IMPORT_SOURCE, &missing.encode_to_vec()).is_err()
+            );
+        }
+        require_request_authority(RETRY_IMPORT_SOURCE, &control.encode_to_vec())
+            .expect("unchanged CAS control");
+    }
+
+    #[test]
+    fn recurring_sync_transport_requires_explicit_original_authority() {
+        let method = "/heddle.api.v1alpha2.IntegrationService/SynchronizeRemote";
+        let control = contract::SynchronizeRemoteRequest {
+            import_authority: signed_import_request().import_authority,
+            ..Default::default()
+        };
+        // Completeness only: the host separately checks Own and recurring scope.
+        require_request_authority(method, &control.encode_to_vec())
+            .expect("explicit signed proposal");
+        let unsigned = contract::SynchronizeRemoteRequest::default();
+        assert!(require_request_authority(method, &unsigned.encode_to_vec()).is_err());
+        let mut substituted = control.clone();
+        substituted
+            .import_authority
+            .as_mut()
+            .expect("proof")
+            .delegations
+            .last_mut()
+            .expect("delegation")
+            .delegating_signature = None;
+        assert!(require_request_authority(method, &substituted.encode_to_vec()).is_err());
+        require_request_authority(method, &control.encode_to_vec())
+            .expect("original completeness control");
+    }
 
     #[test]
     fn source_refs_reject_empty_and_invalid_branch_names_and_bound_all_tags() {
@@ -598,7 +777,11 @@ mod tests {
             )
             .await
             .expect_err("old peer cannot ignore new import authority");
-        assert!(error.to_string().contains("protocol"), "{error}");
+        assert!(
+            matches!(error, ProtocolError::Remote(ref message)
+                if message == &super::super::HostedError::Hybrid(api::hybrid_codec::Reject::Protocol).to_string()),
+            "{error}"
+        );
         client.close().await;
         server.await.expect("hosted test server");
         assert!(captured.lock().expect("capture").requests.is_empty());

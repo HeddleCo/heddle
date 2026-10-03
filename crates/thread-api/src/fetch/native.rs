@@ -263,20 +263,7 @@ impl StagedSource {
                     ThreadReplica::create(repository.heddle_dir(), &signed).map_err(preparation)?
                 }
                 heddle_object_model::object::thread_replication::GenesisOwner::Account(_) => {
-                    if let Some(receipt) = &wrapper.admission {
-                        if receipt.format
-                            != heddle_object_model::object::thread_genesis_admission::FORMAT
-                        {
-                            return Err(Error::Invalid("unknown genesis admission format"));
-                        }
-                        let [_signature] = receipt.signatures.as_slice() else {
-                            return Err(Error::Invalid(
-                                "one hosted genesis admission signature required",
-                            ));
-                        };
-                        let admission = crate::boundary_acceptance::genesis_admission(wrapper)?
-                            .ok_or(Error::Invalid("genesis admission absent"))?;
-                        let _ = admission;
+                    if wrapper.admission.is_some() {
                         return Err(Error::HostedTrustRequired);
                     } else {
                         let authority = authority.ok_or(Error::Invalid(
@@ -299,13 +286,8 @@ impl StagedSource {
             let retained = replica.ownership_claims().map_err(preparation)?;
             for claim in crate::replication::ownership::verify_claims(wrapper, &genesis)? {
                 let value = claim.original.verify().map_err(preparation)?;
-                if let Some(receipt) = &claim.authority_admission {
-                    let trust = replica
-                        .authority_admission_trust(receipt)
-                        .map_err(preparation)?;
-                    receipt
-                        .verify_claim(&claim.original, &genesis, &trust)
-                        .map_err(preparation)?;
+                if claim.authority_admission.is_some() {
+                    return Err(Error::HostedTrustRequired);
                 } else if !retained.contains(&claim.original) {
                     let authority = authority.ok_or(Error::Invalid("new claim requires current original acceptance or independently pinned admission"))?;
                     repo::thread_replication::ownership_claim::verify_claim_authority(
@@ -334,22 +316,8 @@ impl StagedSource {
             claims.insert(replica.thread_id(), pending);
             replicas.insert(replica.thread_id(), replica);
         }
-        // Verify portable original testimony before installing immutable bytes.
-        // Fresh capabilities are evaluated in dependency order below, after
-        // explicit claims, while availability remains unpublished on failure.
-        for signed in &self.operations {
-            let operation = signed.verify().map_err(preparation)?;
-            let replica = replicas
-                .get(&operation.thread)
-                .ok_or(Error::Invalid("source dependency replica absent"))?;
-            if let Some(receipt) = self
-                .authority_admissions
-                .get(&operation.id().map_err(preparation)?)
-            {
-                replica
-                    .require_authority_admission(signed, receipt)
-                    .map_err(preparation)?;
-            }
+        if !self.authority_admissions.is_empty() {
+            return Err(Error::HostedTrustRequired);
         }
         self.install_source_objects(repository)?;
         for (thread, pending) in &mut claims {
@@ -380,40 +348,29 @@ impl StagedSource {
                 .get(&operation.thread)
                 .ok_or(Error::Invalid("source dependency replica absent"))?;
             let id = operation.id().map_err(preparation)?;
-            if !self.authority_admissions.contains_key(&id) {
-                let prior = replica
-                    .operation_with_authority_admission(&id)
-                    .map_err(preparation)?;
-                if !prior.is_some_and(|prior| {
-                    prior.original == *signed
-                        && prior.status == objects::object::thread_replication::Admission::Accepted
-                }) && let Some(author) = operation.source_author().map_err(preparation)?
-                {
-                    match author {
-                        objects::object::thread_replication::SourceAuthor::LocalKey => replica
-                            .verify_local_source_owner(&operation)
-                            .map_err(preparation)?,
-                        objects::object::thread_replication::SourceAuthor::Account { .. } => {
-                            replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
-                        }
+            let prior = replica
+                .operation_with_authority_admission(&id)
+                .map_err(preparation)?;
+            if !prior.is_some_and(|prior| {
+                prior.original == *signed
+                    && prior.status == objects::object::thread_replication::Admission::Accepted
+            }) && let Some(author) = operation.source_author().map_err(preparation)?
+            {
+                match author {
+                    objects::object::thread_replication::SourceAuthor::LocalKey => replica
+                        .verify_local_source_owner(&operation)
+                        .map_err(preparation)?,
+                    objects::object::thread_replication::SourceAuthor::Account { .. } => {
+                        replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
                     }
                 }
             }
+
             let admission = if !self.is_complete() {
                 replica.receive_source_metadata(
                     signed,
                     repository.store(),
-                    self.authority_admissions.get(&id),
-                    require_source_operation,
-                )
-            } else if let Some(receipt) = self
-                .authority_admissions
-                .get(&operation.id().map_err(preparation)?)
-            {
-                replica.receive_with_authority_admission(
-                    signed,
-                    receipt,
-                    repository.store(),
+                    None,
                     require_source_operation,
                 )
             } else {
@@ -623,10 +580,8 @@ fn install_ready_resolution(
             return Ok(());
         }
     }
-    if let Some(receipt) = &resolution.authority_admission {
-        replica
-            .resolve_ownership_with_admission(&resolution.original, receipt)
-            .map_err(preparation)?;
+    if resolution.authority_admission.is_some() {
+        return Err(Error::HostedTrustRequired);
     } else {
         replica
             .resolve_ownership(
@@ -655,10 +610,8 @@ fn install_ready_claims(
             continue;
         }
         let claim = pending.remove(index).original;
-        if let Some(receipt) = &claim.authority_admission {
-            replica
-                .claim_ownership_with_admission(&claim.original, receipt)
-                .map_err(preparation)?;
+        if claim.authority_admission.is_some() {
+            return Err(Error::HostedTrustRequired);
         } else if !replica
             .ownership_claims()
             .map_err(preparation)?

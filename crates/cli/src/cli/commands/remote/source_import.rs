@@ -53,6 +53,10 @@ async fn import_connected(
     args: &ImportUrlArgs,
     refs: &ImportSourceRefs,
 ) -> Result<()> {
+    client
+        .require_import_authority_protocol()
+        .await
+        .context("negotiate hosted import authority before provisioning")?;
     let (destination, created) = provision_hosted_source_destination(client, destination)
         .await
         .context("provision hosted import destination")?;
