@@ -69,6 +69,11 @@ Part 2 verifies objects in an isolated staging store and installs the actual
 pack, native Spool ID and separately selected owner metadata in this callback.
 The replica transaction must not commit before source objects are locally
 installed. A check followed by releasing the lock and then installing is invalid.
+The committed `HostedTrust::mutate` also rechecks receiver time after its closure.
+A callback alone is therefore insufficient if that final check can reject after
+actual pack/pin writes: the seam must preserve commit-time expiry/rollback guards
+and provide transactional filesystem rollback, or an equivalent atomic guarantee.
+A late authority rejection must not leave those artifacts installed.
 
 The selected native closure includes ordinary account source, genesis,
 ownership claims/resolutions, dependencies and landing evidence when present.

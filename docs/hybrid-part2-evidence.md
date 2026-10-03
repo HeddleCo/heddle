@@ -108,10 +108,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ```text
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.59s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 54.02s
 ```
 
-All five CI feature commands passed:
+All five CI feature commands passed on the corrected test tree:
 
 ```sh
 cargo clippy --workspace --all-targets --locked --features heddle-cli/telemetry -- -D warnings -D dead-code
@@ -125,6 +125,26 @@ cargo check --locked -p heddle-cli --features ci
 CI FEATURE FAILURES []
 ```
 
+An extra local-only CLI clippy audit (beyond CI's `cargo check` lane) found
+pre-existing unused items in discuss/remote/action-line/netdaemon/resolve. It
+failed and is not reported as passed. The required local-only feature check
+uses CI's exact command; no warning suppression or core-file edit was made.
+
+The remaining CI feature commands also passed:
+
+```sh
+cargo check --locked -p heddle-repo --no-default-features --features git-overlay,zstd
+cargo check --locked -p heddle-repo --no-default-features --features native,zstd
+cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+cargo clippy --locked -p heddle-cli --features ci --all-targets -- -D warnings
+cargo test --locked -p heddle-cli --features ci --test ci_run_local -- --test-threads 8
+```
+
+```text
+ADDITIONAL CI FEATURES PASSED
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.48s
+```
+
 Both portable WASM checks passed:
 
 ```sh
@@ -133,8 +153,8 @@ cargo check --locked -p heddle-thread-api --no-default-features --features root-
 ```
 
 ```text
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.90s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.94s
 ```
 
 The thread-api workflow's six dependency boundaries and 19 clippy/test/example
@@ -161,12 +181,29 @@ feature builds:
 cargo test --workspace --locked -- --test-threads 8
 ```
 
-**Pending rerun after correcting two obsolete device RPC test assertions.** Log: `/tmp/hybrid-part2-workspace-tests.log`.
+**Running again after the device-bearer test-home correction; final result
+pending.** The preceding exact workspace run passed every CLI integration suite,
+then hosted-client ended with `452 passed; 1 failed; 3 ignored`: its bearer
+retention test had no process-environment lock and lost its enrollment while
+another test changed `HEDDLE_HOME`. The test now uses an isolated temporary home
+and the existing shared environment locks. Its targeted corrected run passed:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 455 filtered out; finished in 0.25s
+```
+
+Archived failure: `/tmp/hybrid-part2-workspace-source-home-race.log`.
+Corrected control: `/tmp/hybrid-part2-source-home-fixed.log`. Final log: `/tmp/hybrid-part2-workspace-final-tests.log`.
 Earlier runs are not claimed as passed gates: one hit stale doctest dependency
 artifacts after an integration merge and concurrent builds; the stable run was
 stopped after a separately invoked built device test exposed an obsolete
 server-side protocol rejection assertion. The latter had passed CLI 499 and
-all four publication/fresh Fetch tests before being stopped.
+all four publication/fresh Fetch tests before being stopped. Its child Cargo
+process continued after the wrapper was interrupted; its old log tail was
+removed from the current run after the child exited. The current log has no
+null bytes or old failure tail. That child exposed documentation corpus
+freshness: `docs/llms.txt` / `docs/llms-full.txt` were regenerated from the new
+source docs and the generator freshness check passed.
 
 ## Applied surfaces and remaining interfaces
 

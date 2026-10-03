@@ -4011,6 +4011,399 @@ template is shipped in
 to copy patterns back in after editing.
 
 ========================================================================
+Source: docs/hybrid-part2-evidence.md
+========================================================================
+
+# HYBRID Part 2 verification evidence
+
+Branch: `task/1961-hybrid-part2-transport-client`.
+PR: https://github.com/HeddleCo/heddle/pull/1963.
+Production behavior checked at `c880c59dee0d791674b1210f8419c93f886da442`;
+subsequent changes correct device RPC test assertions and apply nightly rustfmt.
+All commands use the configured isolated target:
+
+```sh
+export CARGO_TARGET_DIR=/runner/heddleco-build/scratch/heddle-1961p2-target
+export TMPDIR=/home/scratch
+export HEDDLE_HOME=$(mktemp -d /home/scratch/hybrid-p2-home.XXXXXX)
+```
+
+Integration's 0.28.7 release was plain-merged. Its API alpha.19 pin does not
+change the alpha.18 HYBRID schema, documentation, verifier or fixed vectors.
+The retained fixture contains selected published alpha.18 vectors. Every
+retained value was compared to that published fixture and matches exactly;
+expected signatures were not regenerated. Sync's mandatory gate remains OFF at the shared
+`hybrid::SYNC_MANDATORY_GATE` switch. api#318 boundary acceptance remains closed.
+
+## Transport negatives and passing controls
+
+| Required row | Running negative and control | Evidence |
+| --- | --- | --- |
+| Completeness/protocol gate | `discovery_retains_peer_support_and_rejects_old_peers_before_the_gated_call`; complete fixed bundle versus missing closure; capable peer executes gated call, old/malformed peer never executes it | Portable library: 15 passed |
+| Verify before install; no partial mutation | `verify_before_install_rejects_without_partial_repository_mutation`: genuinely signed foreign publisher stages structurally, then installation rejects before pack, Spool ID, owner pin or replica writes; selected local owner installs the same source | Native/default matrix passed; guard-removal experiment below |
+| Structural staging never authorizes | `structural_staging_never_authorizes_an_account_genesis`; `structural_authority_sidecars_never_authorize_native_receive`: authentic structural originals/sidecars reject at admission, while a genuinely owned local original is admitted | Native/default matrix passed; authenticated device RPC control: 1 passed in 131.20s |
+| Retrospective proof-only retrieval | `retrospective_lookup_returns_only_the_exact_originals_retirement_proof`; request is exactly the published 68-byte public selector, without credentials/resource identity; malformed selectors never reach lookup and missing originals return the same `NotFound` | Portable library: 15 passed |
+| Proof substitution | `proof_substitution_cannot_authorize_a_neighboring_original`: another authentic leaf's proof rejects; exact genesis proof succeeds | Portable library: 15 passed |
+| Cached contexts | `learned_revocation_and_changed_original_invalidate_a_resolved_context`: original context succeeds unchanged, then N+1 revocation/changed original rejects | API context control passed; **not** durable concurrent-install proof |
+| Bundle preservation in relay | Negotiated genuine fixed-vector native original carries its byte-identical complete public bundle; unnegotiated carrier rejects | Default matrix passed |
+| Local conversion/publication/fresh Fetch | `adopted_history_round_trips_through_hosted_publication_and_fetch`: local genesis/capture bytes and Git attribution survive hosted publication and a fresh Fetch | Targeted control: 1 passed in 7.07s; full workspace result below |
+
+The concurrent durable-context negative and its guard-removal proof remain
+pending. Part 1 owns `HostedTrust` and its production serialization guards.
+Part 2 cannot replace them with a permissive adapter or edit the core crates.
+Exact API requirements are in [hybrid-part2-needs.md](hybrid-part2-needs.md).
+
+## Verify-before-install sensitivity: fail, restore, pass
+
+Temporary mutation at checkpoint `7cbb50ab`: remove only
+`self.require_locally_signed_source()?` from `StagedSource::install`. No other
+behavior or test assertion changes. The original file was restored exactly.
+
+```sh
+cargo test --locked -p heddle-thread-api --lib \
+  verify_before_install_rejects_without_partial_repository_mutation \
+  -- --nocapture --test-threads 8
+```
+
+Guard removed; actual assertion failure:
+
+```text
+thread 'fetch::staging::tests::verify_before_install_rejects_without_partial_repository_mutation' panicked:
+rejection must precede Spool mutation
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 132 filtered out; finished in 1.62s
+```
+
+Guard restored, same test and passing local-owner control:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 1.78s
+```
+
+Entire Fetch staging suite after restoration:
+
+```text
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 118 filtered out; finished in 2.06s
+```
+
+There is no separate pre-implementation red commit. These are real temporary
+production-guard removals, not a claim about TDD history. Archived local logs:
+`/tmp/hybrid-part2-install-guard-{removed,restored}.log` and
+`/tmp/hybrid-part2-install-control.log`.
+
+## Real authenticated device regression
+
+Two older assertions expected blanket protocol rejection at the daemon and
+bare executor receipt admission. The client now rejects a correctly declared
+HYBRID request against an old peer before Sync I/O. The receipt test verifies
+its genuine original/receipt signature control, asserts `HostedTrustRequired`
+without replica generation changes, and checks the real rejected stream leaves
+no admitted operation. It does not enroll a transport/executor key.
+
+```sh
+cargo test --locked -p heddle-hosted-client --features client,semantic --lib \
+  real_device_rpc_captures_without_weft_and_rejects_unowned_authority \
+  -- --nocapture --test-threads 8
+```
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 455 filtered out; finished in 131.20s
+```
+
+The remaining real scenario includes genuine source publication, metadata,
+capacity, ownership and device Fetch controls. The original built test failed
+at its obsolete remote-protocol assertion; that failure is retained in
+`/tmp/hybrid-part2-device-old-protocol-assertion.log`. This is a test migration,
+not the concurrent durable-context guard-removal experiment.
+
+## Final gates
+
+Nightly rustfmt on touched files and `git diff --check` passed. Workspace clippy:
+
+```sh
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 54.02s
+```
+
+All five CI feature commands passed on the corrected test tree:
+
+```sh
+cargo clippy --workspace --all-targets --locked --features heddle-cli/telemetry -- -D warnings -D dead-code
+cargo clippy --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd --all-targets -- -D warnings
+cargo clippy --locked -p heddle-cli --no-default-features --features native,semantic,zstd,ci --all-targets -- -D warnings
+cargo check --locked -p heddle-cli --no-default-features --features git-overlay,ci
+cargo check --locked -p heddle-cli --features ci
+```
+
+```text
+CI FEATURE FAILURES []
+```
+
+An extra local-only CLI clippy audit (beyond CI's `cargo check` lane) found
+pre-existing unused items in discuss/remote/action-line/netdaemon/resolve. It
+failed and is not reported as passed. The required local-only feature check
+uses CI's exact command; no warning suppression or core-file edit was made.
+
+The remaining CI feature commands also passed:
+
+```sh
+cargo check --locked -p heddle-repo --no-default-features --features git-overlay,zstd
+cargo check --locked -p heddle-repo --no-default-features --features native,zstd
+cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+cargo clippy --locked -p heddle-cli --features ci --all-targets -- -D warnings
+cargo test --locked -p heddle-cli --features ci --test ci_run_local -- --test-threads 8
+```
+
+```text
+ADDITIONAL CI FEATURES PASSED
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.48s
+```
+
+Both portable WASM checks passed:
+
+```sh
+cargo check --locked -p heddle-thread-api --no-default-features --target wasm32-unknown-unknown --lib
+cargo check --locked -p heddle-thread-api --no-default-features --features root-attachment --target wasm32-unknown-unknown --lib
+```
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.90s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.94s
+```
+
+The thread-api workflow's six dependency boundaries and 19 clippy/test/example
+commands passed. Portable tests: 15; signing tests: 19; native tests: 129;
+default library tests: 138; semantic tests: 336 with three existing ignores. No new ignore was added.
+The explicitly ignored transport accounting test ran with `HEDDLE_PROFILE=1`:
+
+```text
+test one_connection_counts_all_rpc_bytes_including_failures_and_cancelled_reads ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+```
+
+The first runner invocation omitted that required environment variable and
+failed its explicit prerequisite assertion. The corrected invocation passed.
+The other 18 matrix commands had already passed and were not rerun needlessly.
+Logs: `/tmp/hybrid-part2-feature-matrix.log`, `/tmp/hybrid-part2-matrix-15.log`,
+`/tmp/hybrid-part2-ci-features.log`, `/tmp/hybrid-part2-workspace-clippy.log`,
+`/tmp/hybrid-part2-wasm-{core,root}.log`.
+
+Full workspace command, on a stable source/dependency tree with no competing
+feature builds:
+
+```sh
+cargo test --workspace --locked -- --test-threads 8
+```
+
+**Running again after the device-bearer test-home correction; final result
+pending.** The preceding exact workspace run passed every CLI integration suite,
+then hosted-client ended with `452 passed; 1 failed; 3 ignored`: its bearer
+retention test had no process-environment lock and lost its enrollment while
+another test changed `HEDDLE_HOME`. The test now uses an isolated temporary home
+and the existing shared environment locks. Its targeted corrected run passed:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 455 filtered out; finished in 0.25s
+```
+
+Archived failure: `/tmp/hybrid-part2-workspace-source-home-race.log`.
+Corrected control: `/tmp/hybrid-part2-source-home-fixed.log`. Final log: `/tmp/hybrid-part2-workspace-final-tests.log`.
+Earlier runs are not claimed as passed gates: one hit stale doctest dependency
+artifacts after an integration merge and concurrent builds; the stable run was
+stopped after a separately invoked built device test exposed an obsolete
+server-side protocol rejection assertion. The latter had passed CLI 499 and
+all four publication/fresh Fetch tests before being stopped. Its child Cargo
+process continued after the wrapper was interrupted; its old log tail was
+removed from the current run after the child exited. The current log has no
+null bytes or old failure tail. That child exposed documentation corpus
+freshness: `docs/llms.txt` / `docs/llms-full.txt` were regenerated from the new
+source docs and the generator freshness check passed.
+
+## Applied surfaces and remaining interfaces
+
+- Verbs/human/agent: remote import rejects an incompatible peer before destination
+  provisioning; the local conversion path and existing output modes are retained.
+- Git interop: conversion continues through sley; native originals and Git
+  attribution survive publication/fresh Fetch.
+- Wire: existing alpha.18+ messages and protocol gates; no second view RPC.
+- Reverse states: explicit job renewal and cancellation carry the original
+  signed scope and CAS. Durable root replacement/high-water invalidation await
+  the Part 1 receiver interface.
+
+All observed Part 1 crypto/capability/object-model/repo interfaces are committed
+on its branch but **pending in integration**. Missing atomic installer callback,
+selected native branch/dependency coverage, historical transfer-prefix selection,
+read-only trust snapshot and concurrent guard-removal evidence are itemized in
+[hybrid-part2-needs.md](hybrid-part2-needs.md). Unresolved hosted installation and
+relay remain typed closed errors. This draft is not complete HYBRID admission.
+
+========================================================================
+Source: docs/hybrid-part2-needs.md
+========================================================================
+
+# HYBRID Part 2 core interfaces
+
+Part 2: `task/1961-hybrid-part2-transport-client`, PR #1963.
+Part 1: `task/1961-hybrid-import-authority-host-witness-hed`.
+
+The normative fixed vectors are API alpha.18. Integration's 0.28.7 release now
+pins alpha.19; the HYBRID schema, docs, verifiers and vectors are unchanged.
+Boundary acceptance stays closed until api#318 / alpha.20. The one
+`hybrid::SYNC_MANDATORY_GATE` switch stays OFF until api#307, including Sync
+stream openings and RPC preludes.
+
+## Observed public interfaces
+
+All of these are **pending in integration**. Part 2 reads Part 1's branch and
+will plain-merge integration when Part 1 lands; it never copies Part 1 files.
+
+- `978eb607`: `capability_verifier::import_delegation::{Selection,
+  CurrentContext, VerifiedImportDelegation, Revocation, verify_current,
+  verify_historical, verify_historical_genesis, verify_new_operation,
+  verify_policy_record}`. Selection is independently verified Spool/owner/keyring
+  authority; new work uses receiver time, historical work authenticated witness
+  observation/order. Cancellation and key revocations have distinct namespaces.
+- `352c99e8`, amended at `b6282ddd`: `crypto::import_authority::{WitnessEvidence,
+  NativeClosure, NativeAuthorityContext, verify_native_genesis,
+  verify_native_operation, verify_delegated_import, verify_publication,
+  verify_genesis_payload, verify_authority_payload, verify_landing_payload}` and
+  `object_model::object::thread_replication::delegated_import::DelegatedImport`.
+- `b6282ddd`: `repo::thread_replication::hosted_trust::{RootSelection, Clock,
+  SystemClock, HostedTrust::open, HostedTrust::mutate, TrustTransaction,
+  select_root, replace_root, select_spool}`.
+- `b6282ddd`: `delegated_import::{AcceptedAuthority, HostedAdmission,
+  NativeSubject, NativeEvidence}` and `ThreadReplica::{install_hybrid_import,
+  hybrid_import_bundle, hosted_admission, receive_witnessed}`.
+
+The actual repo installer currently takes:
+
+```rust
+ThreadReplica::install_hybrid_import(
+    directory: &Path,
+    trust: &HostedTrust<impl Clock>,
+    bundle_bytes: &[u8],
+    native_records: &[wire::SignedRecord],
+    authority: &impl AcceptedAuthority,
+    store: &impl ObjectStore,
+) -> repo::thread_replication::Result<Vec<ThreadReplica>>;
+```
+
+`AcceptedAuthority` selects an exact historical `import_delegation::Selection`
+for each witness/policy, resolves typed native/import revocations, and checks
+**current** disclosure/source access in `authorize_import(bundle, now_millis)`.
+`receive_witnessed` resolves `NativeEvidence` under `HostedTrust::mutate`, checks
+native original authority and invokes a current disclosure callback. It requires
+native dependencies to have been separately admitted already.
+
+## Missing installer callback
+
+Add this final argument to `install_hybrid_import` (or an equivalent public seam
+with the same serialization and verification guarantees):
+
+```rust
+before_commit: impl FnOnce() -> repo::thread_replication::Result<()>
+```
+
+Invoke it only after **all** original/permission/witness/dependency checks,
+current disclosure/context/clock checks, and selected replica receives succeed;
+keep the shared trust serialization held and the SQL transaction uncommitted.
+Any authority rejection must occur before actual repository artifacts mutate.
+Part 2 verifies objects in an isolated staging store and installs the actual
+pack, native Spool ID and separately selected owner metadata in this callback.
+The replica transaction must not commit before source objects are locally
+installed. A check followed by releasing the lock and then installing is invalid.
+The committed `HostedTrust::mutate` also rechecks receiver time after its closure.
+A callback alone is therefore insufficient if that final check can reject after
+actual pack/pin writes: the seam must preserve commit-time expiry/rollback guards
+and provide transactional filesystem rollback, or an equivalent atomic guarantee.
+A late authority rejection must not leave those artifacts installed.
+
+The selected native closure includes ordinary account source, genesis,
+ownership claims/resolutions, dependencies and landing evidence when present.
+Every requested native original must have its own verified admission or reject
+before this callback. Signature verification alone is not admission. Unknown
+or uncovered originals fail closed; legacy executor pins cannot authorize them.
+
+## Selected branches and historical prefixes
+
+Fetch selects one source revision. Replication splits native originals into
+bounded carriers. Their **complete public bundle** can contain authentic signed
+operations/manifests/geneses for other branches or earlier slots whose converted
+native counterparts were not requested.
+
+The current installer requires converted native counterparts for every public
+bundle operation and installs every branch genesis. That cannot serve these
+transports. Verify the complete public delegation/publication/slot history, but
+admit only requested native originals and their selected causal dependencies;
+never install an unrelated branch from carried public evidence. A per-original
+API under `TrustTransaction` is also suitable if it verifies the entire selected
+closure before the callback and retains the full unchanged public bundle.
+The seam must support an explicitly selected genesis with no converted source
+operations, as well as a selected capture and its dependencies.
+
+Historical selections carry the exact transfer prefix at each authenticated
+statement. The current `require_public_selection` compares the whole bundle's
+final transfer list against that historical prefix. Instead, compare the exact
+accepted prefix within the independently selected complete chain. A later
+verified handoff cannot erase an earlier authentic original admission.
+
+Part 2's `AcceptedHistory` reconstructs those exact historical contexts from an
+independently verified Spool observation. Its eventual `AcceptedAuthority`
+adapter must resolve revocations against the exact signed policy and witnessed
+accepted order. A generic `false` predicate is forbidden: unknown keys,
+credentials, cancellation namespaces or unbound statements reject. Historical
+conversion permission cannot supply current disclosure authorization.
+
+## Missing read-only trust snapshot
+
+Async proof-only refresh needs this concrete public accessor:
+
+```rust
+pub struct TrustSnapshot {
+    pub root: RootSelection,
+    pub root_epoch: u64,
+    pub previous: Option<api::witness_trust::VerifiedWitnessSet>,
+    pub clock_floor_millis: i64,
+    pub known_job_associations: Vec<(Vec<u8>, Vec<u8>)>,
+}
+impl<C: Clock> HostedTrust<C> {
+    pub fn snapshot(&self) -> repo::thread_replication::Result<TrustSnapshot>;
+}
+```
+
+Restore `previous` from the persisted original signed set with its retained
+history root, including expired snapshots **only as a high-water/history floor**.
+Return the independently selected current root and epoch separately. Reading
+never changes the durable clock floor/set; reject detected clock rollback.
+Part 2 derives known job keys, performs bounded async set/proof lookup, then
+`mutate` reloads and verifies newest trust at use. A set/root/job context learned
+while lookup awaits can invalidate the prepared result before installation.
+
+`HostedTrust::mutate` is the sole shared serialization for witness updates and
+hosted admission. Freshness, high-water, exact body digest, root epoch, seals,
+tombstones, key/job associations and monotonic clock must be rechecked at use.
+Root replacement is explicit and preserves authenticated history. Transported
+roots or endpoint keys cannot construct independent trust.
+
+## Required concurrent guard-removal evidence
+
+Part 1 owns the production `HostedTrust` guards. Run its concurrent test with
+the relevant guard temporarily removed, record the failure, restore the guard,
+and record the passing run: stage/resolve N, persist N+1 revocation using an
+independent handle, then reject install before durable mutation. Part 2 cannot
+edit those guards under the owner's file split. Direct API cached-context tests
+do not establish durable install serialization. Part 2 will add the transport
+install interleaving test when the actual transaction seam lands.
+
+Part 2 already retains full bundles through staging/batching/relay, rejects
+legacy receipt-only authority, retrieves exact bounded retrospective proofs,
+refreshes only receiver metadata without replacing originals, and verifies
+local conversion/publication/fresh Fetch. Unresolved hosted installation returns
+a typed error; no permissive verification placeholder is used.
+
+========================================================================
 Source: docs/local-metadata.md
 ========================================================================
 
