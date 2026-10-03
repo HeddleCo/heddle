@@ -27,6 +27,36 @@ pub fn register_hosted_factory() {
     hosted_runtime::hosted::register_hosted_factory();
 }
 
+/// Polls one very large test future on a thread with an explicit stack.
+///
+/// The full device and hosted pull round trips nest many awaits over the Sync
+/// messages, which carry heddle-api 0.31.0-alpha.17's inline 2.3 KB
+/// import-authority bundle. Unoptimized builds give each nested future its own
+/// stack slots, which outgrew the default 2 MiB test thread. Release builds and
+/// the CLI's 8 MiB main thread are unaffected.
+#[cfg(test)]
+fn on_large_stack<F, Fut>(test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let outcome = std::thread::Builder::new()
+        .name("large-stack-test".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(test())
+        })
+        .expect("large-stack test thread")
+        .join();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[cfg(test)]
 mod test_process_env {
     //! Shared test gate for process-global credential environment.

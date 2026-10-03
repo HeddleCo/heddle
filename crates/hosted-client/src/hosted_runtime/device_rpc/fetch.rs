@@ -89,6 +89,7 @@ impl DeviceRpc {
         let Some(fetch_client_frame::Body::Open(open)) = request.body else {
             bail!("Fetch requires Open")
         };
+        thread_api::hybrid::fetch_open(&open).map_err(anyhow::Error::msg)?;
         let reference = open.thread.as_ref().context("Thread required")?;
         let spool = reference.spool.as_ref().context("Spool required")?;
         let registered = repo::device_catalog::load(&self.home, uuid::Uuid::parse_str(&spool.id)?)?;
@@ -212,6 +213,8 @@ impl DeviceRpc {
                         .transpose()?
                         .into_iter()
                         .collect(),
+                    // Native replication carries no import-authority proof bundle.
+                    import_authority: None,
                 }),
                 &mut charged,
                 &mut changes,

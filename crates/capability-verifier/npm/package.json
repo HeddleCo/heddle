@@ -1,6 +1,6 @@
 {
   "name": "@heddleco/capability-verifier-wasm",
-  "version": "0.28.5",
+  "version": "0.28.6",
   "description": "Canonical owner-anchored authorization verifier compiled from heddleco-capability-verifier to WebAssembly",
   "license": "Apache-2.0",
   "author": "HeddleCo",

@@ -10,7 +10,11 @@ pub enum CollaborationRevision {
     State { state_id: StateId },
     GitCommit { oid: String },
 }
+/// Unknown keys are refused, never dropped. In particular the signed optional
+/// `path_kind` extension (api `saved-source.md`) is not supported yet
+/// (heddle#1959); discarding it would misrepresent the signed source map.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CollaborationSourceAnchor {
     pub revision: CollaborationRevision,
     pub path: String,
@@ -114,5 +118,45 @@ mod tests {
             invalid.validate().is_err(),
             "line numbers require an exact file path"
         );
+    }
+
+    #[test]
+    fn signed_path_kind_extension_is_refused_not_dropped() {
+        #[derive(Serialize)]
+        struct Extended<'a> {
+            revision: &'a CollaborationRevision,
+            path: &'a str,
+            symbol_id: &'a str,
+            start_line: Option<u32>,
+            end_line: Option<u32>,
+            path_kind: &'a str,
+        }
+        let source = CollaborationSourceAnchor {
+            revision: CollaborationRevision::GitCommit {
+                oid: "a".repeat(40),
+            },
+            path: "src/main.rs".into(),
+            symbol_id: String::new(),
+            start_line: None,
+            end_line: None,
+            target: None,
+        };
+        let plain = rmp_serde::to_vec_named(&source).expect("plain map");
+        assert_eq!(
+            rmp_serde::from_slice::<CollaborationSourceAnchor>(&plain).expect("plain decodes"),
+            source
+        );
+        let extended = rmp_serde::to_vec_named(&Extended {
+            revision: &source.revision,
+            path: &source.path,
+            symbol_id: &source.symbol_id,
+            start_line: None,
+            end_line: None,
+            path_kind: "file",
+        })
+        .expect("extended map");
+        let error = rmp_serde::from_slice::<CollaborationSourceAnchor>(&extended)
+            .expect_err("a signed path_kind must not be silently discarded");
+        assert!(error.to_string().contains("path_kind"), "{error}");
     }
 }

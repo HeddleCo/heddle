@@ -374,3 +374,32 @@ async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
         "None must mean the current generation was fully announced"
     );
 }
+
+#[test]
+fn replication_frames_carrying_import_authority_are_rejected_in_both_directions() {
+    let batch = || ReplicationOperations {
+        import_authority: Some(ImportPublicProofBundleV1::default()),
+        ..Default::default()
+    };
+    let refused = |result: Result<Frame>| {
+        assert!(
+            matches!(result, Err(Error::Protocol(message)) if message.contains("api#307")),
+            "HYBRID import authority must be refused before staging, never ignored"
+        );
+    };
+    refused(Frame::from_request(ReplicateThreadRequest {
+        body: Some(replicate_thread_request::Body::Operations(batch())),
+    }));
+    refused(Frame::from_response(ReplicateThreadResponse {
+        body: Some(replicate_thread_response::Body::Operations(batch())),
+    }));
+    assert!(
+        Frame::from_request(ReplicateThreadRequest {
+            body: Some(replicate_thread_request::Body::Operations(
+                ReplicationOperations::default()
+            )),
+        })
+        .is_ok(),
+        "operations without import authority still decode"
+    );
+}

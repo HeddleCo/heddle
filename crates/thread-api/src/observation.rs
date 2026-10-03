@@ -337,6 +337,7 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
         let Some(stream_frame::Body::Open(open)) = &frame.body else {
             return Err(Error::Invalid("missing Open"));
         };
+        crate::hybrid::stream_open(open).map_err(Error::Invalid)?;
         if open.source.as_ref() != Some(&self.source) {
             return Err(Error::Invalid("stream source mismatch"));
         }
@@ -417,6 +418,7 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
                 let Some(stream_frame::Body::Open(open)) = &frame.body else {
                     return Err(Error::Invalid("missing Open"));
                 };
+                crate::hybrid::stream_open(open).map_err(Error::Invalid)?;
                 if open.source.as_ref() != Some(&self.source) {
                     return Err(Error::Invalid("stream source mismatch"));
                 }

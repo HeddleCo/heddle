@@ -143,6 +143,7 @@ pub(super) async fn roundtrip(
         .send(&ReplicateThreadRequest {
             body: Some(replicate_thread_request::Body::Operations(
                 ReplicationOperations {
+                    import_authority: None,
                     boundary_acceptances: Vec::new(),
                     operations: vec![wire_original.clone()],
                     authority_admissions: vec![receipt.clone()],

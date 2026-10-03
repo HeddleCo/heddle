@@ -62,6 +62,7 @@ impl Default for Limits {
 
 /// Each item has passed its frame, scope and cryptographic checks. An operation
 /// can still have missing causal parents; the durable replica decides admission.
+#[allow(clippy::large_enum_variant)] // heddle-api's inline import-authority bundle; boxing adds a heap hop per frame
 pub enum Item {
     Pack(PackChunk),
     Operations(ReplicationOperations),
@@ -170,6 +171,7 @@ impl Validation {
         endpoint: Option<&EndpointRef>,
         limits: Limits,
     ) -> Result<Self, Error> {
+        crate::hybrid::transfer_ready(&ready).map_err(Error::Invalid)?;
         let thread = open
             .thread
             .as_ref()
@@ -366,6 +368,7 @@ impl Validation {
                 Ok(Item::Pack(chunk))
             }
             fetch_server_frame::Body::Operations(batch) => {
+                crate::hybrid::operations(&batch).map_err(Error::Invalid)?;
                 self.operations = self
                     .operations
                     .checked_add(batch.operations.len())

@@ -564,6 +564,7 @@ fn publication_fixture(
         operations: vec![ReplicationOperations {
             boundary_acceptances: Vec::new(),
             authority_admissions: vec![],
+            import_authority: None,
             operations: operations
                 .into_iter()
                 .map(|signed| {

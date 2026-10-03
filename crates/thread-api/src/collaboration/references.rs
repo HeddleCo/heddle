@@ -376,6 +376,7 @@ pub fn anchor(
                 Anchor::Repository
             }
             collaboration_anchor::Target::Source(value) => {
+                reject_path_kind(value)?;
                 thread(
                     value
                         .thread
@@ -415,6 +416,18 @@ pub fn anchor(
             }
         },
     )
+}
+
+/// The native source map cannot record `path_kind` yet (heddle#1959). A set
+/// kind or provenance is refused rather than dropped, so it is never silently
+/// left out of a signature.
+pub(crate) fn reject_path_kind(value: &SourceAnchor) -> Result<(), Error> {
+    if value.path_kind != 0 || value.path_kind_source != 0 {
+        return Err(Error::Protocol(
+            "source anchor path_kind is not supported yet (heddle#1959)",
+        ));
+    }
+    Ok(())
 }
 
 /// Native audiences map exactly to canonical tiers. An omitted audience must
@@ -499,6 +512,9 @@ pub fn anchor_ref(
             end_line: source.end_line,
             target: source.target.as_ref().map(source_target_ref),
             thread,
+            // Native source maps record no path kind; unknown, never derived here.
+            path_kind: api::heddle::api::v1alpha2::SourcePathKind::Unspecified as i32,
+            path_kind_source: api::heddle::api::v1alpha2::SourcePathKindSource::Unspecified as i32,
         },
         Anchor::State { state_id }
         | Anchor::Path { state_id, .. }
@@ -523,6 +539,8 @@ pub fn anchor_ref(
             end_line: None,
             target: None,
             thread,
+            path_kind: api::heddle::api::v1alpha2::SourcePathKind::Unspecified as i32,
+            path_kind_source: api::heddle::api::v1alpha2::SourcePathKindSource::Unspecified as i32,
         },
         Anchor::Change { .. } => {
             return Err(Error::Protocol(
@@ -737,6 +755,8 @@ mod tests {
             end_line: Some(18),
             target: None,
             thread: Some(thread),
+            path_kind: 0,
+            path_kind_source: 0,
         };
         let value = CollaborationAnchor {
             target: Some(collaboration_anchor::Target::Source(source.clone())),
@@ -778,6 +798,61 @@ mod tests {
             .is_err(),
             "source must not escape the Thread"
         );
+    }
+    #[test]
+    fn set_source_path_kind_is_rejected_not_dropped() {
+        use heddle_object_model::object::CollaborationScope;
+        let scope = CollaborationScope {
+            spool: Uuid::from_u128(1),
+            thread: Some(ContentHash::from_bytes([2; 32])),
+        };
+        let source = SourceAnchor {
+            revision: Some(RevisionRef {
+                spool: wire_spool(scope.spool),
+                revision: Some(revision_ref::Revision::GitCommitOid("a".repeat(40))),
+            }),
+            path: "src/main.rs".into(),
+            thread: Some(ThreadRef {
+                spool: wire_spool(scope.spool),
+                id: Some(ThreadId { value: vec![2; 32] }),
+            }),
+            ..Default::default()
+        };
+        let convert = |source: &SourceAnchor| {
+            (
+                anchor(
+                    &CollaborationAnchor {
+                        target: Some(collaboration_anchor::Target::Source(source.clone())),
+                    },
+                    &scope,
+                ),
+                super::super::tags::annotation_source(&AnnotationSourceReference {
+                    source: Some(source.clone()),
+                }),
+            )
+        };
+        let (native, tag) = convert(&source);
+        native.expect("an unset kind converts");
+        tag.expect("an unset kind converts in a source tag");
+        for (kind, provenance) in [
+            (SourcePathKind::File, SourcePathKindSource::Recorded),
+            (SourcePathKind::Directory, SourcePathKindSource::Derived),
+            (SourcePathKind::File, SourcePathKindSource::Unspecified),
+            (SourcePathKind::Unspecified, SourcePathKindSource::Recorded),
+        ] {
+            let set = SourceAnchor {
+                path_kind: kind as i32,
+                path_kind_source: provenance as i32,
+                ..source.clone()
+            };
+            let (native, tag) = convert(&set);
+            for result in [native.map(|_| ()), tag.map(|_| ())] {
+                assert!(
+                    matches!(result, Err(Error::Protocol(message)) if message.contains("heddle#1959")),
+                    "{kind:?}/{provenance:?} must be refused, not dropped"
+                );
+            }
+        }
     }
     #[test]
     fn audience_mapping_is_explicit_and_lossless() {

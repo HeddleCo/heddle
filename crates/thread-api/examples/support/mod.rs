@@ -508,6 +508,8 @@ async fn observe(
                 resumed_from: options.after_cursor.clone(),
                 accepted_budget: options.budget,
                 authority_valid_until: None,
+                protocol: None,
+                witness_set: None,
             })),
         }),
         payload: None,

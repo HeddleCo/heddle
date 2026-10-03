@@ -757,6 +757,7 @@ async fn committed_receipt_case(with_successor: bool) {
         operations: records,
         authority_admissions: vec![],
         boundary_acceptances: vec![],
+        import_authority: None,
     })
     .request()
     .encode_to_vec();

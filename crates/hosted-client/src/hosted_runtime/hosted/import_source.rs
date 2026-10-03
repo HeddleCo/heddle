@@ -169,6 +169,8 @@ impl HostedClient {
                 ref_name: ref_name.clone(),
                 thread_genesis: creation_request.thread_genesis.clone(),
                 creator_authority: creation_request.creator_authority.clone(),
+                // No HYBRID import authority is claimed; none is signed.
+                genesis_authority: None,
             });
         }
         let request = contract::ImportSourceRequest {
@@ -193,6 +195,8 @@ impl HostedClient {
             initial_base_state: initial_base
                 .encode_current_msgpack()
                 .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
+            // No HYBRID import authority is claimed; no proof bundle.
+            import_authority: None,
         };
         let remote = self.native().await.map_err(protocol_error)?;
         let response: contract::MutationResponse =
@@ -399,6 +403,10 @@ fn retry_import_source_request(
         client_operation_id,
         original_operation: Some(original_operation),
         expected_operation_version: original.version.clone(),
+        // No HYBRID import authority is claimed; no job binding.
+        logical_job_id: Vec::new(),
+        active_delegation_digest: Vec::new(),
+        expected_authority_epoch: 0,
     })
 }
 

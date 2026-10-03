@@ -146,6 +146,7 @@ impl Side {
     }
 }
 
+#[allow(clippy::large_enum_variant)] // heddle-api's inline import-authority bundle; boxing adds a heap hop per frame
 enum Event {
     Incoming(Frame),
     Announce,

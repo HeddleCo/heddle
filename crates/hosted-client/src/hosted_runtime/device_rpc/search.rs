@@ -582,6 +582,8 @@ impl DeviceRpc {
                                             spool: Some(SpoolRef { id: spool.id.to_string() }),
                                             id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
                                         }),
+                                        // The local daemon does not classify paths; unknown.
+                                        path_kind: SourcePathKind::Unspecified as i32,
                                     }),
                                     match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
                                     symbol_name: (hit.kind == 4).then_some(hit.symbol_name),
