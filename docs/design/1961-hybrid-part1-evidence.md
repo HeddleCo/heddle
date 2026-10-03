@@ -1,249 +1,155 @@
-# HYBRID Part 1 verification evidence
+# HYBRID Part 1 security-review evidence (#1961 / PR #1964)
 
-Run in the isolated `heddle-1961` worktree on 2026-10-03, based on
-`53fb89fd` with the requested alpha.18 pin. The PR targets `integration`, which
-has advanced to release 0.28.7 / alpha.19 at `7f90c4ff`; these results validate
-this branch, not an unrun merged feature/dependency graph. Workspace Cargo
-commands unset the inherited `CARGO_TARGET_DIR` and set `TMPDIR=/home/scratch`,
-so `.cargo/config.toml` selects
-`/runner/heddleco-build/scratch/heddle-1961-target`. The nested CI differential
-and parser probe use that same target, never a shared or replacement target.
-
-Boundary-acceptance binding remains a typed api#318 rejection. Part 2 Fetch
-routing remains separate: 38 default hosted-clone regressions (plus three
-`ci,preview` cases) retain their bodies with explicit #1961 Part 2 ignores.
-The new genuine HTTPS clone rejection test runs. No Part 1 negative is ignored.
+The branch plain-merged `origin/integration` at `7f90c4ff` (merge `6fc36351`),
+then moved the coordinated Rust/npm release to 0.28.8 for its dependency change.
+Final API pin: `=0.31.0-alpha.21`, exact release commit
+`05c4d08c4e7120c2532a2b2a6c608b12e58acc4b`. Alpha.21 published during this work.
+It retains alpha.20/api#319's exact boundary binding and completed signing layouts;
+Prepare/Commit integration (api#322) belongs to Part 2.
 
 ## Conformance source
 
-The three packaged fixture copies were compared byte for byte against
-`git -C /home/heddleco/HeddleCo/api show v0.31.0-alpha.18:tests/fixtures/import-authority-host-witness-v1.json`.
+All three packaged fixture copies are verbatim from the API release:
 
 ```text
-Three retained fixtures exactly match alpha.18; SHA-256
-211b1a903f34635b4ae346b6ede40c2981a6cd07637265f39eb9d2020ab26577
+30852e349b9b17ec7ea65df18d307be760eb908f04d4721ee7dc46ca4832ded2
 ```
 
-Expected canonical bytes and signatures were not regenerated. Correctly signed
-malformed inputs use published fixture seeds.
+The copies live in capability-verifier/conformance/hybrid, crypto/tests/fixtures
+and repo/tests/fixtures/hybrid. All **64 alpha.20 signed vectors are unchanged**
+in alpha.21. The earlier alpha.20 fixture hash was
+`e7fd977bc39d5fc4937c55e29d1be00247859ef9413c152be55c3ab8522b8dfc`.
+Expected signatures/bytes were never regenerated. Derived malformed regression
+inputs use the fixture seeds and recompute every affected signature/commitment.
+The review and its probes remain read-only under
+`/home/scratch/review-heddle1964/`.
 
-## Guard-removal sensitivity: fail, restore, pass
+## Finding-by-finding resolution
 
-Each command ran the named existing negative and its nearby valid control.
-The expected failures were test assertion failures, not compile failures.
-Source and dependency files were restored exactly before final gates.
-
-| Gate | One removed guard | Failure observed | Restored result |
-| --- | --- | --- | --- |
-| Role substitution | Initialize selected root/witness forbidden job keys with `Vec::new()` instead of the supplied list | `genuine device delegation cannot make witness a job signer` | 1 passed, 0 failed |
-| Delegation scope | Omit `contract::verify_new_operation(operation, &current.verified, context.now)?` | `left: Ok(())`, `right: Err(Hybrid(Scope))` | 1 passed, 0 failed |
-| Retirement/backdating | Omit API `verify_inclusion(&digest, proof, entry)?` | Backdated genuinely signed statement no longer returns `Contract(Proof)` | 1 passed, 0 failed |
-| Revocation/retirement | Omit API `if entry.state == 3 { return Err(Reject::Revoked); }` | Identical original/proof under REVOKED no longer returns `Contract(Revoked)` | 1 passed, 0 failed |
-
-```sh
-cargo test --locked -p heddleco-capability-verifier --lib role_substitution_and_conflicting_job_associations
-cargo test --locked -p heddleco-capability-verifier --lib portable_import_permission_scope_and_current_expiry
-cargo test --locked -p heddle-crypto --features owner-root --lib retirement_backdating_requires_the_exact_sealed_statement
-cargo test --locked -p heddle-crypto --features owner-root --lib revocation_vs_retirement_rejects_identical_original_and_cached_context
-```
-
-Every removed-guard run ended with:
-
-```text
-test result: FAILED. 0 passed; 1 failed; 0 ignored
-```
-
-Every restored-guard run ended with:
-
-```text
-test result: ok. 1 passed; 0 failed; 0 ignored
-```
-
-The two API-owned guards were mutated only in an isolated `git archive` copy of
-alpha.18 under `/tmp`, temporarily selected by a local dependency patch. The
-shared API checkout/cache and fixed fixture were unchanged. The workspace
-manifest, lockfile and source were restored byte for byte; the final locked
-build uses the original published pin. Role/scope runs were repeated against
-the final expanded genuine signed negatives.
-
-## CI features and ancillary gates
-
-All these commands exited zero (same isolated target/environment as above):
-
-| Command | Observed result |
+| Finding | Resolution and discriminating control |
 | --- | --- |
-| `rustfmt +nightly --edition 2024 <45 touched Rust files>`; `git diff --check` | Passed |
-| `cargo check --locked -p heddle-repo --no-default-features --features git-overlay,zstd` | Passed |
-| `cargo check --locked -p heddle-repo --no-default-features --features native,zstd` | Passed |
-| `cargo check --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd` | Passed |
-| `cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd` | Passed |
-| `cargo check --locked -p heddle-cli --no-default-features --features git-overlay,ci` | Passed |
-| `cargo check --locked -p heddle-cli --features ci` | Passed |
-| `cargo test --locked -p heddle-cli --features ci --test ci_run_local -- --test-threads 8` | 31 passed |
-| `cargo clippy --locked -p heddle-cli -p heddle-config --features heddle-cli/telemetry --lib --bins --tests --examples -- -D warnings` | Passed |
-| `cargo test --locked -p heddle-cli -p heddle-config --features heddle-cli/telemetry --lib --bins -- --test-threads 1` | CLI 499, config 44, binary 5 passed |
-| `cargo test --locked -p heddle-cli --features telemetry --test cli_workflow telemetry:: -- --test-threads 8` | 1 passed |
-| `cargo clippy --locked -p heddle-cli --features ci --all-targets -- -D warnings` | Passed |
-| `cargo test --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- --nocapture` | Owner verifier 72 passed, 4 existing ignores; ordinary verifier 63 unit + 1 conformance passed |
-| `RUSTDOCFLAGS='-D rustdoc::broken_intra_doc_links' cargo doc --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --no-deps` | Passed; existing passkey bare-URL warning |
-| `python3 .github/check_leaf_dependencies.py` | Four leaf crates passed |
-| `scripts/check-publish-pipeline.sh` | Inventory, dependency order and versions passed |
-| `scripts/check-hosted-leaf-consumer.sh` | Separate leaf consumer passed |
-| `scripts/test-biscuit-parser-clippy.sh` | Five intended disallowed-parser diagnostics detected |
-| `cargo run --locked -p heddle-devtools -- check-rust-source-reachability` | 1223 source files / 36 crates reachable; no blanket dead-code allows |
-| `cargo package --locked -p heddleco-capability-verifier --list` and ordinary verifier equivalent | Both package surfaces passed |
+| P1 #1: disclosure expiry during verification | `HostedTrust::mutate_validated` checks current access with freshly sampled milliseconds under SQLite IMMEDIATE immediately before commit. The genuine complete export succeeds at 1350000, rejects initially at 1352000, and rejects when time advances past deadline 1351000 during verification. Threads, admissions, proofs, slots, job associations and signed-set updates roll back. Native receiving uses the same final hook. |
+| P1 #2: alpha.18 incompatibility / missing boundary binding | Coordinated API and native-conformance pins, verbatim new fixtures and real native boundary verification. API selectors bind acceptance/manifest/intent/receipts; the native adapter checks full canonical selection, original/account/Spool/kind, issuer/basis, signatures and accepting authority at authenticated observation with explicit original scope. All dependency acceptances are checked. Publication/landing retain OriginalAuthority. Current and retired multi-original/multiple-acceptance controls pass. Five API substitutions and nine native selection negatives reject at their own gates. |
+| P2 #3: ownership-transfer history | Authenticate the full signed chain once, then require each statement's exact verified prefix, historical owner/state and transfer sequence. Genuine A→B pre-transfer originals and post-transfer renewal retain original genesis and signatures on fresh/existing stores. Wrong prefix, wrong owner/final historical selection and a genuinely co-signed fork reject without durable changes. Current access remains independently selected. |
+| P2 #4: witness/job delegating devices | Exclude selected descriptor/witness and permanently known job keys from delegator, user authority and genesis creator positions in current/historical paths, including native original and boundary acceptor authority. Genuine owner-signed permissions naming witness/job keys with distinct child jobs reject. The complete incoming bundle's job declarations also restrict roles on fresh receivers before durable associations exist; only verified certificates are persisted. A genuine B-signed post-transfer permission cannot promote the earlier job to delegator; ordinary device and direct-owner controls pass. Historical publication/genesis controls retain valid native commitments and genuine selected witness signatures. |
+| P2 #5: reopen erases clock failure | Independent handles share a retained process-lifetime anchor keyed by canonical store/authority; SystemClock shares one monotonic epoch. Frozen wall time after 600000 ms rejects through independent handles and drop/reopen. Restored trustworthy wall time with a fresh genuine root-signed set succeeds. SQLite and restart wall floors remain. |
+| P2 #6: coverage / public WASM route | The differential invokes public `verifyImportDelegation` with identical byte/JSON/time inputs and compares digests/rejection reasons. It includes signed wrong-role delegators, direct-owner/device controls, expiry, cancellation, all three key revocations, independent selection, missing parent, width and i64 overflow. Forced divergence targets import specifically. The genesis-envelope negative recomputes its binding, delegation and witness commitments before reaching envelope rejection. Subdelegation uses distinct keys; published empty/single/even/odd trees and native boundary vectors are consumed directly. |
+| P3 #7: millisecond truncation | Preserve receiver milliseconds for witness freshness; derive seconds only for owner/delegation validity. A root-signed set issued at 1350001 and receiver time 1350002 passes both historical publication and genesis. No signed expiry grace is added. |
 
-The feature checks exposed two existing inconsistencies: the client-gated Auth
-variant had an ungated catalog match arm, and `ci` depended on hosted recording
-without enabling `client`. The PR fixes those feature declarations. Parallel
-CLI initialization now uses the existing process-environment test lock.
-The full eight-thread run also exposed the fsck renderer control racing color
-toggles. Its unmodified binary passed alone; the corrected test takes the
-existing `color_state` serial lock and explicitly selects uncolored output.
-All 34 renderer tests then passed at eight threads. Production output is unchanged.
+## Fail-then-pass runs
 
-## WASM and published binding
+Mutations were temporary and restored before final gates. API guard mutations
+used isolated release copies under `/tmp`; shared Cargo cache sources were never
+edited. Logs are retained in `/home/scratch/heddle1964-fixes/`; final-graph gates
+are in its `alpha21/` directory.
+
+| Gate | Observed failing run | Restored regression |
+| --- | --- | --- |
+| Current disclosure / reopen clock | Review-seeded expiry and independent-reopen tests both fail against the original behavior (`regressions-before.log`) | `hosted_trust_tests` |
+| Actual boundary support | Published positive fails with `BoundaryAcceptancePendingApi318` (`boundary-before-rerun.log`) | `review_alpha20_boundary_vectors_resolve_exact_originals` plus native complete controls |
+| Exact API boundary binding | Isolated selector/original/manifest/intent/receipt checks removed: **0 passed, 5 failed**, each negative becomes `Ok(())` (`boundary-api-before.log`) | Five `review_boundary_api_*` tests |
+| Complete native selection | Adapter selection/authority gate bypassed: **0 passed, 9 failed** (`boundary-native-before.log`) | Nine individually named `review_boundary_native_boundary_*` tests, current and retired |
+| Mixed historical transfer prefixes | Old full-vector equality restored: **0 passed, 1 failed**, genuine mixed-history control rejects `Root` (`transfer-before.log`) | `review_transfer_preserves_original_genesis_and_exact_historical_prefixes` |
+| Wrong-role delegator | Original role behavior: **0 passed, 1 failed**, genuine owner-signed witness delegation accepts (`roles-before.log`) | `review_wrong_role_delegators_have_genuine_owner_permissions` |
+| Fresh receiver job promotion | Genuine A→B bundle with B signing a permission for the earlier job: **0 passed, 1 failed**, bad role installs (`alpha21/fresh-job-role-before.log`) | `review_fresh_bundle_job_cannot_become_post_transfer_delegator` |
+| Operation scope | Operation scope verification removed: **0 passed, 1 failed**, signed scope violation becomes `Ok(())` (`scope-before.log`) | `portable_import_permission_scope_and_current_expiry` |
+| Exact creator envelope | Envelope equality removed with all surrounding commitments valid: **0 passed, 1 failed** (`genesis-envelope-before.log`) | `genesis_original_owner_and_exact_envelope_remain_mandatory` |
+| Retired history proof | Exact inclusion guard removed in isolated API: **0 passed, 1 failed** (`retirement-before.log`) | `retirement_backdating_requires_the_exact_sealed_statement` |
+| Revocation versus retirement | Revoked-entry rejection removed in isolated API: **0 passed, 1 failed** (`revocation-before.log`) | `revocation_vs_retirement_rejects_identical_original_and_cached_context` |
+| Public import differential | Forced mismatch in the import route must exit nonzero and identify `import-device-control` | Four restored fixed seeds, public JS binding |
+
+The fail-then-pass boundary runs used alpha.20's unchanged fixed vectors. Final
+alpha.21 tests rerun the same gates from its verbatim release fixture. Upstream
+Prepare/Commit vectors are packaged intact; this evidence makes no Part 2 RPC or
+host publication claim.
+
+## Final gate output
+
+Observed completed checks on the final alpha.21 graph:
+
+- Nightly fmt on 25 touched Rust files and `git diff --check` passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings -D dead-code` passed.
+- CLI `ci`, CLI/config `telemetry`, and thread-api default/core/native/signing/
+  replication/iroh+replication/root-attachment/semantic-analysis Clippy passed
+  with `-D warnings`, using CI's target selections.
+- `cargo build --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib` passed.
+- Ordinary verifier WASM check and portable thread-api core/root-attachment WASM checks passed.
+- Full capability-verifier WASM unit suite: **48 passed, 0 failed**. All eight
+  import-delegation tests actually executed, including roles and fractional time.
+- Optimized npm build and prepack/dry-run passed with wasm-pack 0.13.1,
+  wasm-bindgen 0.2.127 and wasm-opt 117. Package: `heddleco-capability-verifier-wasm-0.28.8.tgz` (10 files).
+- Native conformance verifier built with `--locked` against the same alpha.21 pin.
+- All four checked-in differential seeds passed: **139 cases each, 556 total**.
+  Forced divergence exited nonzero with `OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED`
+  and named `import-device-control` (fuzz count 0).
+- Leaf dependency boundaries and publish inventory/dependency order passed
+  (156 requirement/version pairs; 35 publishable crates).
+
+Targeted final regression output:
+
+```text
+crypto import_authority_tests:
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 23.63s
+capability-verifier import_delegation:
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.94s
+repo hosted_trust_tests:
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 926 filtered out; finished in 14.58s
+capability-verifier full WASM suite:
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 filtered out; finished in 5.49s
+OWNER_AUTH_DIFFERENTIAL=PASS seed=38322398 fuzz_cases_per_fixture=24 corpus_cases=139
+OWNER_AUTH_DIFFERENTIAL=PASS seed=1138 fuzz_cases_per_fixture=24 corpus_cases=139
+OWNER_AUTH_DIFFERENTIAL=PASS seed=247 fuzz_cases_per_fixture=24 corpus_cases=139
+OWNER_AUTH_DIFFERENTIAL=PASS seed=836 fuzz_cases_per_fixture=24 corpus_cases=139
+```
+
+The full workspace command completed with **exit 0: 6987 passed, 0 failed,
+117 ignored**, summed across 176 unit/integration/doctest summaries
+(2328.67 seconds, including build-lock waits and compilation). It used
+fresh `HEDDLE_HOME=/home/scratch/heddle1964-workspace-tests-hkii2js4`, `TMPDIR=/home/scratch`,
+`CARGO_TARGET_DIR` removed, and the worktree's isolated Cargo target unchanged:
 
 ```sh
-cargo build --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib
-cargo check --locked -p heddle-biscuit-verifier --target wasm32-unknown-unknown --lib
-CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=<wasm-bindgen-test-runner 0.2.127> cargo test --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib -- --nocapture
-npm run build
-npm run pack:binding
-```
-
-The npm steps used CI's wasm-pack 0.13.1 with writable temporary tool/npm caches.
-The full WASM matrix and publish payload ended with:
-
-```text
-test result: ok. 45 passed; 0 failed; 0 ignored; 0 filtered out
-npm binding version: 0.28.6
-npm notice total files: 10
-heddleco-capability-verifier-wasm-0.28.6.tgz
-```
-
-The exact `capability-verifier-parity.yml` seed loop, with
-`OWNER_AUTH_BINDING_READY=1`, completed:
-
-```text
-OWNER_AUTH_DIFFERENTIAL=PASS seed=38322398 fuzz_cases_per_fixture=24 corpus_cases=100
-OWNER_AUTH_DIFFERENTIAL=PASS seed=1138 fuzz_cases_per_fixture=24 corpus_cases=100
-OWNER_AUTH_DIFFERENTIAL=PASS seed=247 fuzz_cases_per_fixture=24 corpus_cases=100
-OWNER_AUTH_DIFFERENTIAL=PASS seed=836 fuzz_cases_per_fixture=24 corpus_cases=100
-```
-
-The forced negative (`OWNER_AUTH_FORCE_DIVERGENCE=1`,
-`OWNER_AUTH_FUZZ_CASE_COUNT=0`) exited 1 with:
-
-```text
-OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED
-```
-
-An initial separate-workspace differential build encountered an unhashed rlib
-collision between two Serde feature graphs in the same required target. After
-other native builds completed, touching the verifier source forced recompilation
-for the differential graph; all four seeds and the actual negative then passed.
-The final workspace graph was likewise rebuilt. No target change or cargo clean.
-
-## Targeted controls
-
-```text
-crypto import_authority: 10 passed, 0 failed
-repo hosted_trust: 6 passed, 0 failed
-capability-verifier import_delegation: 5 passed, 0 failed
-thread-api library: 125 passed, 0 failed
-real authenticated device RPC: 1 passed, 0 failed (82.54s)
-authenticated HTTPS clone rejection: 1 passed, 0 failed; 38 explicitly deferred Part 2 regressions
-```
-
-The first real-device run under competing builds hit the existing capacity
-mutation deadline. An isolated run reached the exact intended core rejection,
-but exposed that the adapter resets its stream rather than serializing that
-error. The final test checks the exact typed rejection independently, then the
-real reset and no accepted operation. Its isolated run passed through capacity,
-source, ownership and replication controls.
-
-The earlier workspace run reached the 38 old hosted-clone setup failures at
-`source preparation: pin hosted executor for native Thread`. The retained
-Part 2 ignores and running rejection control are explicit, not a passing claim
-for those clone round trips. The repo crate run also exposed an obsolete
-alpha.8 requirement assertion; the alpha.18 assertion and actual public-type
-verification control were corrected and passed.
-
-The full client-feature run also reached four old native clone/pull fixtures that
-expected the closed executor-pin route to install content. Their active tests
-now preserve genuine framed publication and assert the exact closed-path
-rejection across clone, replay, repair and hydration, with unchanged closure and
-original-genesis controls. The enrollment bearer control now takes the existing
-process/credential environment locks and uses an isolated device home.
-
-Final workspace Clippy completed with exit 0 after the last receiving-test
-fixes (`--workspace --all-targets --locked -- -D warnings -D dead-code`):
-
-```text
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.96s
-```
-
-Cargo also reported the existing third-party `proc-macro-error2` future
-incompatibility notice. The completed command did not suppress diagnostics.
-
-## Final full workspace gate
-
-After the final receiving-test corrections, the recorder created a fresh
-`HEDDLE_HOME` before both commands, removed `CARGO_TARGET_DIR` from the command
-environment and supplied `TMPDIR=/home/scratch`. The Cargo invocations were:
-
-```sh
-cargo clippy --workspace --all-targets --locked -- -D warnings -D dead-code
 cargo test --workspace --locked -- --test-threads 8
 ```
 
-Both commands completed with observed exit 0. The final workspace test command
-ran for 1918.98 seconds. Summing its 176 unit/integration/doctest summaries gives
-**6963 passed, 0 failed, 117 ignored**. Of the ignores, 38 are the explicitly
-retained Part 2 Fetch regressions; the other 79 are existing opt-in/baseline
-cases. No Part 1 negative is ignored.
-
-The recorder completion output was:
+Recorder output:
 
 ```text
-workspace-clippy-final 0
-workspace-tests-final 0
+workspace-tests 0
 ```
 
-Relevant final per-binary output tails:
+The aggregate includes the explicit Part 2 and existing opt-in/platform ignores;
+the targeted Part 1 regressions and all 48 WASM cases have zero ignores.
+
+Full-graph core library output tails:
 
 ```text
 crypto:
-test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
-object-model:
-test result: ok. 375 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
-capability-verifier:
-test result: ok. 72 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 3.93s
+test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.82s
+heddle_object_model:
+test result: ok. 375 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
+heddleco_capability_verifier:
+test result: ok. 75 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 4.39s
 repo:
-test result: ok. 986 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 227.72s
-hosted-client:
-test result: ok. 446 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 165.66s
-thread-api:
-test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.30s
-renderer:
-test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-hosted_clone_writes:
-test result: ok. 1 passed; 0 failed; 38 ignored; 0 measured; 0 filtered out; finished in 2.54s
+test result: ok. 990 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 234.99s
+hosted_client:
+test result: ok. 447 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 214.32s
+heddle_thread_api:
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.73s
 ```
 
-The final Cargo output tail was:
+## Integration limits
 
-```text
-all doctests ran in 0.85s; merged doctests compilation took 0.83s
-   Doc-tests weft_client
+The 38 default `hosted_clone_writes` cases and three feature-specific native
+carrier deferrals remain explicit Part 2 work. Bare direct/stored executor-pin
+routes reject with typed `WitnessEvidenceRequired`; these rejection tests do
+not establish a HYBRID Fetch/clone round trip. Descriptor routing, peer
+negotiation, Prepare/Commit, custody, issuance fencing, retrospective lookup,
+server policy/lease/frontier commit fences and compromise recovery remain with
+Part 2/weft. No Part 1 negative is ignored.
 
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-```
-
-All six new hosted-trust tests passed in that full feature graph, as did all
-portable delegation, independent original/witness signature, scope, retirement,
-revocation and original binding controls. The branch's clean merge-tree check
-against `integration` exited 0; it is not a claim of merged-graph test execution.
+Applied surfaces: no new verb/help/clap flag; human and agent output contracts
+remain unchanged; the additive Rust/WASM evidence APIs carry typed rejections;
+Git projection retains original signed bytes/IDs through sley; the shared API
+wire is coordinated without another view RPC; transfer/replay/revocation/root
+replacement and exported trust/proof state remain observable.

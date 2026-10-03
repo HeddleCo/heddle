@@ -268,7 +268,7 @@ pub struct PublicationIntent {
     pub client_operation_id: Uuid,
 }
 impl PublicationIntent {
-    pub fn id(&self) -> Result<ContentHash> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         if self.spool.is_nil()
             || self.client_operation_id.is_nil()
             || self.source == [0; 32]
@@ -276,10 +276,21 @@ impl PublicationIntent {
         {
             return Err(invalid("invalid boundary publication intent"));
         }
-        Ok(ContentHash::compute_typed(
-            INTENT_FORMAT,
-            &rmp_serde::to_vec_named(self)?,
-        ))
+        Ok(rmp_serde::to_vec_named(self)?)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_ACCEPTANCE_BYTES {
+            return Err(invalid("publication intent byte bound exceeded"));
+        }
+        let value: Self =
+            preflight::decode(bytes, false, |bytes| Ok(rmp_serde::from_slice(bytes)?))?;
+        if value.encode()? != bytes {
+            return Err(invalid("noncanonical publication intent"));
+        }
+        Ok(value)
+    }
+    pub fn id(&self) -> Result<ContentHash> {
+        Ok(ContentHash::compute_typed(INTENT_FORMAT, &self.encode()?))
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

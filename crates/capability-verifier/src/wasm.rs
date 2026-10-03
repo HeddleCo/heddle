@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use prost::Message;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -33,27 +32,7 @@ fn json<T: Serialize>(value: &T) -> Result<String, JsError> {
     serde_json::to_string(value).map_err(js_error)
 }
 
-fn canonical_message<T>(bytes: &[u8], maximum_bytes: usize) -> crate::Result<T>
-where
-    T: Message + Default,
-{
-    if bytes.len() > maximum_bytes {
-        return Err(crate::Error::TooLarge {
-            limit: maximum_bytes,
-        });
-    }
-    let decoded = T::decode(bytes)?;
-    if decoded.encode_to_vec() != bytes {
-        return Err(crate::Error::NonCanonicalProtobuf);
-    }
-    Ok(decoded)
-}
-
-fn fixed<const N: usize>(bytes: &[u8], label: &str) -> crate::Result<[u8; N]> {
-    bytes
-        .try_into()
-        .map_err(|_| crate::Error::Invalid(format!("{label} must be {N} bytes")))
-}
+use crate::canonical::{canonical_message, fixed};
 
 /// Verify typed import delegation against independently selected owner/Spool
 /// pins and actual current time. No incoming keyring enrolls its carried root.
@@ -75,108 +54,21 @@ pub fn verify_import_delegation_binding(
     now_unix_seconds: i64,
     max_capability_ttl_seconds: i64,
 ) -> Result<Vec<u8>, JsError> {
-    use crate::import_delegation::{CurrentContext, Revocation, Selection};
-    fn ids(value: &str, width: usize) -> crate::Result<Vec<Vec<u8>>> {
-        if value.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
-            return Err(crate::Error::TooLarge {
-                limit: heddle_api::import_authority::MAX_BUNDLE_BYTES,
-            });
-        }
-        let values: Vec<String> =
-            serde_json::from_str(value).map_err(|e| crate::Error::Invalid(e.to_string()))?;
-        if values.len() > 4096 {
-            return Err(crate::Error::TooLarge { limit: 4096 });
-        }
-        values
-            .iter()
-            .map(|v| {
-                let bytes = hex::decode(v).map_err(|e| crate::Error::Invalid(e.to_string()))?;
-                if bytes.len() != width {
-                    return Err(crate::Error::Invalid("wrong identifier width".into()));
-                }
-                Ok(bytes)
-            })
-            .collect()
-    }
-    let result = (|| -> crate::Result<Vec<u8>> {
-        let limits = VerificationLimits::new(max_capability_ttl_seconds)?;
-        let keyring = crate::verify_clone_keyring_bytes(keyring, now_unix_seconds, limits, &[])?;
-        let history: crate::wire::OwnerHistory =
-            canonical_message(accepted_owner_history, limits.max_bundle_bytes())?;
-        let mut owner = crate::verify_owner_root(
-            history
-                .root
-                .as_ref()
-                .ok_or_else(|| crate::Error::Invalid("owner root missing".into()))?,
-        )?;
-        if history.accepted_transitions.len() > 64 {
-            return Err(crate::Error::TooLarge { limit: 64 });
-        }
-        for transition in &history.accepted_transitions {
-            owner = crate::apply_accepted_transition(&owner, transition, now_unix_seconds, limits)?;
-        }
-        if history.state_hash != owner.state_hash() {
-            return Err(crate::Error::Hybrid(heddle_api::hybrid_codec::Reject::Root));
-        }
-        let certificate =
-            canonical_message(certificate, heddle_api::import_authority::MAX_RECORD_BYTES)?;
-        let permission = if permission.is_empty() {
-            None
-        } else {
-            Some(canonical_message(
-                permission,
-                heddle_api::import_authority::MAX_RECORD_BYTES,
-            )?)
-        };
-        let initial = fixed(selected_initial_owner_id, "initial owner id")?;
-        let digest = fixed(selected_spool_genesis_digest, "Spool genesis digest")?;
-        let forbidden = ids(forbidden_job_keys_json, 32)?;
-        let cancelled = ids(cancelled_ids_json, 32)?;
-        let revoked = ids(revoked_key_ids_json, 32)?;
-        if known_job_associations_json.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
-            return Err(crate::Error::TooLarge {
-                limit: heddle_api::import_authority::MAX_BUNDLE_BYTES,
-            });
-        }
-        let pairs: Vec<[String; 2]> = serde_json::from_str(known_job_associations_json)
-            .map_err(|e| crate::Error::Invalid(e.to_string()))?;
-        if pairs.len() > 4096 {
-            return Err(crate::Error::TooLarge { limit: 4096 });
-        }
-        let associations = pairs
-            .iter()
-            .map(|p| {
-                let key = hex::decode(&p[0]).map_err(|e| crate::Error::Invalid(e.to_string()))?;
-                let job = hex::decode(&p[1]).map_err(|e| crate::Error::Invalid(e.to_string()))?;
-                fixed::<32>(&key, "job key")?;
-                fixed::<16>(&job, "logical job")?;
-                Ok((key, job))
-            })
-            .collect::<crate::Result<Vec<_>>>()?;
-        let context = CurrentContext {
-            selection: Selection {
-                spool_genesis_digest: &digest,
-                initial_owner_id: &initial,
-                owner: &owner,
-                keyring: &keyring,
-                limits,
-            },
-            now: now_unix_seconds,
-            forbidden_job_keys: &forbidden,
-            known_job_associations: &associations,
-        };
-        let verified = crate::import_delegation::verify_current(
-            &certificate,
-            permission.as_ref(),
-            &context,
-            |r| match r {
-                Revocation::Cancellation(_, id) => cancelled.iter().any(|c| c == id),
-                Revocation::Key(id) => revoked.iter().any(|k| k == id),
-            },
-        )?;
-        Ok(verified.scope().digest().to_vec())
-    })();
-    result.map_err(js_error)
+    crate::import_delegation::verify_bytes(
+        certificate,
+        permission,
+        keyring,
+        accepted_owner_history,
+        selected_initial_owner_id,
+        selected_spool_genesis_digest,
+        forbidden_job_keys_json,
+        known_job_associations_json,
+        cancelled_ids_json,
+        revoked_key_ids_json,
+        now_unix_seconds,
+        max_capability_ttl_seconds,
+    )
+    .map_err(js_error)
 }
 
 /// Exact crate version backing this generated package.

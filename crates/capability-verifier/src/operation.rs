@@ -161,7 +161,7 @@ fn decision_result(
 
 fn denial(error: &Error) -> Denial {
     match error {
-        Error::Hybrid(_) | Error::BoundaryAcceptancePendingApi318 => Denial::InvalidProof,
+        Error::Hybrid(_) => Denial::InvalidProof,
         Error::TooLarge { .. } => Denial::OverLimit,
         Error::InvalidSignature | Error::Biscuit(_) | Error::RecoveryThreshold { .. } => {
             Denial::InvalidProof

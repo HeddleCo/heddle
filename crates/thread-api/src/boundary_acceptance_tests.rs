@@ -275,7 +275,7 @@ fn boundary_native_receivers_fail_closed_pending_api318() {
         let replica = repository.native_thread("main").expect("receiver Thread");
         assert!(matches!(
             replica.authority_admission_trust(&receipt),
-            Err(repo::thread_replication::Error::BoundaryAcceptancePendingApi318)
+            Err(repo::thread_replication::Error::WitnessEvidenceRequired)
         ));
         let id = received
             .original
@@ -291,7 +291,7 @@ fn boundary_native_receivers_fail_closed_pending_api318() {
         .expect("restart");
         assert!(matches!(
             reopened.authority_admission_trust(&receipt),
-            Err(repo::thread_replication::Error::BoundaryAcceptancePendingApi318)
+            Err(repo::thread_replication::Error::WitnessEvidenceRequired)
         ));
     }
 }

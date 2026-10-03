@@ -170,8 +170,8 @@ pub enum Revocation<'a> {
 pub struct CurrentContext<'a> {
     /// Selected public owner lineage.
     pub selection: Selection<'a>,
-    /// Actual receiver clock in seconds; never a claimed author time.
-    pub now: i64,
+    /// Actual receiver clock in milliseconds; never a claimed author time.
+    pub now_millis: i64,
     /// Descriptor root and every witness key, including retired/revoked keys.
     pub forbidden_job_keys: &'a [Vec<u8>],
     /// Durable job-key → logical-job associations, retained across expiry.
@@ -280,6 +280,25 @@ fn verify_at(
     now: i64,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportDelegation> {
+    let delegator = &signed
+        .body
+        .as_ref()
+        .ok_or(Error::Hybrid(contract::Reject::Canonical))?
+        .delegating_public_key;
+    let user_keys: Vec<_> = context.selection.owner.authority_public_keys().collect();
+    for key in std::iter::once(delegator)
+        .chain(user_keys.iter())
+        .chain(context.selection.keyring.authority_public_keys())
+    {
+        if context.forbidden_job_keys.contains(key)
+            || context
+                .known_job_associations
+                .iter()
+                .any(|(job, _)| job == key)
+        {
+            return Err(Error::Hybrid(contract::Reject::KeyRole));
+        }
+    }
     let (identity, digest, expiry) = expectation(&context.selection, now)?;
     let mut forbidden = context.forbidden_job_keys.to_vec();
     forbidden.extend(context.selection.owner.authority_public_keys());
@@ -340,7 +359,13 @@ pub fn verify_current(
     context: &CurrentContext<'_>,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportDelegation> {
-    verify_at(signed, member, context, context.now, is_revoked)
+    verify_at(
+        signed,
+        member,
+        context,
+        context.now_millis / 1000,
+        is_revoked,
+    )
 }
 
 /// Check an exact retained certificate at an authenticated observation. The
@@ -357,17 +382,14 @@ pub fn verify_historical(
     set: &VerifiedWitnessSet,
     is_revoked_at_accepted_order: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportDelegation> {
-    let now_ms = context
-        .now
-        .checked_mul(1000)
-        .ok_or(Error::Hybrid(contract::Reject::Bounds))?;
+    let now_ms = context.now_millis;
     witness_trust::recheck_context(resolved, set, statement, now_ms)?;
     let statement = statement
         .body
         .as_ref()
         .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
     if statement.basis != 1 {
-        return Err(Error::BoundaryAcceptancePendingApi318);
+        return Err(Error::Hybrid(contract::Reject::BoundaryAcceptance));
     }
     if statement.purpose != 3
         || statement.authority_digest != contract::signed_delegation_digest(signed)?
@@ -406,22 +428,11 @@ pub fn verify_historical_genesis(
     set: &VerifiedWitnessSet,
     is_revoked_at_accepted_order: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportDelegation> {
-    witness_trust::recheck_context(
-        resolved,
-        set,
-        statement,
-        context
-            .now
-            .checked_mul(1000)
-            .ok_or(Error::Hybrid(contract::Reject::Bounds))?,
-    )?;
+    witness_trust::recheck_context(resolved, set, statement, context.now_millis)?;
     let s = statement
         .body
         .as_ref()
         .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
-    if s.basis != 1 {
-        return Err(Error::BoundaryAcceptancePendingApi318);
-    }
     contract::verify_witness_payload(s, contract::WitnessPayload::Genesis(payload))?;
     let verified = verify_at(
         signed,
@@ -457,6 +468,130 @@ pub fn verify_new_operation(
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<()> {
     let current = verify_current(&delegation.signed, member, context, is_revoked)?;
-    contract::verify_new_operation(operation, &current.verified, context.now)?;
+    contract::verify_new_operation(operation, &current.verified, context.now_millis / 1000)?;
     Ok(())
+}
+
+/// Verify current import authority from canonical byte and JSON inputs.
+/// Shared by the public WASM binding and native differential consumer.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_bytes(
+    certificate: &[u8],
+    permission: &[u8],
+    keyring: &[u8],
+    accepted_owner_history: &[u8],
+    selected_initial_owner_id: &[u8],
+    selected_spool_genesis_digest: &[u8],
+    forbidden_job_keys_json: &str,
+    known_job_associations_json: &str,
+    cancelled_ids_json: &str,
+    revoked_key_ids_json: &str,
+    now_unix_seconds: i64,
+    max_capability_ttl_seconds: i64,
+) -> crate::Result<Vec<u8>> {
+    use crate::canonical::{canonical_message, fixed};
+    fn ids(value: &str, width: usize) -> crate::Result<Vec<Vec<u8>>> {
+        if value.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
+            return Err(crate::Error::TooLarge {
+                limit: heddle_api::import_authority::MAX_BUNDLE_BYTES,
+            });
+        }
+        let values: Vec<String> =
+            serde_json::from_str(value).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+        if values.len() > 4096 {
+            return Err(crate::Error::TooLarge { limit: 4096 });
+        }
+        values
+            .iter()
+            .map(|v| {
+                let bytes = hex::decode(v).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+                if bytes.len() != width {
+                    return Err(crate::Error::Invalid("wrong identifier width".into()));
+                }
+                Ok(bytes)
+            })
+            .collect()
+    }
+    (|| -> crate::Result<Vec<u8>> {
+        let limits = VerificationLimits::new(max_capability_ttl_seconds)?;
+        let keyring = crate::verify_clone_keyring_bytes(keyring, now_unix_seconds, limits, &[])?;
+        let history: crate::wire::OwnerHistory =
+            canonical_message(accepted_owner_history, limits.max_bundle_bytes())?;
+        let mut owner = crate::verify_owner_root(
+            history
+                .root
+                .as_ref()
+                .ok_or_else(|| crate::Error::Invalid("owner root missing".into()))?,
+        )?;
+        if history.accepted_transitions.len() > 64 {
+            return Err(crate::Error::TooLarge { limit: 64 });
+        }
+        for transition in &history.accepted_transitions {
+            owner = crate::apply_accepted_transition(&owner, transition, now_unix_seconds, limits)?;
+        }
+        if history.state_hash != owner.state_hash() {
+            return Err(crate::Error::Hybrid(heddle_api::hybrid_codec::Reject::Root));
+        }
+        let certificate =
+            canonical_message(certificate, heddle_api::import_authority::MAX_RECORD_BYTES)?;
+        let permission = if permission.is_empty() {
+            None
+        } else {
+            Some(canonical_message(
+                permission,
+                heddle_api::import_authority::MAX_RECORD_BYTES,
+            )?)
+        };
+        let initial = fixed(selected_initial_owner_id, "initial owner id")?;
+        let digest = fixed(selected_spool_genesis_digest, "Spool genesis digest")?;
+        let forbidden = ids(forbidden_job_keys_json, 32)?;
+        let cancelled = ids(cancelled_ids_json, 32)?;
+        let revoked = ids(revoked_key_ids_json, 32)?;
+        if known_job_associations_json.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
+            return Err(crate::Error::TooLarge {
+                limit: heddle_api::import_authority::MAX_BUNDLE_BYTES,
+            });
+        }
+        let pairs: Vec<[String; 2]> = serde_json::from_str(known_job_associations_json)
+            .map_err(|e| crate::Error::Invalid(e.to_string()))?;
+        if pairs.len() > 4096 {
+            return Err(crate::Error::TooLarge { limit: 4096 });
+        }
+        let associations = pairs
+            .iter()
+            .map(|p| {
+                let key = hex::decode(&p[0]).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+                let job = hex::decode(&p[1]).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+                fixed::<32>(&key, "job key")?;
+                fixed::<16>(&job, "logical job")?;
+                Ok((key, job))
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let context = CurrentContext {
+            selection: Selection {
+                spool_genesis_digest: &digest,
+                initial_owner_id: &initial,
+                owner: &owner,
+                keyring: &keyring,
+                limits,
+            },
+            now_millis: now_unix_seconds
+                .checked_mul(1000)
+                .ok_or(crate::Error::Hybrid(
+                    heddle_api::hybrid_codec::Reject::Bounds,
+                ))?,
+            forbidden_job_keys: &forbidden,
+            known_job_associations: &associations,
+        };
+        let verified = crate::import_delegation::verify_current(
+            &certificate,
+            permission.as_ref(),
+            &context,
+            |r| match r {
+                Revocation::Cancellation(_, id) => cancelled.iter().any(|c| c == id),
+                Revocation::Key(id) => revoked.iter().any(|k| k == id),
+            },
+        )?;
+        Ok(verified.scope().digest().to_vec())
+    })()
 }

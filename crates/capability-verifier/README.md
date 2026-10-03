@@ -22,7 +22,7 @@ access; owner authority uses the separate signed operations below.
 Rust and npm versions follow `[workspace.package] version`; the npm build and
 prepack copy wasm-pack’s resolved Cargo version into the npm manifest.
 
-Version 0.28.7 consumes `heddle-api = "=0.31.0-alpha.19"`. Public proof types come
+Version 0.28.8 consumes `heddle-api = "=0.31.0-alpha.21"`. Public proof types come
 from `heddle.api.v1alpha2`; the durable signing formats keep their own versions.
 The verifier implements the owner contract:
 

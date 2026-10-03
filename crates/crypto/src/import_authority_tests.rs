@@ -3,6 +3,7 @@ use prost::Message;
 use serde_json::Value;
 
 use super::*;
+use crate::Signer;
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!(
@@ -41,6 +42,13 @@ fn trusted_set(f: &Value, name: &str, now: i64) -> VerifiedWitnessSet {
     .expect("root-authenticated set")
 }
 fn delegation(f: &Value, now: i64) -> VerifiedImportDelegation {
+    delegation_record(f, now, &record(f, "delegation"))
+}
+fn delegation_record(
+    f: &Value,
+    now: i64,
+    signed: &wire::SignedImportJobDelegationV1,
+) -> VerifiedImportDelegation {
     use heddleco_capability_verifier::{
         self as verifier,
         import_delegation::{CurrentContext, Selection},
@@ -80,16 +88,13 @@ fn delegation(f: &Value, now: i64) -> VerifiedImportDelegation {
             keyring: &ring,
             limits,
         },
-        now,
+        now_millis: now * 1000,
         forbidden_job_keys: &[key(f, "witness"), key(f, "root")],
         known_job_associations: &[],
     };
-    verifier::import_delegation::verify_current(
-        &record(f, "delegation"),
-        Some(&record(f, "permission")),
-        &c,
-        |_| false,
-    )
+    verifier::import_delegation::verify_current(signed, Some(&record(f, "permission")), &c, |_| {
+        false
+    })
     .expect("portable authority")
 }
 
@@ -382,11 +387,54 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     verify_genesis_payload(&payload, &evidence, &d, |_| false)
         .expect("independent native genesis control");
     let mut changed = payload.clone();
-    changed.creator_authority_envelope.push(0);
-    assert!(matches!(
-        verify_genesis_payload(&changed, &evidence, &d, |_| false),
-        Err(Error::Contract(Reject::Scope))
+    let other: wire::SignedImportMemberPermissionV1 = record(&f, "renewed_permission");
+    changed.creator_authority_envelope = b"heddle-signed-import-member-permission-v1\0".to_vec();
+    changed
+        .creator_authority_envelope
+        .extend(hybrid_codec::canonical(&other).expect("other authentic permission"));
+    let binding = changed.binding.as_mut().expect("binding");
+    let body = binding.body.as_mut().expect("body");
+    body.creator_authority_envelope_digest =
+        hybrid_codec::hash(&[&changed.creator_authority_envelope]);
+    binding.creator_signature = Some(sign_fixture(&f, "device", contract::GENESIS_DOMAIN, body));
+    let mut certificate: wire::SignedImportJobDelegationV1 = record(&f, "delegation");
+    let body = certificate.body.as_mut().expect("body");
+    let id = binding.body.as_ref().expect("body").genesis_digest.clone();
+    body.branch_manifest
+        .iter_mut()
+        .find(|m| m.limit.as_ref().is_some_and(|l| l.genesis_digest == id))
+        .expect("branch")
+        .genesis_authority_digest =
+        contract::signed_genesis_digest(binding).expect("binding digest");
+    certificate.delegating_signature = Some(sign_fixture(
+        &f,
+        "device",
+        contract::DELEGATION_DOMAIN,
+        body,
     ));
+    let verified = delegation_record(&f, 1100, &certificate);
+    let binding_digest = contract::signed_genesis_digest(binding).expect("binding digest");
+    let mut statement: host::SignedHostedWitnessStatementV1 = record(&f, "genesis_admission");
+    let body = statement.body.as_mut().expect("body");
+    body.canonical_payload = hybrid_codec::canonical(&changed).expect("payload");
+    body.authority_digest = binding_digest;
+    statement.signature = fixture_signer(&f, "witness")
+        .sign(&witness_trust::statement_signing_digest(body).expect("statement digest"))
+        .expect("authentic witness");
+    let current = trusted_set(&f, "current_set", 1100000);
+    let changed_evidence = WitnessEvidence::resolve(&current, &statement, None, false, 1100000)
+        .expect("genuine surrounding witness");
+    contract::verify_witness_payload(
+        statement.body.as_ref().expect("body"),
+        WitnessPayload::Genesis(&changed),
+    )
+    .expect("all other commitments and signatures match");
+    assert!(matches!(
+        verify_genesis_payload(&changed, &changed_evidence, &verified, |_| false),
+        Err(Error::Contract(Reject::ImportPermission))
+    ));
+    verify_genesis_payload(&payload, &evidence, &d, |_| false)
+        .expect("unchanged exact envelope control");
     let missing: wire::ImportAuthorityWitnessV1 = record(&f, "missing_owner_payload");
     let genuine = record(&f, "witness_without_owner");
     let current = trusted_set(&f, "current_set", 1100000);
@@ -438,6 +486,10 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         spool_genesis: &digest,
         transfer_sequence: 0,
         spool_path: "example",
+        witness_set: &set,
+        original_geneses: &b.genesis_witnesses,
+        known_job_associations: &[],
+        forbidden_authority_keys: &[key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")],
     };
     for (name, statement, proof) in [
         (
@@ -583,27 +635,405 @@ fn genuine_root_signed_malformed_sets_and_unattested_witnesses() {
         Err(Error::Contract(Reject::Root))
     ));
 }
+
 #[test]
-fn boundary_acceptance_requires_api_318_even_with_valid_current_witness() {
+fn review_alpha20_boundary_vectors_resolve_exact_originals() {
     let f = fixture();
     let set = trusted_set(&f, "current_set", 1100000);
-    let original: host::SignedHostedWitnessStatementV1 = record(&f, "genesis_admission");
-    WitnessEvidence::resolve(&set, &original, None, false, 1100000)
-        .expect("original authority control");
-    let mut boundary = original;
-    boundary.body.as_mut().expect("body").basis = 2;
-    use crate::{Ed25519Signer, Signer};
-    let seed =
-        hex::decode(f["keys"]["witness"]["seed_hex"].as_str().expect("seed")).expect("bytes");
-    boundary.signature = Ed25519Signer::from_seed(&seed)
-        .expect("witness")
-        .sign(
-            &witness_trust::statement_signing_digest(boundary.body.as_ref().expect("body"))
-                .expect("preimage"),
-        )
-        .expect("valid witness");
-    assert!(matches!(
-        WitnessEvidence::resolve(&set, &boundary, None, false, 1100000),
-        Err(Error::BoundaryAcceptancePendingApi318)
-    ));
+    for v in f["boundary_vectors"]["passing"]
+        .as_array()
+        .expect("vectors")
+    {
+        let statement = record(&f, v["statement"].as_str().expect("statement"));
+        WitnessEvidence::resolve(&set, &statement, None, false, 1100000)
+            .expect("published boundary control");
+    }
 }
+
+fn boundary_vector(
+    f: &Value,
+    statement_name: &str,
+    payload_name: &str,
+    kind: &str,
+    retired: bool,
+) -> Result<()> {
+    let now = if retired { 1350000 } else { 1100000 };
+    let set = trusted_set(
+        f,
+        if retired {
+            "retired_set"
+        } else {
+            "current_set"
+        },
+        now,
+    );
+    let statement = record(f, statement_name);
+    let proof_name = statement_name.replace("_statement", "_proof");
+    let proof = retired.then(|| record(f, &proof_name));
+    let evidence = WitnessEvidence::resolve(&set, &statement, proof.as_ref(), false, now)?;
+    let b: wire::ImportPublicProofBundleV1 = record(f, "complete_renewed_export");
+    let base: wire::ImportAuthorityWitnessV1 = record(f, "authority_admission_payload");
+    let mut originals = b.original_geneses.clone();
+    originals.extend(base.original);
+    originals.extend(base.dependencies);
+    let mut genesis_payloads = b.genesis_witnesses.clone();
+    let (genesis, authority, boundaries) = if kind == "genesis" {
+        let p: wire::ImportGenesisWitnessV1 = record(f, payload_name);
+        originals.extend(p.original_genesis.clone());
+        genesis_payloads.retain(|g| g.original_genesis != p.original_genesis);
+        genesis_payloads.push(p.clone());
+        let boundaries = p.boundary_acceptance.iter().cloned().collect::<Vec<_>>();
+        (Some(p), None, boundaries)
+    } else {
+        let p: wire::ImportAuthorityWitnessV1 = record(f, payload_name);
+        originals.extend(p.original.clone());
+        originals.extend(p.dependencies.clone());
+        let boundaries = p.boundary_acceptances.clone();
+        (None, Some(p), boundaries)
+    };
+    let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
+    let h: wire::OwnerHistory = record(f, "owner_history");
+    let owner = heddleco_capability_verifier::verify_owner_root(h.root.as_ref().expect("root"))
+        .expect("owner");
+    let identity: wire::ImportIdentityV1 = record(f, "identity");
+    let digest = identity
+        .spool_genesis_digest
+        .as_slice()
+        .try_into()
+        .expect("digest");
+    let context = NativeAuthorityContext {
+        owner: &owner,
+        spool_uuid: uuid::Uuid::from_slice(&identity.spool_uuid).expect("Spool"),
+        spool_genesis: &digest,
+        transfer_sequence: 0,
+        spool_path: "example",
+        witness_set: &set,
+        original_geneses: &genesis_payloads,
+        known_job_associations: &[],
+        forbidden_authority_keys: &[key(f, "root"), key(f, "witness"), key(f, "next_witness")],
+    };
+    if let Some(p) = genesis {
+        verify_genesis_payload_at_boundary(
+            &p,
+            &evidence,
+            &delegation(f, 1100),
+            &closure,
+            &context,
+            |_| false,
+        )?;
+    } else {
+        verify_authority_payload(
+            authority.as_ref().expect("payload"),
+            &evidence,
+            &closure,
+            &context,
+            |_| false,
+        )?;
+    }
+    Ok(())
+}
+#[test]
+fn review_boundary_native_selection_and_substitution_gates() {
+    let f = fixture();
+    for v in f["boundary_vectors"]["passing"]
+        .as_array()
+        .expect("passing")
+    {
+        for retired in [false, true] {
+            boundary_vector(
+                &f,
+                v["statement"].as_str().expect("statement"),
+                v["payload"].as_str().expect("payload"),
+                v["kind"].as_str().expect("kind"),
+                retired,
+            )
+            .expect("exact boundary control");
+        }
+    }
+    for v in f["boundary_vectors"]["negative"]
+        .as_array()
+        .expect("negatives")
+    {
+        assert!(
+            matches!(
+                boundary_vector(
+                    &f,
+                    v["statement"].as_str().expect("statement"),
+                    v["payload"].as_str().expect("payload"),
+                    "genesis",
+                    false
+                ),
+                Err(Error::Contract(Reject::BoundaryAcceptance))
+            ),
+            "{}",
+            v["name"]
+        );
+        boundary_vector(
+            &f,
+            v["control_statement"].as_str().expect("control"),
+            v["control_payload"].as_str().expect("control"),
+            "genesis",
+            false,
+        )
+        .expect("neighbor control");
+    }
+    assert!(matches!(
+        boundary_vector(
+            &f,
+            "boundary_dependency_missing_statement",
+            "boundary_dependency_missing_payload",
+            "authority",
+            false
+        ),
+        Err(Error::Contract(Reject::BoundaryAcceptance))
+    ));
+    for v in f["boundary_vectors"]["native_negative"]
+        .as_array()
+        .expect("native negatives")
+    {
+        for retired in [false, true] {
+            assert!(
+                matches!(
+                    boundary_vector(
+                        &f,
+                        v["statement"].as_str().expect("statement"),
+                        v["payload"].as_str().expect("payload"),
+                        v["kind"].as_str().expect("kind"),
+                        retired
+                    ),
+                    Err(Error::Contract(Reject::BoundaryAcceptance))
+                ),
+                "{}",
+                v["name"]
+            );
+        }
+    }
+    boundary_vector(
+        &f,
+        "boundary_complete_2_statement",
+        "boundary_complete_2_payload",
+        "genesis",
+        false,
+    )
+    .expect("complete selection control");
+    boundary_vector(
+        &f,
+        "boundary_multiple_dependencies_statement",
+        "boundary_multiple_dependencies_payload",
+        "authority",
+        false,
+    )
+    .expect("multiple acceptance control");
+}
+#[test]
+fn review_published_empty_single_even_odd_proofs_isolate_shape() {
+    let f = fixture();
+    for tree in f["trees"].as_array().expect("trees") {
+        let bytes = |v: &Value| hex::decode(v.as_str().expect("hex")).expect("bytes");
+        let leaves = tree["leaves_hex"]
+            .as_array()
+            .expect("leaves")
+            .iter()
+            .map(bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            witness_trust::merkle_root(&leaves).expect("root"),
+            bytes(&tree["root_hex"])
+        );
+        let entry = host::HostedWitnessEntryV1 {
+            executor_id: vec![1; 32],
+            state: 2,
+            archive_root: bytes(&tree["root_hex"]),
+            archive_leaf_count: tree["count"].as_u64().expect("count"),
+            ..Default::default()
+        };
+        for path in tree["paths"].as_array().expect("paths") {
+            let p = host::HostedWitnessHistoryProofV1 {
+                executor_id: entry.executor_id.clone(),
+                purpose: 3,
+                leaf_index: path["index"].as_u64().expect("index"),
+                leaf_count: entry.archive_leaf_count,
+                siblings: path["siblings_hex"]
+                    .as_array()
+                    .expect("siblings")
+                    .iter()
+                    .map(bytes)
+                    .collect(),
+            };
+            let leaf = &leaves[p.leaf_index as usize];
+            witness_trust::verify_inclusion(leaf, &p, &entry).expect("published path control");
+            let mut malformed = p.clone();
+            malformed.siblings.push(vec![0; 32]);
+            assert_eq!(
+                witness_trust::verify_inclusion(leaf, &malformed, &entry),
+                Err(Reject::Proof)
+            );
+            if !p.siblings.is_empty() {
+                let mut missing = p.clone();
+                missing.siblings.pop();
+                assert_eq!(
+                    witness_trust::verify_inclusion(leaf, &missing, &entry),
+                    Err(Reject::Proof)
+                );
+                let mut wrong = p.clone();
+                wrong.siblings[0][0] ^= 1;
+                assert_eq!(
+                    witness_trust::verify_inclusion(leaf, &wrong, &entry),
+                    Err(Reject::Proof)
+                );
+            }
+            witness_trust::verify_inclusion(leaf, &p, &entry).expect("unchanged shape control");
+        }
+    }
+}
+
+fn fixture_signer(f: &Value, role: &str) -> crate::Ed25519Signer {
+    crate::Ed25519Signer::from_seed(
+        &hex::decode(f["keys"][role]["seed_hex"].as_str().expect("seed")).expect("bytes"),
+    )
+    .expect("signer")
+}
+fn sign_fixture<T: hybrid_codec::Canonical>(
+    f: &Value,
+    role: &str,
+    domain: &str,
+    body: &T,
+) -> wire::AuthorizationSignature {
+    wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(&key(f, role)),
+        signature: fixture_signer(f, role)
+            .sign(&hybrid_codec::signing_digest(domain, body).expect("digest"))
+            .expect("signature"),
+    }
+}
+
+// Each published substitution must reach its API binding gate with valid
+// signatures and surrounding payload commitments. The native adapter has its
+// own independent selection tests above.
+fn boundary_api_substitution(vector: &str) {
+    let f = fixture();
+    let set = trusted_set(&f, "current_set", 1100000);
+    let control: host::SignedHostedWitnessStatementV1 = record(&f, "boundary_genesis_statement");
+    WitnessEvidence::resolve(&set, &control, None, false, 1100000).expect("signed control");
+    contract::verify_witness_payload(
+        control.body.as_ref().expect("control body"),
+        WitnessPayload::Genesis(&record(&f, "boundary_genesis_payload")),
+    )
+    .expect("exact binding control");
+    let statement: host::SignedHostedWitnessStatementV1 =
+        record(&f, &format!("{vector}_statement"));
+    let result = WitnessEvidence::resolve(&set, &statement, None, false, 1100000).and_then(|_| {
+        contract::verify_witness_payload(
+            statement.body.as_ref().expect("body"),
+            WitnessPayload::Genesis(&record(&f, &format!("{vector}_payload"))),
+        )
+        .map_err(Error::from)
+    });
+    assert!(
+        matches!(result, Err(Error::Contract(Reject::BoundaryAcceptance))),
+        "{vector}: {result:?}"
+    );
+}
+macro_rules! boundary_api_negative {
+    ($test:ident, $vector:literal) => {
+        #[test]
+        fn $test() {
+            boundary_api_substitution($vector);
+        }
+    };
+}
+boundary_api_negative!(
+    review_boundary_api_original_substitution,
+    "acceptance_swapped_between_originals"
+);
+boundary_api_negative!(
+    review_boundary_api_manifest_substitution,
+    "manifest_mismatch"
+);
+boundary_api_negative!(review_boundary_api_intent_substitution, "intent_mismatch");
+boundary_api_negative!(
+    review_boundary_api_receipt_substitution,
+    "receipt_from_another_acceptance"
+);
+boundary_api_negative!(review_boundary_api_required_binding, "missing_binding");
+
+macro_rules! boundary_native_negative {
+    ($test:ident, $statement:literal, $payload:literal, $kind:literal) => {
+        #[test]
+        fn $test() {
+            let f = fixture();
+            for retired in [false, true] {
+                boundary_vector(
+                    &f,
+                    "boundary_complete_2_statement",
+                    "boundary_complete_2_payload",
+                    "genesis",
+                    retired,
+                )
+                .expect("complete selection control");
+                assert!(
+                    matches!(
+                        boundary_vector(&f, $statement, $payload, $kind, retired),
+                        Err(Error::Contract(Reject::BoundaryAcceptance))
+                    ),
+                    "native selection: {} retired={retired}",
+                    $statement
+                );
+            }
+        }
+    };
+}
+boundary_native_negative!(
+    review_boundary_native_boundary_omission_2,
+    "boundary_omission_2_statement",
+    "boundary_omission_2_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_duplicate_2,
+    "boundary_duplicate_2_statement",
+    "boundary_duplicate_2_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_substitution_2,
+    "boundary_substitution_2_statement",
+    "boundary_substitution_2_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_extra_2,
+    "boundary_extra_2_statement",
+    "boundary_extra_2_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_omission_3,
+    "boundary_omission_3_statement",
+    "boundary_omission_3_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_duplicate_3,
+    "boundary_duplicate_3_statement",
+    "boundary_duplicate_3_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_substitution_3,
+    "boundary_substitution_3_statement",
+    "boundary_substitution_3_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_extra_3,
+    "boundary_extra_3_statement",
+    "boundary_extra_3_payload",
+    "genesis"
+);
+boundary_native_negative!(
+    review_boundary_native_boundary_invalid_dependency_acceptance,
+    "boundary_invalid_dependency_acceptance_statement",
+    "boundary_invalid_dependency_acceptance_payload",
+    "authority"
+);

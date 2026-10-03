@@ -76,8 +76,6 @@ pub enum Error {
         "hosted installation requires fresh root-authenticated witness and original authority evidence"
     )]
     WitnessEvidenceRequired,
-    #[error("boundary acceptance witness binding requires api#318")]
-    BoundaryAcceptancePendingApi318,
     #[error("trusted receiver clock unavailable or rolled back")]
     HostedClock,
     #[error("Local metadata: {0}")]

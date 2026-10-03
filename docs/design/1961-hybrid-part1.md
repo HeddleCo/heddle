@@ -2,28 +2,38 @@
 
 Implements the Heddle object-model, crypto, capability-verifier and repo rows of
 [weft#2469's accepted design](https://github.com/HeddleCo/weft/blob/main/docs/design/2469-import-authority-and-host-witness.md).
-The wire contract remains `heddle-api =0.31.0-alpha.18`, revision
-`bc02d30a28ae6df35ab9ef2e0164c11fcf848262`. Every expected conformance byte comes
+The wire contract remains `heddle-api =0.31.0-alpha.21`, revision
+`05c4d08c4e7120c2532a2b2a6c608b12e58acc4b`. Every expected conformance byte comes
 verbatim from that tag's `import-authority-host-witness-v1.json`; the three leaf
 packages retain their own identical copy for packaging. Malformed signed inputs
 use the fixture seeds; tests never regenerate expected signatures.
 
-Boundary-acceptance witness binding is pending
-[api#318](https://github.com/HeddleCo/api/issues/318) / alpha.20. All receiving
-boundary-basis paths return `BoundaryAcceptancePendingApi318`. A genuine signature,
-old executor pin or ordinary original acceptance cannot fill in that binding.
-The single crypto guard in `original_boundary_acceptance` is the insertion seam.
+Alpha.21 retains the alpha.20/api#319 binding, which selects the exact signed native acceptance, complete
+originals manifest, publication intent and per-original receipts. The native
+adapter verifies canonical formats, complete membership, original/account/Spool/
+kind and receipt issuer/basis, then verifies accepting authority at the
+root-authenticated witness observation with explicit original-subject scope.
+Every acceptance in a dependency payload is verified. Publication and landing
+retain OriginalAuthority. Native formats and signature domains are unchanged.
 
 ## Verification and durability
 
 `capability_verifier::import_delegation` verifies independently selected immutable
 Spool lineage and public owner/transfer history before owner → device import
-permission → job attenuation. Current verification takes actual receiver seconds,
+permission → job attenuation. Current verification preserves actual receiver milliseconds, derives seconds
+only for owner/delegation validity,
 rechecks cancellation and owner/device/job revocations, and prohibits root,
-witness, historical user-authority and cross-job key substitution. Historical
+witness, historical user-authority and cross-job key substitution. Selected root/
+witness and permanently known job keys cannot become a delegator, device, owner
+or genesis creator; the direct-owner delegation path remains supported. Fresh
+receivers also exclude job declarations from the complete incoming bundle before
+any mutation; only verified certificates become durable associations. Historical
 verification takes accepted time/order only from an API-authenticated exact
 witness; expiry or ordinary authorization revocation today cannot rewrite a
-previous committed result. Cancellation IDs use the API's separate namespace.
+previous committed result. The complete signed ownership-transfer chain is
+authenticated once, then every statement selects its exact verified historical
+prefix and owner state. Current disclosure uses today's independently selected
+authority. Cancellation IDs use the API's separate namespace.
 Online roles, ordinary credentials, PURGE and timeline proofs supply no import
 permission. Witness set/proof verification stays in API.
 
@@ -50,9 +60,14 @@ it does not turn a multi-head target frontier into an invented single State.
 `repo::thread_replication::hosted_trust` serializes fresh set authentication,
 root epoch/generation/digest high-water, immutable seals/tombstones, receiver
 clock floors and durable native changes in SQLite IMMEDIATE transactions. It
-rechecks set expiry and wall/monotonic progress before commit. Millisecond
-truncation permits at most one tick of sampling uncertainty, without changing
-any signed exclusive expiry. The previous signed set is restored only from
+rechecks set expiry and wall/monotonic progress before commit. Independently opened
+handles for the same canonical store/authority share a process-lifetime anchor;
+dropping handles or reopening cannot clear a detected clock failure. SystemClock
+uses one process-wide monotonic epoch. Custom clocks must share that epoch across
+handles. Restored trustworthy wall time must catch up before mutations resume.
+After signature verification, a final current-access callback receives freshly
+sampled milliseconds under the same transaction immediately before commit.
+The previous signed set is restored only from
 locally retained, already authenticated bytes. Failed verification rolls back
 both content and trust updates. Explicit routine root replacement preserves
 local history and invalidates staged contexts; this is not automatic compromised
@@ -75,7 +90,7 @@ unchanged for structural verification.
   rejection reasons for Part 2 output adapters.
 - **Git interop:** original native bytes and Git authorship stay intact through
   existing sley publication controls.
-- **Wire:** all evidence uses existing alpha.18 types; no second view RPC.
+- **Wire:** all evidence uses alpha.21 types; no second view RPC.
 - **Reverse states:** root replacement, high-water/revocation inspection and
   unchanged bundle/admission export make durable trust state observable.
 
@@ -89,7 +104,9 @@ unchanged for structural verification.
 2. Supply `delegated_import::AcceptedAuthority` from independently verified public
    owner/keyring histories and selected accepted state/order. Its revocation
    callbacks refer to the exact historical acceptance. `authorize_import` must
-   check today's disclosure/audience/source access inside the transaction.
+   check today's disclosure/audience/source access inside the transaction,
+   including the final call with fresh receiver milliseconds. Do not use an
+   earlier captured time.
    Current leases, sender epoch/policy/frontier fences and RPC credentials remain
    separate gates; this historical receiver API does not mint current permission.
 3. Stage bounded native closure pages in the object store, then pass unchanged
@@ -109,10 +126,12 @@ unchanged for structural verification.
 6. `verify_current` / `verify_new_operation` are sender-side portable permission
    checks. Browser consumers can use WASM `verifyImportDelegation`; it does not
    resolve witnesses or grant transport access. Keep mandatory peer feature and
-   disclosure checks in the Part 2 adapters. This PR keeps their 0.28.6 HYBRID
+   disclosure checks in the Part 2 adapters. This PR keeps their 0.28.8 HYBRID
    rejects; it adds no thread-api/hosted-client production integration.
-7. Resume boundary admission when alpha.20 publishes api#318. The typed rejection
-   guards are deliberate until that exact portable binding exists.
+7. Carry alpha.21's exact boundary evidence in genesis/authority payloads and
+   use the native adapter above. Every selected dependency acceptance needs its
+   complete manifest/intent/receipt proof. Prepare/Commit RPC wiring belongs to
+   Part 2 (api#322 / alpha.21).
 
 ## Acceptance table coverage
 
@@ -126,18 +145,18 @@ or cross-replica proof.
 | Root authentication / integrity | Wrong-root set, unchanged-signature tamper, independent root/Spool pins; stored endpoint pin cannot authorize | Part 2 descriptor transport attestation routing |
 | Canonical / semantic set | Genuine root-signed duplicate/unsorted IDs, selector/purpose/interval/archive/window errors; noncanonical/oversized protobuf; immutable lifecycle transition/equivocation checks | API owns complete set semantics; no invented global interval restriction |
 | Unattested witness | Genuine absent-key signature rejects with valid set; endpoint enrollment/real transport sidecar cannot grant witness authority | Full descriptor transport-only attestation exchange is Part 2 |
-| Role substitution | Genuine device-signed owner/device/witness/root-as-job certificates; known job-as-witness sets; missing/substituted creator/job/native signatures | None in core |
-| Owner / genesis binding | Selected owner/genesis/transfer chain, original creator/envelope/account binding; invalid carried owner root despite cached valid selection; no foreign-owner enrollment | Boundary reference stays typed api#318 |
+| Role substitution | Genuine device-signed owner/device/witness/root-as-job certificates; owner-signed witness/job-as-delegator permissions with distinct child jobs; historical witness-as-genesis-creator/publication negatives; direct-owner control in public JS/WASM | None in core |
+| Owner / genesis binding | Selected owner/genesis/transfer chain, genuine A→B pre/post-transfer history, exact prefixes and fork/owner negatives on fresh/existing stores; fully recommitted wrong creator envelope; invalid carried owner root despite cached valid selection; no foreign-owner enrollment | Exact alpha.21 boundary adapter covered; transport integration is Part 2 |
 | Delegation scope / authority | Genuine job-signed mutations of Spool/genesis/job/retry/delegation/ref/slot/hash/OID/target/frontier/options/converter/budget; signed source/provider/destination/mutable-ref/TTL/purpose attenuation and self/subdelegation negatives | Online prepare/commit adapters in Part 2/weft |
 | Job key isolation / custody | Conflicting supplied and durable key→job associations reject atomically; independent signed operation/job binding | weft AEAD, rewrap, custody and plaintext destruction |
 | Expiry / late work | Not-before/exclusive expiry and staged current checks; exact committed history survives ordinary expiry with authenticated witness time | Host recurring sync/publication fences |
 | Renewal / idempotency | Complete published renewed export installs/replays exact original genesis, slots and signatures; immutable bundle originals; API renewal attenuation/cumulative manifest | Host lease/retry/publication accounting |
 | Current authority races | Staged owner/device/job cancellation/revocation/expiry rechecks; current disclosure loss rejects historical install with unchanged control | weft current policy/transfer/lease/frontier final commit fence |
 | Retirement / backdating | Exact archived receipt passes; genuinely backdated new receipt with old proof, missing proof and retired new work reject | Host issuance fence |
-| Proof substitution / bounds | Purpose/executor/index/count/shape/missing/extra sibling and oversized proof negatives before install; full independent original authority retained | Retrospective proof lookup service |
+| Proof substitution / bounds | Published empty/single/even/odd trees plus purpose/executor/index/count/shape/missing/extra sibling and oversized proof negatives before install; full independent original authority retained | Retrospective proof lookup service |
 | Revocation versus retirement | Identical original/proof accepted retired, rejected revoked; existing receipt/bundle/old pin and staged context cannot revive it | None in core |
-| Rollback / restart | N+1 persisted, restart replays N; same-generation different body; receiver clock rollback/unavailable/expiry during transaction; fresh-receiver contract is not universal replay prevention | None in core |
-| Cached contexts / concurrent use | Independent writer advances revocation; stale staged install rejected under shared SQLite serialization; root epoch replacement and commit-time expiry rechecks | Part 2 context/network refresh and weft authority races |
+| Rollback / restart | N+1 persisted, restart replays N; same-generation different body; receiver clock rollback/unavailable/expiry during transaction and independent handle/drop/reopen protection; fresh-receiver contract is not universal replay prevention | None in core |
+| Cached contexts / concurrent use | Independent writer advances revocation; stale staged install rejected under shared SQLite serialization; root epoch replacement and disclosure-expiry-at-commit rollback | Part 2 context/network refresh and weft authority races |
 | Root transition / compromise | Routine explicit replacement keeps known seals/tombstones; enlarged archive rejected across replacement, original local snapshot required | Operator-selected independent pre-compromise checkpoint/recovery workflow |
 | Publication / landing independence | Exact operation/manifest/publication binding and original native source/request/review/ancestry; no job executor grant; native receive original control/revoked replay | Hosted landing policy/CAS execution in weft |
 | Completeness / compatibility | Required owner/delegation/genesis/publication/retired proofs and native dependencies; strict decode; bare receipts cannot install | Part 2 mandatory peer negotiation, Fetch/export carrier integration |

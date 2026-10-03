@@ -7,8 +7,9 @@
 //! transaction. Resolve staged originals anew inside that same transaction.
 //! This replaces evergreen executor-key enrollment for HYBRID records.
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -43,20 +44,17 @@ pub struct RootSelection {
 }
 
 /// Receiver clock. Callers must fail if trustworthy wall time is unavailable.
-/// The monotonic reading detects rollback during a process; SQLite retains the
+/// The monotonic reading uses a process-wide epoch across independent handles
+/// and detects rollback during a process; SQLite retains the
 /// last accepted wall floor across processes and restarts.
 pub trait Clock: Send + Sync {
     fn now_millis(&self) -> Result<i64>;
     fn elapsed_millis(&self) -> Result<u64>;
 }
-pub struct SystemClock {
-    start: Instant,
-}
+pub struct SystemClock;
 impl Default for SystemClock {
     fn default() -> Self {
-        Self {
-            start: Instant::now(),
-        }
+        Self
     }
 }
 impl Clock for SystemClock {
@@ -68,7 +66,9 @@ impl Clock for SystemClock {
         i64::try_from(ms).map_err(|_| Error::HostedClock)
     }
     fn elapsed_millis(&self) -> Result<u64> {
-        u64::try_from(self.start.elapsed().as_millis()).map_err(|_| Error::HostedClock)
+        static START: OnceLock<Instant> = OnceLock::new();
+        u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis())
+            .map_err(|_| Error::HostedClock)
     }
 }
 pub struct HostedTrust<C = SystemClock> {
@@ -88,6 +88,20 @@ impl<C> Clone for HostedTrust<C> {
     }
 }
 type TrustRow = (String, Vec<u8>, i64, String, Vec<u8>, Option<Vec<u8>>, i64);
+
+type ClockAnchor = Arc<Mutex<Option<(i64, u64)>>>;
+// Retain anchors for the process lifetime, including after the last handle is
+// dropped. A rejected rollback cannot be cleared by opening the store again.
+fn shared_anchor(directory: &Path, authority: &str) -> Result<ClockAnchor> {
+    type Anchors = BTreeMap<(PathBuf, String), ClockAnchor>;
+    static ANCHORS: OnceLock<Mutex<Anchors>> = OnceLock::new();
+    let key = (directory.canonicalize()?, authority.to_owned());
+    let mut anchors = ANCHORS
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| Error::HostedClock)?;
+    Ok(Arc::clone(anchors.entry(key).or_default()))
+}
 
 fn require_clock_progress(last: (i64, u64), now: (i64, u64)) -> Result<()> {
     let passed = now.1.checked_sub(last.1).ok_or(Error::HostedClock)?;
@@ -123,7 +137,7 @@ impl<C: Clock> HostedTrust<C> {
             directory: directory.to_path_buf(),
             authority: authority.into(),
             clock: Arc::new(clock),
-            anchor: Arc::new(Mutex::new(None)),
+            anchor: shared_anchor(directory, authority)?,
         })
     }
 
@@ -134,6 +148,17 @@ impl<C: Clock> HostedTrust<C> {
         signed: &SignedHostedWitnessSetV1,
         mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.mutate_validated(signed, mutation, |_, _| Ok(()))
+    }
+
+    /// Validate current access with freshly sampled receiver time immediately
+    /// before commit, while the same trust/content transaction remains locked.
+    pub fn mutate_validated<T>(
+        &self,
+        signed: &SignedHostedWitnessSetV1,
+        mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
+        validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
+    ) -> Result<T> {
         let mut anchor = self.anchor.lock().map_err(|_| Error::HostedClock)?;
         let mut connection = crate::local_metadata::open(&self.directory)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -142,6 +167,8 @@ impl<C: Clock> HostedTrust<C> {
         let elapsed = self.clock.elapsed_millis()?;
         if let Some(last) = *anchor {
             require_clock_progress(last, (now, elapsed))?;
+        } else {
+            *anchor = Some((now, elapsed));
         }
         let associations = job_associations(&tx)?;
         let jobs = associations
@@ -193,9 +220,20 @@ impl<C: Clock> HostedTrust<C> {
             },
             Some(&set),
         )?;
-        tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),commit_now])?;
+        // Signature verification can itself take time. Sample again after it,
+        // retaining millisecond freshness for the final current-access hook.
+        let final_now = self.clock.now_millis()?;
+        let final_elapsed = self.clock.elapsed_millis()?;
+        require_clock_progress((commit_now, commit_elapsed), (final_now, final_elapsed))?;
+        if final_now < set.body().issued_at_unix_millis
+            || final_now >= set.body().valid_until_unix_millis
+        {
+            return Err(Error::Hybrid(Reject::Expired));
+        }
+        tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),final_now])?;
+        validate_commit(&context, final_now)?;
         tx.commit()?;
-        *anchor = Some((commit_now, commit_elapsed));
+        *anchor = Some((final_now, final_elapsed));
         Ok(result)
     }
 }

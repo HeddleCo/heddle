@@ -170,7 +170,7 @@ fn boundary_genesis_fails_closed_pending_api_318() {
         .err()
         .unwrap_or_else(|| panic!("missing evidence"))
         .to_string()
-        .contains("api#318")
+        .contains("fresh root-authenticated witness")
     );
     assert!(ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("id")).is_err());
     let mut wrong = trust.clone();
@@ -192,7 +192,7 @@ fn boundary_genesis_fails_closed_pending_api_318() {
             &receipt,
             &trust
         ),
-        Err(Error::BoundaryAcceptancePendingApi318)
+        Err(Error::WitnessEvidenceRequired)
     ));
     assert!(ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("id")).is_err());
 }
@@ -271,7 +271,7 @@ fn boundary_source_fails_closed_pending_api_318() {
             .err()
             .unwrap_or_else(|| panic!("no self enrolled executor"))
             .to_string()
-            .contains("api#318")
+            .contains("fresh root-authenticated witness")
     );
     pin(&replica, &trust);
     let mut missing = receipt.clone();
@@ -282,7 +282,7 @@ fn boundary_source_fails_closed_pending_api_318() {
             .err()
             .unwrap_or_else(|| panic!("missing evidence"))
             .to_string()
-            .contains("api#318")
+            .contains("fresh root-authenticated witness")
     );
     receipt
         .verify(&original, &trust)
@@ -290,7 +290,7 @@ fn boundary_source_fails_closed_pending_api_318() {
     assert!(matches!(
         replica
             .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(())),
-        Err(Error::BoundaryAcceptancePendingApi318)
+        Err(Error::WitnessEvidenceRequired)
     ));
     assert!(
         replica
@@ -375,7 +375,7 @@ fn boundary_claim_fails_closed_pending_api_318() {
         .expect("valid dual original signatures and explicit acceptance");
     assert!(matches!(
         replica.claim_ownership_with_admission(&signed, &receipt),
-        Err(Error::BoundaryAcceptancePendingApi318)
+        Err(Error::WitnessEvidenceRequired)
     ));
     assert_eq!(replica.effective_owner().expect("unclaimed"), genesis.owner);
     assert!(replica.ownership_claims().expect("no mutation").is_empty());

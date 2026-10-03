@@ -40,22 +40,6 @@ fn signing_bytes(canonical: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(canonical);
     bytes
 }
-/// HYBRID boundary acceptance stays closed until the API binds the exact
-/// signed acceptance originals/intent/receipts to its witness (api#318).
-#[cfg(feature = "owner-root")]
-pub fn require_hybrid_original_authority(
-    signed: &api::heddle::api::common::SignedHostedWitnessStatementV1,
-) -> crate::import_authority::Result<()> {
-    let body = signed
-        .body
-        .as_ref()
-        .ok_or(api::hybrid_codec::Reject::Canonical)?;
-    if body.basis != 1 {
-        return Err(crate::import_authority::Error::BoundaryAcceptancePendingApi318);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

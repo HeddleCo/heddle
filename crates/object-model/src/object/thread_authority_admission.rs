@@ -2,7 +2,7 @@
 //! This is separate from causal acceptance and from current review/landing policy.
 //! HYBRID retains these original/basis/actor/envelope comparisons while its
 //! crypto layer verifies each independent signature and witness proof. Boundary
-//! acceptance cannot become HYBRID permission before api#318 supplies its binding.
+//! acceptance requires the exact API binding and current accepting authority.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

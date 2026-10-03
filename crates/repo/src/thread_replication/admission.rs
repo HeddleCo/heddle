@@ -53,11 +53,7 @@ impl ThreadReplica {
         &self,
         receipt: &SignedAuthorityAdmission,
     ) -> Result<TrustedHostedExecutor> {
-        if receipt.verify_signature()?.basis
-            != objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority
-        {
-            return Err(Error::BoundaryAcceptancePendingApi318);
-        }
+        receipt.verify_signature()?;
         Err(Error::WitnessEvidenceRequired)
     }
     /// One indexed statement returns original bytes, status and retained proof.

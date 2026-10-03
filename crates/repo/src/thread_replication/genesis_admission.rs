@@ -16,11 +16,7 @@ impl ThreadReplica {
         trust: &TrustedHostedExecutor,
     ) -> Result<Self> {
         let _ = (directory, original, envelope, trust);
-        if admission.verify_signature()?.basis
-            != objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority
-        {
-            return Err(super::Error::BoundaryAcceptancePendingApi318);
-        }
+        admission.verify_signature()?;
         Err(super::Error::WitnessEvidenceRequired)
     }
 }
@@ -34,11 +30,7 @@ impl ThreadReplica {
         admission: &SignedGenesisAdmission,
     ) -> Result<Self> {
         let _ = (directory, original, envelope);
-        if admission.verify_signature()?.basis
-            != objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority
-        {
-            return Err(super::Error::BoundaryAcceptancePendingApi318);
-        }
+        admission.verify_signature()?;
         Err(super::Error::WitnessEvidenceRequired)
     }
 }

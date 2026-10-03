@@ -2,7 +2,7 @@
 //! first admission; it grants neither current disclosure nor account enrollment.
 //! The comparisons below remain structural prerequisites. HYBRID verification
 //! adds independently selected owner/delegation and fresh witness-set evidence;
-//! boundary acceptance requires the pending api#318 witness binding.
+//! boundary acceptance requires the exact API witness binding and native selection.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

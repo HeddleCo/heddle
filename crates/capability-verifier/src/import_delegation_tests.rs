@@ -77,7 +77,7 @@ fn context<'a>(
             keyring,
             limits: VerificationLimits::new(3600).expect("limits"),
         },
-        now,
+        now_millis: now * 1000,
         forbidden_job_keys: forbidden,
         known_job_associations: &[],
     }
@@ -353,15 +353,277 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
         verify_current(&d, Some(&nondelegable), &c, |_| false),
         Err(Error::Hybrid(contract::Reject::ImportPermission))
     ));
-    // Self-PoP/subdelegation has valid signatures but no owner-authorized parent.
+    // A distinct child key avoids the same-key gate; the authentic parent
+    // authorizes the device, not this job acting as a delegation issuer.
     let mut child = d.clone();
     let b = child.body.as_mut().expect("body");
     b.delegating_public_key = key(&f, "job");
+    b.job_public_key = key(&f, "renew_job");
+    b.job_key_id = hybrid_codec::key_id(&b.job_public_key);
     child.delegating_signature = Some(sign_changed(&f, "job", contract::DELEGATION_DOMAIN, b));
     assert!(matches!(
         verify_current(&child, Some(&p), &c, |_| false),
-        Err(Error::Hybrid(contract::Reject::KeyRole))
+        Err(Error::Hybrid(contract::Reject::Scope))
     ));
     verify_new_operation(&op, &staged, Some(&p), &c, |_| false)
         .expect("unchanged accepted context control");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn review_wrong_role_delegators_have_genuine_owner_permissions() {
+    let f = fixture();
+    let (owner, ring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let forbidden = vec![key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")];
+    let mut c = context(&owner, &ring, &digest, &initial, &forbidden, 1100);
+    let d: SignedImportJobDelegationV1 = record(&f, "delegation");
+    let p: SignedImportMemberPermissionV1 = record(&f, "permission");
+    verify_current(&d, Some(&p), &c, |_| false).expect("ordinary device control");
+    let associations = vec![(
+        key(&f, "job"),
+        d.body.as_ref().expect("body").logical_job_id.clone(),
+    )];
+    c.known_job_associations = &associations;
+    for role in ["witness", "job"] {
+        let mut parent = p.clone();
+        let b = parent.body.as_mut().expect("body");
+        b.subject_public_key = key(&f, role);
+        parent.owner_signature = Some(sign_changed(&f, "owner", contract::PERMISSION_DOMAIN, b));
+        let mut child = d.clone();
+        let b = child.body.as_mut().expect("body");
+        b.delegating_public_key = key(&f, role);
+        b.job_public_key = key(&f, "renew_job");
+        b.job_key_id = hybrid_codec::key_id(&b.job_public_key);
+        b.parent_permission_digest =
+            contract::signed_permission_digest(&parent).expect("parent digest");
+        child.delegating_signature = Some(sign_changed(&f, role, contract::DELEGATION_DOMAIN, b));
+        assert!(
+            matches!(
+                verify_current(&child, Some(&parent), &c, |_| false),
+                Err(Error::Hybrid(contract::Reject::KeyRole))
+            ),
+            "genuine owner-signed {role} delegator must reject"
+        );
+    }
+    verify_current(&d, Some(&p), &c, |_| false).expect("unchanged device control");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn review_witness_freshness_preserves_receiver_milliseconds() {
+    let f = fixture();
+    let (owner, ring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let forbidden = vec![key(&f, "root"), key(&f, "witness")];
+    let mut c = context(&owner, &ring, &digest, &initial, &forbidden, 1350);
+    c.now_millis = 1350002;
+    let mut signed: host::SignedHostedWitnessSetV1 = record(&f, "retired_set");
+    signed.body.as_mut().expect("body").issued_at_unix_millis = 1350001;
+    let preimage =
+        witness_trust::set_signing_bytes(signed.body.as_ref().expect("body")).expect("bytes");
+    signed.body_digest = hybrid_codec::hash(&[&preimage]);
+    let seed: [u8; 32] = hex::decode(f["keys"]["root"]["seed_hex"].as_str().expect("seed"))
+        .expect("bytes")
+        .try_into()
+        .expect("seed width");
+    use ed25519_dalek::Signer;
+    signed.root_signature = ed25519_dalek::SigningKey::from_bytes(&seed)
+        .sign(&preimage)
+        .to_bytes()
+        .to_vec();
+    let root = key(&f, "root");
+    let set = witness_trust::verify_set(
+        &signed,
+        &witness_trust::SetExpectation {
+            authority: "https://weft.example.test",
+            root_id: "descriptor-root-1",
+            root_public_key: &root,
+            root_epoch: 1,
+            now_unix_millis: c.now_millis,
+            clock_floor_unix_millis: 0,
+            known_job_keys: &[],
+        },
+        None,
+    )
+    .expect("fractional issued time control");
+    let statement = record(&f, "publication_statement");
+    let proof = record(&f, "publication_proof");
+    let resolved =
+        witness_trust::resolve_statement(&set, &statement, Some(&proof), false, c.now_millis)
+            .expect("resolution control");
+    verify_historical(
+        &record(&f, "delegation"),
+        Some(&record(&f, "permission")),
+        &c,
+        &statement,
+        &resolved,
+        &set,
+        |_| false,
+    )
+    .expect("freshness must retain milliseconds");
+    let statement = record(&f, "genesis_admission");
+    let proof = record(&f, "genesis_proof");
+    let resolved =
+        witness_trust::resolve_statement(&set, &statement, Some(&proof), false, c.now_millis)
+            .expect("genesis resolution control");
+    verify_historical_genesis(
+        &record(&f, "delegation"),
+        Some(&record(&f, "permission")),
+        &c,
+        &record(&f, "genesis_payload"),
+        &statement,
+        &resolved,
+        &set,
+        |_| false,
+    )
+    .expect("genesis freshness retains milliseconds");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn review_historical_genesis_and_publication_exclude_selected_witness_as_creator() {
+    use ed25519_dalek::{Signer, SigningKey};
+    let f = fixture();
+    let (owner, ring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let device = key(&f, "device");
+    let root = key(&f, "root");
+    let seed: [u8; 32] = hex::decode(f["keys"]["device"]["seed_hex"].as_str().expect("seed"))
+        .expect("seed bytes")
+        .try_into()
+        .expect("seed width");
+    let mut signed: host::SignedHostedWitnessSetV1 = record(&f, "current_set");
+    let set_body = signed.body.as_mut().expect("set");
+    let entry = set_body
+        .entries
+        .iter_mut()
+        .find(|e| e.executor_id == set_body.current_executor_id)
+        .expect("current");
+    entry.public_key = device.clone();
+    entry.executor_id = witness_trust::witness_id(&device);
+    set_body.current_executor_id = entry.executor_id.clone();
+    set_body
+        .entries
+        .sort_by(|a, b| a.executor_id.cmp(&b.executor_id));
+    let root_seed: [u8; 32] = hex::decode(f["keys"]["root"]["seed_hex"].as_str().expect("seed"))
+        .expect("bytes")
+        .try_into()
+        .expect("width");
+    signed.body_digest =
+        hybrid_codec::hash(&[&witness_trust::set_signing_bytes(set_body).expect("set preimage")]);
+    signed.root_signature = SigningKey::from_bytes(&root_seed)
+        .sign(&witness_trust::set_signing_bytes(set_body).expect("set preimage"))
+        .to_bytes()
+        .to_vec();
+    let set = witness_trust::verify_set(
+        &signed,
+        &witness_trust::SetExpectation {
+            authority: "https://weft.example.test",
+            root_id: "descriptor-root-1",
+            root_public_key: &root,
+            root_epoch: 1,
+            now_unix_millis: 1100000,
+            clock_floor_unix_millis: 0,
+            known_job_keys: &[],
+        },
+        None,
+    )
+    .expect("genuine root-selected witness");
+    let d = record(&f, "delegation");
+    let p = record(&f, "permission");
+    let allowed = vec![root.clone(), key(&f, "witness"), key(&f, "next_witness")];
+    let control_set = witness_trust::verify_set(
+        &record(&f, "current_set"),
+        &witness_trust::SetExpectation {
+            authority: "https://weft.example.test",
+            root_id: "descriptor-root-1",
+            root_public_key: &root,
+            root_epoch: 1,
+            now_unix_millis: 1100000,
+            clock_floor_unix_millis: 0,
+            known_job_keys: &[],
+        },
+        None,
+    )
+    .expect("ordinary device control set");
+    let allowed_context = context(&owner, &ring, &digest, &initial, &allowed, 1100);
+    let forbidden = vec![root, device.clone()];
+    let forbidden_context = context(&owner, &ring, &digest, &initial, &forbidden, 1100);
+    for genesis in [false, true] {
+        let mut statement: host::SignedHostedWitnessStatementV1 = record(
+            &f,
+            if genesis {
+                "genesis_admission"
+            } else {
+                "publication_statement"
+            },
+        );
+        let control_resolved =
+            witness_trust::resolve_statement(&control_set, &statement, None, false, 1100000)
+                .expect("ordinary testimony");
+        if genesis {
+            verify_historical_genesis(
+                &d,
+                Some(&p),
+                &allowed_context,
+                &record(&f, "genesis_payload"),
+                &statement,
+                &control_resolved,
+                &control_set,
+                |_| false,
+            )
+            .expect("ordinary creator control");
+        } else {
+            verify_historical(
+                &d,
+                Some(&p),
+                &allowed_context,
+                &statement,
+                &control_resolved,
+                &control_set,
+                |_| false,
+            )
+            .expect("ordinary delegator control");
+        }
+        let body = statement.body.as_mut().expect("statement");
+        body.executor_id = witness_trust::witness_id(&device);
+        statement.signature = SigningKey::from_bytes(&seed)
+            .sign(&witness_trust::statement_signing_digest(body).expect("preimage"))
+            .to_bytes()
+            .to_vec();
+        let resolved = witness_trust::resolve_statement(&set, &statement, None, false, 1100000)
+            .expect("genuine witness testimony");
+        let verify = |c| {
+            if genesis {
+                verify_historical_genesis(
+                    &d,
+                    Some(&p),
+                    c,
+                    &record(&f, "genesis_payload"),
+                    &statement,
+                    &resolved,
+                    &set,
+                    |_| false,
+                )
+            } else {
+                verify_historical(&d, Some(&p), c, &statement, &resolved, &set, |_| false)
+            }
+        };
+        if genesis {
+            contract::verify_witness_payload(
+                statement.body.as_ref().expect("body"),
+                contract::WitnessPayload::Genesis(&record(&f, "genesis_payload")),
+            )
+            .expect("unchanged valid surrounding native commitments");
+        }
+
+        assert!(
+            matches!(
+                verify(&forbidden_context),
+                Err(Error::Hybrid(contract::Reject::KeyRole))
+            ),
+            "historical genesis={genesis}"
+        );
+    }
 }
