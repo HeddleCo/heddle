@@ -16,6 +16,8 @@ pub enum Error {
     Store(#[from] repo::thread_replication::Error),
     #[error("local replica worker: {0}")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("HYBRID original requires independently selected hosted trust")]
+    HostedTrustRequired,
 }
 pub struct LocalReplica<S> {
     replica: ThreadReplica,
@@ -91,6 +93,7 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
                         ReceivedOperation {
                             original: stored.original,
                             authority_admission: stored.authority_admission,
+                            import_authority: None,
                         },
                         stored.status,
                     )
@@ -99,6 +102,9 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         .await
     }
     async fn receive(&self, received: ReceivedOperation) -> Result<Admission, Error> {
+        if received.import_authority.is_some() {
+            return Err(Error::HostedTrustRequired);
+        }
         let authority_home = self.authority_home.clone();
         self.execute(move |replica, objects| {
             let operation = received.original;

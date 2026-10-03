@@ -12,6 +12,9 @@ use wire::ProtocolError;
 
 use super::{HostedClient, operation_id::ClientOperationId};
 
+mod job;
+pub use job::PreparedImportJob;
+
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
 const RETRY_IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/RetryImportSource";
 
@@ -582,98 +585,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_source_round_trips_request_and_live_operation_updates() {
+    async fn import_source_rejects_an_old_peer_before_sending_unsigned_authority() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_import_source().await;
-        let source_url = "https://github.com/octocat/Hello-World.git";
-        let operation_id = Uuid::now_v7().to_string();
-        let started = client
+        let error = client
             .import_source(
                 "acme",
-                source_url,
+                "https://github.com/octocat/Hello-World.git",
                 &ImportSourceRefs::from_names(["refs/heads/main".into()]).expect("refs"),
-                operation_id.clone(),
+                Uuid::now_v7().to_string(),
             )
             .await
-            .expect("ImportSource reaches the hosted transport");
-        let mut updates = Vec::new();
-        let terminal = client
-            .observe_import_source(&started, |record| {
-                updates.push((record.state, record.completed_units));
-                Ok(())
-            })
-            .await
-            .expect("ObserveOperations reaches a terminal import state");
-        assert_eq!(
-            terminal.state,
-            contract::operation_record::State::Completed as i32
-        );
-        assert_eq!(
-            updates,
-            vec![
-                (contract::operation_record::State::Queued as i32, 0),
-                (
-                    contract::operation_record::State::Running as i32,
-                    8 * 1024 * 1024
-                ),
-                (
-                    contract::operation_record::State::Running as i32,
-                    16 * 1024 * 1024
-                ),
-                (
-                    contract::operation_record::State::Completed as i32,
-                    32 * 1024 * 1024
-                ),
-            ]
-        );
-
+            .expect_err("old peer cannot ignore new import authority");
+        assert!(error.to_string().contains("protocol"), "{error}");
         client.close().await;
         server.await.expect("hosted test server");
-        let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
-        let request = captured.requests.first().expect("captured ImportSource");
-        assert_eq!(request.client_operation_id, started.client_operation_id);
-        assert!(Uuid::parse_str(&request.client_operation_id).is_ok());
-        assert_eq!(request.destination, Some(started.destination.clone()));
-        assert_eq!(request.expected_destination_version, vec![7; 32]);
-        let source = request.source.as_ref().expect("public Git source");
-        assert!(source.connection.is_none());
-        assert_eq!(source.provider_repository_id, source_url);
-        assert_eq!(source.clone_url, source_url);
-        assert!(!source.private);
-        assert!(source.installation_id.is_empty());
-        assert!(!request.branches[0].creator_authority.is_empty());
-        let signed = request.branches[0]
-            .thread_genesis
-            .as_ref()
-            .expect("signed genesis");
-        let genesis = ThreadGenesis::decode(&signed.canonical_record).expect("canonical genesis");
-        let base = objects::object::State::decode_current_msgpack(&request.initial_base_state)
-            .expect("canonical initial base");
-        assert_eq!(genesis.base, base.id());
-        assert_eq!(genesis.spool, started.destination.id);
-        assert_eq!(genesis.name, "main");
-        assert_eq!(
-            started.threads[0],
-            ThreadCreation::from_signed_with_authority(
-                request.client_operation_id.clone(),
-                signed.clone(),
-                request.branches[0].creator_authority.clone(),
-            )
-            .expect("valid signed genesis")
-            .reference()
-            .clone()
-        );
-
-        let observation = captured
-            .observations
-            .first()
-            .expect("captured ObserveOperations");
-        assert_eq!(
-            observation.client_operation_ids,
-            [started.client_operation_id]
-        );
-        assert_eq!(observation.spools, [started.destination]);
-        assert_eq!(observation.operations, [started.operation]);
+        assert!(captured.lock().expect("capture").requests.is_empty());
     }
 }

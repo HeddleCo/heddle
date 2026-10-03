@@ -90,7 +90,10 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
                 "endpoint identity/package mismatch",
             )));
         }
-        let api = Client::new(transport, description.implemented_methods.clone());
+        let mut api = Client::new(transport, description.implemented_methods.clone());
+        if let Some(protocol) = &description.protocol {
+            api = api.with_protocol(protocol.clone());
+        }
         Ok(Self { api, description })
     }
 

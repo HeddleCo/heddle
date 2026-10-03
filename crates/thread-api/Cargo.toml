@@ -22,6 +22,7 @@ native = [
     "dep:hex",
     "dep:tokio",
     "dep:tempfile",
+    "dep:heddleco-capability-verifier",
 ]
 # Exact bounded source packs and download validation without a local repo or identity manager.
 source-transfer = [
@@ -43,6 +44,7 @@ semantic-analysis = ["dep:semantic"]
 root-attachment = ["signing", "dep:biscuit-verifier", "dep:base64", "dep:chrono"]
 
 [dependencies]
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.6", optional = true }
 base64 = { workspace = true, optional = true }
 api.workspace = true
 semantic = { workspace = true, optional = true }
@@ -71,6 +73,7 @@ getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 uuid = { workspace = true, features = ["js"], optional = true }
 
 [dev-dependencies]
+serde_json.workspace = true
 tracing-subscriber.workspace = true
 anyhow = "1"
 biscuit-auth.workspace = true

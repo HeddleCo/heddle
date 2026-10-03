@@ -163,6 +163,35 @@ async fn adopted_history_round_trip() {
         .get_state(&source_state.id())
         .expect("read cloned HEAD")
         .expect("cloned HEAD state");
+    let cloned_replica = cloned.native_thread("main").expect("fresh native replica");
+    assert_eq!(cloned_replica.thread_id(), thread.thread_id());
+    assert_eq!(
+        cloned_replica.signed_genesis().expect("original genesis"),
+        thread.signed_genesis().expect("adopted genesis")
+    );
+    let operation_ids = thread
+        .source_operation_page(source_state.id(), None, 64)
+        .expect("original source IDs");
+    assert!(!operation_ids.is_empty());
+    for id in operation_ids {
+        let original = thread
+            .operation(&id)
+            .expect("source operation")
+            .expect("original")
+            .0;
+        let received = cloned_replica
+            .operation(&id)
+            .expect("fetched operation")
+            .expect("received")
+            .0;
+        assert_eq!(
+            received, original,
+            "fresh Fetch retains the creator's exact signed conversion"
+        );
+        cloned_replica
+            .verify_local_source_owner(&received.verify().expect("signature"))
+            .expect("independent local owner binding");
+    }
     assert_eq!(cloned_state.attribution, source_attribution);
     let cloned_tree = cloned
         .store()

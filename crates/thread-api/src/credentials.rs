@@ -116,6 +116,11 @@ impl Authorize for Credentials {
             bearer_grant_envelope: grant_envelope.to_vec(),
             ..Default::default()
         };
+        // Integration import routes advertise this client's semantic support.
+        // Sync remains ungated until the coordinated api#307 cutover.
+        if !method.mandatory_features.is_empty() {
+            context.protocol = Some(crate::hybrid::protocol());
+        }
         #[cfg(any(feature = "native", feature = "root-attachment"))]
         if let Self::OwnedDevice(value) = self {
             context.bearer_authority_key_selector = value.mint_root.clone();

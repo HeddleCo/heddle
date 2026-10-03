@@ -103,6 +103,7 @@ pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion
 pub use hydration::register_hosted_factory;
 pub use import_source::{
     ImportOperationStart, ImportSourceRefError, ImportSourceRefs, ImportSourceStart,
+    PreparedImportJob,
 };
 use iroh::{Endpoint, EndpointAddr};
 use objects::{NoopWarnings, Warning, WarningSink};
@@ -200,6 +201,8 @@ pub struct HostedClient {
     on_human_signature: Option<HumanSignatureCallback>,
     warnings: Arc<dyn WarningSink>,
     server_key: Option<String>,
+    hosted_root: Option<descriptor_trust::HostedRootSelection>,
+    witness_lookup: Option<Arc<descriptor_trust::HostedWitnessLookup>>,
 }
 
 impl std::fmt::Debug for HostedClient {
@@ -217,6 +220,15 @@ impl std::fmt::Debug for HostedClient {
 }
 
 impl HostedClient {
+    pub fn hosted_root(&self) -> Option<&descriptor_trust::HostedRootSelection> {
+        self.hosted_root.as_ref()
+    }
+
+    pub fn witness_lookup(&self) -> Result<&descriptor_trust::HostedWitnessLookup> {
+        self.witness_lookup
+            .as_deref()
+            .ok_or(HostedError::Hybrid(api::hybrid_codec::Reject::Root))
+    }
     /// Discover the native contract once, then retain this typed client for the
     /// command. Connection, descriptor trust and credentials come from the same
     /// assembled session; no legacy request/response is translated here.
@@ -255,13 +267,12 @@ impl HostedClient {
             })
             .await?
             .clone();
-        Ok(thread_api::Remote {
-            api: api::v2::client::Client::new(
-                transport()?,
-                description.implemented_methods.clone(),
-            ),
-            description,
-        })
+        let mut api =
+            api::v2::client::Client::new(transport()?, description.implemented_methods.clone());
+        if let Some(protocol) = &description.protocol {
+            api = api.with_protocol(protocol.clone());
+        }
+        Ok(thread_api::Remote { api, description })
     }
 
     pub(crate) fn claim_authority_token(&self) -> &[u8] {
@@ -332,6 +343,14 @@ impl HostedClient {
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
+            hosted_root: descriptor.and_then(|value| value.hosted_root()).cloned(),
+            witness_lookup: descriptor
+                .and_then(|value| value.hosted_root())
+                .map(|root| {
+                    descriptor_trust::HostedWitnessLookup::new(root.authority(), config)
+                        .map(Arc::new)
+                })
+                .transpose()?,
         };
         client.native().await.map_err(HostedError::transport)?;
         Ok(client)
@@ -373,6 +392,14 @@ impl HostedClient {
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
+            hosted_root: descriptor.hosted_root().cloned(),
+            witness_lookup: descriptor
+                .hosted_root()
+                .map(|root| {
+                    descriptor_trust::HostedWitnessLookup::new(root.authority(), config)
+                        .map(Arc::new)
+                })
+                .transpose()?,
         })
     }
 
@@ -384,6 +411,8 @@ impl HostedClient {
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
+            hosted_root: None,
+            witness_lookup: None,
         })
     }
 
@@ -399,6 +428,8 @@ impl HostedClient {
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
+            hosted_root: None,
+            witness_lookup: None,
         })
     }
 
@@ -413,6 +444,8 @@ impl HostedClient {
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
+            hosted_root: None,
+            witness_lookup: None,
         })
     }
 
@@ -497,7 +530,12 @@ impl HostedClient {
         if descriptor.client_operation_id_required && client_operation_id.is_empty() {
             return Err(HostedError::MissingClientOperationId);
         }
-        let signed = context.unary(method, encoded, client_operation_id)?;
+        let mut signed = context.unary(method, encoded, client_operation_id)?;
+        if !descriptor.mandatory_features.is_empty() {
+            let remote = self.native().await.map_err(HostedError::transport)?;
+            api::import_authority::require_hybrid_peer(remote.description.protocol.as_ref())?;
+            signed.context.protocol = Some(thread_api::hybrid::protocol());
+        }
         match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),
             Err(HostedError::Call {
@@ -505,8 +543,13 @@ impl HostedClient {
                 message,
                 error: Some(error),
             }) if api::human_verification_challenge(&error).is_some() => {
-                let challenge = api::human_verification_challenge(&error)
-                    .expect("guarded human-verification detail");
+                let Some(challenge) = api::human_verification_challenge(&error) else {
+                    return Err(HostedError::Call {
+                        code: api::heddle::api::common::CallFailureCode::Unauthenticated,
+                        message,
+                        error: Some(error),
+                    });
+                };
                 let canonical = signed
                     .canonical()
                     .ok_or(HostedError::SigningIdentityRequired)?;

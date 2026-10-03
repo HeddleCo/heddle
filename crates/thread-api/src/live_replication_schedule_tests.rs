@@ -575,6 +575,7 @@ fn retained_acceptance_allocations_include_spare_capacity_once_until_last_user()
     let make_unit = || {
         let record = operation(ContentHash::from_bytes([1; 32]), false, 1);
         InputUnit::Operation(ReceivedOperation {
+            import_authority: None,
             original: SignedOperation {
                 canonical: record.canonical_record,
                 signature: record.signatures[0].signature.clone(),

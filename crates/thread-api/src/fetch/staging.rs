@@ -19,8 +19,8 @@ const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_OBJECTS: usize = 100_000;
 
-/// Verified source artifacts and their original proofs. Dropping this value
-/// removes its temporary files. Native callers can install it on a disk worker.
+/// Structurally checked source artifacts and original proofs. These bytes grant
+/// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,

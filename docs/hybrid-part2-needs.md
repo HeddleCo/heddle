@@ -10,15 +10,16 @@ semantics below are required, and Part 2 will consume the actual public APIs.
 
 ## Observed Part 1 interfaces (2026-10-03)
 
-Landed on Part 1 branch at `978eb607`: `import_delegation::{Selection,
+Landed on Part 1 branch at `978eb607` (integration pending): `import_delegation::{Selection,
 CurrentContext, VerifiedImportDelegation, verify_current, verify_historical,
 verify_historical_genesis, verify_new_operation}` and typed `Revocation`.
 
-Drafted in Part 1's working tree: `crypto::import_authority::{WitnessEvidence,
+Landed on Part 1 branch at `352c99e8` (integration pending): `crypto::import_authority::{WitnessEvidence,
 NativeClosure, NativeAuthorityContext, verify_native_genesis,
 verify_native_operation, verify_delegated_import, verify_publication,
 verify_genesis_payload, verify_authority_payload, verify_landing_payload}`;
-`object_model::object::thread_replication::delegated_import::DelegatedImport`;
+`object_model::object::thread_replication::delegated_import::DelegatedImport`.
+Drafted in Part 1's working tree, not landed:
 `repo::thread_replication::hosted_trust::{RootSelection, Clock, SystemClock,
 HostedTrust, TrustTransaction, select_root, replace_root}`. Part 2 will use
 `HostedTrust::mutate` as the sole witness update/installation serialization.

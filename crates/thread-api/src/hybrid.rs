@@ -1,104 +1,114 @@
-//! HYBRID import authority is not supported yet (api#307).
-//!
-//! The api contract (`docs/alpha-v2/import-authority-host-witness.md`) says a
-//! non-HYBRID peer MUST reject any Sync record or frame carrying
-//! `import_authority` before staging, installation, relay or publication, and
-//! never silently ignore it. Presence alone rejects, including an empty bundle.
-//! Openings, ready replies and stream openings that declare HYBRID protocol
-//! support or carry a witness set are rejected the same way: this peer cannot
-//! honour them. Fields this peer sends stay empty.
-//!
-//! Each check returns the rejection message so the caller can raise it in its
-//! own protocol error type.
+//! HYBRID transport checks. Structural proof closure is preparation only;
+//! authority is resolved independently at each serialized durable mutation.
 use crate::contract::{
-    FetchOpen, PublicationReceipt, PublishContentOpen, ReplicationOpen, ReplicationOperations,
-    ReplicationReady, StreamOpen, TransferReady,
+    FetchOpen, ImportPublicProofBundleV1, PublicationReceipt, PublishContentOpen, ReplicationOpen,
+    ReplicationOperations, ReplicationReady, StreamOpen, TransferReady,
 };
+use api::heddle::api::common::ProtocolCompatibility;
 
-/// The reason a received message was rejected.
+#[cfg(feature = "native")]
+pub mod authority;
+pub mod history;
+#[cfg(test)]
+mod history_tests;
+#[cfg(test)]
+mod protocol_tests;
 pub type Rejection = &'static str;
 
-fn absent<T>(field: &Option<T>, message: Rejection) -> Result<(), Rejection> {
-    match field {
-        Some(_) => Err(message),
-        None => Ok(()),
+/// Integration routes support HYBRID. Keep this single switch OFF until the
+/// coordinated Sync mandatory cutover in api#307; optional capable paths still
+/// require exact protocol negotiation before accepting any authority bundle.
+pub const SYNC_MANDATORY_GATE: bool = false;
+
+/// All ordinary Sync constructors use the same coordinated cutover switch.
+pub fn sync_protocol() -> Option<ProtocolCompatibility> {
+    SYNC_MANDATORY_GATE.then(protocol)
+}
+
+pub fn protocol() -> ProtocolCompatibility {
+    ProtocolCompatibility {
+        protocol_version: 2,
+        mandatory_features: vec![1],
     }
 }
-
+fn check_protocol(value: Option<&ProtocolCompatibility>) -> Result<(), Rejection> {
+    if SYNC_MANDATORY_GATE || value.is_some() {
+        api::import_authority::require_hybrid_peer(value)
+            .map_err(|_| "incompatible HYBRID protocol (api#307 cutover)")?;
+    }
+    Ok(())
+}
+/// Complete structural closure, never signature trust, enrollment or admission.
+pub fn bundle(value: Option<&ImportPublicProofBundleV1>) -> Result<(), Rejection> {
+    if let Some(value) = value {
+        api::import_authority::validate_public_bundle(value)
+            .map_err(|_| "incomplete HYBRID import authority (api#307 cutover)")?;
+        if value
+            .statements
+            .iter()
+            .any(|s| s.body.as_ref().is_some_and(|body| body.basis == 2))
+        {
+            return Err("HYBRID boundary acceptance binding requires api#318");
+        }
+    }
+    Ok(())
+}
+fn carrier(
+    protocol: Option<&ProtocolCompatibility>,
+    value: Option<&ImportPublicProofBundleV1>,
+) -> Result<(), Rejection> {
+    check_protocol(protocol)?;
+    if value.is_some() {
+        api::import_authority::require_hybrid_peer(protocol).map_err(
+            |_| "import authority requires negotiated HYBRID protocol (api#307 cutover)",
+        )?;
+    }
+    bundle(value)
+}
+/// Bind support to both ends of this exact stream, including its first Ready.
+pub fn negotiated(
+    open: Option<&ProtocolCompatibility>,
+    ready: Option<&ProtocolCompatibility>,
+) -> Result<(), Rejection> {
+    check_protocol(open)?;
+    check_protocol(ready)?;
+    if open != ready {
+        return Err("HYBRID protocol differs from stream opening");
+    }
+    Ok(())
+}
 pub fn operations(batch: &ReplicationOperations) -> Result<(), Rejection> {
-    absent(
-        &batch.import_authority,
-        "replication operations carry HYBRID import authority, which this peer does not support (api#307)",
-    )
+    bundle(batch.import_authority.as_ref())
 }
-
 pub fn replication_open(open: &ReplicationOpen) -> Result<(), Rejection> {
-    absent(
-        &open.protocol,
-        "replication opening declares HYBRID protocol support, which this peer does not support (api#307)",
-    )?;
-    absent(
-        &open.import_authority,
-        "replication opening carries HYBRID import authority, which this peer does not support (api#307)",
-    )
+    carrier(open.protocol.as_ref(), open.import_authority.as_ref())
 }
-
 pub fn replication_ready(ready: &ReplicationReady) -> Result<(), Rejection> {
-    absent(
-        &ready.protocol,
-        "replication ready declares HYBRID protocol support, which this peer does not support (api#307)",
-    )?;
-    absent(
-        &ready.import_authority,
-        "replication ready carries HYBRID import authority, which this peer does not support (api#307)",
-    )
+    carrier(ready.protocol.as_ref(), ready.import_authority.as_ref())
 }
-
 pub fn fetch_open(open: &FetchOpen) -> Result<(), Rejection> {
-    absent(
-        &open.protocol,
-        "fetch opening declares HYBRID protocol support, which this peer does not support (api#307)",
-    )
+    check_protocol(open.protocol.as_ref())
 }
-
 pub fn transfer_ready(ready: &TransferReady) -> Result<(), Rejection> {
-    absent(
-        &ready.protocol,
-        "transfer ready declares HYBRID protocol support, which this peer does not support (api#307)",
-    )?;
-    absent(
-        &ready.import_authority,
-        "transfer ready carries HYBRID import authority, which this peer does not support (api#307)",
-    )
+    carrier(ready.protocol.as_ref(), ready.import_authority.as_ref())
 }
-
 pub fn publish_open(open: &PublishContentOpen) -> Result<(), Rejection> {
-    absent(
-        &open.protocol,
-        "publication opening declares HYBRID protocol support, which this peer does not support (api#307)",
-    )?;
-    absent(
-        &open.import_authority,
-        "publication opening carries HYBRID import authority, which this peer does not support (api#307)",
-    )
+    carrier(open.protocol.as_ref(), open.import_authority.as_ref())
 }
-
 pub fn publication_receipt(receipt: &PublicationReceipt) -> Result<(), Rejection> {
-    absent(
-        &receipt.import_authority,
-        "publication receipt carries HYBRID import authority, which this peer does not support (api#307)",
-    )
+    bundle(receipt.import_authority.as_ref())
 }
-
 pub fn stream_open(open: &StreamOpen) -> Result<(), Rejection> {
-    absent(
-        &open.protocol,
-        "stream opening declares HYBRID protocol support, which this peer does not support (api#307)",
-    )?;
-    absent(
-        &open.witness_set,
-        "stream opening carries a HYBRID witness set, which this peer does not support (api#307)",
-    )
+    check_protocol(open.protocol.as_ref())?;
+    if let Some(set) = &open.witness_set {
+        use prost::Message;
+        api::import_authority::require_hybrid_peer(open.protocol.as_ref())
+            .map_err(|_| "witness set requires HYBRID protocol (api#307 cutover)")?;
+        if set.encoded_len() > api::witness_trust::MAX_SET_BYTES || set.body.is_none() {
+            return Err("invalid HYBRID witness set");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -136,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn present_import_authority_is_rejected_never_ignored() {
+    fn incomplete_import_authority_is_rejected_never_ignored() {
         rejected(
             operations(&ReplicationOperations {
                 import_authority: bundle(),
@@ -182,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_hybrid_protocol_and_witness_sets_are_rejected() {
+    fn unsupported_protocol_and_incomplete_witness_sets_are_rejected() {
         rejected(
             replication_open(&ReplicationOpen {
                 protocol: protocol(),

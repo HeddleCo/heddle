@@ -757,6 +757,8 @@ mod tests {
             on_human_signature: None,
             warnings: Arc::new(super::super::NoopWarnings),
             server_key: None,
+            hosted_root: None,
+            witness_lookup: None,
         };
         let discovered = client.native().await;
         connection.close().await;
