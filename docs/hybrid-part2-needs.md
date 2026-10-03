@@ -1,133 +1,114 @@
 # HYBRID Part 2 core interfaces
 
-Part 2 branch: `task/1961-hybrid-part2-transport-client`.
-Part 1 branch: `task/1961-hybrid-import-authority-host-witness-hed`.
-Contract: heddle-api `v0.31.0-alpha.18`; boundary acceptance remains closed
-until api#318 / alpha.20. Sync mandatory negotiation remains off until api#307.
+Part 2: `task/1961-hybrid-part2-transport-client`, PR #1963.
+Part 1: `task/1961-hybrid-import-authority-host-witness-hed`.
 
-These interfaces are pending. Names may follow Part 1's implementation; the
-semantics below are required, and Part 2 will consume the actual public APIs.
+The normative fixed vectors are API alpha.18. Integration's 0.28.7 release now
+pins alpha.19; the HYBRID schema, docs, verifiers and vectors are unchanged.
+Boundary acceptance stays closed until api#318 / alpha.20. The one
+`hybrid::SYNC_MANDATORY_GATE` switch stays OFF until api#307, including Sync
+stream openings and RPC preludes.
 
-## Observed Part 1 interfaces (2026-10-03)
+## Observed public interfaces
 
-Landed on Part 1 branch at `978eb607` (integration pending): `import_delegation::{Selection,
-CurrentContext, VerifiedImportDelegation, verify_current, verify_historical,
-verify_historical_genesis, verify_new_operation}` and typed `Revocation`.
+All of these are **pending in integration**. Part 2 reads Part 1's branch and
+will plain-merge integration when Part 1 lands; it never copies Part 1 files.
 
-Landed on Part 1 branch at `352c99e8` (integration pending): `crypto::import_authority::{WitnessEvidence,
-NativeClosure, NativeAuthorityContext, verify_native_genesis,
-verify_native_operation, verify_delegated_import, verify_publication,
-verify_genesis_payload, verify_authority_payload, verify_landing_payload}`;
-`object_model::object::thread_replication::delegated_import::DelegatedImport`.
-Drafted in Part 1's working tree, not landed:
-`repo::thread_replication::hosted_trust::{RootSelection, Clock, SystemClock,
-HostedTrust, TrustTransaction, select_root, replace_root}`. Part 2 will use
-`HostedTrust::mutate` as the sole witness update/installation serialization.
-The newer repo draft also supplies
-`delegated_import::{HostedAdmission, NativeSubject, NativeEvidence}` and
-`ThreadReplica::{hosted_admission, receive_witnessed}`. `receive_witnessed`
-re-resolves trust/policy/originals and calls current disclosure authorization
-inside `mutate`; it still requires every native dependency to be separately
-admitted. Fetch needs the complete selected closure admitted atomically before
-any actual pack or Spool mutation, using the same callback seam below.
+- `978eb607`: `capability_verifier::import_delegation::{Selection,
+  CurrentContext, VerifiedImportDelegation, Revocation, verify_current,
+  verify_historical, verify_historical_genesis, verify_new_operation,
+  verify_policy_record}`. Selection is independently verified Spool/owner/keyring
+  authority; new work uses receiver time, historical work authenticated witness
+  observation/order. Cancellation and key revocations have distinct namespaces.
+- `352c99e8`, amended at `b6282ddd`: `crypto::import_authority::{WitnessEvidence,
+  NativeClosure, NativeAuthorityContext, verify_native_genesis,
+  verify_native_operation, verify_delegated_import, verify_publication,
+  verify_genesis_payload, verify_authority_payload, verify_landing_payload}` and
+  `object_model::object::thread_replication::delegated_import::DelegatedImport`.
+- `b6282ddd`: `repo::thread_replication::hosted_trust::{RootSelection, Clock,
+  SystemClock, HostedTrust::open, HostedTrust::mutate, TrustTransaction,
+  select_root, replace_root, select_spool}`.
+- `b6282ddd`: `delegated_import::{AcceptedAuthority, HostedAdmission,
+  NativeSubject, NativeEvidence}` and `ThreadReplica::{install_hybrid_import,
+  hybrid_import_bundle, hosted_admission, receive_witnessed}`.
 
-## Narrow repo mutation seam still needed
-
-Part 2 retains complete bundles on staged Fetch and on `ReceivedOperation`.
-The following concrete API is needed to commit authorized originals using the
-**same SQL transaction** as `HostedTrust::mutate`, rather than nesting existing
-`ThreadReplica::receive` transactions or checking trust and releasing the lock:
+The actual repo installer currently takes:
 
 ```rust
-impl TrustTransaction<'_> {
-    pub fn verify_import_source<'a>(
-        &self,
-        bundle: &'a ImportPublicProofBundleV1,
-        selected: import_delegation::Selection<'a>,
-        geneses: &'a [ThreadGenesisRecord],
-        originals: &'a [SignedOperation],
-    ) -> Result<VerifiedImportSource<'a>>;
-
-    pub fn install_import_source(
-        &self,
-        verified: &VerifiedImportSource<'_>,
-        objects: &impl ObjectStore,
-    ) -> Result<()>;
-}
-impl ThreadReplica {
-    pub fn import_authority_bundle(
-        &self, operation: &ContentHash,
-    ) -> Result<Option<ImportPublicProofBundleV1>>;
-}
+ThreadReplica::install_hybrid_import(
+    directory: &Path,
+    trust: &HostedTrust<impl Clock>,
+    bundle_bytes: &[u8],
+    native_records: &[wire::SignedRecord],
+    authority: &impl AcceptedAuthority,
+    store: &impl ObjectStore,
+) -> repo::thread_replication::Result<Vec<ThreadReplica>>;
 ```
 
-`VerifiedImportSource` is opaque, borrowing or owning exact originals/bundle;
-verification checks the **entire** closure and every original/dependency before
-any install. It is valid only for this transaction (enforce via borrow lifetime
-or recheck inside installation). The selected owner/keyring come from local
-enrollment or a separate verified Spool observation, never the bundle itself.
-Part 2 invokes source pack/Spool/owner installation only after verification,
-still inside `HostedTrust::mutate`; Part 1 commits replica frontiers, proof
-markers, original authority and bundles atomically in `install_import_source`.
-The source verifier must also cover ordinary owned-device originals, claims,
-resolutions, genesis/authority/landing witness sidecars mixed with imports.
-Unknown or uncovered originals fail closed. Bundle export returns unchanged
-original signed public closure plus proof-only history proofs.
+`AcceptedAuthority` selects an exact historical `import_delegation::Selection`
+for each witness/policy, resolves typed native/import revocations, and checks
+**current** disclosure/source access in `authorize_import(bundle, now_millis)`.
+`receive_witnessed` resolves `NativeEvidence` under `HostedTrust::mutate`, checks
+native original authority and invokes a current disclosure callback. It requires
+native dependencies to have been separately admitted already.
 
-For replication, the same seam operates on the carried bundle's complete native
-closure and then admits the requested original; no bundle is silently dropped.
+## Missing installer callback
 
-Part 1's newer draft exposes `delegated_import::AcceptedAuthority` and
-`ThreadReplica::{install_hybrid_import, hybrid_import_bundle}` instead. Those
-names work. **One missing hook is critical:** add `before_commit:
-impl FnOnce() -> Result<()>` to `install_hybrid_import`, called after every
-original/permission/witness check and every `receive_in` succeeds but before the
-outer `HostedTrust::mutate` transaction commits. Part 2 passes an isolated staged
-`FsStore` for verification and uses the hook to install source objects and native
-Spool/owner metadata. This makes rejection leave the actual repository unchanged
-and holds the same trust serialization throughout install. No durable pack
-installation can occur before full verification; no replica transaction can
-commit before the pack is locally installed. Existing `hybrid_import_bundle`
-supplies exact retained closure for relay.
+Add this final argument to `install_hybrid_import` (or an equivalent public seam
+with the same serialization and verification guarantees):
 
-Historical selections carry the handoff prefix at each authenticated statement,
-not the bundle's final owner/transfer state. The draft's
-`require_public_selection` currently compares `bundle.ownership_transfers ==
-selection.keyring.wire().ownership_transfers`; this must instead verify the
-exact accepted prefix within the complete independently selected chain. A
-later verified handoff cannot erase an earlier exact original admission.
+```rust
+before_commit: impl FnOnce() -> repo::thread_replication::Result<()>
+```
 
-The draft also verifies a `NativeClosure` but installs only converted delegated
-operations. Every supplied native original must have a verified admission path
-or reject before the callback; signature verification alone does not authorize
-ordinary account operations, ownership claims/resolutions or dependencies.
+Invoke it only after **all** original/permission/witness/dependency checks,
+current disclosure/context/clock checks, and selected replica receives succeed;
+keep the shared trust serialization held and the SQL transaction uncommitted.
+Any authority rejection must occur before actual repository artifacts mutate.
+Part 2 verifies objects in an isolated staging store and installs the actual
+pack, native Spool ID and separately selected owner metadata in this callback.
+The replica transaction must not commit before source objects are locally
+installed. A check followed by releasing the lock and then installing is invalid.
 
-Part 2's `AcceptedHistory` reconstructs exact historical owner contexts from an
+The selected native closure includes ordinary account source, genesis,
+ownership claims/resolutions, dependencies and landing evidence when present.
+Every requested native original must have its own verified admission or reject
+before this callback. Signature verification alone is not admission. Unknown
+or uncovered originals fail closed; legacy executor pins cannot authorize them.
+
+## Selected branches and historical prefixes
+
+Fetch selects one source revision. Replication splits native originals into
+bounded carriers. Their **complete public bundle** can contain authentic signed
+operations/manifests/geneses for other branches or earlier slots whose converted
+native counterparts were not requested.
+
+The current installer requires converted native counterparts for every public
+bundle operation and installs every branch genesis. That cannot serve these
+transports. Verify the complete public delegation/publication/slot history, but
+admit only requested native originals and their selected causal dependencies;
+never install an unrelated branch from carried public evidence. A per-original
+API under `TrustTransaction` is also suitable if it verifies the entire selected
+closure before the callback and retains the full unchanged public bundle.
+The seam must support an explicitly selected genesis with no converted source
+operations, as well as a selected capture and its dependencies.
+
+Historical selections carry the exact transfer prefix at each authenticated
+statement. The current `require_public_selection` compares the whole bundle's
+final transfer list against that historical prefix. Instead, compare the exact
+accepted prefix within the independently selected complete chain. A later
+verified handoff cannot erase an earlier authentic original admission.
+
+Part 2's `AcceptedHistory` reconstructs those exact historical contexts from an
 independently verified Spool observation. Its eventual `AcceptedAuthority`
-adapter must resolve typed revocations against the exact signed policy and
-authenticated accepted-order witness. A generic `false` predicate is forbidden;
-unknown keys, credentials, cancellation namespaces or unbound statements reject.
-The draft's new `authorize_import(bundle, now_millis) -> Result<()>` callback
-must likewise check independently selected **current** disclosure/source access
-under the mutation lock. Historical conversion permission cannot supply it.
+adapter must resolve revocations against the exact signed policy and witnessed
+accepted order. A generic `false` predicate is forbidden: unknown keys,
+credentials, cancellation namespaces or unbound statements reject. Historical
+conversion permission cannot supply current disclosure authorization.
 
-Fetch selects one source revision and replication splits originals into bounded
-batches. Their complete public bundle can include signed delegated results and
-manifests from other branches/earlier slots whose converted native records are
-not selected for installation. The draft loops over every bundle operation and
-requires a matching converted native record, then installs every branch genesis.
-That seam cannot serve a single-branch Fetch or a split replication batch.
-Verify the complete public delegation/publication/slot history, but require and
-admit converted-native counterparts only for the exact requested originals and
-their selected causal dependencies. Never install an unrelated branch merely
-because its public proof was carried. Alternatively expose a per-original
-verification/installation API under `TrustTransaction`; the public closure must
-remain intact through batching, and every requested native original must be
-covered or fail closed before the callback.
+## Missing read-only trust snapshot
 
-## Receiver trust and mutation serialization (repo)
-
-The concrete snapshot requested from the newer draft is:
+Async proof-only refresh needs this concrete public accessor:
 
 ```rust
 pub struct TrustSnapshot {
@@ -138,94 +119,36 @@ pub struct TrustSnapshot {
     pub known_job_associations: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl<C: Clock> HostedTrust<C> {
-    pub fn snapshot(&self) -> Result<TrustSnapshot>;
+    pub fn snapshot(&self) -> repo::thread_replication::Result<TrustSnapshot>;
 }
 ```
 
-Restore `previous` from the persisted original signed set using its retained
-history root, including expired snapshots only as a high-water/history floor.
-Return the independently selected current root and epoch separately. Do not
-claim an expired snapshot is fresh authority. Reading the snapshot never
-changes the durable clock floor or set; reject detected clock rollback. Part 2
-derives known job keys from the associations, performs bounded async lookup,
-then `mutate` reloads and verifies newest trust at use. A set learned during
-async lookup can still invalidate the prepared result before installation.
+Restore `previous` from the persisted original signed set with its retained
+history root, including expired snapshots **only as a high-water/history floor**.
+Return the independently selected current root and epoch separately. Reading
+never changes the durable clock floor/set; reject detected clock rollback.
+Part 2 derives known job keys, performs bounded async set/proof lookup, then
+`mutate` reloads and verifies newest trust at use. A set/root/job context learned
+while lookup awaits can invalidate the prepared result before installation.
 
-```rust
-pub struct HostedRootContext {
-    pub authority: String,
-    pub root_id: String,
-    pub root_public_key: [u8; 32],
-    pub root_epoch: u64,
-}
-pub struct HostedTrustStore; // opened from independently selected local state
-impl HostedTrustStore {
-    pub fn open(heddle_dir: &Path, root: &HostedRootContext) -> Result<Self>;
-    pub fn update_set(&self, signed: &SignedHostedWitnessSetV1, now_ms: i64)
-        -> Result<VerifiedWitnessSet>;
-    pub fn with_mutation<T>(&self, now_ms: i64,
-        mutation: impl FnOnce(&VerifiedWitnessSet) -> Result<T>) -> Result<T>;
-}
-```
-
-`update_set` and `with_mutation` hold the SAME receiver lock through verification
-and commit, persist original set/high-water/digest/seals/tombstones and clock
-floor, reject rollback and old-root contexts, and enforce monotonic elapsed time.
-`with_mutation` reloads newest state; an earlier opaque verification is never
-authority. Root replacement is explicit, invalidates contexts, and carries known
-history. A transported root or endpoint key cannot construct independent trust.
-
-## Complete original history verification (crypto / capability-verifier)
-
-```rust
-pub struct VerifiedImportHistory; // opaque; complete independently verified closure
-pub fn verify_import_history(
-    bundle: &ImportPublicProofBundleV1,
-    selected_spool: &IndependentlySelectedSpoolLineage,
-    set: &VerifiedWitnessSet,
-    now_ms: i64,
-) -> Result<VerifiedImportHistory>;
-```
-
-This verifies owner histories/handoffs/policies, original genesis/envelopes,
-owner-to-device typed permissions, each original delegation, converted native
-operation and exact publication/admission/authority/landing statements. Historic
-authority time comes ONLY from authenticated witness observation/order. Resolve
-each issuer and exact proof independently. Missing/extra/substituted closure
-rejects. BoundaryAcceptance rejects until api#318. Persist key-to-job associations
-under the receiver mutation lock and forbid all root/user/witness role overlap.
-
-## Verified batch installation and relay (repo)
-
-```rust
-pub fn install_verified_source(
-    repository: &Repository,
-    history: &VerifiedImportHistory,
-    geneses: &[ThreadGenesisRecord],
-    originals: &[SignedOperation],
-    pack: &Path,
-    index: &Path,
-) -> Result<StateId>;
-```
-
-The batch must match every native original/dependency to the verified history
-BEFORE Spool ID, owner observation, replicas, immutable pack, source frontiers or
-possession markers change. Reject leaves no partial authorized mutation. Commit
-uses the same receiver lock as trust updates; receipt verification may not fall
-back to evergreen executor pins. Local-key and owned-device paths retain their
-independent current authority checks. A relay exports the unchanged complete
-public bundle attached to stored operations, never just signatures.
-
-Part 2 implements proof-only retrieval using api's exact leaf preimage, bounded
-DTOs and inclusion verification, and re-resolves staged originals against newest
-trust rather than treating structural staging or cached contexts as authority.
+`HostedTrust::mutate` is the sole shared serialization for witness updates and
+hosted admission. Freshness, high-water, exact body digest, root epoch, seals,
+tombstones, key/job associations and monotonic clock must be rechecked at use.
+Root replacement is explicit and preserves authenticated history. Transported
+roots or endpoint keys cannot construct independent trust.
 
 ## Required concurrent guard-removal evidence
 
-Part 1 owns the production `HostedTrust` high-water/re-resolution guards.
-Please run its cached-context/concurrent-install test with the relevant guard
-temporarily removed, record the failing run, restore it, and record the passing
-run. Part 2 cannot edit that production code under the owner's file split.
-Direct API context tests are useful controls but do not prove durable install
-serialization. Part 2 will add the transport install interleaving test after the
-actual transaction seam lands in integration.
+Part 1 owns the production `HostedTrust` guards. Run its concurrent test with
+the relevant guard temporarily removed, record the failure, restore the guard,
+and record the passing run: stage/resolve N, persist N+1 revocation using an
+independent handle, then reject install before durable mutation. Part 2 cannot
+edit those guards under the owner's file split. Direct API cached-context tests
+do not establish durable install serialization. Part 2 will add the transport
+install interleaving test when the actual transaction seam lands.
+
+Part 2 already retains full bundles through staging/batching/relay, rejects
+legacy receipt-only authority, retrieves exact bounded retrospective proofs,
+refreshes only receiver metadata without replacing originals, and verifies
+local conversion/publication/fresh Fetch. Unresolved hosted installation returns
+a typed error; no permissive verification placeholder is used.

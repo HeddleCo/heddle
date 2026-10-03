@@ -47,6 +47,10 @@ pub trait ReplicaStore: Clone + Send + Sync + 'static {
         after: Option<ContentHash>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<ContentHash>, Self::Error>> + Send;
+    /// Recheck retained hosted authority under the receiver's mutation
+    /// serialization before exporting an accepted original. Cached acceptance
+    /// and structural sidecars grant no authority; keep the complete public
+    /// evidence attached for the next receiver.
     fn operation(
         &self,
         id: ContentHash,
