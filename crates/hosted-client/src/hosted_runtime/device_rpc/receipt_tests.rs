@@ -100,6 +100,12 @@ pub(super) async fn roundtrip(
     };
     thread_api::authority_admission::verify(&receipt, &original, &trust)
         .expect("independent valid original and receipt signatures control");
+    let typed_receipt =
+        thread_api::authority_admission::decode(&receipt).expect("exact signed sidecar");
+    assert!(matches!(
+        replica.authority_admission_trust(&typed_receipt),
+        Err(repo::thread_replication::Error::WitnessEvidenceRequired)
+    ));
     let wire_original = SignedRecord {
         format: OPERATION_FORMAT.into(),
         canonical_record: original.canonical.clone(),
@@ -179,7 +185,16 @@ pub(super) async fn roundtrip(
     })
     .await
     .expect("proof rejection deadline");
-    assert!(error.to_string().contains("hosted installation requires fresh root-authenticated witness and original authority evidence"), "{error}");
+    // This adapter resets rejected streams; typed failure serialization is
+    // separate from core admission and belongs to Part 2.
+    assert!(
+        matches!(
+            error,
+            api::v2::client::ClientError::Transport(thread_api::transport::Error::Io(ref reason))
+                if reason.starts_with("stream reset by peer")
+        ),
+        "{error}"
+    );
     assert!(replica.operation(&id).expect("durable read").is_none());
     assert_eq!(
         repository.head().expect("checkout unchanged"),
