@@ -1,6 +1,3 @@
-use crate::{Remote, contract::*, rpc, transport::Error};
-use api::v2::client::{ClientError, MessageReader, MessageWriter, Rpc, RpcTransport};
-use prost::Message;
 use std::{
     future::Future,
     pin::pin,
@@ -10,6 +7,11 @@ use std::{
     },
     task::{Context, Poll, Waker},
 };
+
+use api::v2::client::{ClientError, MessageReader, MessageWriter, Rpc, RpcTransport};
+use prost::Message;
+
+use crate::{Remote, contract::*, rpc, transport::Error};
 
 struct Empty;
 #[test]

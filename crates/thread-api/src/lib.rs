@@ -109,8 +109,9 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         M::Request: observation::ObservationRequest,
         M::Response: observation::ObservedEvent,
     {
-        use crate::reopen::ReopenRetryable as _;
         use observation::ObservationRequest as _;
+
+        use crate::reopen::ReopenRetryable as _;
         let budget = observation::budget(&self.description)?;
         let options = request.options_mut();
         options.budget = Some(budget);

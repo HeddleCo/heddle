@@ -1,10 +1,11 @@
 //! HYBRID transport checks. Structural proof closure is preparation only;
 //! authority is resolved independently at each serialized durable mutation.
+use api::heddle::api::common::ProtocolCompatibility;
+
 use crate::contract::{
     FetchOpen, ImportPublicProofBundleV1, PublicationReceipt, PublishContentOpen, ReplicationOpen,
     ReplicationOperations, ReplicationReady, StreamOpen, TransferReady,
 };
-use api::heddle::api::common::ProtocolCompatibility;
 
 #[cfg(feature = "native")]
 pub mod authority;

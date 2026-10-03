@@ -261,13 +261,15 @@ fn boundary_receipt_cannot_relabel_original_scope_or_use_old_authorize_path() {
 #[cfg(feature = "native")]
 #[tokio::test]
 async fn boundary_native_receive_requires_selected_witness_binding() {
+    use std::sync::Arc;
+
+    use crypto::thread_operation::SignedGenesis;
+    use objects::object::thread_replication::{GenesisOwner, ThreadGenesis};
+
     use crate::replication::{
         native::{Error as NativeError, LocalReplica},
         store::{ReceivedOperation, ReplicaStore},
     };
-    use crypto::thread_operation::SignedGenesis;
-    use objects::object::thread_replication::{GenesisOwner, ThreadGenesis};
-    use std::sync::Arc;
     let directory = tempfile::tempdir().expect("receiver");
     let repository = repo::Repository::init_default(directory.path()).expect("repository");
     let (mut batch, trust) = fixture(1);

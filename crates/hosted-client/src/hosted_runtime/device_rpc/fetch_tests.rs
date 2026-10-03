@@ -508,10 +508,10 @@ pub(super) async fn initial_base_roundtrip(
         seed.id(),
         "fresh native Thread uses the portable seed"
     );
-    // The daemon is not a HYBRID peer (api#307): the same otherwise valid
-    // opening is refused when it declares HYBRID protocol support.
+    // The daemon does not advertise HYBRID support. Reject a capable opening
+    // at the client gate before opening its Sync stream.
     let hybrid = FetchOpen {
-        protocol: Some(api::heddle::api::common::ProtocolCompatibility::default()),
+        protocol: Some(thread_api::hybrid::protocol()),
         ..open(&genesis, seed.id())
     };
     let refused = remote
@@ -520,13 +520,11 @@ pub(super) async fn initial_base_roundtrip(
         .err()
         .unwrap_or_else(|| panic!("a HYBRID fetch opening must be refused, not ignored"));
     assert!(
-        matches!(&refused,
-            thread_api::fetch::Error::Client(api::v2::client::ClientError::Transport(
-                thread_api::transport::Error::Remote(failure)
-            )) if failure.code == api::heddle::api::common::CallFailureCode::FailedPrecondition as i32
-                && failure.message.contains("api#307")
+        matches!(
+            refused,
+            thread_api::fetch::Error::Hybrid(api::hybrid_codec::Reject::Protocol)
         ),
-        "the daemon names the unsupported HYBRID opening: {refused}"
+        "the client rejects an old peer at the protocol gate: {refused}"
     );
     let download = remote
         .fetch_content(open(&genesis, seed.id()), Default::default())

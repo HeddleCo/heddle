@@ -220,8 +220,9 @@ impl AcceptedHistory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use prost::Message;
+
+    use super::*;
 
     fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =

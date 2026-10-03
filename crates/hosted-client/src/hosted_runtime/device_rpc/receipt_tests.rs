@@ -1,5 +1,5 @@
-//! A real authenticated browser stream relays another account's original record
-//! using previously enrolled hosted executor testimony, with no hosted calls.
+//! Genuine original/receipt signatures are structural evidence. A real
+//! authenticated browser stream cannot use them as hosted witness authority.
 use std::{sync::Arc, time::Duration};
 
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
@@ -8,7 +8,7 @@ use objects::object::{
     thread_authority_admission::ThreadAuthorityAdmission,
     thread_replication::{
         OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
-        integration::SPOOL_GENESIS_TRUST_FORMAT,
+        integration::{SPOOL_GENESIS_TRUST_FORMAT, TrustedHostedExecutor},
         metadata::{AUTHORITY_FORMAT, Control, Intent, ThreadControl},
     },
 };
@@ -26,7 +26,7 @@ pub(super) async fn roundtrip(
     let genesis = replica.genesis().expect("Thread");
     let spool: uuid::Uuid = genesis.spool.parse().expect("Spool");
     let owner = Ed25519Signer::from_seed(&[71; 32]).expect("owning root");
-    let executor = Ed25519Signer::from_seed(&[91; 32]).expect("independently enrolled executor");
+    let executor = Ed25519Signer::from_seed(&[91; 32]).expect("structural executor signature");
     let foreign = Ed25519Signer::from_seed(&[92; 32]).expect("another account's original agent");
     let owner_genesis =
         repo::sign_spool_owner_genesis(&owner, *spool.as_bytes()).expect("owner genesis");
@@ -37,9 +37,6 @@ pub(super) async fn roundtrip(
             &["selected".into(), "hosted-spool".into()],
         )
         .expect("selected authenticated remote owner");
-    repository
-        .pin_thread_hosted_executor(replica, executor.public_key().try_into().expect("key"))
-        .expect("independent executor enrollment");
     let envelope =
         b"sealed original authority checked by the enrolled host at first durable receipt".to_vec();
     let control = ThreadControl {
@@ -93,6 +90,35 @@ pub(super) async fn roundtrip(
     };
     let receipt =
         thread_api::authority_admission::sign(&statement, &executor).expect("executor receipt");
+    let structural = TrustedHostedExecutor {
+        spool,
+        spool_genesis: statement.spool_genesis,
+        executor: executor.public_key().try_into().expect("key"),
+    };
+    thread_api::authority_admission::verify(&receipt, &original, &structural)
+        .expect("genuine original and matching executor signature control");
+    let generation = replica.generation().expect("generation");
+    let local = thread_api::replication::native::LocalReplica::new(
+        replica.clone(),
+        Arc::new(objects::store::FsStore::new(repository.heddle_dir())),
+    );
+    use thread_api::replication::store::ReplicaStore;
+    assert!(matches!(
+        local
+            .receive(thread_api::replication::store::ReceivedOperation {
+                original: original.clone(),
+                authority_admission: Some(
+                    thread_api::authority_admission::decode(&receipt).expect("receipt")
+                ),
+                import_authority: None,
+            })
+            .await,
+        Err(thread_api::replication::native::Error::HostedTrustRequired)
+    ));
+    assert_eq!(
+        replica.generation().expect("no durable admission"),
+        generation
+    );
     let wire_original = SignedRecord {
         format: OPERATION_FORMAT.into(),
         canonical_record: original.canonical.clone(),
@@ -152,67 +178,38 @@ pub(super) async fn roundtrip(
         })
         .await
         .expect("relay exact original plus independent receipt");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let refused = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let frame = output
-                .next()
-                .await
-                .expect("admission frame")
-                .expect("retained stream");
+            let frame = match output.next().await {
+                Err(error) => break error,
+                Ok(Some(frame)) => frame,
+                Ok(None) => panic!("rejected authority must terminate with a transport error"),
+            };
             if let Some(replicate_thread_response::Body::Receipt(value)) = frame.body {
-                if value
-                    .accepted_operation_ids
-                    .contains(&id.as_bytes().to_vec())
-                {
-                    break;
-                }
                 assert!(
-                    value.rejected.is_empty(),
-                    "valid foreign author receipt admitted"
+                    !value
+                        .accepted_operation_ids
+                        .contains(&id.as_bytes().to_vec()),
+                    "structural executor signature must never admit a foreign original"
                 );
             }
         }
     })
     .await
-    .expect("foreign original author accepted over real Iroh");
-    let stored = replica
-        .operation_with_authority_admission(&id)
-        .expect("durable read")
-        .expect("original");
-    assert_eq!(stored.original, original);
-    assert_eq!(
-        stored
-            .authority_admission
-            .as_ref()
-            .map(thread_api::authority_admission::encode)
-            .transpose()
-            .expect("receipt"),
-        Some(receipt.clone())
+    .expect("authority rejection deadline");
+    assert!(
+        matches!(
+            refused,
+            api::v2::client::ClientError::Transport(thread_api::transport::Error::Io(ref reason))
+                if reason.starts_with("stream reset by peer")
+        ),
+        "{refused}"
     );
-    input
-        .send(&ReplicateThreadRequest {
-            body: Some(replicate_thread_request::Body::Need(ReplicationNeed {
-                operation_ids: vec![id.as_bytes().to_vec()],
-            })),
-        })
-        .await
-        .expect("request original and receipt");
-    let exported = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let frame = output
-                .next()
-                .await
-                .expect("export frame")
-                .expect("retained stream");
-            if let Some(replicate_thread_response::Body::Operations(value)) = frame.body {
-                break value;
-            }
-        }
-    })
-    .await
-    .expect("original-author export");
-    assert_eq!(exported.operations, vec![wire_original]);
-    assert_eq!(exported.authority_admissions, vec![receipt]);
+    assert!(replica.operation(&id).expect("durable read").is_none());
+    assert_eq!(
+        replica.generation().expect("no durable admission"),
+        generation
+    );
     assert_eq!(repository.head().expect("checkout"), Some(genesis.base));
     drop(input);
     drop(output);
