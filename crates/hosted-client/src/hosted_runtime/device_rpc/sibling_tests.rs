@@ -253,6 +253,29 @@ pub(super) async fn roundtrip(
         .await
         .expect("temporary identity snapshot")
         .expect("snapshot");
+    // An unknown session-state filter is invalid, never silently ignored.
+    let refused = match temporary_remote
+        .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+            ObserveIdentityRequest {
+                include_current_credential: true,
+                session_state: 99,
+                observe: Some(ObserveOptions {
+                    mode: ObservationMode::Once as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+    {
+        Ok(mut view) => view.next_commit().await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    assert!(
+        refused.is_err(),
+        "the daemon must refuse an unknown session state filter"
+    );
     let created = temporary_remote
         .api
         .call::<thread_api::rpc::SpoolServiceCreateSpool>(&CreateSpoolRequest {

@@ -268,6 +268,17 @@ impl DeviceRpc {
         })
     }
 }
+/// The daemon never serves the hosted sessions page; that section reports
+/// Unavailable whatever filter is requested. A known `session_state` therefore
+/// changes nothing observable. The contract makes an unknown value invalid, so
+/// it is refused rather than ignored.
+pub(super) fn validate_identity_query(query: &ObserveIdentityRequest) -> Result<()> {
+    if SessionStateFilter::try_from(query.session_state).is_err() {
+        bail!("unknown session state filter {}", query.session_state);
+    }
+    Ok(())
+}
+
 fn status(section: &str, coverage: Coverage) -> (String, IdentityEvent) {
     (
         format!("status:{section}"),
@@ -280,4 +291,36 @@ fn status(section: &str, coverage: Coverage) -> (String, IdentityEvent) {
             ..Default::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_query_refuses_unknown_session_state_filters() {
+        for known in [
+            SessionStateFilter::Unspecified,
+            SessionStateFilter::Active,
+            SessionStateFilter::Ended,
+            SessionStateFilter::All,
+        ] {
+            validate_identity_query(&ObserveIdentityRequest {
+                session_state: known as i32,
+                ..Default::default()
+            })
+            .expect("known filter");
+        }
+        for unknown in [4, -1, i32::MAX] {
+            let error = validate_identity_query(&ObserveIdentityRequest {
+                session_state: unknown,
+                ..Default::default()
+            })
+            .expect_err("unknown filters are invalid, never ignored");
+            assert!(
+                error.to_string().contains("session state filter"),
+                "{error}"
+            );
+        }
+    }
 }
