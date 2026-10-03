@@ -58,7 +58,7 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.8";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.18";
 
 #[cfg(test)]
 mod tests;

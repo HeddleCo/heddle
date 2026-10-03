@@ -6,6 +6,8 @@ mod aead;
 mod ci_verdict;
 mod ed25519;
 mod error;
+#[cfg(feature = "owner-root")]
+pub mod import_authority;
 pub mod original_boundary_acceptance;
 #[cfg(feature = "owner-root")]
 pub mod owner_root;

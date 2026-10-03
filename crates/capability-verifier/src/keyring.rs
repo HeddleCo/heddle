@@ -19,9 +19,15 @@ pub struct VerifiedCloneKeyring {
     owner_state: VerifiedOwnerState,
     owner_genesis: VerifiedSpoolOwnerGenesis,
     current_owner_uuid: [u8; 16],
+    authority_public_keys: Vec<Vec<u8>>,
 }
 
 impl VerifiedCloneKeyring {
+    /// All verified user authority keys across rotations and ownership transfers.
+    /// Import job keys cannot reuse any of these historical identities.
+    pub fn authority_public_keys(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.authority_public_keys.iter()
+    }
     /// Original verified wire object.
     #[must_use]
     pub const fn wire(&self) -> &CloneAuthorizationKeyring {
@@ -317,11 +323,18 @@ pub fn verify_clone_keyring(
         &keyring.ownership_transfers,
         &owners,
     )?;
+    let authority_public_keys = state
+        .authority_public_keys()
+        .chain(owners.iter().flat_map(|o| o.state.authority_public_keys()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(VerifiedCloneKeyring {
         wire: keyring,
         owner_state: state,
         owner_genesis,
         current_owner_uuid,
+        authority_public_keys,
     })
 }
 

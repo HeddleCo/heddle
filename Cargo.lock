@@ -2629,6 +2629,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "heddle-api",
  "heddle-format",
  "hex",
  "proptest",
