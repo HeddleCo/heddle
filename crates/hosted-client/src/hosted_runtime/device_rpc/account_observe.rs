@@ -52,13 +52,17 @@ impl DeviceRpc {
             }};
         }
         match method.rsplit('/').next().context("method")? {
-            "ObserveIdentity" => observe!(
-                ObserveIdentityRequest::decode(body)?,
-                |_: &ObserveIdentityRequest| None::<ThreadQuery>,
-                |q: &ObserveIdentityRequest, _: &ReadBudget, _: &[u8]| -> Result<_> {
-                    Ok((self.identity_snapshot(session, q)?, complete()))
-                }
-            ),
+            "ObserveIdentity" => {
+                let request = ObserveIdentityRequest::decode(body)?;
+                super::account_identity::validate_identity_query(&request)?;
+                observe!(
+                    request,
+                    |_: &ObserveIdentityRequest| None::<ThreadQuery>,
+                    |q: &ObserveIdentityRequest, _: &ReadBudget, _: &[u8]| -> Result<_> {
+                        Ok((self.identity_snapshot(session, q)?, complete()))
+                    }
+                )
+            }
             "ObserveOwnership" => observe!(
                 ObserveOwnershipRequest::decode(body)?,
                 |_: &ObserveOwnershipRequest| None::<ThreadQuery>,
