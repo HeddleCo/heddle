@@ -261,6 +261,34 @@ mod native_exchange_tests {
         assert_eq!(pushed.new_state, Some(state));
     }
 
+    fn require_fresh_witness(error: ProtocolError) {
+        assert!(
+            matches!(error, ProtocolError::InvalidState(reason) if reason == "source preparation: pin hosted executor for native Thread")
+        );
+    }
+
+    fn unadmitted_original_clone(source: &Repository, clone: &std::path::Path, state: StateId) {
+        let staged = Repository::open(clone).expect("staging repository");
+        let original = source
+            .native_thread(REMOTE_THREAD)
+            .expect("original Thread");
+        let replica = repo::thread_replication::ThreadReplica::open(
+            staged.heddle_dir(),
+            original.thread_id(),
+        )
+        .expect("signature-only original staging");
+        assert_eq!(
+            replica.signed_genesis().expect("staged original"),
+            original.signed_genesis().expect("signed source original")
+        );
+        assert!(
+            replica
+                .source_operation_page(state, None, 1)
+                .expect("no admitted source")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn persist_advertised_identity_adopts_api_thread_id() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
@@ -371,7 +399,7 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
+    async fn native_push_preserves_framed_publication_and_bare_clone_fails_closed() {
         let _process_env_guard = crate::test_process_env::shared().await;
         crate::on_large_stack(native_push_and_clone_pull);
     }
@@ -401,7 +429,7 @@ mod native_exchange_tests {
         );
 
         let clone = TempDir::new().unwrap();
-        let (pulled, cloned_repo) = client
+        let error = client
             .clone_pull_with_depth_and_materialization(
                 "acme/widgets",
                 Some("main"),
@@ -410,27 +438,10 @@ mod native_exchange_tests {
                 |_| Repository::init(clone.path()).map_err(ProtocolError::from),
             )
             .await
-            .unwrap();
-        assert!(pulled.success);
-        assert_eq!(pulled.final_state, Some(state));
-        assert!(pulled.checkpoint.is_empty());
-        assert!(cloned_repo.store().has_state(&state).unwrap());
-        assert_eq!(cloned_repo.root(), clone.path());
-        assert_eq!(
-            cloned_repo.native_spool_id().unwrap(),
-            repo.native_spool_id().unwrap()
-        );
-        assert_eq!(
-            cloned_repo
-                .native_thread("main")
-                .unwrap()
-                .signed_genesis()
-                .unwrap(),
-            repo.native_thread("main")
-                .unwrap()
-                .signed_genesis()
-                .unwrap()
-        );
+            .err()
+            .expect("full witness routing belongs to Part 2");
+        require_fresh_witness(error);
+        unadmitted_original_clone(&repo, clone.path(), state);
 
         client.close().await;
         server.await.unwrap();
@@ -469,7 +480,7 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn compact_pull_of_a_complete_local_state_preserves_the_native_closure() {
+    async fn compact_pull_requires_witness_evidence_and_preserves_the_existing_closure() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
@@ -481,11 +492,11 @@ mod native_exchange_tests {
         let (mut client, server, _) = native_server(&repo).await;
         publish(&mut client, &repo, state).await;
 
-        let received = client
+        let error = client
             .fetch_state(&repo, "acme/widgets", REMOTE_THREAD, state)
             .await
-            .unwrap();
-        assert_eq!(received, 1);
+            .expect_err("cached content cannot authorize a bare hosted publication");
+        require_fresh_witness(error);
         assert!(repo.store().has_state(&state).unwrap());
         assert_eq!(
             wire::enumerate_state_closure(repo.store(), state)
@@ -502,7 +513,7 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn complete_local_state_exercises_each_public_pull_mode() {
+    async fn every_supported_pull_mode_requires_fresh_witness_evidence() {
         let _process_env_guard = crate::test_process_env::shared().await;
         crate::on_large_stack(complete_local_state_pull_modes);
     }
@@ -514,20 +525,13 @@ mod native_exchange_tests {
         publish(&mut client, &repo, state).await;
         let bootstrap = REMOTE_THREAD;
 
-        assert!(
-            client
+        for _ in 0..2 {
+            let error = client
                 .pull_profiled(&repo, "acme/widgets", bootstrap, None)
                 .await
-                .unwrap()
-                .0
-                .success
-        );
-        let (profiled, profile) = client
-            .pull_profiled(&repo, "acme/widgets", bootstrap, None)
-            .await
-            .unwrap();
-        assert!(profiled.success);
-        assert_eq!(profile.objects_received, 0);
+                .expect_err("replay requires fresh evidence too");
+            require_fresh_witness(error);
+        }
         let depth_error = client
             .pull_with_depth(&repo, "acme/widgets", bootstrap, None, Some(1))
             .await
@@ -545,25 +549,26 @@ mod native_exchange_tests {
             .await
             .unwrap_err();
         assert!(lazy_error.to_string().contains("--lazy"));
+        let error = client
+            .repair_clone_with_depth_and_materialization(
+                &repo,
+                "acme/widgets",
+                bootstrap,
+                None,
+                PullMaterialization::Full,
+            )
+            .await
+            .expect_err("repair cannot use an evergreen key");
+        require_fresh_witness(error);
+        let error = client
+            .hydrate_missing_blobs_for_state(&repo, "acme/widgets", bootstrap, state)
+            .await
+            .expect_err("hydration still needs current publication evidence");
+        require_fresh_witness(error);
         assert!(
-            client
-                .repair_clone_with_depth_and_materialization(
-                    &repo,
-                    "acme/widgets",
-                    bootstrap,
-                    None,
-                    PullMaterialization::Full,
-                )
-                .await
-                .unwrap()
-                .success
-        );
-        assert_eq!(
-            client
-                .hydrate_missing_blobs_for_state(&repo, "acme/widgets", bootstrap, state)
-                .await
-                .unwrap(),
-            1
+            repo.store()
+                .has_state(&state)
+                .expect("existing state survives rejection")
         );
 
         client.close().await;
@@ -571,7 +576,7 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn clone_pull_installs_a_complete_native_pack() {
+    async fn clone_pull_keeps_originals_unadmitted_without_fresh_witness_evidence() {
         let _process_env_guard = crate::test_process_env::shared().await;
         crate::on_large_stack(clone_pull_complete_native_pack);
     }
@@ -583,7 +588,7 @@ mod native_exchange_tests {
         publish(&mut client, &repo, state).await;
         let clone = TempDir::new().unwrap();
 
-        let (pulled, cloned_repo) = client
+        let error = client
             .clone_pull_with_depth_and_materialization(
                 "acme/widgets",
                 Some("main"),
@@ -592,17 +597,10 @@ mod native_exchange_tests {
                 |_| Repository::init(clone.path()).map_err(ProtocolError::from),
             )
             .await
-            .unwrap();
-        assert!(pulled.success);
-        assert_eq!(pulled.final_state, Some(state));
-        assert!(cloned_repo.store().has_state(&state).unwrap());
-        assert!(
-            clone
-                .path()
-                .join(".heddle/owner-authorization.bin")
-                .is_file(),
-            "clone must persist the verified PullReady owner genesis before installing objects"
-        );
+            .err()
+            .expect("bare publication cannot install a pack");
+        require_fresh_witness(error);
+        unadmitted_original_clone(&repo, clone.path(), state);
 
         client.close().await;
         server.await.unwrap();
