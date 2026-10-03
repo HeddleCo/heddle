@@ -27,14 +27,14 @@ pub fn sync_protocol() -> Option<ProtocolCompatibility> {
 
 /// Keep RPC preludes and stream openings on the same cutover switch. Until
 /// api#307, Sync declares no protocol support in its CallContext.
-pub fn call_protocol(method: &api::v2::MethodDescriptor) -> Option<ProtocolCompatibility> {
-    (!method.mandatory_features.is_empty()
-        || (SYNC_MANDATORY_GATE
-            && method
-                .path
-                .trim_start_matches('/')
-                .starts_with("heddle.api.v1alpha2.SyncService/")))
-    .then(protocol)
+pub fn call_protocol(method_path: &str, requires_hybrid: bool) -> Option<ProtocolCompatibility> {
+    if method_path
+        .trim_start_matches('/')
+        .starts_with("heddle.api.v1alpha2.SyncService/")
+    {
+        return sync_protocol();
+    }
+    requires_hybrid.then(protocol)
 }
 
 pub fn protocol() -> ProtocolCompatibility {

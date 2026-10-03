@@ -118,7 +118,8 @@ impl Authorize for Credentials {
         };
         // Integration import routes advertise this client's semantic support.
         // Sync remains ungated until the coordinated api#307 cutover.
-        context.protocol = crate::hybrid::call_protocol(method);
+        context.protocol =
+            crate::hybrid::call_protocol(method.path, !method.mandatory_features.is_empty());
         #[cfg(any(feature = "native", feature = "root-attachment"))]
         if let Self::OwnedDevice(value) = self {
             context.bearer_authority_key_selector = value.mint_root.clone();
