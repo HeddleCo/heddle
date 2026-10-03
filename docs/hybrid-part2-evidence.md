@@ -2,8 +2,11 @@
 
 Branch: `task/1961-hybrid-part2-transport-client`.
 PR: https://github.com/HeddleCo/heddle/pull/1963.
-Production behavior checked at `c880c59dee0d791674b1210f8419c93f886da442`;
-subsequent changes correct device RPC test assertions and apply nightly rustfmt.
+The full workspace gate checked code/test tree
+`877a01cc874f8d83174d563245ac700fb9c18bd2`. Production behavior is unchanged
+from `c880c59dee0d791674b1210f8419c93f886da442`; subsequent changes correct
+device RPC test assertions, isolate the bearer-retention test home, and apply
+nightly rustfmt. The final evidence/corpus update is checked separately.
 All commands use the configured isolated target:
 
 ```sh
@@ -108,7 +111,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ```text
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 54.02s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.86s
 ```
 
 All five CI feature commands passed on the corrected test tree:
@@ -181,12 +184,33 @@ feature builds:
 cargo test --workspace --locked -- --test-threads 8
 ```
 
-**Running again after the device-bearer test-home correction; final result
-pending.** The preceding exact workspace run passed every CLI integration suite,
-then hosted-client ended with `452 passed; 1 failed; 3 ignored`: its bearer
-retention test had no process-environment lock and lost its enrollment while
-another test changed `HEDDLE_HOME`. The test now uses an isolated temporary home
-and the existing shared environment locks. Its targeted corrected run passed:
+**Passed**, including doctests, with no competing feature builds or source
+changes during the run. The exact command exited zero; the runner printed:
+
+```text
+EXACT FULL WORKSPACE GATE PASSED
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The touched hosted-client and thread-api libraries and all four hosted
+publication/fresh Fetch controls passed in that same invocation:
+
+```text
+# hosted-client
+test result: ok. 453 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 213.01s
+# thread-api
+test result: ok. 138 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.83s
+# CLI adoption/publication/fresh Fetch
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 173.07s
+```
+
+The preceding exact workspace run passed every CLI integration suite, then
+hosted-client ended with `452 passed; 1 failed; 3 ignored`: its bearer-retention
+test lacked a process-environment lock and lost its enrollment while another
+test changed `HEDDLE_HOME`. The correction uses an isolated temporary home and
+the existing shared environment locks. Its targeted control also passed:
 
 ```text
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 455 filtered out; finished in 0.25s
