@@ -303,6 +303,155 @@ fn fixture(
     std::fs::write(directory.path().join("source.idx"), index).expect("index");
     (directory, ready, vec![operation], state)
 }
+
+#[cfg(feature = "native")]
+fn installation_fixture(
+    scratch: &Path,
+) -> (
+    tempfile::TempDir,
+    TransferReady,
+    Vec<SignedOperation>,
+    State,
+) {
+    let (directory, mut ready, operations, state) = fixture(scratch, false);
+    let owner = Ed25519Signer::from_seed(&[61; 32]).expect("selected owner");
+    let recovery = Ed25519Signer::from_seed(&[62; 32]).expect("recovery");
+    let account = uuid::Uuid::from_bytes([9; 16]);
+    let root = repo::sign_custodial_owner_root(&owner, &recovery, *account.as_bytes(), [98; 32])
+        .expect("owner root");
+    let binding =
+        repo::sign_custodial_owner_binding(&owner, &root, [99; 32]).expect("owner binding");
+    let hash = binding.root_state_hash.clone();
+    let spool = ready
+        .thread
+        .as_ref()
+        .expect("Thread")
+        .spool
+        .as_ref()
+        .expect("Spool")
+        .id
+        .parse::<uuid::Uuid>()
+        .expect("UUID");
+    ready.ownership = Some(OwnerState {
+        owner: Some(PrincipalRef {
+            id: account.to_string(),
+        }),
+        root: Some(root.clone()),
+        binding: Some(binding),
+        version: hash.clone(),
+        resource_keyring: Some(CloneAuthorizationKeyring {
+            format_version: 1,
+            spool_uuid: spool.as_bytes().to_vec(),
+            canonical_spool_path_segments: vec!["selected".into(), "source".into()],
+            pin: Some(CloneOwnerPin {
+                kind: CloneOwnerPinKind::CloneTofu as i32,
+                expected_owner_id: root.root.as_ref().expect("root").owner_id.clone(),
+                first_seen_unix_seconds: 1,
+            }),
+            owner_root: Some(root),
+            accepted_state_hash: hash,
+            owner_genesis: ready.owner_genesis.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    (directory, ready, operations, state)
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn verify_before_install_rejects_without_partial_repository_mutation() {
+    use objects::store::ObjectStore;
+    let scratch = tempfile::tempdir().expect("scratch");
+    let destination = tempfile::tempdir().expect("destination");
+    let repository = repo::Repository::init(destination.path()).expect("unseeded repository");
+    let (directory, ready, mut operations, state) = installation_fixture(scratch.path());
+    let stranger = Ed25519Signer::from_seed(&[63; 32]).expect("valid neighboring author");
+    let mut operation = operations[0].verify().expect("original operation");
+    operation.publisher = stranger.public_key().try_into().expect("key");
+    operations[0] = SignedOperation::sign(&operation, &stranger).expect("valid original signature");
+    let staged = validate(directory, ready, operations, vec![])
+        .expect("structural staging is not ownership authority");
+    assert!(staged.install(&repository, 1100).is_err());
+    assert!(
+        !repository.heddle_dir().join("spool-id").exists(),
+        "rejection must precede Spool mutation"
+    );
+    assert!(
+        !repository
+            .heddle_dir()
+            .join("owner-authorization.bin")
+            .exists(),
+        "no owner enrollment on rejection"
+    );
+    assert!(
+        repository
+            .store()
+            .get_state(&state.id())
+            .expect("source lookup")
+            .is_none(),
+        "rejection must precede pack installation"
+    );
+    // Passing control uses the same closure with the actual local owner.
+    let (directory, ready, operations, state) = installation_fixture(scratch.path());
+    let staged = validate(directory, ready, operations, vec![]).expect("valid structural source");
+    assert_eq!(
+        staged
+            .install(&repository, 1100)
+            .expect("authorized local source"),
+        state.id()
+    );
+    assert!(
+        repository
+            .store()
+            .get_state(&state.id())
+            .expect("source lookup")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "native")]
+#[test]
+fn structural_staging_never_authorizes_an_account_genesis() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let destination = tempfile::tempdir().expect("destination");
+    let repository = repo::Repository::init(destination.path()).expect("unseeded repository");
+    let (directory, mut ready, mut operations, _) = installation_fixture(scratch.path());
+    let wrapper = ready.thread_genesis.as_mut().expect("genesis carrier");
+    let record = wrapper.genesis.as_ref().expect("original");
+    let mut genesis = heddle_object_model::object::thread_replication::ThreadGenesis::decode(
+        &record.canonical_record,
+    )
+    .expect("genesis");
+    genesis.owner =
+        objects::object::thread_replication::GenesisOwner::Account(uuid::Uuid::from_bytes([9; 16]));
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("creator");
+    wrapper.genesis =
+        Some(replication::opening::sign_genesis(&genesis, &signer).expect("original signature"));
+    wrapper.creator_authority = b"retained bytes are not an owner grant".to_vec();
+    ready
+        .thread
+        .as_mut()
+        .expect("Thread")
+        .id
+        .as_mut()
+        .expect("ID")
+        .value = genesis.id().expect("ID").as_bytes().to_vec();
+    let mut operation = operations[0].verify().expect("operation");
+    operation.thread = genesis.id().expect("ID");
+    operations[0] = SignedOperation::sign(&operation, &signer).expect("original signature");
+    let staged = validate(directory, ready, operations, vec![]).expect("structural originals");
+    assert!(matches!(
+        staged.install(&repository, 1100),
+        Err(Error::HostedTrustRequired)
+    ));
+    assert!(!repository.heddle_dir().join("spool-id").exists());
+    let (directory, ready, operations, _) = installation_fixture(scratch.path());
+    validate(directory, ready, operations, vec![])
+        .expect("local originals")
+        .install(&repository, 1100)
+        .expect("local conversion remains available");
+}
 #[test]
 fn source_staging_keeps_original_proofs_and_releases_artifacts_twice() {
     let scratch = tempfile::tempdir().expect("scratch");

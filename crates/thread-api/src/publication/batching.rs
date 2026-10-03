@@ -25,6 +25,9 @@ fn fits(operations: usize, bytes: usize, operation_id: &str, frame_limit: usize)
 }
 
 fn append(batch: &mut ReplicationOperations, unit: ReplicationOperations) {
+    if batch.operations.is_empty() {
+        batch.import_authority = unit.import_authority.clone();
+    }
     batch.operations.extend(unit.operations);
     batch.authority_admissions.extend(unit.authority_admissions);
     for evidence in unit.boundary_acceptances {
@@ -102,7 +105,8 @@ pub(super) fn bounded_originals(
             ));
         }
         #[cfg(feature = "replication")]
-        let received = if batch.authority_admissions.is_empty() {
+        let received = if batch.authority_admissions.is_empty() && batch.import_authority.is_none()
+        {
             if !batch.boundary_acceptances.is_empty() {
                 return Err(Error::Invalid("unmatched publication boundary evidence"));
             }
@@ -118,6 +122,7 @@ pub(super) fn bounded_originals(
             #[allow(unused_mut)]
             let mut unit = ReplicationOperations {
                 operations: vec![record.clone()],
+                import_authority: batch.import_authority.clone(),
                 ..Default::default()
             };
             #[cfg(feature = "replication")]
@@ -144,6 +149,17 @@ pub(super) fn bounded_originals(
             }
             // Repeated protobuf fields are additive. Subtract only exact
             // duplicate evidence that append will retain once in this batch.
+            if !current.operations.is_empty() && current.import_authority != unit.import_authority {
+                output.push(std::mem::take(&mut current));
+            }
+            let duplicate_bundle = if !current.operations.is_empty() {
+                unit.import_authority.as_ref().map_or(0, |bundle| {
+                    let bytes = bundle.encoded_len();
+                    1 + prost::length_delimiter_len(bytes) + bytes
+                })
+            } else {
+                0
+            };
             let duplicate_bytes: usize = unit
                 .boundary_acceptances
                 .iter()
@@ -152,7 +168,8 @@ pub(super) fn bounded_originals(
                     let bytes = record.encoded_len();
                     1 + prost::length_delimiter_len(bytes) + bytes
                 })
-                .sum();
+                .sum::<usize>()
+                + duplicate_bundle;
             let bytes = current.encoded_len() + unit.encoded_len() - duplicate_bytes;
             if !fits(
                 current.operations.len() + 1,

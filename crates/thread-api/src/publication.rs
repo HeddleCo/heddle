@@ -160,8 +160,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
-        // Re-batching rebuilds each unit, so refuse HYBRID import authority
-        // here rather than relay originals with it silently dropped (api#307).
+        // Re-batching retains each unit's complete original evidence.
         for batch in &originals.operations {
             crate::hybrid::operations(batch).map_err(Error::Invalid)?;
         }
@@ -173,6 +172,18 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
         };
+        crate::hybrid::publish_open(open).map_err(Error::Invalid)?;
+        if open.protocol.is_some() {
+            api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())
+                .map_err(|_| Error::Invalid("peer does not support HYBRID publication"))?;
+        }
+        if originals.operations.iter().any(|batch| {
+            batch.import_authority.is_some() && batch.import_authority != open.import_authority
+        }) {
+            return Err(Error::Invalid(
+                "publication proof differs from negotiated opening",
+            ));
+        }
         if open.destination != self.description.endpoint
             || open.thread.is_none()
             || open.revision.is_none()
@@ -213,6 +224,8 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             _ => return Err(Error::Invalid("Ready or replay receipt required")),
         };
         crate::hybrid::transfer_ready(&ready).map_err(Error::Invalid)?;
+        crate::hybrid::negotiated(open.protocol.as_ref(), ready.protocol.as_ref())
+            .map_err(Error::Invalid)?;
         if ready.endpoint != open.destination
             || ready.thread != open.thread
             || ready.current != open.revision
@@ -342,6 +355,10 @@ fn validate_receipt(
         return Err(Error::Invalid("Open required"));
     };
     crate::hybrid::publication_receipt(&receipt).map_err(Error::Invalid)?;
+    if receipt.import_authority.is_some() {
+        api::import_authority::require_hybrid_peer(open.protocol.as_ref())
+            .map_err(|_| Error::Invalid("HYBRID receipt requires negotiated publication"))?;
+    }
     if receipt.client_operation_id != opening.client_operation_id
         || receipt.destination != open.destination
         || receipt.thread != open.thread

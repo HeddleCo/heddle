@@ -100,15 +100,28 @@ impl DescriptorKeyring {
             &signed.signature,
         )
         .map_err(|_| HostedError::InvalidDescriptorSignature)?;
-        Ok(VerifiedEndpointDescriptor(descriptor.clone()))
+        Ok(VerifiedEndpointDescriptor(descriptor.clone(), None))
     }
 }
 
 /// Endpoint descriptor after signature, expiry, ALPN, and address validation.
 #[derive(Debug, Clone)]
-pub struct VerifiedEndpointDescriptor(EndpointDescriptor);
+pub struct VerifiedEndpointDescriptor(
+    EndpointDescriptor,
+    Option<super::descriptor_trust::HostedRootSelection>,
+);
 
 impl VerifiedEndpointDescriptor {
+    pub fn hosted_root(&self) -> Option<&super::descriptor_trust::HostedRootSelection> {
+        self.1.as_ref()
+    }
+    pub(super) fn with_hosted_root(
+        mut self,
+        root: super::descriptor_trust::HostedRootSelection,
+    ) -> Self {
+        self.1 = Some(root);
+        self
+    }
     pub fn endpoint_addr(&self) -> Result<EndpointAddr> {
         let endpoint_id: EndpointId = self
             .0
@@ -161,7 +174,7 @@ impl VerifiedEndpointDescriptor {
             return Err(HostedError::DescriptorOutsideValidityWindow);
         }
         validate_descriptor(&endpoint.endpoint_descriptor, now_unix_millis)?;
-        Ok(Self(endpoint.endpoint_descriptor.clone()))
+        Ok(Self(endpoint.endpoint_descriptor.clone(), None))
     }
 }
 
@@ -257,7 +270,7 @@ pub async fn fetch_descriptor_key_document(
     })
 }
 
-async fn bootstrap_http_client(
+pub(super) async fn bootstrap_http_client(
     url: &str,
     config: &ClientConfig,
 ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
@@ -286,7 +299,7 @@ async fn bootstrap_http_client(
     Ok((builder.build()?, target.url, target.host_header))
 }
 
-async fn bounded_response_body(
+pub(super) async fn bounded_response_body(
     mut response: reqwest::Response,
     limit: usize,
     label: &str,

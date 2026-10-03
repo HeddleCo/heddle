@@ -19,8 +19,8 @@ const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_OBJECTS: usize = 100_000;
 
-/// Verified source artifacts and their original proofs. Dropping this value
-/// removes its temporary files. Native callers can install it on a disk worker.
+/// Structurally checked source artifacts and original proofs. These bytes grant
+/// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
@@ -46,6 +46,24 @@ impl StagedSource {
     }
     pub fn ready(&self) -> &TransferReady {
         &self.ready
+    }
+    /// Retained bytes are structural evidence, never installation authority.
+    pub fn import_authority(&self) -> Option<&crate::contract::ImportPublicProofBundleV1> {
+        self.ready.import_authority.as_ref()
+    }
+    /// Refresh witness-set/proof metadata after retirement or freshness renewal
+    /// while keeping the downloaded pack and every original signed byte.
+    pub fn refresh_import_authority(
+        &mut self,
+        refreshed: crate::contract::ImportPublicProofBundleV1,
+    ) -> Result<(), Error> {
+        let original = self
+            .ready
+            .import_authority
+            .as_mut()
+            .ok_or(Error::HostedTrustRequired)?;
+        crate::hybrid::history::replace_receiver_metadata(original, refreshed)?;
+        Ok(())
     }
     pub fn state(&self) -> &State {
         &self.state

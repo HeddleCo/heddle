@@ -285,12 +285,8 @@ fn retired_import_surfaces_are_not_registered() {
 
 #[cfg(feature = "client")]
 #[tokio::test]
-async fn hosted_import_signs_every_branch_and_ref_bound_sends_no_request() {
+async fn hosted_import_protocol_gate_and_ref_bound_send_no_import_request() {
     use hosted_client::hosted_runtime::hosted::{ImportSourceRefError, ImportSourceRefs};
-    use objects::object::thread_replication::{
-        ThreadGenesis, hosted_import::synthetic_initial_base,
-    };
-    use thread_api::creation::ThreadCreation;
 
     let temp = tempfile::tempdir().expect("source");
     let path = temp.path();
@@ -307,7 +303,7 @@ async fn hosted_import_signs_every_branch_and_ref_bound_sends_no_request() {
         .expect("discover refs");
     let spool = uuid::Uuid::now_v7();
     let (mut client, server, captured) = native_hosted_server::start(spool, "main", [7; 32]).await;
-    let started = client
+    let error = client
         .import_source(
             &spool.to_string(),
             url,
@@ -315,42 +311,9 @@ async fn hosted_import_signs_every_branch_and_ref_bound_sends_no_request() {
             uuid::Uuid::now_v7().to_string(),
         )
         .await
-        .expect("import request");
-    {
-        let capture = captured.lock().expect("capture");
-        let request = capture.import_requests.first().expect("signed request");
-        assert_eq!(request.branches.len(), 3);
-        let seed = synthetic_initial_base().expect("seed");
-        assert_eq!(
-            request.initial_base_state,
-            seed.encode_current_msgpack().expect("seed bytes")
-        );
-        let mut names = Vec::new();
-        for (index, branch) in request.branches.iter().enumerate() {
-            let signed = branch.thread_genesis.as_ref().expect("signed genesis");
-            let genesis = ThreadGenesis::decode(&signed.canonical_record).expect("genesis");
-            assert_eq!(branch.ref_name, format!("refs/heads/{}", genesis.name));
-            assert_eq!(genesis.base, seed.id());
-            assert_eq!(genesis.parent, None);
-            assert_eq!(genesis.spool, spool.to_string());
-            assert_eq!(branch.creator_authority, vec![6; 32]);
-            assert_eq!(
-                genesis.owner,
-                objects::object::thread_replication::GenesisOwner::Account(uuid::Uuid::from_bytes(
-                    [9; 16]
-                ))
-            );
-            let creation = ThreadCreation::from_signed_with_authority(
-                request.client_operation_id.clone(),
-                signed.clone(),
-                branch.creator_authority.clone(),
-            )
-            .expect("verified signature");
-            assert_eq!(creation.reference(), &started.threads[index]);
-            names.push(genesis.name);
-        }
-        assert_eq!(names, ["feature/auth", "main", "release"]);
-    }
+        .expect_err("an old peer cannot ignore mandatory import authority");
+    assert!(error.to_string().contains("incompatible peer"), "{error}");
+    assert!(captured.lock().expect("capture").import_requests.is_empty());
     // 3 branches + 510 tags = 513; the annotated tag's peeled line counts once.
     for index in 1..510 {
         git(path, &["tag", &format!("tag-{index}")]);

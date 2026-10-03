@@ -155,6 +155,8 @@ default = [
 # treadle). Non-default: the everyday loop never invokes it, and the
 # default binary should not carry the check runner.
 ci = [
+    # Hosted evidence recording is part of the CI executor.
+    "client",
     "dep:ci-config",
     "dep:ci-engine",
     "heddle-cli-args/ci",

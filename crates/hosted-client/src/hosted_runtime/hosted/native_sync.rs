@@ -254,6 +254,82 @@ fn operation_id(method: &str, caller: String) -> String {
 }
 
 impl HostedClient {
+    /// Refresh public witness metadata and fill exact retirement paths without
+    /// downloading content or changing any original signature. The caller's
+    /// durable trust transaction must authenticate this set again at install;
+    /// a successful refresh is preparation, never an admission marker.
+    pub async fn refresh_import_proofs(
+        &self,
+        bundle: &mut contract::ImportPublicProofBundleV1,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let root = self.hosted_root().ok_or(api::hybrid_codec::Reject::Root)?;
+        let lookup = self.witness_lookup()?;
+        let signed = lookup.fetch_set().await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let selected = api::witness_trust::SetExpectation {
+            authority: root.authority(),
+            root_id: root.root_id(),
+            root_public_key: root.public_key(),
+            root_epoch,
+            now_unix_millis: now,
+            clock_floor_unix_millis: clock_floor_millis,
+            known_job_keys,
+        };
+        let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
+        let mut prepared = bundle.clone();
+        thread_api::hybrid::history::complete_bundle(lookup, &verified, &mut prepared, now)
+            .await
+            .map_err(|error| match error {
+                thread_api::hybrid::history::Error::Rejected(error) => {
+                    super::HostedError::Hybrid(error)
+                }
+                thread_api::hybrid::history::Error::Lookup(error) => error,
+                thread_api::hybrid::history::Error::NotFound => {
+                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
+                }
+            })?;
+        prepared.witness_set = Some(signed);
+        thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
+        Ok(verified)
+    }
+    /// Revalidate retained proof metadata without redownloading staged content.
+    /// Installation must independently recheck the latest durable context.
+    pub async fn refresh_staged_import_proofs(
+        &self,
+        staged: &mut thread_api::fetch::StagedSource,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let mut bundle = staged
+            .import_authority()
+            .ok_or(api::hybrid_codec::Reject::Scope)?
+            .clone();
+        let verified = self
+            .refresh_import_proofs(
+                &mut bundle,
+                previous,
+                root_epoch,
+                clock_floor_millis,
+                known_job_keys,
+            )
+            .await?;
+        staged
+            .refresh_import_authority(bundle)
+            .map_err(|error| match error {
+                thread_api::fetch::Error::Hybrid(reject) => super::HostedError::Hybrid(reject),
+                thread_api::fetch::Error::HostedTrustRequired => {
+                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Root)
+                }
+                error => super::HostedError::framing(error),
+            })?;
+        Ok(verified)
+    }
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
         Ok(self
             .list_refs_with_revision_addresses(repo_path)
@@ -728,6 +804,7 @@ impl HostedClient {
             stored
                 .into_iter()
                 .map(|item| thread_api::replication::store::ReceivedOperation {
+                    import_authority: None,
                     original: item.original,
                     authority_admission: item.authority_admission,
                 }),
@@ -1065,6 +1142,7 @@ impl HostedClient {
             FetchOpen {
                 thread: Some(reference.clone()),
                 revision: Some(revision),
+                protocol: thread_api::hybrid::sync_protocol(),
                 selection: Some(TransferSelection {
                     facets: vec![contract::SharedFacet::Source as i32],
                     ..Default::default()

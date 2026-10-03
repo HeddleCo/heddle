@@ -1,12 +1,8 @@
 //! Install a verified hosted download through the existing local store and
 //! replica admission paths. This disk operation never advances a checkout.
 use crypto::thread_operation::SignedGenesis;
-use heddle_object_model::object::{
-    ContentHash, StateId,
-    thread_replication::integration::{SPOOL_GENESIS_TRUST_FORMAT, TrustedHostedExecutor},
-};
+use heddle_object_model::object::{ContentHash, StateId};
 use objects::store::ObjectStore;
-use prost::Message;
 use repo::{Repository, thread_replication::ThreadReplica};
 
 use super::{Error, StagedSource};
@@ -20,9 +16,9 @@ pub struct OwnedDeviceBinding<'a> {
 }
 
 impl StagedSource {
-    /// Call on the application's disk worker. Owner history is independently
-    /// verified and monotonically pinned; the authenticated hosted endpoint is
-    /// pinned before accepting any original Integration operations.
+    /// Call on the application's disk worker. Locally signed conversion is
+    /// checked before any repository mutation. Hosted testimony needs the
+    /// separate selected-root installation path; transport keys grant no trust.
     pub fn install(self, repository: &Repository, now_unix_seconds: i64) -> Result<StateId, Error> {
         let endpoint = self
             .ready
@@ -34,11 +30,9 @@ impl StagedSource {
                 "hosted installation requires the selected Weft endpoint",
             ));
         }
-        let executor = endpoint
-            .public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Invalid("invalid hosted endpoint key"))?;
+        // Endpoint possession authenticates transport only. Every hosted
+        // original requires independently selected witness/owner context.
+        self.require_locally_signed_source()?;
         let spool = uuid::Uuid::parse_str(
             &self
                 .ready
@@ -62,29 +56,6 @@ impl StagedSource {
         let verified =
             repo::verify_spool_owner_observation(genesis, owner, spool, now_unix_seconds)
                 .map_err(preparation)?;
-        let body = genesis
-            .genesis
-            .as_ref()
-            .ok_or(Error::Invalid("owner genesis body absent"))?;
-        let trust = TrustedHostedExecutor {
-            spool,
-            spool_genesis: ContentHash::compute_typed(
-                SPOOL_GENESIS_TRUST_FORMAT,
-                &body.encode_to_vec(),
-            ),
-            executor,
-        };
-        for signed in &self.operations {
-            let operation = signed.verify().map_err(preparation)?;
-            require_source_operation(&operation).map_err(preparation)?;
-            if operation
-                .hosted_execution_binding()
-                .map_err(preparation)?
-                .is_some()
-            {
-                trust.authorize(&operation).map_err(preparation)?;
-            }
-        }
         // A verified hosted download belongs to this Spool, just as an
         // owned-device download does. Never let a later local write mint one.
         repository
@@ -99,8 +70,60 @@ impl StagedSource {
                 now_unix_seconds,
             )
             .map_err(preparation)?;
-        self.install_replicas(repository, Some(&trust), None, "", now_unix_seconds)?;
+        self.install_replicas(repository, None, "", now_unix_seconds)?;
         Ok(self.state.id())
+    }
+    fn require_locally_signed_source(&self) -> Result<(), Error> {
+        use heddle_object_model::object::thread_replication::{GenesisOwner, SourceAuthor};
+        if self.ready.import_authority.is_some() || !self.authority_admissions.is_empty() {
+            return Err(Error::HostedTrustRequired);
+        }
+        let main = self
+            .ready
+            .thread_genesis
+            .as_ref()
+            .ok_or(Error::Invalid("Thread genesis absent"))?;
+        let mut owners = std::collections::BTreeMap::new();
+        for wrapper in std::iter::once(main).chain(&self.dependencies) {
+            let record = wrapper
+                .genesis
+                .as_ref()
+                .ok_or(Error::Invalid("original genesis absent"))?;
+            let genesis = heddle_object_model::object::thread_replication::ThreadGenesis::decode(
+                &record.canonical_record,
+            )
+            .map_err(preparation)?;
+            let GenesisOwner::LocalKey(key) = genesis.owner else {
+                return Err(Error::HostedTrustRequired);
+            };
+            if wrapper.admission.is_some()
+                || !wrapper.creator_authority.is_empty()
+                || !wrapper.ownership_claims.is_empty()
+                || !wrapper.ownership_resolutions.is_empty()
+                || !wrapper.ownership_claim_admissions.is_empty()
+                || !wrapper.ownership_resolution_admissions.is_empty()
+                || !wrapper.boundary_acceptances.is_empty()
+            {
+                return Err(Error::HostedTrustRequired);
+            }
+            owners.insert(genesis.id().map_err(preparation)?, key);
+        }
+        for signed in &self.operations {
+            let operation = signed.verify().map_err(preparation)?;
+            require_source_operation(&operation).map_err(preparation)?;
+            let local = match operation.source_author().map_err(preparation)? {
+                Some(SourceAuthor::LocalKey) => true,
+                None => operation
+                    .local_integration()
+                    .map_err(preparation)?
+                    .is_some(),
+                _ => false,
+            };
+            if !local || owners.get(&operation.thread) != Some(&operation.publisher) {
+                return Err(Error::HostedTrustRequired);
+            }
+        }
+        Ok(())
     }
     /// Device-only source uses independently admitted local account authority;
     /// incoming material cannot enroll its endpoint or replace a Spool owner.
@@ -124,6 +147,7 @@ impl StagedSource {
                 "owned-device installation requires device endpoint",
             ));
         }
+        self.require_device_originals()?;
         let owner = repo::verify_account_owner_observation(&authority.owner, now_unix_seconds)
             .map_err(preparation)?;
         let account = owner
@@ -175,19 +199,32 @@ impl StagedSource {
         repository
             .install_native_spool_id(spool.id.parse().map_err(preparation)?)
             .map_err(preparation)?;
-        self.install_replicas(
-            repository,
-            None,
-            Some(authority),
-            spool_path,
-            now_unix_seconds,
-        )?;
+        self.install_replicas(repository, Some(authority), spool_path, now_unix_seconds)?;
         Ok(self.state.id())
+    }
+    fn require_device_originals(&self) -> Result<(), Error> {
+        let main = self
+            .ready
+            .thread_genesis
+            .as_ref()
+            .ok_or(Error::Invalid("Thread genesis absent"))?;
+        if self.ready.import_authority.is_some()
+            || !self.authority_admissions.is_empty()
+            || std::iter::once(main)
+                .chain(&self.dependencies)
+                .any(|record| {
+                    record.admission.is_some()
+                        || !record.ownership_claim_admissions.is_empty()
+                        || !record.ownership_resolution_admissions.is_empty()
+                })
+        {
+            return Err(Error::HostedTrustRequired);
+        }
+        Ok(())
     }
     fn install_replicas(
         &self,
         repository: &Repository,
-        trust: Option<&TrustedHostedExecutor>,
         authority: Option<&repo::device_authority::DeviceAuthority>,
         spool_path: &str,
         now: i64,
@@ -226,35 +263,8 @@ impl StagedSource {
                     ThreadReplica::create(repository.heddle_dir(), &signed).map_err(preparation)?
                 }
                 heddle_object_model::object::thread_replication::GenesisOwner::Account(_) => {
-                    if let Some(receipt) = &wrapper.admission {
-                        if receipt.format
-                            != heddle_object_model::object::thread_genesis_admission::FORMAT
-                        {
-                            return Err(Error::Invalid("unknown genesis admission format"));
-                        }
-                        let [_signature] = receipt.signatures.as_slice() else {
-                            return Err(Error::Invalid(
-                                "one hosted genesis admission signature required",
-                            ));
-                        };
-                        let admission = crate::boundary_acceptance::genesis_admission(wrapper)?
-                            .ok_or(Error::Invalid("genesis admission absent"))?;
-                        match trust {
-                            Some(trust) => ThreadReplica::create_from_genesis_admission(
-                                repository.heddle_dir(),
-                                &signed,
-                                &wrapper.creator_authority,
-                                &admission,
-                                trust,
-                            ),
-                            None => ThreadReplica::create_from_pinned_genesis_admission(
-                                repository.heddle_dir(),
-                                &signed,
-                                &wrapper.creator_authority,
-                                &admission,
-                            ),
-                        }
-                        .map_err(preparation)?
+                    if wrapper.admission.is_some() {
+                        return Err(Error::HostedTrustRequired);
                     } else {
                         let authority = authority.ok_or(Error::Invalid(
                             "original account genesis admission required",
@@ -272,23 +282,12 @@ impl StagedSource {
                     }
                 }
             };
-            if let Some(trust) = trust {
-                let executor = trust.executor;
-                repository
-                    .pin_thread_hosted_executor(&replica, executor)
-                    .map_err(preparation)?;
-            }
             let mut pending = Vec::new();
             let retained = replica.ownership_claims().map_err(preparation)?;
             for claim in crate::replication::ownership::verify_claims(wrapper, &genesis)? {
                 let value = claim.original.verify().map_err(preparation)?;
-                if let Some(receipt) = &claim.authority_admission {
-                    let trust = replica
-                        .authority_admission_trust(receipt)
-                        .map_err(preparation)?;
-                    receipt
-                        .verify_claim(&claim.original, &genesis, &trust)
-                        .map_err(preparation)?;
+                if claim.authority_admission.is_some() {
+                    return Err(Error::HostedTrustRequired);
                 } else if !retained.contains(&claim.original) {
                     let authority = authority.ok_or(Error::Invalid("new claim requires current original acceptance or independently pinned admission"))?;
                     repo::thread_replication::ownership_claim::verify_claim_authority(
@@ -317,22 +316,8 @@ impl StagedSource {
             claims.insert(replica.thread_id(), pending);
             replicas.insert(replica.thread_id(), replica);
         }
-        // Verify portable original testimony before installing immutable bytes.
-        // Fresh capabilities are evaluated in dependency order below, after
-        // explicit claims, while availability remains unpublished on failure.
-        for signed in &self.operations {
-            let operation = signed.verify().map_err(preparation)?;
-            let replica = replicas
-                .get(&operation.thread)
-                .ok_or(Error::Invalid("source dependency replica absent"))?;
-            if let Some(receipt) = self
-                .authority_admissions
-                .get(&operation.id().map_err(preparation)?)
-            {
-                replica
-                    .require_authority_admission(signed, receipt)
-                    .map_err(preparation)?;
-            }
+        if !self.authority_admissions.is_empty() {
+            return Err(Error::HostedTrustRequired);
         }
         self.install_source_objects(repository)?;
         for (thread, pending) in &mut claims {
@@ -363,40 +348,29 @@ impl StagedSource {
                 .get(&operation.thread)
                 .ok_or(Error::Invalid("source dependency replica absent"))?;
             let id = operation.id().map_err(preparation)?;
-            if !self.authority_admissions.contains_key(&id) {
-                let prior = replica
-                    .operation_with_authority_admission(&id)
-                    .map_err(preparation)?;
-                if !prior.is_some_and(|prior| {
-                    prior.original == *signed
-                        && prior.status == objects::object::thread_replication::Admission::Accepted
-                }) && let Some(author) = operation.source_author().map_err(preparation)?
-                {
-                    match author {
-                        objects::object::thread_replication::SourceAuthor::LocalKey => replica
-                            .verify_local_source_owner(&operation)
-                            .map_err(preparation)?,
-                        objects::object::thread_replication::SourceAuthor::Account { .. } => {
-                            replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
-                        }
+            let prior = replica
+                .operation_with_authority_admission(&id)
+                .map_err(preparation)?;
+            if !prior.is_some_and(|prior| {
+                prior.original == *signed
+                    && prior.status == objects::object::thread_replication::Admission::Accepted
+            }) && let Some(author) = operation.source_author().map_err(preparation)?
+            {
+                match author {
+                    objects::object::thread_replication::SourceAuthor::LocalKey => replica
+                        .verify_local_source_owner(&operation)
+                        .map_err(preparation)?,
+                    objects::object::thread_replication::SourceAuthor::Account { .. } => {
+                        replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
                     }
                 }
             }
+
             let admission = if !self.is_complete() {
                 replica.receive_source_metadata(
                     signed,
                     repository.store(),
-                    self.authority_admissions.get(&id),
-                    require_source_operation,
-                )
-            } else if let Some(receipt) = self
-                .authority_admissions
-                .get(&operation.id().map_err(preparation)?)
-            {
-                replica.receive_with_authority_admission(
-                    signed,
-                    receipt,
-                    repository.store(),
+                    None,
                     require_source_operation,
                 )
             } else {
@@ -606,10 +580,8 @@ fn install_ready_resolution(
             return Ok(());
         }
     }
-    if let Some(receipt) = &resolution.authority_admission {
-        replica
-            .resolve_ownership_with_admission(&resolution.original, receipt)
-            .map_err(preparation)?;
+    if resolution.authority_admission.is_some() {
+        return Err(Error::HostedTrustRequired);
     } else {
         replica
             .resolve_ownership(
@@ -638,10 +610,8 @@ fn install_ready_claims(
             continue;
         }
         let claim = pending.remove(index).original;
-        if let Some(receipt) = &claim.authority_admission {
-            replica
-                .claim_ownership_with_admission(&claim.original, receipt)
-                .map_err(preparation)?;
+        if claim.authority_admission.is_some() {
+            return Err(Error::HostedTrustRequired);
         } else if !replica
             .ownership_claims()
             .map_err(preparation)?

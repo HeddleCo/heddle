@@ -32,6 +32,10 @@ pub enum Error {
     Preparation(String),
     #[error("invalid source download: {0}")]
     Invalid(&'static str),
+    #[error("hosted history requires independently selected root, owner and fresh witness trust")]
+    HostedTrustRequired,
+    #[error("HYBRID authority rejected: {0}")]
+    Hybrid(#[from] api::hybrid_codec::Reject),
 }
 
 impl crate::reopen::ReopenRetryable for Error {
@@ -129,6 +133,10 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         open: FetchOpen,
         limits: Limits,
     ) -> Result<Download<T::Reader>, Error> {
+        crate::hybrid::fetch_open(&open).map_err(Error::Invalid)?;
+        if open.protocol.is_some() {
+            api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())?;
+        }
         let (sender, mut messages) = self
             .api
             .exchange::<rpc::SyncServiceFetch>(&FetchClientFrame {
@@ -172,6 +180,8 @@ impl Validation {
         limits: Limits,
     ) -> Result<Self, Error> {
         crate::hybrid::transfer_ready(&ready).map_err(Error::Invalid)?;
+        crate::hybrid::negotiated(open.protocol.as_ref(), ready.protocol.as_ref())
+            .map_err(Error::Invalid)?;
         let thread = open
             .thread
             .as_ref()
@@ -369,6 +379,13 @@ impl Validation {
             }
             fetch_server_frame::Body::Operations(batch) => {
                 crate::hybrid::operations(&batch).map_err(Error::Invalid)?;
+                if batch.import_authority.is_some()
+                    && batch.import_authority != self.ready.import_authority
+                {
+                    return Err(Error::Invalid(
+                        "operation proof bundle differs from negotiated source closure",
+                    ));
+                }
                 self.operations = self
                     .operations
                     .checked_add(batch.operations.len())
