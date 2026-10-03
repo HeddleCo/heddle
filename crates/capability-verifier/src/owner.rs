@@ -44,6 +44,13 @@ pub struct VerifiedOwnerState {
 }
 
 impl VerifiedOwnerState {
+    /// All verified owner authority keys, including historical issuers. A job
+    /// signer cannot reuse any of these keys, even after retirement or recovery.
+    pub fn authority_public_keys(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        self.issuers
+            .values()
+            .map(|issuer| issuer.key.public_key.clone())
+    }
     /// Stable cryptographic owner id derived from the signed root.
     #[must_use]
     pub const fn owner_id(&self) -> [u8; 32] {

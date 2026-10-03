@@ -3,6 +3,12 @@
 /// A fail-closed verification error.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// API-owned HYBRID signature, scope or time rejection.
+    #[error(transparent)]
+    Hybrid(#[from] heddle_api::hybrid_codec::Reject),
+    /// The pinned API has no exact boundary-acceptance witness binding.
+    #[error("boundary acceptance witness binding requires api#318")]
+    BoundaryAcceptancePendingApi318,
     /// A field, enum, canonical ordering, or fixed-width value is invalid.
     #[error("invalid owner-authorization object: {0}")]
     Invalid(String),
