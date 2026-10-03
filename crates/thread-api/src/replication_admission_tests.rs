@@ -21,8 +21,7 @@ use uuid::Uuid;
 use super::{native::LocalReplica, *};
 
 #[tokio::test]
-async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatched_or_missing_proof()
-{
+async fn original_authority_sidecars_match_exactly_and_require_fresh_witness_evidence() {
     let left_dir = tempfile::tempdir().expect("left");
     let right_dir = tempfile::tempdir().expect("right");
     let third_dir = tempfile::tempdir().expect("third");
@@ -66,7 +65,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
                 &replica,
                 executor.public_key().try_into().expect("executor key"),
             )
-            .expect("independent endpoint enrollment");
+            .expect_err("endpoint enrollment cannot substitute for fresh witness evidence");
         replica
             .set_sharing([86; 32], &BTreeSet::from([ThreadFacet::Metadata]))
             .expect("explicit local opt-in");
@@ -127,8 +126,18 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
         );
     let unmatched =
         crate::authority_admission::sign(&unknown, &executor).expect("valid unmatched testimony");
-    left.receive_with_authority_admission(&original, &receipt, left_repo.store(), |_| Ok(()))
-        .expect("durable source-side receipt");
+    let trust = objects::object::thread_replication::integration::TrustedHostedExecutor {
+        spool,
+        spool_genesis: receipt.verify_signature().expect("receipt").spool_genesis,
+        executor: executor.public_key().try_into().expect("key"),
+    };
+    receipt
+        .verify(&original, &trust)
+        .expect("genuine original and receipt signature control");
+    assert!(matches!(
+        left.receive_with_authority_admission(&original, &receipt, left_repo.store(), |_| Ok(())),
+        Err(repo::thread_replication::Error::WitnessEvidenceRequired)
+    ));
     drop(author);
     drop(executor);
     drop(owner);
@@ -141,18 +150,21 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
         )
         .expect("session without original credential or signing keys")
     };
-    let sender = session(left, &left_repo);
-    let Frame::Operations(batch) = sender
-        .export_operation(id)
-        .await
-        .expect("export original+receipt")
-    else {
-        panic!("operations")
+    let batch = crate::contract::ReplicationOperations {
+        operations: vec![crate::contract::SignedRecord {
+            format: objects::object::thread_replication::OPERATION_FORMAT.into(),
+            canonical_record: original.canonical.clone(),
+            signatures: vec![crate::contract::RecordSignature {
+                public_key: operation.publisher.to_vec(),
+                signature: original.signature.clone(),
+            }],
+        }],
+        authority_admissions: vec![
+            crate::authority_admission::encode(&receipt).expect("unchanged receipt"),
+        ],
+        ..Default::default()
     };
-    assert_eq!(
-        batch.authority_admissions,
-        vec![crate::authority_admission::encode(&receipt).expect("unchanged receipt")]
-    );
+    crate::authority_admission::match_batch(&batch).expect("exact sidecar matching control");
     let mut receiver = session(right.clone(), &right_repo);
     let mut duplicate = batch.clone();
     duplicate
@@ -192,39 +204,27 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
             .contains("independently enrolled account authority")
     );
     assert!(missing.operation(&id).expect("lookup").is_none());
-    receiver
+    let error = receiver
         .handle(Frame::Operations(batch.clone()))
         .await
-        .expect("foreign agent admitted by independent retained host testimony");
-    let stored = right
-        .operation_with_authority_admission(&id)
-        .expect("lookup")
-        .expect("original");
-    assert_eq!(stored.original, original);
-    assert_eq!(stored.authority_admission, Some(receipt.clone()));
-    assert_eq!(stored.status, Admission::Accepted);
-    drop(receiver);
+        .err()
+        .expect("fresh evidence required");
+    assert!(error.to_string().contains("hosted installation requires fresh root-authenticated witness and original authority evidence"), "{error}");
+    assert!(right.operation(&id).expect("no mutation").is_none());
     let restarted =
         ThreadReplica::open(right_repo.heddle_dir(), operation.thread).expect("restart");
-    let Frame::Operations(relayed) = session(restarted, &right_repo)
-        .export_operation(id)
-        .await
-        .expect("relay after restart")
-    else {
-        panic!("operations")
-    };
-    assert_eq!(
-        relayed, batch,
-        "relay preserves exact original signature and first-admission evidence"
-    );
-    session(third.clone(), &third_repo)
-        .handle(Frame::Operations(relayed))
-        .await
-        .expect("second relay");
-    let stored = third
-        .operation_with_authority_admission(&id)
-        .expect("lookup")
-        .expect("original");
-    assert_eq!(stored.original, original);
-    assert_eq!(stored.authority_admission, Some(receipt));
+    for (replica, repository) in [(restarted, &right_repo), (third.clone(), &third_repo)] {
+        let error = session(replica.clone(), repository)
+            .handle(Frame::Operations(batch.clone()))
+            .await
+            .err()
+            .expect("retained old pin cannot authorize replay");
+        assert!(error.to_string().contains("hosted installation requires fresh root-authenticated witness and original authority evidence"), "{error}");
+        assert!(
+            replica
+                .operation(&id)
+                .expect("unchanged after replay")
+                .is_none()
+        );
+    }
 }

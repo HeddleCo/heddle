@@ -3952,6 +3952,9 @@ mod tests {
     fn select_clone_thread_priority_order() {
         use objects::object::ThreadName;
 
+        // Grant tests replace the process-wide device/config home. Keep both
+        // repository initializations under that same environment lock.
+        let _home = ::config::credentials::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp");
         let repo = crate::init_test_repository(temp.path()).expect("init");
         // Snapshot once so we have a real state tip to point threads at.

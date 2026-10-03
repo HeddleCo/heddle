@@ -259,174 +259,40 @@ fn boundary_receipt_cannot_relabel_original_scope_or_use_old_authorize_path() {
 }
 
 #[cfg(feature = "native")]
-#[tokio::test]
-async fn boundary_native_two_receiver_relay_preserves_exact_testimony_without_credential() {
-    use std::sync::Arc;
-
-    use crypto::{
-        thread_genesis_admission::SignedGenesisAdmission, thread_operation::SignedGenesis,
-    };
-    use heddle_object_model::object::{
-        thread_genesis_admission::{ENVELOPE_FORMAT, ThreadGenesisAdmission},
-        thread_replication::{
-            GenesisOwner, ThreadFacet, ThreadGenesis, integration::SPOOL_GENESIS_TRUST_FORMAT,
-        },
-    };
-    use prost::Message;
-    use repo::{Repository, thread_replication::ThreadReplica};
-
-    use crate::replication::{Frame, Session, native::LocalReplica};
-    let paths = [
-        tempfile::tempdir().expect("sender"),
-        tempfile::tempdir().expect("receiver"),
-        tempfile::tempdir().expect("next receiver"),
-    ];
-    let repositories = paths
-        .iter()
-        .map(|path| Repository::init_default(path.path()).expect("repository"))
-        .collect::<Vec<_>>();
-    let (mut batch, mut trust) = fixture(1);
-    let account = uuid::Uuid::from_u128(502);
-    let spool_genesis = repo::sign_spool_owner_genesis(&key(54), *trust.spool.as_bytes())
-        .expect("independent Spool root");
-    trust.spool_genesis = ContentHash::compute_typed(
-        SPOOL_GENESIS_TRUST_FORMAT,
-        &spool_genesis
-            .genesis
-            .as_ref()
-            .expect("genesis")
-            .encode_to_vec(),
-    );
-    let genesis = ThreadGenesis {
-        version: 1,
-        spool: trust.spool.to_string(),
-        parent: None,
-        base: repositories[0].head().expect("head").expect("base"),
-        name: "historical boundary relay".into(),
-        intent: "no original live bearer".into(),
-        creator: key(51).public_key().try_into().expect("key"),
-        owner: GenesisOwner::Account(account),
-        nonce: vec![1],
-    };
-    let original_genesis = SignedGenesis::sign(&genesis, &key(51)).expect("genesis");
-    let genesis_receipt = ThreadGenesisAdmission {
-        version: 2,
-        basis: AdmissionBasis::OriginalAuthority,
-        spool: trust.spool,
-        spool_genesis: trust.spool_genesis,
-        thread: genesis.id().expect("id"),
-        owner: account,
-        creator: genesis.creator,
-        authority_digest: ContentHash::compute_typed(
-            ENVELOPE_FORMAT,
-            b"retained original genesis envelope",
-        ),
-        executor: trust.executor,
-        admitted_at_ms: 8000,
-    };
-    let genesis_receipt = SignedGenesisAdmission::sign(&genesis_receipt, &key(53))
-        .expect("pinned executor testimony");
-    let replicas = repositories
-        .iter()
-        .map(|repository| {
-            let replica = ThreadReplica::create_from_genesis_admission(
-                repository.heddle_dir(),
-                &original_genesis,
-                b"retained original genesis envelope",
-                &genesis_receipt,
-                &trust,
-            )
-            .expect("independent genesis pin");
-            repository
-                .verify_and_pin_owner_genesis(
-                    2,
-                    Some(&spool_genesis.encode_to_vec()),
-                    &["selected".into(), "shared".into()],
-                )
-                .expect("independent trust setup");
-            repository
-                .pin_thread_hosted_executor(&replica, trust.executor)
-                .expect("independent executor pin");
-            replica
-                .set_sharing([86; 32], &[ThreadFacet::Source].into())
-                .expect("explicit export consent");
-            replica
-        })
-        .collect::<Vec<_>>();
-    let mut original = crate::replication::decode_record(batch.operations.remove(0))
-        .expect("original")
-        .verify()
-        .expect("operation");
-    original.thread = genesis.id().expect("Thread");
-    if let ThreadOperationBody::Capture(capture) = &mut original.body {
-        let state = State::new_snapshot(
-            Tree::new().hash(),
-            vec![genesis.base],
-            Attribution::human(Principal::new("offline work", "")),
-        );
-        capture.result.state = state.encode_current_msgpack().expect("state");
-    }
-    let signed = SignedOperation::sign(&original, &key(51)).expect("original signature");
-    let id = original.id().expect("ID");
-    let mut statement =
-        crate::authority_admission::verify_signature(&batch.authority_admissions[0])
-            .expect("receipt");
-    statement.thread = original.thread;
-    statement.subject = OriginalAuthoritySubject::Operation(id);
-    statement.spool_genesis = trust.spool_genesis;
-    let mut receipt = SignedAuthorityAdmission::sign(&statement, &key(53)).expect("pinned receipt");
-    receipt.boundary_acceptance = Some(Arc::new(
-        decode(&batch.boundary_acceptances[0]).expect("evidence"),
-    ));
-    replicas[0]
-        .receive_with_authority_admission(&signed, &receipt, repositories[0].store(), |_| Ok(()))
-        .expect("original pinned admission");
-    let session = |index: usize| {
-        Session::new(
-            LocalReplica::new(
-                replicas[index].clone(),
-                Arc::new(repositories[index].store().clone()),
-            ),
-            [86; 32],
-            [ThreadFacet::Source].into(),
-            8,
+#[test]
+fn boundary_native_receivers_fail_closed_pending_api318() {
+    let (batch, trust) = fixture(1);
+    let received = crate::authority_admission::match_batch(&batch)
+        .expect("exact original/acceptance/receipt control")
+        .remove(0);
+    let receipt = received.authority_admission.expect("boundary receipt");
+    receipt
+        .verify(&received.original, &trust)
+        .expect("original scope, acceptance and independent executor comparisons remain");
+    for _ in 0..2 {
+        let directory = tempfile::tempdir().expect("receiver");
+        let repository = repo::Repository::init_default(directory.path()).expect("repository");
+        let replica = repository.native_thread("main").expect("receiver Thread");
+        assert!(matches!(
+            replica.authority_admission_trust(&receipt),
+            Err(repo::thread_replication::Error::BoundaryAcceptancePendingApi318)
+        ));
+        let id = received
+            .original
+            .verify()
+            .expect("original")
+            .id()
+            .expect("id");
+        assert!(replica.operation(&id).expect("no installation").is_none());
+        let reopened = repo::thread_replication::ThreadReplica::open(
+            repository.heddle_dir(),
+            replica.thread_id(),
         )
-        .expect("exact source session")
-    };
-    let mut exported = session(0)
-        .export_operation(id)
-        .await
-        .expect("export evidence");
-    for index in 1..3 {
-        let Frame::Operations(batch) = exported else {
-            panic!("originals")
-        };
-        assert_eq!(batch.boundary_acceptances.len(), 1);
-        let mut missing = batch.clone();
-        missing.boundary_acceptances.clear();
-        let mut receiver = session(index);
-        assert!(
-            receiver.handle(Frame::Operations(missing)).await.is_err(),
-            "no evidence cannot authorize new receiver"
-        );
-        assert!(replicas[index].operation(&id).expect("unchanged").is_none());
-        receiver
-            .handle(Frame::Operations(batch))
-            .await
-            .expect("actual native receive");
-        let reopened =
-            ThreadReplica::open(repositories[index].heddle_dir(), genesis.id().expect("ID"))
-                .expect("reopen");
-        let retained = reopened
-            .operation_with_authority_admission(&id)
-            .expect("lookup")
-            .expect("original");
-        assert_eq!(retained.original, signed);
-        assert_eq!(retained.authority_admission, Some(receipt.clone()));
-        exported = session(index)
-            .export_operation(id)
-            .await
-            .expect("relay exact acceptance");
+        .expect("restart");
+        assert!(matches!(
+            reopened.authority_admission_trust(&receipt),
+            Err(repo::thread_replication::Error::BoundaryAcceptancePendingApi318)
+        ));
     }
 }
 
