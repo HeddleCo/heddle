@@ -69,6 +69,19 @@ original signed public closure plus proof-only history proofs.
 For replication, the same seam operates on the carried bundle's complete native
 closure and then admits the requested original; no bundle is silently dropped.
 
+Part 1's newer draft exposes `delegated_import::AcceptedAuthority` and
+`ThreadReplica::{install_hybrid_import, hybrid_import_bundle}` instead. Those
+names work. **One missing hook is critical:** add `before_commit:
+impl FnOnce() -> Result<()>` to `install_hybrid_import`, called after every
+original/permission/witness check and every `receive_in` succeeds but before the
+outer `HostedTrust::mutate` transaction commits. Part 2 passes an isolated staged
+`FsStore` for verification and uses the hook to install source objects and native
+Spool/owner metadata. This makes rejection leave the actual repository unchanged
+and holds the same trust serialization throughout install. No durable pack
+installation can occur before full verification; no replica transaction can
+commit before the pack is locally installed. Existing `hybrid_import_bundle`
+supplies exact retained closure for relay.
+
 ## Receiver trust and mutation serialization (repo)
 
 ```rust
