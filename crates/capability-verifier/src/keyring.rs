@@ -174,7 +174,7 @@ pub fn verify_clone_keyring(
         .spool_uuid
         .as_slice()
         .try_into()
-        .expect("checked spool UUID");
+        .map_err(|_| Error::Invalid("Spool UUID must be 16 bytes".into()))?;
     let owner_genesis = verify_spool_owner_genesis(
         keyring
             .owner_genesis
@@ -226,11 +226,11 @@ pub fn verify_clone_keyring(
         .signed_root()
         .root
         .as_ref()
-        .expect("verified owner root")
+        .ok_or_else(|| Error::BrokenChain("verified owner root missing".into()))?
         .account_uuid
         .as_slice()
         .try_into()
-        .expect("verified account UUID");
+        .map_err(|_| Error::BrokenChain("verified account UUID must be 16 bytes".into()))?;
     // Transfer signatures name historical state hashes. Verify the original
     // proofs before selecting the exact state; later rotations do not invalidate
     // earlier accepted ownership handoffs.

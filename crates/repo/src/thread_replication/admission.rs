@@ -1,5 +1,6 @@
 //! Original-author authority receipts accompany immutable operations atomically.
-//! Executor pins come from receiver-owned setup, never from incoming records.
+//! Bare executor pins cannot authorize a receiving mutation. Part 2 supplies
+//! independently selected fresh witness evidence through the HYBRID seam.
 use crypto::{
     thread_authority_admission::SignedAuthorityAdmission, thread_operation::SignedOperation,
 };
@@ -19,8 +20,8 @@ pub struct StoredOperation {
 }
 impl ThreadReplica {
     /// Current delivery authorization remains the endpoint's separate gate.
-    /// The receipt establishes original authority using an independently pinned
-    /// executor. Its exact bytes persist in the operation's admission transaction.
+    /// A bare receipt now fails closed. Use `receive_witnessed` with an
+    /// independently selected fresh set and the complete original authority.
     pub fn receive_with_authority_admission(
         &self,
         original: &SignedOperation,
@@ -46,37 +47,18 @@ impl ThreadReplica {
         receipt.verify(original, &self.authority_admission_trust(receipt)?)?;
         Ok(())
     }
-    /// Resolve the receiver-owned executor pin for any typed admission subject.
+    /// Reject evergreen executor trust for any typed admission subject.
     /// Incoming testimony never inserts or replaces a trust record.
     pub fn authority_admission_trust(
         &self,
         receipt: &SignedAuthorityAdmission,
     ) -> Result<TrustedHostedExecutor> {
-        let statement = receipt.verify_signature()?;
-        if self.genesis()?.spool != statement.spool.to_string() {
-            return Err(Error::Invalid(
-                "authority receipt crosses local Spool".into(),
-            ));
+        if receipt.verify_signature()?.basis
+            != objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority
+        {
+            return Err(Error::BoundaryAcceptancePendingApi318);
         }
-        let genesis: Option<Vec<u8>> = self
-            .connect()?
-            .query_row(
-                "SELECT genesis FROM hosted_executor_pins WHERE spool=?1 AND executor=?2",
-                params![statement.spool.to_string(), statement.executor],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let genesis = genesis.ok_or_else(|| {
-            Error::Invalid(
-                "authority admission requires independently pinned executor trust".into(),
-            )
-        })?;
-        let trust = TrustedHostedExecutor {
-            spool: statement.spool,
-            spool_genesis: super::hash(&genesis)?,
-            executor: statement.executor,
-        };
-        Ok(trust)
+        Err(Error::WitnessEvidenceRequired)
     }
     /// One indexed statement returns original bytes, status and retained proof.
     pub fn operation_with_authority_admission(

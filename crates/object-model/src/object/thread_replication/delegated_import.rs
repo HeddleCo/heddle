@@ -7,7 +7,9 @@
 //! repo rechecks publication trust while committing. A job never becomes a
 //! `TrustedHostedExecutor` or acquires generic capture/metadata/landing powers.
 use api::{
-    heddle::api::v1alpha2::{ImportContentV1, ImportFrontierV1, SignedDelegatedImportOperationV1},
+    heddle::api::v1alpha2::{
+        ImportContentV1, ImportFrontierV1, ImportIdentityV1, SignedDelegatedImportOperationV1,
+    },
     import_authority::{self, VerifiedImportDelegation},
 };
 
@@ -29,6 +31,7 @@ impl DelegatedImport {
         signed: &SignedDelegatedImportOperationV1,
         delegation: &VerifiedImportDelegation,
         genesis: &ThreadGenesis,
+        original_identity: &ImportIdentityV1,
         converted: &ThreadOperation,
         parents: &[ThreadOperation],
     ) -> Result<Self> {
@@ -43,7 +46,8 @@ impl DelegatedImport {
             .identity
             .as_ref()
             .ok_or_else(|| invalid("import identity missing"))?;
-        let account = uuid::Uuid::from_slice(&identity.owner_account_uuid).map_err(invalid)?;
+        let account =
+            uuid::Uuid::from_slice(&original_identity.owner_account_uuid).map_err(invalid)?;
         let ThreadOperationBody::Capture(capture) = &converted.body else {
             return Err(invalid(
                 "delegated import requires converted Capture content",
@@ -55,6 +59,8 @@ impl DelegatedImport {
         // with the successor job key and changing their native operation IDs.
         if !matches!(capture.author, super::SourceAuthor::LocalKey)
             || genesis.owner != GenesisOwner::Account(account)
+            || identity.spool_uuid != original_identity.spool_uuid
+            || identity.spool_genesis_digest != original_identity.spool_genesis_digest
             || genesis.spool
                 != uuid::Uuid::from_slice(&body.spool_uuid)
                     .map_err(invalid)?

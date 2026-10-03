@@ -89,7 +89,7 @@ fn portable_import_permission_scope_and_current_expiry() {
     let f = fixture();
     let (owner, keyring, digest) = selected(&f);
     let initial = owner.owner_id();
-    let d = record(&f, "delegation");
+    let d: SignedImportJobDelegationV1 = record(&f, "delegation");
     let p = record(&f, "permission");
     let o = record(&f, "operation_main");
     let forbidden = vec![key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")];
@@ -125,6 +125,25 @@ fn role_substitution_and_conflicting_job_associations() {
     let normal = vec![key(&f, "witness"), key(&f, "root")];
     let c = context(&owner, &keyring, &digest, &initial, &normal, 1100);
     verify_current(&d, Some(&p), &c, |_| false).expect("separate roles control");
+    for role in ["owner", "device", "witness", "root"] {
+        let mut changed: SignedImportJobDelegationV1 = d.clone();
+        let body = changed.body.as_mut().expect("body");
+        body.job_public_key = key(&f, role);
+        body.job_key_id = hybrid_codec::key_id(&body.job_public_key);
+        changed.delegating_signature = Some(sign_changed(
+            &f,
+            "device",
+            contract::DELEGATION_DOMAIN,
+            body,
+        ));
+        assert!(
+            matches!(
+                verify_current(&changed, Some(&p), &c, |_| false),
+                Err(Error::Hybrid(contract::Reject::KeyRole))
+            ),
+            "genuine device delegation cannot make {role} a job signer"
+        );
+    }
     let forbidden = vec![key(&f, "job")];
     let c = context(&owner, &keyring, &digest, &initial, &forbidden, 1100);
     assert!(matches!(
@@ -291,22 +310,37 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
         verify_new_operation(&op, &staged, Some(&p), &expired, |_| false),
         Err(Error::Hybrid(contract::Reject::Expired))
     );
-    for field in 0..4 {
+    for field in 0..9 {
         let mut bad = d.clone();
         let b = bad.body.as_mut().expect("body");
         match field {
             0 => b.expires_at_unix_seconds += 1,
             1 => b.not_before_unix_seconds -= 1,
             2 => b.scope.as_mut().expect("scope").max_operations += 1,
-            _ => {
+            3 => {
                 b.scope.as_mut().expect("scope").source_url = "https://github.com/other/repo".into()
             }
+            4 => b.scope.as_mut().expect("scope").provider = "other-provider".into(),
+            5 => b.scope.as_mut().expect("scope").destination_version[0] ^= 1,
+            6 => b.scope.as_mut().expect("scope").max_result_bytes += 1,
+            7 => {
+                let scope = b.scope.as_mut().expect("scope");
+                scope.branches[0].ref_mode = 2;
+                scope.branches[0].pinned_commit_oid.clear();
+                b.branch_manifest[0].limit = Some(scope.branches[0].clone());
+            }
+            _ => b.purpose = 2,
         };
         bad.delegating_signature = Some(sign_changed(&f, "device", contract::DELEGATION_DOMAIN, b));
+        let expected = if field == 8 {
+            contract::Reject::Version
+        } else {
+            contract::Reject::Scope
+        };
         assert!(
             matches!(
                 verify_current(&bad, Some(&p), &c, |_| false),
-                Err(Error::Hybrid(contract::Reject::Scope))
+                Err(Error::Hybrid(reason)) if reason == expected
             ),
             "parent attenuation {field}"
         );
@@ -326,7 +360,7 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
     child.delegating_signature = Some(sign_changed(&f, "job", contract::DELEGATION_DOMAIN, b));
     assert!(matches!(
         verify_current(&child, Some(&p), &c, |_| false),
-        Err(Error::Hybrid(contract::Reject::KeyRole)) | Err(Error::Hybrid(contract::Reject::Scope))
+        Err(Error::Hybrid(contract::Reject::KeyRole))
     ));
     verify_new_operation(&op, &staged, Some(&p), &c, |_| false)
         .expect("unchanged accepted context control");

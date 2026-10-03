@@ -185,7 +185,7 @@ fn proof_substitution_shape_and_bounds_reject_before_native_authority() {
     let s = record(&f, "publication_statement");
     let p: host::HostedWitnessHistoryProofV1 = record(&f, "publication_proof");
     WitnessEvidence::resolve(&set, &s, Some(&p), false, 1350000).expect("proof control");
-    for field in 0..5 {
+    for field in 0..6 {
         let mut p = p.clone();
         match field {
             0 => p.purpose = 1,
@@ -194,7 +194,8 @@ fn proof_substitution_shape_and_bounds_reject_before_native_authority() {
             3 => {
                 p.siblings.pop();
             }
-            _ => p.executor_id[0] ^= 1,
+            4 => p.executor_id[0] ^= 1,
+            _ => p.siblings.push(vec![0; 32]),
         };
         assert!(matches!(
             WitnessEvidence::resolve(&set, &s, Some(&p), false, 1350000),
@@ -210,22 +211,104 @@ fn proof_substitution_shape_and_bounds_reject_before_native_authority() {
 }
 
 #[test]
+fn canonical_wire_and_size_limits_reject_before_any_trusted_installation() {
+    let f = fixture();
+    let bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let mut bytes = bundle.encode_to_vec();
+    let decoded: wire::ImportPublicProofBundleV1 =
+        hybrid_codec::strict_decode(&bytes, contract::MAX_BUNDLE_BYTES)
+            .expect("canonical bounded control");
+    assert_eq!(decoded, bundle);
+    bytes.extend_from_slice(&[0xf8, 0x07, 0x01]);
+    assert_eq!(
+        hybrid_codec::strict_decode::<wire::ImportPublicProofBundleV1>(
+            &bytes,
+            contract::MAX_BUNDLE_BYTES
+        ),
+        Err(Reject::Canonical)
+    );
+    assert_eq!(
+        hybrid_codec::strict_decode::<wire::ImportPublicProofBundleV1>(
+            &vec![0; contract::MAX_BUNDLE_BYTES + 1],
+            contract::MAX_BUNDLE_BYTES
+        ),
+        Err(Reject::Bounds)
+    );
+}
+
+#[test]
 fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     let f = fixture();
     let d = delegation(&f, 1100);
     let b: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
     let p: wire::ImportGenesisWitnessV1 = record(&f, "genesis_payload");
-    let (original, _) = verify_native_genesis(p.original_genesis.as_ref().expect("genesis"))
-        .expect("native genesis");
+    verify_native_genesis(p.original_genesis.as_ref().expect("genesis"))
+        .expect("native genesis signature control");
+    let genesis_set = trusted_set(&f, "retired_set", 1350000);
+    let genesis_evidence = WitnessEvidence::resolve(
+        &genesis_set,
+        &record(&f, "genesis_admission"),
+        Some(&record(&f, "genesis_proof")),
+        false,
+        1350000,
+    )
+    .expect("original creation witness");
+    let original = verify_genesis_payload(&p, &genesis_evidence, &d, |_| false)
+        .expect("original portable creation authority");
     let converted: wire::SignedRecord = record(&f, "converted_main");
     let content = verify_delegated_import(
         &record(&f, "operation_main"),
+        &d,
         &d,
         &original,
         &converted,
         &[],
     )
     .expect("scoped converted content");
+    // An otherwise genuine API job signature cannot promote a witness key
+    // into the native converter role. Keep content, scope and signatures valid.
+    let (_, mut native) = verify_native_operation(&converted).expect("native converter control");
+    native.publisher = key(&f, "witness").try_into().expect("witness key");
+    let witness_seed =
+        hex::decode(f["keys"]["witness"]["seed_hex"].as_str().expect("seed")).expect("bytes");
+    let witness_signer = crate::Ed25519Signer::from_seed(&witness_seed).expect("witness signer");
+    let witnessed_native = SignedOperation::sign(&native, &witness_signer)
+        .expect("genuine wrong-role native signature");
+    let wrong_role = wire::SignedRecord {
+        format: converted.format.clone(),
+        canonical_record: witnessed_native.canonical,
+        signatures: vec![wire::RecordSignature {
+            public_key: native.publisher.to_vec(),
+            signature: witnessed_native.signature,
+        }],
+    };
+    let mut job: wire::SignedDelegatedImportOperationV1 = record(&f, "operation_main");
+    let body = job.body.as_mut().expect("body");
+    body.resulting_frontier_digest = contract::frontier_digest(&wire::ImportFrontierV1 {
+        format_version: 1,
+        thread_id: native.thread.as_bytes().to_vec(),
+        operation_ids: vec![native.id().expect("id").as_bytes().to_vec()],
+    })
+    .expect("exact frontier");
+    use crate::Signer;
+    let job_seed =
+        hex::decode(f["keys"]["job"]["seed_hex"].as_str().expect("seed")).expect("bytes");
+    job.job_signature = Some(wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(&key(&f, "job")),
+        signature: crate::Ed25519Signer::from_seed(&job_seed)
+            .expect("job signer")
+            .sign(
+                &hybrid_codec::signing_digest(contract::OPERATION_DOMAIN, body)
+                    .expect("exact API domain"),
+            )
+            .expect("genuine job signature"),
+    });
+    contract::verify_operation(&job, d.scope())
+        .expect("valid job scope/signature surrounding control");
+    assert!(matches!(
+        verify_delegated_import(&job, &d, &d, &original, &wrong_role, &[]),
+        Err(Error::Contract(Reject::KeyRole))
+    ));
     let set = trusted_set(&f, "retired_set", 1350000);
     let evidence = WitnessEvidence::resolve(
         &set,
@@ -244,7 +327,7 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
         1350000,
     )
     .expect("exact publication control");
-    assert!(
+    assert!(matches!(
         verify_publication(
             &content,
             &d,
@@ -252,19 +335,20 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
             &evidence,
             &set,
             1350000
-        )
-        .is_err()
-    );
-    assert!(
+        ),
+        Err(Error::Contract(Reject::Scope))
+    ));
+    assert!(matches!(
         verify_delegated_import(
             &record(&f, "scope_violation"),
+            &d,
             &d,
             &original,
             &converted,
             &[]
         )
-        .is_err()
-    );
+        , Err(Error::Object(heddle_object_model::error::HeddleError::InvalidObject(reason))) if reason == Reject::Scope.to_string()
+    ));
     let bad: wire::SignedDelegatedImportOperationV1 = record(&f, "witness_without_job");
     assert!(matches!(
         contract::verify_operation(&bad, d.scope()),
@@ -272,10 +356,17 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     ));
     let mut altered = converted.clone();
     altered.signatures[0].signature[0] ^= 1;
-    assert!(
-        verify_delegated_import(&record(&f, "operation_main"), &d, &original, &altered, &[])
-            .is_err()
-    );
+    assert!(matches!(
+        verify_delegated_import(
+            &record(&f, "operation_main"),
+            &d,
+            &d,
+            &original,
+            &altered,
+            &[]
+        ),
+        Err(Error::Native(crate::thread_operation::Error::Signature(_)))
+    ));
 }
 
 #[test]
@@ -292,7 +383,10 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
         .expect("independent native genesis control");
     let mut changed = payload.clone();
     changed.creator_authority_envelope.push(0);
-    assert!(verify_genesis_payload(&changed, &evidence, &d, |_| false).is_err());
+    assert!(matches!(
+        verify_genesis_payload(&changed, &evidence, &d, |_| false),
+        Err(Error::Contract(Reject::Scope))
+    ));
     let missing: wire::ImportAuthorityWitnessV1 = record(&f, "missing_owner_payload");
     let genuine = record(&f, "witness_without_owner");
     let current = trusted_set(&f, "current_set", 1100000);
@@ -373,7 +467,9 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .expect("exact authority witness");
         verify_authority_payload(&p, &evidence, &closure, &context, |_| false)
             .expect("independent original authority");
-        assert!(verify_authority_payload(&p, &evidence, &closure, &context, |_| true).is_err());
+        assert!(
+            matches!(verify_authority_payload(&p, &evidence, &closure, &context, |_| true), Err(Error::Authority(heddleco_capability_verifier::Error::Invalid(reason))) if reason == "original Thread mint root or publisher is revoked")
+        );
     }
     let evidence = WitnessEvidence::resolve(
         &set,
@@ -394,7 +490,10 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .expect("signature")
         .signature =
         record::<host::SignedHostedWitnessStatementV1>(&f, "landing_statement").signature;
-    assert!(verify_landing_payload(&bad, &evidence, &closure, &context, |_| false).is_err());
+    assert!(matches!(
+        verify_landing_payload(&bad, &evidence, &closure, &context, |_| false),
+        Err(Error::Contract(Reject::Signature))
+    ));
     let mut incomplete = originals.clone();
     let removal = incomplete
         .iter()
@@ -402,7 +501,10 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .expect("genesis dependency");
     let removed = incomplete.remove(removal);
     incomplete.retain(|r| r != &removed);
-    assert!(NativeClosure::verify(&incomplete).is_err());
+    assert!(matches!(
+        NativeClosure::verify(&incomplete),
+        Err(Error::Contract(Reject::Scope))
+    ));
 }
 
 fn resign_set(f: &Value, set: &mut host::SignedHostedWitnessSetV1) {
@@ -476,11 +578,6 @@ fn genuine_root_signed_malformed_sets_and_unattested_witnesses() {
                 .expect("digest"),
         )
         .expect("genuine absent signature");
-    assert!(matches!(
-        WitnessEvidence::resolve(&set, &absent, None, false, 1100000),
-        Err(Error::Contract(Reject::Root))
-    ));
-    // A transport signature is valid cryptography but supplies no witness role.
     assert!(matches!(
         WitnessEvidence::resolve(&set, &absent, None, false, 1100000),
         Err(Error::Contract(Reject::Root))

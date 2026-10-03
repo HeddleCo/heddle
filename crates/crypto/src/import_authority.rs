@@ -124,21 +124,72 @@ pub fn verify_native_operation(
 
 /// Job signature + owner-authorized scope + exact native content/ancestry. A
 /// publication witness is independently required before durable installation.
+/// `converter` is the original verified delegation whose job key signed the
+/// retained native conversion; renewal never re-signs those original bytes.
 pub fn verify_delegated_import(
     signed: &wire::SignedDelegatedImportOperationV1,
     delegation: &VerifiedImportDelegation,
-    genesis: &SignedGenesis,
+    converter: &VerifiedImportDelegation,
+    genesis: &VerifiedImportGenesis,
     converted: &wire::SignedRecord,
     parents: &[ThreadOperation],
 ) -> Result<DelegatedImport> {
     let (_, operation) = verify_native_operation(converted)?;
+    let active = delegation.scope().body();
+    let original = converter.scope().body();
+    let active_id = active.identity.as_ref().ok_or(Reject::Canonical)?;
+    let converter_id = original.identity.as_ref().ok_or(Reject::Canonical)?;
+    if operation.publisher.as_slice() != original.job_public_key
+        || active.logical_job_id != original.logical_job_id
+        || active.retry_lineage_id != original.retry_lineage_id
+        || active_id.spool_uuid != converter_id.spool_uuid
+        || active_id.spool_genesis_digest != converter_id.spool_genesis_digest
+    {
+        return Err(Reject::KeyRole.into());
+    }
+    let binding = genesis.payload.binding.as_ref().ok_or(Reject::Canonical)?;
+    let binding_digest = contract::signed_genesis_digest(binding)?;
+    let genesis_id = genesis.genesis.id()?;
+    if !active.branch_manifest.iter().any(|b| {
+        b.genesis_authority_digest == binding_digest
+            && b.limit
+                .as_ref()
+                .is_some_and(|b| b.genesis_digest == genesis_id.as_bytes())
+    }) {
+        return Err(Reject::Scope.into());
+    }
     Ok(DelegatedImport::bind(
         signed,
         delegation.scope(),
-        &genesis.verify()?,
+        &genesis.genesis,
+        binding
+            .body
+            .as_ref()
+            .and_then(|b| b.identity.as_ref())
+            .ok_or(Reject::Canonical)?,
         &operation,
         parents,
     )?)
+}
+
+/// Opaque original creation authority. Later owner transfers/renewals do not
+/// replace its creator, account, native signature or first signed binding.
+#[derive(Clone, Debug)]
+pub struct VerifiedImportGenesis {
+    payload: wire::ImportGenesisWitnessV1,
+    original: SignedGenesis,
+    genesis: ThreadGenesis,
+}
+impl VerifiedImportGenesis {
+    pub fn original(&self) -> &SignedGenesis {
+        &self.original
+    }
+    pub fn genesis(&self) -> &ThreadGenesis {
+        &self.genesis
+    }
+    pub fn payload(&self) -> &wire::ImportGenesisWitnessV1 {
+        &self.payload
+    }
 }
 
 /// Independent committed-publication testimony; never job-key executor trust.
@@ -170,7 +221,7 @@ pub fn verify_genesis_payload(
     is_revoked_at_accepted_order: impl Fn(
         heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
     ) -> bool,
-) -> Result<ThreadGenesis> {
+) -> Result<VerifiedImportGenesis> {
     let original = payload.original_genesis.as_ref().ok_or(Reject::Canonical)?;
     let (signed, genesis) = verify_native_genesis(original)?;
     let s = evidence.signed.body.as_ref().ok_or(Reject::Canonical)?;
@@ -226,7 +277,11 @@ pub fn verify_genesis_payload(
     {
         return Err(Reject::Root.into());
     }
-    Ok(genesis)
+    Ok(VerifiedImportGenesis {
+        payload: payload.clone(),
+        original: signed,
+        genesis,
+    })
 }
 
 /// Native causal/ownership closure. It supplies no account authorization;
@@ -243,14 +298,12 @@ pub struct NativeClosure {
 }
 impl NativeClosure {
     pub fn verify(records: &[wire::SignedRecord]) -> Result<Self> {
+        // Individual records retain their wire bounds. The caller stages
+        // closure pages and chooses history depth; admission adds no ceiling.
         use heddle_object_model::object::thread_replication::{
             self as native, ownership_claim::ThreadOwnershipClaim,
             ownership_resolution::ThreadOwnershipResolution,
         };
-        if records.len() > 1024 {
-            return Err(Reject::Bounds.into());
-        }
-        let mut bytes = 0usize;
         let mut result = Self {
             geneses: Default::default(),
             operations: Default::default(),
@@ -259,12 +312,6 @@ impl NativeClosure {
         };
         let mut seen = std::collections::BTreeMap::new();
         for record in records {
-            bytes = bytes
-                .checked_add(record.canonical_record.len())
-                .ok_or(Reject::Bounds)?;
-            if bytes > contract::MAX_BUNDLE_BYTES {
-                return Err(Reject::Bounds.into());
-            }
             let digest = contract::signed_native_digest(record)?;
             if let Some(old) = seen.insert(digest, record) {
                 if old != record {
@@ -432,7 +479,7 @@ pub fn verify_landing_payload(
 ) -> Result<heddle_object_model::object::thread_replication::integration::HostedIntegration> {
     use api::v2::client::Rpc;
     use heddle_object_model::object::{
-        ContentHash,
+        ContentHash, StateId,
         thread_replication::{
             SourceAuthor, ThreadOperationBody,
             metadata::{Control, ThreadControl},
@@ -523,23 +570,24 @@ pub fn verify_landing_payload(
     {
         return Err(Reject::Scope.into());
     }
-    let selected_target = if integration.expected_target_frontier.is_empty() {
-        closure.genesis(&integration.target_thread)?.base
-    } else {
-        let mut states = integration.expected_target_frontier.iter().map(|id| {
-            closure
-                .operation(id)?
-                .source_state()?
-                .map(|s| s.id())
-                .ok_or(Error::Contract(Reject::Scope))
-        });
-        let state = states.next().ok_or(Reject::Scope)??;
-        if states.any(|s| s.is_err() || s.is_ok_and(|s| s != state)) {
-            return Err(Reject::Scope.into());
-        }
-        state
-    };
     use wire::revision_ref::Revision;
+    // The unchanged execution attests frontier CAS; NativeClosure preserves
+    // its complete target ancestry. A multi-head frontier is not necessarily
+    // one State. Keep the user's exact signed selection for review matching.
+    let Some(Revision::State(target)) = body
+        .expected_target
+        .as_ref()
+        .and_then(|r| r.revision.as_ref())
+    else {
+        return Err(Reject::Scope.into());
+    };
+    let selected_target = StateId::from_bytes(
+        target
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| Reject::Canonical)?,
+    );
     if !body.thread.as_ref().is_some_and(|t| t.spool.as_ref().is_some_and(|v|v.id==integration.spool.to_string()) && t.id.as_ref().is_some_and(|id|id.value==integration.source_thread.as_bytes()))
         || !body.target.as_ref().is_some_and(|t|t.spool.as_ref().is_some_and(|v|v.id==integration.spool.to_string()) && t.id.as_ref().is_some_and(|id|id.value==integration.target_thread.as_bytes()))
         || !body.source.as_ref().is_some_and(|r|r.spool.as_ref().is_some_and(|v|v.id==integration.spool.to_string()) && matches!(&r.revision,Some(Revision::State(id)) if id.value==integration.source_revision.as_bytes()))

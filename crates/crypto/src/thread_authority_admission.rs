@@ -1,11 +1,15 @@
 //! Executor-signed testimony with one fixed canonical format, without API or
 //! storage dependencies. Neither a signature nor its carried key creates trust.
+//! HYBRID first admissions additionally retain and verify every native original
+//! and dependency under independently selected witness and accepted owner state.
 use heddle_object_model::object::{
     thread_authority_admission::{FORMAT, ThreadAuthorityAdmission},
     thread_replication::integration::TrustedHostedExecutor,
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "owner-root")]
+pub use crate::import_authority::verify_authority_payload as verify_original_witness;
 use crate::{
     Ed25519Signer, Signer,
     thread_operation::{Error, SignedOperation},

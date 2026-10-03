@@ -1,11 +1,15 @@
 //! Executor-signed testimony with one fixed canonical format, without API or
 //! storage dependencies. Neither a signature nor its carried key creates trust.
+//! HYBRID combines the unchanged native creator/envelope checks with a separate
+//! root-authenticated witness and scoped portable import authority.
 use heddle_object_model::object::{
     thread_genesis_admission::{FORMAT, ThreadGenesisAdmission},
     thread_replication::integration::TrustedHostedExecutor,
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "owner-root")]
+pub use crate::import_authority::verify_genesis_payload as verify_import_witness;
 use crate::{
     Ed25519Signer, Signer,
     thread_operation::{Error, SignedGenesis},
