@@ -2,7 +2,10 @@
 //! Transport authenticates disclosure/delivery separately. This module retains
 //! unchanged originals, resolves each witness under receiver-owned trust, and
 //! commits genesis/content/proof/job associations in the same transaction.
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use api::{
     heddle::api::{common as host, v1alpha2 as wire},
@@ -26,6 +29,7 @@ use rusqlite::{OptionalExtension, params};
 use super::{
     Error, Result, ThreadReplica,
     hosted_trust::{Clock, HostedTrust, TrustTransaction},
+    install_artifacts::InstallArtifacts,
 };
 
 /// Receiver-owned accepted authority lookup. Implementations select verified
@@ -222,9 +226,14 @@ impl ThreadReplica {
         .transpose()
     }
 
-    /// Install a complete bounded import export, including post-renewal history.
-    /// Canonical protobuf is checked before trusting typed fields. Native closure
-    /// objects may be staged in the object store first; no checkout is changed.
+    /// Verify the complete public history and install only selected originals
+    /// and their causal dependencies. A selected genesis requires no conversion.
+    /// The callback must install actual packs/pins/sidecars through its journal;
+    /// any callback or commit-time rejection restores them under the trust lock.
+    /// Public evidence includes the complete post-renewal history.
+    /// Canonical protobuf is checked before trusting typed fields. `store` must
+    /// be an isolated staging store: receives may write source states there.
+    /// Publish its actual pack and sidecars through the callback journal.
     /// A fresh set and receiver clock are mandatory even for exact replay.
     pub fn install_hybrid_import(
         directory: &Path,
@@ -233,6 +242,7 @@ impl ThreadReplica {
         native_records: &[wire::SignedRecord],
         authority: &impl AcceptedAuthority,
         store: &impl ObjectStore,
+        before_commit: impl FnOnce(&mut InstallArtifacts) -> Result<()>,
     ) -> Result<Vec<Self>> {
         if directory.canonicalize()? != trust.directory().canonicalize()? {
             return Err(Error::Hybrid(Reject::Root));
@@ -247,7 +257,7 @@ impl ThreadReplica {
             return Err(Error::Hybrid(Reject::Bounds));
         }
         let signed_set = bundle.witness_set.as_ref().ok_or(Reject::Root)?;
-        let replicas = trust.mutate_validated(
+        let replicas = trust.mutate_with_artifacts(
             signed_set,
             |context| {
                 install_in(
@@ -259,6 +269,8 @@ impl ThreadReplica {
                     context,
                 )
             },
+            |_, now| authority.authorize_import(&bundle, now),
+            before_commit,
             |_, now| authority.authorize_import(&bundle, now),
         )?;
         if let Some(replica) = replicas.first() {
@@ -414,7 +426,7 @@ fn install_in(
         )?;
         delegations.insert(body.delegation_digest.clone(), d);
     }
-    let mut replicas = BTreeMap::new();
+    let mut admissions = BTreeMap::new();
     let mut geneses = BTreeMap::new();
     for payload in &bundle.genesis_witnesses {
         let canonical = hybrid_codec::canonical(payload)?;
@@ -487,20 +499,25 @@ fn install_in(
             },
             |r| authority.native_revoked(s, r),
         )?;
-        retain_statement(context, genesis.genesis().id()?, &evidence)?;
-        let replica = ThreadReplica {
-            path: directory.join(crate::local_metadata::DATABASE_NAME),
-            thread: genesis.genesis().id()?,
-        };
-        replica.create_with_proof_in(
-            context.sql(),
-            genesis.original(),
-            &payload.creator_authority_envelope,
-            None,
+        admit_boundary_originals(
+            &mut admissions,
+            payload.boundary_acceptance.as_slice(),
+            &originals,
+            &evidence,
         )?;
-        retain_bundle(context, &replica.thread, bundle)?;
-        geneses.insert(replica.thread, genesis);
-        replicas.insert(replica.thread, replica);
+        let thread = genesis.genesis().id()?;
+        admissions.insert(
+            thread,
+            (
+                payload
+                    .original_genesis
+                    .as_ref()
+                    .ok_or(Reject::Canonical)?
+                    .clone(),
+                evidence,
+            ),
+        );
+        geneses.insert(thread, genesis);
         context.retain_delegation(&d)?;
         delegations
             .entry(contract::signed_delegation_digest(signed)?)
@@ -623,7 +640,23 @@ fn install_in(
                 },
                 |r| authority.native_revoked(s, r),
             )?;
-            retain_statement(context, genesis.genesis().id()?, &evidence)?;
+            admit_boundary_originals(
+                &mut admissions,
+                payload.boundary_acceptance.as_slice(),
+                &originals,
+                &evidence,
+            )?;
+            admissions.insert(
+                genesis.genesis().id()?,
+                (
+                    payload
+                        .original_genesis
+                        .as_ref()
+                        .ok_or(Reject::Canonical)?
+                        .clone(),
+                    evidence,
+                ),
+            );
             continue;
         }
         if s.purpose == 3 {
@@ -693,6 +726,14 @@ fn install_in(
             verification::verify_authority_payload(p, &evidence, &closure, &native, |r| {
                 authority.native_revoked(s, r)
             })?;
+            admit_boundary_originals(
+                &mut admissions,
+                &p.boundary_acceptances,
+                &originals,
+                &evidence,
+            )?;
+            let record = p.original.as_ref().ok_or(Reject::Canonical)?;
+            admissions.insert(native_subject(record)?.0, (record.clone(), evidence));
         } else {
             let p = bundle
                 .landing_witnesses
@@ -702,7 +743,34 @@ fn install_in(
             verification::verify_landing_payload(p, &evidence, &closure, &native, |r| {
                 authority.native_revoked(s, r)
             })?;
+            for record in p
+                .execution
+                .iter()
+                .chain(p.source_operation.iter())
+                .chain(p.review_evidence.iter())
+            {
+                admissions.insert(
+                    native_subject(record)?.0,
+                    (record.clone(), evidence.clone()),
+                );
+            }
         }
+    }
+    // Index already verified originals once. Complete public histories can
+    // carry many slots with no requested converted counterpart.
+    let mut native_frontiers = BTreeMap::new();
+    for record in originals
+        .iter()
+        .filter(|record| record.format == objects::object::thread_replication::OPERATION_FORMAT)
+    {
+        let id = ContentHash::compute_typed(&record.format, &record.canonical_record);
+        let op = closure.operation(&id)?;
+        let frontier = contract::frontier_digest(&wire::ImportFrontierV1 {
+            format_version: 1,
+            thread_id: op.thread.as_bytes().to_vec(),
+            operation_ids: vec![id.as_bytes().to_vec()],
+        })?;
+        native_frontiers.insert(frontier, record);
     }
     for operation in &bundle.operations {
         let body = operation.body.as_ref().ok_or(Reject::Canonical)?;
@@ -715,24 +783,16 @@ fn install_in(
                 .try_into()
                 .map_err(|_| Reject::Canonical)?,
         );
-        let replica = replicas.get(&thread).ok_or(Reject::Scope)?;
         let original = geneses.get(&thread).ok_or(Reject::Scope)?;
-        let mut converted = None;
-        for record in native_records {
-            let (_, op) = verification::verify_native_operation(record)?;
-            if op.thread == thread
-                && contract::frontier_digest(&wire::ImportFrontierV1 {
-                    format_version: 1,
-                    thread_id: thread.as_bytes().to_vec(),
-                    operation_ids: vec![op.id()?.as_bytes().to_vec()],
-                })? == body.resulting_frontier_digest
-            {
-                converted = Some(record);
-                break;
-            }
-        }
-        let converted = converted.ok_or(Reject::Scope)?;
-        let (native_signed, native_operation) = verification::verify_native_operation(converted)?;
+        // Public history authenticates all publications and slots, even when
+        // this carrier does not request their converted native counterparts.
+        context.retain_delegation(d)?;
+        context.retain_slot(operation)?;
+        let Some(converted) = native_frontiers.get(&body.resulting_frontier_digest) else {
+            continue;
+        };
+        let converted = *converted;
+        let (_, native_operation) = verification::verify_native_operation(converted)?;
         let converter = delegations
             .values()
             .find(|v| {
@@ -759,24 +819,250 @@ fn install_in(
             context.set(),
             context.now_millis(),
         )?;
-        context.retain_delegation(d)?;
-        context.retain_slot(operation)?;
-        retain_statement(context, native_operation.id()?, &evidence)?;
-        if replica.receive_verified_in(
-            context.sql(),
-            &native_signed,
-            &native_operation,
-            store,
-            false,
-            None,
-            false,
-        )? != Admission::Accepted
+        admissions.insert(native_operation.id()?, (converted.clone(), evidence));
+    }
+    let selected = selected_originals(native_records, &originals)?;
+    // Signature verification is not admission. Match exact originals, including
+    // their signatures, before any receives or filesystem callback can run.
+    for (id, record) in &selected {
+        if !admissions
+            .get(id)
+            .is_some_and(|(admitted, _)| admitted == record)
         {
-            return Err(Error::Hybrid(Reject::Scope));
+            return Err(Error::Hybrid(Reject::ImportPermission));
         }
     }
-    Ok(replicas.into_values().collect::<Vec<_>>())
+    let mut replicas = BTreeMap::new();
+    for (id, record) in &selected {
+        if record.format != objects::object::thread_replication::GENESIS_FORMAT {
+            continue;
+        }
+        let genesis = geneses.get(id).ok_or(Reject::Scope)?;
+        let replica = ThreadReplica {
+            path: directory.join(crate::local_metadata::DATABASE_NAME),
+            thread: *id,
+        };
+        replica.create_with_proof_in(
+            context.sql(),
+            genesis.original(),
+            &genesis.payload().creator_authority_envelope,
+            None,
+        )?;
+        retain_bundle(context, id, bundle)?;
+        replicas.insert(*id, replica);
+    }
+    // Dependency order comes from the signed native DAG, never carrier order.
+    // Cache edges once; a long selected chain must not repeatedly decode or
+    // authenticate every still-pending original.
+    let mut ready = BTreeSet::new();
+    let mut remaining = BTreeMap::new();
+    let mut dependents: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
+    for (id, record) in &selected {
+        let (_, thread, dependencies) = native_subject(record)?;
+        let dependencies: BTreeSet<_> = dependencies.into_iter().collect();
+        if dependencies.is_empty() {
+            ready.insert(*id);
+        }
+        remaining.insert(*id, (thread, dependencies.len()));
+        for dependency in dependencies {
+            dependents.entry(dependency).or_default().push(*id);
+        }
+    }
+    let mut pending = selected;
+    while let Some(id) = ready.pop_first() {
+        let (thread, _) = remaining.remove(&id).ok_or(Reject::Scope)?;
+        let record = pending.remove(&id).ok_or(Reject::Scope)?;
+        let replica = replicas.get(&thread).ok_or(Reject::Scope)?;
+        if let Some((_, evidence)) = admissions.get(&id) {
+            retain_statement(context, id, evidence)?;
+        }
+        match record.format.as_str() {
+            objects::object::thread_replication::GENESIS_FORMAT => {}
+            objects::object::thread_replication::OPERATION_FORMAT => {
+                let (signed, operation) = verification::verify_native_operation(&record)?;
+                replica.validate_reference_capture_in(
+                    context.sql(),
+                    closure.genesis(&thread)?,
+                    &operation,
+                    store,
+                )?;
+                if replica.receive_verified_in(
+                    context.sql(),
+                    &signed,
+                    &operation,
+                    store,
+                    false,
+                    None,
+                    false,
+                )? != Admission::Accepted
+                {
+                    return Err(Error::Hybrid(Reject::Scope));
+                }
+            }
+            objects::object::thread_replication::ownership_claim::FORMAT => {
+                replica.install_verified_claim_in(context.sql(), &record)?;
+            }
+            objects::object::thread_replication::ownership_resolution::FORMAT => {
+                replica.install_verified_resolution_in(context.sql(), &record)?;
+            }
+            _ => return Err(Error::Hybrid(Reject::Version)),
+        }
+        if let Some(children) = dependents.remove(&id) {
+            for child in children {
+                let (_, count) = remaining.get_mut(&child).ok_or(Reject::Scope)?;
+                *count = count.checked_sub(1).ok_or(Reject::Scope)?;
+                if *count == 0 {
+                    ready.insert(child);
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Err(Error::Hybrid(Reject::Scope));
+    }
+    Ok(replicas.into_values().collect())
 }
+
+// Called only after the native payload verifier authenticates the complete
+// boundary selection, each original receipt and the accepting authority.
+// Each selected dependency still needs its own exact verified receipt.
+fn admit_boundary_originals(
+    admissions: &mut BTreeMap<ContentHash, (wire::SignedRecord, WitnessEvidence)>,
+    boundaries: &[wire::ImportBoundaryAcceptanceV1],
+    originals: &[wire::SignedRecord],
+    evidence: &WitnessEvidence,
+) -> Result<()> {
+    use objects::object::{
+        thread_authority_admission::{OriginalAuthoritySubject, ThreadAuthorityAdmission},
+        thread_genesis_admission::ThreadGenesisAdmission,
+    };
+    for receipt in boundaries
+        .iter()
+        .flat_map(|boundary| &boundary.original_receipts)
+    {
+        let (id, format) = match receipt.format.as_str() {
+            "heddle-thread-genesis-admission-v2" => (
+                ThreadGenesisAdmission::decode(&receipt.canonical_record)?.thread,
+                objects::object::thread_replication::GENESIS_FORMAT,
+            ),
+            "heddle-thread-authority-admission-v3" => {
+                match ThreadAuthorityAdmission::decode(&receipt.canonical_record)?.subject {
+                    OriginalAuthoritySubject::Operation(id) => {
+                        (id, objects::object::thread_replication::OPERATION_FORMAT)
+                    }
+                    OriginalAuthoritySubject::OwnershipClaim(id) => (
+                        id,
+                        objects::object::thread_replication::ownership_claim::FORMAT,
+                    ),
+                    OriginalAuthoritySubject::OwnershipResolution(id) => (
+                        id,
+                        objects::object::thread_replication::ownership_resolution::FORMAT,
+                    ),
+                }
+            }
+            _ => return Err(Error::Hybrid(Reject::BoundaryAcceptance)),
+        };
+        let original = originals
+            .iter()
+            .filter(|record| record.format == format)
+            .find(|record| native_subject(record).is_ok_and(|subject| subject.0 == id))
+            .ok_or(Reject::BoundaryAcceptance)?;
+        admissions
+            .entry(id)
+            .or_insert_with(|| (original.clone(), evidence.clone()));
+    }
+    Ok(())
+}
+
+/// IDs and required native dependencies; signatures are checked by NativeClosure.
+fn native_subject(
+    record: &wire::SignedRecord,
+) -> Result<(ContentHash, ContentHash, Vec<ContentHash>)> {
+    use objects::object::thread_replication::{self as native, ThreadOperationBody};
+    let (id, thread, mut dependencies) = match record.format.as_str() {
+        native::GENESIS_FORMAT => {
+            let genesis = native::ThreadGenesis::decode(&record.canonical_record)?;
+            (genesis.id()?, genesis.id()?, Vec::new())
+        }
+        native::OPERATION_FORMAT => {
+            let operation = native::ThreadOperation::decode(&record.canonical_record)?;
+            let mut dependencies = operation.parents.iter().copied().collect::<Vec<_>>();
+            if let ThreadOperationBody::Integration(bytes) = &operation.body {
+                let landing = native::integration::HostedIntegration::decode(bytes)?;
+                dependencies.push(landing.source_operation);
+                dependencies.extend(landing.review_evidence);
+            }
+            (operation.id()?, operation.thread, dependencies)
+        }
+        native::ownership_claim::FORMAT => {
+            let claim =
+                native::ownership_claim::ThreadOwnershipClaim::decode(&record.canonical_record)?;
+            (
+                claim.id()?,
+                claim.thread,
+                claim.source_frontier.into_iter().collect(),
+            )
+        }
+        native::ownership_resolution::FORMAT => {
+            let resolution = native::ownership_resolution::ThreadOwnershipResolution::decode(
+                &record.canonical_record,
+            )?;
+            let dependencies = resolution
+                .conflicting_claims
+                .iter()
+                .copied()
+                .chain(resolution.frontier.iter().copied())
+                .collect();
+            (resolution.id()?, resolution.thread, dependencies)
+        }
+        _ => return Err(Error::Hybrid(Reject::Version)),
+    };
+    if id != thread {
+        dependencies.push(thread);
+    }
+    Ok((id, thread, dependencies))
+}
+
+fn selected_originals(
+    requested: &[wire::SignedRecord],
+    originals: &[wire::SignedRecord],
+) -> Result<BTreeMap<ContentHash, wire::SignedRecord>> {
+    let mut available = BTreeMap::new();
+    for record in originals {
+        // Boundary receipts are public evidence, rather than native subjects.
+        if matches!(
+            record.format.as_str(),
+            "heddle-original-boundary-acceptance-v1"
+                | "heddle-thread-genesis-admission-v2"
+                | "heddle-thread-authority-admission-v3"
+        ) {
+            continue;
+        }
+        let (id, _, _) = native_subject(record)?;
+        if available
+            .insert(id, record)
+            .is_some_and(|previous| previous != record)
+        {
+            return Err(Error::Hybrid(Reject::Canonical));
+        }
+    }
+    let mut pending = requested.to_vec();
+    let mut selected = BTreeMap::new();
+    while let Some(record) = pending.pop() {
+        let (id, _, dependencies) = native_subject(&record)?;
+        if let Some(previous) = selected.insert(id, record.clone()) {
+            if previous != record {
+                return Err(Error::Hybrid(Reject::Canonical));
+            }
+            continue;
+        }
+        for dependency in dependencies {
+            pending.push((*available.get(&dependency).ok_or(Reject::Scope)?).clone());
+        }
+    }
+    Ok(selected)
+}
+
 fn replica_genesis(
     context: &TrustTransaction<'_>,
     thread: ContentHash,

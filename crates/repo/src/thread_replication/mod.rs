@@ -17,6 +17,7 @@ mod genesis_admission;
 pub mod hosted_trust;
 #[cfg(test)]
 mod hosted_trust_tests;
+pub mod install_artifacts;
 mod integration;
 pub mod listing;
 mod local;

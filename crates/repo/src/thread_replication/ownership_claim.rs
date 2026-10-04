@@ -416,25 +416,7 @@ impl ThreadReplica {
                 }
             }
         }
-        transaction.execute("INSERT INTO thread_owner_claims(thread,id,canonical,local_signature,acceptance_signature,account,admission,admission_signature) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![self.thread.as_bytes(), id.as_bytes(), signed.canonical, signed.local_signature, signed.acceptance_signature, claim.account()?.to_string(), admission.map(|value|value.canonical.as_slice()), admission.map(|value|value.signature.as_slice())])?;
-        if let Some(receipt) = admission {
-            super::boundary_evidence::persist(
-                &transaction,
-                &receipt.canonical,
-                receipt.boundary_acceptance.as_deref(),
-            )?;
-        }
-        for head in &claim.source_frontier {
-            transaction.execute(
-                "INSERT INTO thread_owner_claim_frontier(thread,claim,operation) VALUES(?1,?2,?3)",
-                params![self.thread.as_bytes(), id.as_bytes(), head.as_bytes()],
-            )?;
-        }
-        transaction.execute("WITH RECURSIVE history(id) AS (SELECT operation FROM thread_owner_claim_frontier WHERE thread=?1 AND claim=?2 UNION SELECT p.parent FROM parents p JOIN history h ON p.child=h.id JOIN operations o ON o.id=p.parent AND o.thread=?1 AND o.status=1) INSERT OR IGNORE INTO thread_owner_claim_history(thread,claim,operation) SELECT ?1,?2,id FROM history", params![self.thread.as_bytes(),id.as_bytes()])?;
-        transaction.execute(
-            "UPDATE threads SET generation=generation+1 WHERE id=?1",
-            [self.thread.as_bytes()],
-        )?;
+        self.retain_claim_in(&transaction, signed, &claim, admission)?;
         if count == 0
             && let Some((command, response)) = command
         {
@@ -450,5 +432,81 @@ impl ThreadReplica {
             ));
         }
         Ok((id, command.map(|(_, response)| response.to_vec())))
+    }
+    // HYBRID has already verified each original's accepted authority. Retain
+    // the claim under that same trust transaction, including its cutoff DAG.
+    pub(super) fn install_verified_claim_in(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        record: &api::heddle::api::v1alpha2::SignedRecord,
+    ) -> Result<()> {
+        let claim = ThreadOwnershipClaim::decode(&record.canonical_record)?;
+        let signature = |key: &[u8]| {
+            record
+                .signatures
+                .iter()
+                .find(|s| s.public_key == key)
+                .map(|s| s.signature.clone())
+                .ok_or(super::Error::Hybrid(api::hybrid_codec::Reject::Signature))
+        };
+        let signed = SignedOwnershipClaim {
+            canonical: record.canonical_record.clone(),
+            local_signature: signature(&claim.prior_local_key)?,
+            acceptance_signature: signature(&claim.accepting_publisher)?,
+        };
+        let claim = signed.verify()?;
+        let genesis: Vec<u8> = tx.query_row(
+            "SELECT genesis FROM threads WHERE id=?1",
+            [self.thread.as_bytes()],
+            |r| r.get(0),
+        )?;
+        claim.validate_genesis(&ThreadGenesis::decode(&genesis)?)?;
+        let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM thread_owner_claims WHERE thread=?1 AND id=?2 AND canonical=?3 AND local_signature=?4 AND acceptance_signature=?5)", params![self.thread.as_bytes(),claim.id()?.as_bytes(),signed.canonical,signed.local_signature,signed.acceptance_signature], |r| r.get(0))?;
+        if present {
+            return Ok(());
+        }
+        let blocked: bool = tx.query_row("SELECT (SELECT count(*) FROM thread_owner_claims WHERE thread=?1)>=2 OR EXISTS(SELECT 1 FROM thread_owner_resolutions WHERE thread=?1)", [self.thread.as_bytes()], |r| r.get(0))?;
+        if blocked {
+            return Err(Error::Invalid(
+                "ownership claims require explicit resolution".into(),
+            ));
+        }
+        for head in &claim.source_frontier {
+            let accepted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND thread=?2 AND facet=1 AND status=1)",params![head.as_bytes(),self.thread.as_bytes()], |r| r.get(0))?;
+            if !accepted {
+                return Err(Error::Hybrid(api::hybrid_codec::Reject::Scope));
+            }
+        }
+        self.retain_claim_in(tx, &signed, &claim, None)
+    }
+
+    fn retain_claim_in(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        signed: &SignedOwnershipClaim,
+        claim: &ThreadOwnershipClaim,
+        admission: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    ) -> Result<()> {
+        let id = claim.id()?;
+        transaction.execute("INSERT INTO thread_owner_claims(thread,id,canonical,local_signature,acceptance_signature,account,admission,admission_signature) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![self.thread.as_bytes(), id.as_bytes(), signed.canonical, signed.local_signature, signed.acceptance_signature, claim.account()?.to_string(), admission.map(|value|value.canonical.as_slice()), admission.map(|value|value.signature.as_slice())])?;
+        if let Some(receipt) = admission {
+            super::boundary_evidence::persist(
+                transaction,
+                &receipt.canonical,
+                receipt.boundary_acceptance.as_deref(),
+            )?;
+        }
+        for head in &claim.source_frontier {
+            transaction.execute(
+                "INSERT INTO thread_owner_claim_frontier(thread,claim,operation) VALUES(?1,?2,?3)",
+                params![self.thread.as_bytes(), id.as_bytes(), head.as_bytes()],
+            )?;
+        }
+        transaction.execute("WITH RECURSIVE history(id) AS (SELECT operation FROM thread_owner_claim_frontier WHERE thread=?1 AND claim=?2 UNION SELECT p.parent FROM parents p JOIN history h ON p.child=h.id JOIN operations o ON o.id=p.parent AND o.thread=?1 AND o.status=1) INSERT OR IGNORE INTO thread_owner_claim_history(thread,claim,operation) SELECT ?1,?2,id FROM history", params![self.thread.as_bytes(),id.as_bytes()])?;
+        transaction.execute(
+            "UPDATE threads SET generation=generation+1 WHERE id=?1",
+            [self.thread.as_bytes()],
+        )?;
+        Ok(())
     }
 }

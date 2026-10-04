@@ -156,9 +156,16 @@ impl ThreadReplica {
         operation: &ThreadOperation,
         store: &impl ObjectStore,
     ) -> Result<()> {
-        let genesis = self.genesis()?;
+        self.validate_reference_capture_in(&self.connect()?, &self.genesis()?, operation, store)
+    }
+    pub(super) fn validate_reference_capture_in(
+        &self,
+        connection: &rusqlite::Connection,
+        genesis: &objects::object::thread_replication::ThreadGenesis,
+        operation: &ThreadOperation,
+        store: &impl ObjectStore,
+    ) -> Result<()> {
         if let Some(state) = operation.source_state()? {
-            let connection = self.connect()?;
             for parent in &state.parents {
                 let parent_thread = if *parent == genesis.base {
                     genesis.parent.unwrap_or(self.thread)
@@ -177,12 +184,12 @@ impl ThreadReplica {
                 }
             }
         }
-        if let Some(proof) = operation.reference_proof(&genesis)? {
+        if let Some(proof) = operation.reference_proof(genesis)? {
             capture::closure(&Source(store), proof.descriptor, &proof.scope, proof.state)?;
         } else if let Some(state) = operation.source_state()?
             && let Some(parent) = genesis.parent
             && state.parents.contains(&genesis.base)
-            && !descriptor_rows_at(&self.connect()?, parent, genesis.base)?
+            && !descriptor_rows_at(connection, parent, genesis.base)?
                 .1
                 .is_empty()
         {

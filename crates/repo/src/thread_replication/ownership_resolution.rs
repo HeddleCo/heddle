@@ -244,21 +244,7 @@ impl ThreadReplica {
                 }
             }
         }
-        tx.execute(
-            "INSERT INTO thread_owner_resolutions(thread,id,winner,canonical,local_signature,acceptance_signature,admission,admission_signature) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![self.thread.as_bytes(), id.as_bytes(), value.winning_claim.as_bytes(), signed.canonical, signed.local_signature, signed.acceptance_signature, admission.map(|v| v.canonical.as_slice()), admission.map(|v| v.signature.as_slice())],
-        )?;
-        if let Some(receipt) = admission {
-            super::boundary_evidence::persist(
-                &tx,
-                &receipt.canonical,
-                receipt.boundary_acceptance.as_deref(),
-            )?;
-        }
-        tx.execute(
-            "UPDATE threads SET generation=generation+1 WHERE id=?1",
-            [self.thread.as_bytes()],
-        )?;
+        self.retain_resolution_in(&tx, signed, &value, admission)?;
         if let Some((command, response)) = command {
             crate::device_operations::receipt(&tx, command, response)
                 .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -267,5 +253,108 @@ impl ThreadReplica {
         drop(connection);
         self.notify_committed()?;
         Ok(id)
+    }
+    pub(super) fn install_verified_resolution_in(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        record: &api::heddle::api::v1alpha2::SignedRecord,
+    ) -> Result<()> {
+        let value = ThreadOwnershipResolution::decode(&record.canonical_record)?;
+        let signature = |key: &[u8]| {
+            record
+                .signatures
+                .iter()
+                .find(|s| s.public_key == key)
+                .map(|s| s.signature.clone())
+                .ok_or(super::Error::Hybrid(api::hybrid_codec::Reject::Signature))
+        };
+        let signed = SignedOwnershipResolution {
+            canonical: record.canonical_record.clone(),
+            local_signature: signature(&value.local_owner)?,
+            acceptance_signature: signature(&value.accepting_publisher)?,
+        };
+        let genesis: Vec<u8> = tx.query_row(
+            "SELECT genesis FROM threads WHERE id=?1",
+            [self.thread.as_bytes()],
+            |r| r.get(0),
+        )?;
+        value.validate_genesis(&objects::object::thread_replication::ThreadGenesis::decode(
+            &genesis,
+        )?)?;
+        let existing: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = tx.query_row("SELECT canonical,local_signature,acceptance_signature FROM thread_owner_resolutions WHERE thread=?1",[self.thread.as_bytes()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some(existing) = existing {
+            if existing
+                == (
+                    signed.canonical.clone(),
+                    signed.local_signature.clone(),
+                    signed.acceptance_signature.clone(),
+                )
+            {
+                return Ok(());
+            }
+            return Err(Error::Invalid(
+                "Thread ownership already resolved differently".into(),
+            ));
+        }
+        let mut query = tx.prepare("SELECT id,canonical,local_signature,acceptance_signature FROM thread_owner_claims WHERE thread=?1 ORDER BY id")?;
+        let claims = query
+            .query_map([self.thread.as_bytes()], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    crypto::thread_ownership_claim::SignedOwnershipClaim {
+                        canonical: r.get(1)?,
+                        local_signature: r.get(2)?,
+                        acceptance_signature: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let ids = claims
+            .iter()
+            .map(|(id, _)| super::hash(id))
+            .collect::<Result<BTreeSet<_>>>()?;
+        if ids != value.conflicting_claims {
+            return Err(Error::Invalid(
+                "resolution differs from complete stored claim set".into(),
+            ));
+        }
+        let winner = claims
+            .iter()
+            .find(|(id, _)| id.as_slice() == value.winning_claim.as_bytes())
+            .ok_or(api::hybrid_codec::Reject::Scope)?;
+        signed.verify(&winner.1.verify()?)?;
+        for head in &value.frontier {
+            let accepted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND thread=?2 AND facet=1 AND status=1)",params![head.as_bytes(),self.thread.as_bytes()], |r| r.get(0))?;
+            if !accepted {
+                return Err(Error::Hybrid(api::hybrid_codec::Reject::Scope));
+            }
+        }
+        self.retain_resolution_in(tx, &signed, &value, None)
+    }
+
+    fn retain_resolution_in(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        signed: &SignedOwnershipResolution,
+        value: &ThreadOwnershipResolution,
+        admission: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    ) -> Result<()> {
+        let id = value.id()?;
+        tx.execute(
+            "INSERT INTO thread_owner_resolutions(thread,id,winner,canonical,local_signature,acceptance_signature,admission,admission_signature) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![self.thread.as_bytes(), id.as_bytes(), value.winning_claim.as_bytes(), signed.canonical, signed.local_signature, signed.acceptance_signature, admission.map(|v| v.canonical.as_slice()), admission.map(|v| v.signature.as_slice())],
+        )?;
+        if let Some(receipt) = admission {
+            super::boundary_evidence::persist(
+                tx,
+                &receipt.canonical,
+                receipt.boundary_acceptance.as_deref(),
+            )?;
+        }
+        tx.execute(
+            "UPDATE threads SET generation=generation+1 WHERE id=?1",
+            [self.thread.as_bytes()],
+        )?;
+        Ok(())
     }
 }

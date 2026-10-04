@@ -19,9 +19,11 @@ use api::{
     witness_trust::{self, SetExpectation, VerifiedWitnessSet},
 };
 use prost::Message;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
-use super::{Error, Result};
+use super::{Error, Result, install_artifacts::InstallArtifacts};
 
 pub(crate) const SCHEMA:&str="
 CREATE TABLE IF NOT EXISTS hosted_witness_trust(
@@ -41,6 +43,17 @@ pub struct RootSelection {
     pub authority: String,
     pub root_id: String,
     pub public_key: [u8; 32],
+}
+
+/// Read-only preparation context. `previous` retains authenticated history,
+/// including expired sets; it never authorizes admission. `mutate` reloads and
+/// verifies the newest durable trust after asynchronous proof lookup.
+pub struct TrustSnapshot {
+    pub root: RootSelection,
+    pub root_epoch: u64,
+    pub previous: Option<VerifiedWitnessSet>,
+    pub clock_floor_millis: i64,
+    pub known_job_associations: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Receiver clock. Callers must fail if trustworthy wall time is unavailable.
@@ -141,6 +154,65 @@ impl<C: Clock> HostedTrust<C> {
         })
     }
 
+    pub fn snapshot(&self) -> Result<TrustSnapshot> {
+        let mut anchor = self.anchor.lock().map_err(|_| Error::HostedClock)?;
+        let mut connection = Connection::open_with_flags(
+            self.directory.join(crate::local_metadata::DATABASE_NAME),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let tx = connection.transaction()?;
+        let row: TrustRow = tx.query_row("SELECT root_id,root_key,root_epoch,history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1", [&self.authority], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+        let now = self.clock.now_millis()?;
+        let elapsed = self.clock.elapsed_millis()?;
+        if now < row.6 {
+            return Err(Error::HostedClock);
+        }
+        if let Some(last) = *anchor {
+            require_clock_progress(last, (now, elapsed))?;
+        }
+        let associations = job_associations(&tx)?;
+        let jobs = associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let root_epoch = u64::try_from(row.2).map_err(|_| Error::Hybrid(Reject::Bounds))?;
+        let previous = row
+            .5
+            .as_ref()
+            .map(|bytes| {
+                let signed: SignedHostedWitnessSetV1 =
+                    hybrid_codec::strict_decode(bytes, witness_trust::MAX_SET_BYTES)?;
+                Ok::<_, Error>(witness_trust::restore_history_snapshot(
+                    &signed,
+                    &SetExpectation {
+                        authority: &self.authority,
+                        root_id: &row.3,
+                        root_public_key: &row.4,
+                        root_epoch,
+                        now_unix_millis: now,
+                        clock_floor_unix_millis: row.6,
+                        known_job_keys: &jobs,
+                    },
+                )?)
+            })
+            .transpose()?;
+        *anchor = Some((now, elapsed));
+        Ok(TrustSnapshot {
+            root: RootSelection {
+                authority: self.authority.clone(),
+                root_id: row.0,
+                public_key: row
+                    .1
+                    .try_into()
+                    .map_err(|_| Error::Hybrid(Reject::Bounds))?,
+            },
+            root_epoch,
+            previous,
+            clock_floor_millis: row.6,
+            known_job_associations: associations,
+        })
+    }
+
     /// Authenticate the fresh set and execute a native mutation under one
     /// receiver trust lock/transaction. Errors roll back trust and content.
     pub fn mutate<T>(
@@ -159,7 +231,19 @@ impl<C: Clock> HostedTrust<C> {
         mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
         validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
     ) -> Result<T> {
+        self.mutate_with_artifacts(signed, mutation, |_, _| Ok(()), |_| Ok(()), validate_commit)
+    }
+
+    pub(super) fn mutate_with_artifacts<T>(
+        &self,
+        signed: &SignedHostedWitnessSetV1,
+        mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
+        validate_install: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
+        before_commit: impl FnOnce(&mut InstallArtifacts) -> Result<()>,
+        validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
+    ) -> Result<T> {
         let mut anchor = self.anchor.lock().map_err(|_| Error::HostedClock)?;
+        let mut artifacts = InstallArtifacts::default();
         let mut connection = crate::local_metadata::open(&self.directory)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row:TrustRow=tx.query_row("SELECT root_id,root_key,root_epoch,history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1",[&self.authority],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
@@ -207,32 +291,55 @@ impl<C: Clock> HostedTrust<C> {
             associations,
         };
         let result = mutation(&context)?;
-        // Expiry and receiver-clock changes during verification cannot leave
-        // an earlier opaque context authorizing the eventual durable commit.
-        let commit_now = self.clock.now_millis()?;
-        let commit_elapsed = self.clock.elapsed_millis()?;
-        require_clock_progress((now, elapsed), (commit_now, commit_elapsed))?;
-        witness_trust::verify_set(
-            signed,
-            &SetExpectation {
-                now_unix_millis: commit_now,
-                ..expected
-            },
-            Some(&set),
-        )?;
-        // Signature verification can itself take time. Sample again after it,
-        // retaining millisecond freshness for the final current-access hook.
-        let final_now = self.clock.now_millis()?;
-        let final_elapsed = self.clock.elapsed_millis()?;
-        require_clock_progress((commit_now, commit_elapsed), (final_now, final_elapsed))?;
-        if final_now < set.body().issued_at_unix_millis
-            || final_now >= set.body().valid_until_unix_millis
+        let install_now = self.clock.now_millis()?;
+        let install_elapsed = self.clock.elapsed_millis()?;
+        require_clock_progress((now, elapsed), (install_now, install_elapsed))?;
+        if install_now < set.body().issued_at_unix_millis
+            || install_now >= set.body().valid_until_unix_millis
         {
             return Err(Error::Hybrid(Reject::Expired));
         }
-        tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),final_now])?;
-        validate_commit(&context, final_now)?;
-        tx.commit()?;
+        validate_install(&context, install_now)?;
+        let committed = (|| {
+            before_commit(&mut artifacts)?;
+            // Expiry and receiver-clock changes during verification cannot leave
+            // an earlier opaque context authorizing the eventual durable commit.
+            let commit_now = self.clock.now_millis()?;
+            let commit_elapsed = self.clock.elapsed_millis()?;
+            require_clock_progress((install_now, install_elapsed), (commit_now, commit_elapsed))?;
+            witness_trust::verify_set(
+                signed,
+                &SetExpectation {
+                    now_unix_millis: commit_now,
+                    ..expected
+                },
+                Some(&set),
+            )?;
+            // Signature verification can itself take time. Sample again after it,
+            // retaining millisecond freshness for the final current-access hook.
+            let final_now = self.clock.now_millis()?;
+            let final_elapsed = self.clock.elapsed_millis()?;
+            require_clock_progress((commit_now, commit_elapsed), (final_now, final_elapsed))?;
+            if final_now < set.body().issued_at_unix_millis
+                || final_now >= set.body().valid_until_unix_millis
+            {
+                return Err(Error::Hybrid(Reject::Expired));
+            }
+            tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),final_now])?;
+            validate_commit(&context, final_now)?;
+            Ok((final_now, final_elapsed))
+        })();
+        let (final_now, final_elapsed) = match committed {
+            Ok(time) => time,
+            Err(error) => {
+                artifacts.rollback()?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = tx.commit() {
+            artifacts.rollback()?;
+            return Err(error.into());
+        }
         *anchor = Some((final_now, final_elapsed));
         Ok(result)
     }
