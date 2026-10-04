@@ -2926,6 +2926,7 @@ dependencies = [
  "heddle-api",
  "heddle-biscuit-verifier",
  "hex",
+ "js-sys",
  "p256 0.14.0",
  "prost 0.14.1",
  "serde",

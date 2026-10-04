@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- PR #1965 review fixes: validate original JS bigint types and signed/unsigned ranges before WASM conversion; exclude all verified owner-history authority keys when a policy introduces revocations; use the general 256-transition import bound and restore the 4096 policy-revocation bound. Keep the alpha.21 API pin; alpha.23 error mapping and dependency migration remain coordinated release work.
+
+- HYBRID Part 3 (#1961, weft#2469): move complete signed Spool policy verification and tests from weft into the public Rust `policy` API; reuse it for import provenance. Expose production WASM transfer/audit, resource-keyring, self/delegated genesis and policy-chain APIs with typed JS objects and error codes. Scope historical policy keys to verified ownership phases. Publish `@heddleco/capability-verifier-wasm` to GitHub Packages from the stable Heddle release workflow at the matching workspace version; build generated artifacts in CI.
+
 - Adopt heddle-api 0.31.0-alpha.21 and the published boundary vectors. Reject witness and permanently known job keys in delegator/user positions, preserve milliseconds for historical freshness, and exercise the public import JS/WASM binding against native digests and rejection reasons. Release with the workspace and npm package at 0.28.8 (#1961, #1964). Alpha.21 (api#322) revises undeployed Prepare/Commit in place; completed signing layouts and the alpha.20 boundary binding are unchanged. Part 2 owns the client/RPC integration.
 
 - Adopt heddle-api 0.31.0-alpha.19 (PlatformAdminService checks, notification contract, identity account management; additive) and release with the workspace and npm package at 0.28.7; no verifier behavior change.
