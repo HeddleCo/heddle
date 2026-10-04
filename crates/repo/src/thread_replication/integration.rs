@@ -1,9 +1,6 @@
-//! Persisted receiver-owned hosted executor pins. Incoming records cannot add a
-//! pin, and an immutable Spool genesis cannot be replaced under the same UUID.
-use objects::object::{
-    ContentHash,
-    thread_replication::{ThreadOperation, integration::TrustedHostedExecutor},
-};
+//! Hosted execution requires fresh receiver-selected witness evidence.
+//! Bare executor keys and stored endpoint pins cannot authorize installation.
+use objects::object::thread_replication::{ThreadOperation, integration::TrustedHostedExecutor};
 use rusqlite::{OptionalExtension, params};
 
 use super::{Error, Result, ThreadReplica};
@@ -14,40 +11,10 @@ type LocalIntegrationSourceRow = (Vec<u8>, Vec<u8>, i32, Vec<u8>);
 
 impl ThreadReplica {
     /// Called only by Repository's verified owner-genesis configuration seam.
-    pub(crate) fn pin_hosted_executor(&self, trust: &TrustedHostedExecutor) -> Result<()> {
-        if self.genesis()?.spool != trust.spool.to_string() {
-            return Err(Error::Invalid(
-                "executor pin belongs to another Thread Spool".into(),
-            ));
-        }
-        let mut connection = self.connect()?;
-        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let previous: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT genesis FROM hosted_executor_pins WHERE spool=?1 LIMIT 1",
-                [trust.spool.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if previous
-            .as_deref()
-            .is_some_and(|genesis| genesis != trust.spool_genesis.as_bytes())
-        {
-            return Err(Error::Invalid(
-                "hosted executor pin cannot replace immutable Spool genesis".into(),
-            ));
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO hosted_executor_pins(spool,genesis,executor) VALUES(?1,?2,?3)",
-            params![
-                trust.spool.to_string(),
-                trust.spool_genesis.as_bytes(),
-                trust.executor
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
+    pub(crate) fn pin_hosted_executor(&self, _trust: &TrustedHostedExecutor) -> Result<()> {
+        Err(Error::WitnessEvidenceRequired)
     }
+
     /// Validate source executor pins before installing an incoming artifact.
     /// A capture or local integration has no hosted executor and is a no-op here;
     /// its original author must be checked separately.
@@ -58,29 +25,8 @@ impl ThreadReplica {
         let Some(receipt) = operation.hosted_execution_binding()? else {
             return Ok(());
         };
-        let genesis: Option<Vec<u8>> = self
-            .connect()?
-            .query_row(
-                "SELECT genesis FROM hosted_executor_pins WHERE spool=?1 AND executor=?2",
-                params![receipt.spool.to_string(), receipt.executor],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let genesis = genesis.ok_or_else(|| {
-            Error::Invalid("hosted integration requires independently pinned executor trust".into())
-        })?;
-        let trust = TrustedHostedExecutor {
-            spool: receipt.spool,
-            spool_genesis: ContentHash::from_bytes(
-                genesis
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::Invalid("invalid executor genesis pin".into()))?,
-            ),
-            executor: receipt.executor,
-        };
-        trust.authorize(operation)?;
-        Ok(())
+        let _ = receipt;
+        Err(Error::WitnessEvidenceRequired)
     }
 }
 
@@ -138,9 +84,9 @@ mod tests {
         thread_operation::{SignedGenesis, SignedOperation},
     };
     use objects::object::{
-        Attribution, Principal, State, Tree,
+        Attribution, ContentHash, Principal, State, Tree,
         thread_replication::{
-            Admission, GenesisOwner, ThreadGenesis, ThreadOperationBody,
+            GenesisOwner, ThreadGenesis, ThreadOperationBody,
             hosted_import::{HostedImport, ImportProvider, ImportedCommit},
         },
     };
@@ -148,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hosted_import_requires_persistent_independent_executor_pin_without_checkout_writes() {
+    fn hosted_import_rejects_bare_and_stored_executor_keys_without_checkout_writes() {
         let directory = tempfile::TempDir::new().expect("repository directory");
         let repo = crate::Repository::init_default(directory.path()).expect("repository");
         let creator = Ed25519Signer::from_seed(&[41; 32]).expect("creator");
@@ -210,42 +156,36 @@ mod tests {
         let error = replica
             .receive(&signed, repo.store(), |_| Ok(()))
             .expect_err("incoming receipt is not trust");
-        assert!(
-            error
-                .to_string()
-                .contains("independently pinned executor trust"),
-            "{error}"
-        );
+        assert!(matches!(error, Error::WitnessEvidenceRequired));
         assert!(
             replica
                 .operation(&operation.id().expect("ID"))
                 .expect("lookup")
                 .is_none()
         );
+        assert!(matches!(
+            replica.pin_hosted_executor(&trust),
+            Err(Error::WitnessEvidenceRequired)
+        ));
+        // An existing on-disk endpoint key is not portable witness history.
         replica
-            .pin_hosted_executor(&trust)
-            .expect("receiver configuration");
-        assert_eq!(
-            replica
-                .receive(&signed, repo.store(), |_| Ok(()))
-                .expect("trusted import"),
-            Admission::Accepted
-        );
-        let reopened = ThreadReplica::open(repo.heddle_dir(), replica.thread_id()).expect("reopen");
-        assert_eq!(
-            reopened
-                .receive(&signed, repo.store(), |_| Ok(()))
-                .expect("replay"),
-            Admission::Accepted
-        );
-        assert_eq!(
-            reopened
-                .accepted_source_revision(state.id())
-                .expect("source membership")
-                .expect("retained capture")
-                .id(),
-            state.id()
-        );
+            .connect()
+            .expect("db")
+            .execute(
+                "INSERT INTO hosted_executor_pins VALUES(?1,?2,?3)",
+                params![
+                    trust.spool.to_string(),
+                    trust.spool_genesis.as_bytes(),
+                    trust.executor
+                ],
+            )
+            .expect("old stored pin");
+        let reopened =
+            ThreadReplica::open(repo.heddle_dir(), replica.thread_id()).expect("restart");
+        assert!(matches!(
+            reopened.receive(&signed, repo.store(), |_| Ok(())),
+            Err(Error::WitnessEvidenceRequired)
+        ));
         assert_eq!(repo.head().expect("unchanged checkout"), Some(base));
     }
 }

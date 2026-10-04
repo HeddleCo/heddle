@@ -16,6 +16,7 @@ standard `wasm-bindgen` initializer plus:
 - `verifyOwnerRoot(signedOwnerRootBytes)`;
 - `verifyPurgeAuthorization(...)`;
 - `verifyTimelineAcceptance(...)`;
+- `verifyImportDelegation(...)`;
 - `runPurgeFixture(fixtureJson)`;
 - `runTransferFixture(fixtureJson)`;
 - `runKeyringFixture(fixtureJson)`; and
@@ -32,6 +33,14 @@ request digest and position range, current capability and subject Biscuit
 revocation IDs as hex arrays, admission time, and TTL ceiling. It returns a
 boolean. The caller verifies original credential provenance and the uploader's
 transport proof independently.
+
+`verifyImportDelegation` takes the original canonical certificate, optional
+member permission, clone-keyring inputs and accepted owner history,
+independently selected initial owner and Spool genesis, JSON arrays of forbidden
+root/witness keys, permanent job associations, cancellations and revoked key IDs,
+actual receiver seconds and TTL ceiling. It returns the verified certificate
+digest. It verifies current portable permission; historical witness/set/proof
+resolution remains in the API trust layer and never uses claimed author time.
 
 The publish root is this `npm/` directory. `npm run pack:binding` from the
 crate directory builds it and shows the exact npm tarball payload.

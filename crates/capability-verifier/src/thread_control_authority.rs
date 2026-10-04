@@ -103,6 +103,24 @@ pub fn verify(
     verify_with_retained_mint_roots(bytes, context, &[], is_revoked)
 }
 
+/// Verify original landing request authority. Requests do not carry a signed
+/// native actor/agent label, so derive that attribution from the sealed token;
+/// the request PoP key, account, exact method and Spool still bind independently.
+pub fn verify_landing_request(
+    bytes: &[u8],
+    context: Context<'_>,
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+) -> Result<VerifiedAuthor> {
+    if !matches!(
+        context.method,
+        "/heddle.api.v1alpha2.ThreadService/LandThread"
+            | "/heddle.api.v1alpha2.ThreadService/LandStack"
+    ) {
+        return Err(invalid("landing request requires an exact landing method"));
+    }
+    verify_original(bytes, context, &[], is_revoked, false, &[])
+}
+
 /// As [`verify`], with exact certificates from independently trusted durable
 /// admission. These survive ordinary owner rotation without recertification;
 /// matching only a certificate's key or author-supplied timestamp is insufficient.

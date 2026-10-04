@@ -146,7 +146,7 @@ fn genesis_receipt(
     signed
 }
 #[test]
-fn boundary_genesis_receipt_requires_evidence_and_survives_reopen() {
+fn boundary_genesis_fails_closed_pending_api_318() {
     let (_directory, repository, genesis, original, trust) = setup();
     let receipt = genesis_receipt(&genesis, &trust);
     assert!(
@@ -170,7 +170,7 @@ fn boundary_genesis_receipt_requires_evidence_and_survives_reopen() {
         .err()
         .unwrap_or_else(|| panic!("missing evidence"))
         .to_string()
-        .contains("basis evidence")
+        .contains("fresh root-authenticated witness")
     );
     assert!(ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("id")).is_err());
     let mut wrong = trust.clone();
@@ -181,59 +181,32 @@ fn boundary_genesis_receipt_requires_evidence_and_survives_reopen() {
             .is_err(),
         "carried evidence must not establish executor trust"
     );
-    let replica = ThreadReplica::create_from_genesis_admission(
-        repository.heddle_dir(),
-        &original,
-        b"original expired genesis envelope",
-        &receipt,
-        &trust,
-    )
-    .expect("independently pinned genesis admission");
-    let reopen = ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("reopen");
-    let wrapper = reopen.genesis_record().expect("export exact evidence");
-    assert_eq!(wrapper.boundary_acceptances.len(), 1);
-    assert_eq!(
-        wrapper.boundary_acceptances[0].canonical_record,
-        receipt
-            .boundary_acceptance
-            .as_ref()
-            .expect("acceptance")
-            .canonical
-    );
-    assert_eq!(
-        wrapper.genesis.expect("original").canonical_record,
-        original.canonical
-    );
-    let mut changed = receipt.verify_signature().expect("statement");
-    changed.admitted_at_ms += 1;
-    let mut changed = SignedGenesisAdmission::sign(&changed, &key(18)).expect("later statement");
-    changed.boundary_acceptance = receipt.boundary_acceptance.clone();
-    assert!(
+    receipt
+        .verify(&original, b"original expired genesis envelope", &trust)
+        .expect("surrounding native cryptographic control");
+    assert!(matches!(
         ThreadReplica::create_from_genesis_admission(
             repository.heddle_dir(),
             &original,
             b"original expired genesis envelope",
-            &changed,
+            &receipt,
             &trust
-        )
-        .is_err(),
-        "first genesis receipt stays immutable"
-    );
+        ),
+        Err(Error::WitnessEvidenceRequired)
+    ));
+    assert!(ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("id")).is_err());
 }
+
 #[test]
-fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() {
-    let (_directory, repository, genesis, original_genesis, trust) = setup();
-    let replica = ThreadReplica::create_from_genesis_admission(
-        repository.heddle_dir(),
-        &original_genesis,
-        b"original expired genesis envelope",
-        &genesis_receipt(&genesis, &trust),
-        &trust,
-    )
-    .expect("genesis");
+fn boundary_source_fails_closed_pending_api_318() {
+    let (_directory, repository, mut genesis, _, trust) = setup();
     let GenesisOwner::Account(account) = genesis.owner else {
         panic!("account")
     };
+    genesis.owner = GenesisOwner::LocalKey(genesis.creator);
+    let original_genesis = SignedGenesis::sign(&genesis, &key(17)).expect("local genesis control");
+    let replica =
+        ThreadReplica::create(repository.heddle_dir(), &original_genesis).expect("local original");
     let base = repository
         .store()
         .get_state(&genesis.base)
@@ -298,7 +271,7 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
             .err()
             .unwrap_or_else(|| panic!("no self enrolled executor"))
             .to_string()
-            .contains("independently pinned")
+            .contains("fresh root-authenticated witness")
     );
     pin(&replica, &trust);
     let mut missing = receipt.clone();
@@ -309,153 +282,31 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
             .err()
             .unwrap_or_else(|| panic!("missing evidence"))
             .to_string()
-            .contains("basis evidence")
+            .contains("fresh root-authenticated witness")
     );
-    let mut damaged = receipt.clone();
-    std::sync::Arc::make_mut(damaged.boundary_acceptance.as_mut().expect("evidence")).signature
-        [0] ^= 1;
-    assert!(
+    receipt
+        .verify(&original, &trust)
+        .expect("valid original signatures and explicit acceptance");
+    assert!(matches!(
         replica
-            .receive_with_authority_admission(&original, &damaged, repository.store(), |_| Ok(()))
-            .is_err(),
-        "evidence signature required"
-    );
-    replica.connect().expect("connection").execute_batch("CREATE TRIGGER boundary_rollback BEFORE UPDATE OF generation ON threads BEGIN SELECT RAISE(ABORT,'boundary transaction rollback'); END;").expect("rollback seam");
-    assert!(
-        replica
-            .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(()))
-            .err()
-            .unwrap_or_else(|| panic!("rollback"))
-            .to_string()
-            .contains("boundary transaction rollback")
-    );
+            .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(())),
+        Err(Error::WitnessEvidenceRequired)
+    ));
     assert!(
         replica
             .operation(&operation.id().expect("id"))
             .expect("lookup")
             .is_none()
     );
-    let count: i64 = replica
-        .connect()
-        .expect("connection")
-        .query_row(
-            "SELECT count(*) FROM boundary_admission_evidence WHERE receipt=?1",
-            [receipt.canonical.as_slice()],
-            |row| row.get(0),
-        )
-        .expect("evidence count");
-    assert_eq!(count, 0, "failed source leaves no acceptance reference");
-    replica
-        .connect()
-        .expect("connection")
-        .execute_batch("DROP TRIGGER boundary_rollback")
-        .expect("restore trigger");
-    assert_eq!(
-        replica
-            .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(()))
-            .expect("admit pinned testimony"),
-        Admission::Accepted
-    );
-    let reopened =
-        ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("reopen");
-    let stored = reopened
-        .operation_with_authority_admission(&operation.id().expect("id"))
-        .expect("lookup")
-        .expect("retained");
-    assert_eq!(stored.original, original);
-    assert_eq!(stored.authority_admission, Some(receipt.clone()));
-    let ancestry = reopened
-        .source_ancestry(operation.id().expect("id"), 128, 1024 * 1024)
-        .expect("bounded export");
-    assert_eq!(ancestry[0].authority_admission, Some(receipt.clone()));
-    let mut later = statement.clone();
-    later.admitted_at_ms += 1;
-    let mut later =
-        SignedAuthorityAdmission::sign(&later, &key(18)).expect("later valid statement");
-    later.boundary_acceptance = receipt.boundary_acceptance.clone();
-    reopened
-        .receive_with_authority_admission(&original, &later, repository.store(), |_| Ok(()))
-        .expect("replay");
-    assert_eq!(
-        reopened
-            .operation_with_authority_admission(&operation.id().expect("id"))
-            .expect("lookup")
-            .expect("stored")
-            .authority_admission,
-        Some(receipt.clone())
-    );
-    let mut prior_id = operation.id().expect("first ID");
-    let mut prior_revision = state.id();
-    for index in 1..128 {
-        let next = State::new_snapshot(
-            base.tree,
-            vec![prior_revision],
-            Attribution::human(Principal::new(format!("offline {index}"), "")),
-        );
-        let operation = ThreadOperation {
-            version: 1,
-            thread: replica.thread_id(),
-            parents: [prior_id].into(),
-            publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(AuthoredCapture {
-                result: next.encode_current_msgpack().expect("state").into(),
-                author: author.clone(),
-            }),
-        };
-        let signed = SignedOperation::sign(&operation, &key(17)).expect("source signature");
-        let statement = ThreadAuthorityAdmission {
-            subject: OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
-            ..statement.clone()
-        };
-        let mut next_receipt =
-            SignedAuthorityAdmission::sign(&statement, &key(18)).expect("receipt");
-        next_receipt.boundary_acceptance = receipt.boundary_acceptance.clone();
-        assert_eq!(
-            reopened
-                .receive_with_authority_admission(
-                    &signed,
-                    &next_receipt,
-                    repository.store(),
-                    |_| Ok(())
-                )
-                .expect("next accepted original"),
-            Admission::Accepted
-        );
-        prior_id = operation.id().expect("ID");
-        prior_revision = next.id();
-    }
-    let shared = reopened
-        .source_ancestry(prior_id, 128, 1024 * 1024)
-        .expect("128 originals with one distinct64KiB acceptance fit1MiB");
-    assert_eq!(shared.len(), 128);
-    let first = shared[0]
-        .authority_admission
-        .as_ref()
-        .expect("receipt")
-        .boundary_acceptance
-        .as_ref()
-        .expect("evidence");
-    for item in &shared {
-        assert!(
-            std::sync::Arc::ptr_eq(
-                first,
-                item.authority_admission
-                    .as_ref()
-                    .expect("receipt")
-                    .boundary_acceptance
-                    .as_ref()
-                    .expect("evidence")
-            ),
-            "SQL hydration must own shared acceptance bytes only once"
-        );
-    }
     assert!(
-        reopened.source_ancestry(prior_id, 128, 1024).is_err(),
-        "aggregate source/evidence budget remains enforced"
+        !replica
+            .original_authority_admitted(&original)
+            .expect("no admission")
     );
 }
+
 #[test]
-fn boundary_claim_receipt_preserves_dual_signatures_and_explicit_cutoff() {
+fn boundary_claim_fails_closed_pending_api_318() {
     let (_directory, repository, mut genesis, _, trust) = setup();
     genesis.owner = GenesisOwner::LocalKey(genesis.creator);
     let original = SignedGenesis::sign(&genesis, &key(17)).expect("local original");
@@ -519,31 +370,13 @@ fn boundary_claim_receipt_preserves_dual_signatures_and_explicit_cutoff() {
             .is_err()
     );
     assert_eq!(replica.effective_owner().expect("unclaimed"), genesis.owner);
-    replica
-        .claim_ownership_with_admission(&signed, &receipt)
-        .expect("explicit accepted claim");
-    let reopened =
-        ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("reopen");
-    assert_eq!(
-        reopened
-            .ownership_claims_with_admission()
-            .expect("retained"),
-        vec![(signed.clone(), Some(receipt.clone()))]
-    );
-    let wrapper = reopened.genesis_record().expect("claim transfer");
-    assert_eq!(wrapper.boundary_acceptances.len(), 1);
-    assert_eq!(wrapper.ownership_claims[0].signatures.len(), 2);
-    assert_eq!(reopened.genesis().expect("immutable genesis"), genesis);
-    assert_eq!(
-        reopened.effective_owner().expect("explicit account"),
-        GenesisOwner::Account(account)
-    );
-    let mut wrong = signed;
-    wrong.local_signature[0] ^= 1;
-    assert!(
-        reopened
-            .claim_ownership_with_admission(&wrong, &receipt)
-            .is_err(),
-        "receipt does not replace original local signature"
-    );
+    receipt
+        .verify_claim(&signed, &genesis, &trust)
+        .expect("valid dual original signatures and explicit acceptance");
+    assert!(matches!(
+        replica.claim_ownership_with_admission(&signed, &receipt),
+        Err(Error::WitnessEvidenceRequired)
+    ));
+    assert_eq!(replica.effective_owner().expect("unclaimed"), genesis.owner);
+    assert!(replica.ownership_claims().expect("no mutation").is_empty());
 }

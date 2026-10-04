@@ -9,7 +9,8 @@ use super::{MAX_RECORDS, invalid};
 use crate::error::Result;
 
 const MAX_DEPTH: usize = 12;
-const MAX_FIELDS: usize = 8;
+// PublicationIntent is the largest native boundary map, with nine fields.
+const MAX_FIELDS: usize = 9;
 const MAX_SEQUENCE: usize = 32;
 const MAX_TEXT: usize = 256;
 const MAX_AUTHORITY: usize = 64 * 1024;

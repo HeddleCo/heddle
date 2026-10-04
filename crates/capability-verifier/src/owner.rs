@@ -44,6 +44,22 @@ pub struct VerifiedOwnerState {
 }
 
 impl VerifiedOwnerState {
+    pub(crate) fn issuers_sequence(&self, state_hash: &[u8]) -> Result<u64> {
+        let hash: [u8; 32] = state_hash
+            .try_into()
+            .map_err(|_| Error::Invalid("owner state hash must be 32 bytes".into()))?;
+        self.issuers
+            .get(&hash)
+            .map(|i| i.sequence)
+            .ok_or_else(|| Error::BrokenChain("unknown policy issuer".into()))
+    }
+    /// All verified owner authority keys, including historical issuers. A job
+    /// signer cannot reuse any of these keys, even after retirement or recovery.
+    pub fn authority_public_keys(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        self.issuers
+            .values()
+            .map(|issuer| issuer.key.public_key.clone())
+    }
     /// Stable cryptographic owner id derived from the signed root.
     #[must_use]
     pub const fn owner_id(&self) -> [u8; 32] {

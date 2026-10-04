@@ -8,12 +8,13 @@ import {
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-type FixtureKind = "purge" | "transfer" | "keyring" | "timeline";
+type FixtureKind = "purge" | "transfer" | "keyring" | "timeline" | "import";
 
 type CorpusCase = {
   id: string;
   fixture_kind: FixtureKind;
   fixture_json: string;
+  expected_error?: string | null;
 };
 
 type Outcome = {
@@ -169,6 +170,28 @@ for (const definition of fixtureDefinitions) {
   }
 }
 
+const importCases = JSON.parse(execFileSync(nativeVerifier, [
+  "--import-corpus",
+  path.join(repositoryRoot, "conformance", "hybrid", "import-authority-host-witness-v1.json"),
+], { encoding: "utf8" })) as CorpusCase[];
+corpusCases.push(...importCases);
+for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
+  const selected = importCases[random.int(importCases.length)];
+  const inputs = asRecord(JSON.parse(selected.fixture_json), "import inputs");
+  const fields = [
+    "certificate_hex", "permission_hex", "keyring_hex", "owner_history_hex",
+  ];
+  const field = fields[random.int(fields.length)];
+  const value = String(inputs[field]);
+  // Keep hex conversion valid so both routes receive identical byte arrays.
+  inputs[field] = mutateHex(value, [0, 1, 2, 4][mutation % 4], random);
+  corpusCases.push({
+    id: `import-seed-${seed}-mutation-${mutation}`,
+    fixture_kind: "import",
+    fixture_json: JSON.stringify(inputs),
+  });
+}
+
 mkdirSync(scratch, { recursive: true });
 const corpusPath = path.join(scratch, `owner-authorization-corpus-${seed}.json`);
 writeFileSync(corpusPath, JSON.stringify({ seed, cases: corpusCases }));
@@ -206,6 +229,21 @@ function errorMessage(error: unknown): string {
 }
 
 function evaluateWasm(testCase: CorpusCase): Outcome {
+  if (testCase.fixture_kind === "import") {
+    const c = asRecord(JSON.parse(testCase.fixture_json), "import inputs");
+    const bytes = (field: string) => new Uint8Array(Buffer.from(String(c[field]), "hex"));
+    try {
+      const digest = wasm.verifyImportDelegation(
+        bytes("certificate_hex"), bytes("permission_hex"), bytes("keyring_hex"),
+        bytes("owner_history_hex"), bytes("initial_owner_hex"), bytes("spool_genesis_hex"),
+        c.forbidden_json, c.associations_json, c.cancellations_json, c.revoked_json,
+        BigInt(String(c.now)), BigInt(String(c.max_ttl)),
+      );
+      return { id: testCase.id, ok: Buffer.from(digest).toString("hex") };
+    } catch (error) {
+      return { id: testCase.id, error: errorMessage(error) };
+    }
+  }
   const runner = testCase.fixture_kind === "purge"
     ? wasm.runPurgeFixture
     : testCase.fixture_kind === "transfer"
@@ -222,8 +260,10 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
 
 const wasmOutcomes = corpusCases.map(evaluateWasm);
 if (process.env.OWNER_AUTH_FORCE_DIVERGENCE === "1") {
-  wasmOutcomes[0] = {
-    id: wasmOutcomes[0].id,
+  const index = corpusCases.findIndex(c => c.fixture_kind === "import");
+  if (index < 0) throw new Error("import differential route missing");
+  wasmOutcomes[index] = {
+    id: wasmOutcomes[index].id,
     error: "injected differential self-test mismatch",
   };
 }
@@ -322,6 +362,13 @@ for (const definition of fixtureDefinitions) {
   if (!Array.isArray(base?.ok) ||
       !base.ok.every((outcome) => asRecord(outcome, "base outcome").matches === true)) {
     divergences.push(`base-${definition.kind}: checked-in fixture did not match expectations`);
+  }
+}
+
+for (const c of importCases) {
+  const actual = nativeById.get(c.id);
+  if (c.expected_error === null ? typeof actual?.ok !== "string" : actual?.error !== c.expected_error) {
+    divergences.push(`${c.id}: expected import gate ${c.expected_error ?? "success digest"}, actual=${JSON.stringify(actual)}`);
   }
 }
 

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Adopt heddle-api 0.31.0-alpha.21 and the published boundary vectors. Reject witness and permanently known job keys in delegator/user positions, preserve milliseconds for historical freshness, and exercise the public import JS/WASM binding against native digests and rejection reasons. Release with the workspace and npm package at 0.28.8 (#1961, #1964). Alpha.21 (api#322) revises undeployed Prepare/Commit in place; completed signing layouts and the alpha.20 boundary binding are unchanged. Part 2 owns the client/RPC integration.
+
 - Adopt heddle-api 0.31.0-alpha.19 (PlatformAdminService checks, notification contract, identity account management; additive) and release with the workspace and npm package at 0.28.7; no verifier behavior change.
 - Adopt heddle-api 0.31.0-alpha.18 (hybrid import-authority / host-witness contract, catalog filter, owner/address search and CatalogSummary, custodial 1-of-1 recovery RPCs and the `custodial_email` recovery proof, bookmark timestamps, and the optional signed `SourceAnchor.path_kind` extension; additive) and release with the workspace and npm package at 0.28.6; no verifier behavior change.
 - Adopt heddle-api 0.31.0-alpha.16 (operation context, landing-assessment status, spool default thread, client SemanticIndex ingestion messages, code-navigation reads, tip-only search docs, ListPaths, SpoolOverview.ancestors, author display names, provider default branch/refs, stable capability enum plus Blocked.error, search-hit thread name and spool path, relationship name and lifecycle; additive) and release with the workspace and npm package at 0.28.5; no verifier behavior change.

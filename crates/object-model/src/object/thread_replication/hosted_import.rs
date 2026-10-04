@@ -1,6 +1,8 @@
 //! Hosted import is an executor attestation of provider provenance. The original
 //! creator-signed genesis and imported Git authorship are never replaced by a
 //! claim that the initiating human signed a future source capture.
+//! This immutable format remains a structural decoder. HYBRID dispatch uses
+//! `delegated_import::DelegatedImport`; this format grants no HYBRID authority.
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
