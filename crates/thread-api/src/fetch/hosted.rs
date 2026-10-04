@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use heddle_object_model::object::StateId;
-use objects::lock::RepositoryLockExt;
+use objects::{lock::RepositoryLockExt, store::ObjectStore};
 use prost::Message;
 use repo::{
     Repository,
@@ -78,6 +78,14 @@ impl StagedSource {
         let staging = tempfile::tempdir_in(self.directory.path())?;
         let staged_repo = Repository::init(staging.path()).map_err(preparation)?;
         self.install_source_objects(&staged_repo)?;
+        // Native checkout comparison needs the immutable empty base. Keep its
+        // tree/state in staging so every imported artifact shares the journal.
+        let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+            .map_err(preparation)?;
+        staged_repo
+            .store()
+            .put_snapshot_objects_packed(Vec::new(), &objects::object::Tree::new(), &seed)
+            .map_err(preparation)?;
         let main = self
             .ready
             .thread_genesis

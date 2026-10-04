@@ -786,14 +786,15 @@ impl HostedClient {
                 proofs.push(proof);
             }
         }
-        let scratch = repo.heddle_dir().join("source-transfers");
-        objects::fs_atomic::create_private_dir_all(&scratch)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let scratch = tempfile::Builder::new()
+            .prefix("heddle-source-transfer-")
+            .tempdir()
+            .map_err(native_error)?;
         let pack = SourcePack::prepare_with_references(
             repo.store(),
             &state,
             &proofs,
-            &scratch,
+            scratch.path(),
             SourceBudget {
                 max_objects: SOURCE_OBJECTS,
                 max_decoded_bytes: SOURCE_BYTES,
@@ -1163,16 +1164,21 @@ impl HostedClient {
         // hints against configured shards; DescribeEndpoint and ThreadOverview
         // currently do not advertise them, so clone stays on direct Fetch until
         // a caller supplies usable routes here.
+        let remote = self.native().await.map_err(native_error)?;
+        let protocol = if self.hosted_root().is_some() && remote.description.protocol.is_some() {
+            api::import_authority::require_hybrid_peer(remote.description.protocol.as_ref())
+                .map_err(native_error)?;
+            Some(thread_api::hybrid::protocol())
+        } else {
+            thread_api::hybrid::sync_protocol()
+        };
         let open = preferred_fetch_open(
             FetchOpen {
                 thread: Some(reference.clone()),
                 revision: Some(revision),
-                // Independently selected descriptor trust enables this optional
-                // capable Fetch; the global mandatory Sync gate stays off.
-                protocol: self
-                    .hosted_root()
-                    .map(|_| thread_api::hybrid::protocol())
-                    .or_else(thread_api::hybrid::sync_protocol),
+                // Optional HYBRID needs both receiver-selected trust and the
+                // peer's explicit support. Ordinary Sync keeps its rollout gate.
+                protocol,
                 selection: Some(TransferSelection {
                     facets: vec![contract::SharedFacet::Source as i32],
                     ..Default::default()
@@ -1181,22 +1187,26 @@ impl HostedClient {
             },
             Vec::new(),
         );
-        let scratch = repo.heddle_dir().join("source-transfers");
-        objects::fs_atomic::create_private_dir_all(&scratch)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let scratch = tempfile::Builder::new()
+            .prefix("heddle-source-transfer-")
+            .tempdir()
+            .map_err(native_error)?;
         let staged = self
-            .fetch_native_source(open, thread_api::fetch::Limits::default(), &scratch)
+            .fetch_native_source(open, thread_api::fetch::Limits::default(), scratch.path())
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let imported = staged.import_authority().is_some();
         let final_state = self.install_staged_source(repo, staged).await?;
         if final_state != selected {
             return Err(ProtocolError::InvalidState(format!(
                 "Fetch installed {final_state} instead of selected revision {selected}"
             )));
         }
-        let seed = synthetic_initial_base().map_err(native_error)?;
-        repo.store().put_tree(&objects::object::Tree::new())?;
-        repo.store().put_state(&seed)?;
+        if !imported {
+            let seed = synthetic_initial_base().map_err(native_error)?;
+            repo.store().put_tree(&objects::object::Tree::new())?;
+            repo.store().put_state(&seed)?;
+        }
         Ok(final_state)
     }
 
