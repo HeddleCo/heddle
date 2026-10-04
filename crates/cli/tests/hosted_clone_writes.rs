@@ -268,10 +268,8 @@ impl Fixture {
     }
 }
 
-// The existing clone/write regressions below require the Part 2 Fetch adapter.
-// Retain their assertions until it can supply fresh independently selected trust.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn transport_authenticated_fetch_cannot_enroll_an_evergreen_executor() {
+async fn local_source_fetch_preserves_original_authority_without_executor_enrollment() {
     let fixture = Fixture::uninstalled().await;
     let output = fixture.output_at(
         fixture._temp.path(),
@@ -281,16 +279,13 @@ async fn transport_authenticated_fetch_cannot_enroll_an_evergreen_executor() {
             fixture.clone.to_str().expect("clone path"),
         ],
     );
-    assert_eq!(output.status.code(), Some(76));
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("invalid state: source preparation: pin hosted executor for native Thread"),
-        "{stderr}"
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(matches!(
-        Repository::open(&fixture.clone),
-        Err(repo::HeddleError::IncompleteClone(_))
-    ));
+    let clone = Repository::open(&fixture.clone).expect("complete local-authority clone");
     let replica = repo::thread_replication::ThreadReplica::open(
         &fixture.clone.join(".heddle"),
         fixture.thread_id,
@@ -302,15 +297,42 @@ async fn transport_authenticated_fetch_cannot_enroll_an_evergreen_executor() {
         .head()
         .expect("source HEAD")
         .expect("source State");
-    assert!(
+    assert_eq!(clone.head().expect("clone HEAD"), Some(tip));
+    let originals = replica
+        .accepted_source_originals_for_revisions(&[tip])
+        .expect("admitted original source");
+    assert!(!originals.is_empty());
+    let source = repo::thread_replication::ThreadReplica::open(
+        &fixture.source.join(".heddle"),
+        fixture.thread_id,
+    )
+    .expect("source replica");
+    assert_eq!(
+        originals,
+        source
+            .accepted_source_originals_for_revisions(&[tip])
+            .expect("published source originals")
+    );
+    for (_, original) in &originals {
         replica
-            .source_operation_page(tip, None, 1)
-            .expect("source was not admitted")
-            .is_empty()
+            .verify_local_source_owner(&original.verify().expect("original signature"))
+            .expect("original local owner authorizes source");
+    }
+    let database = repo::local_metadata::open(clone.heddle_dir()).expect("clone metadata");
+    let executor_pins: i64 = database
+        .query_row("SELECT count(*) FROM hosted_executor_pins", [], |row| {
+            row.get(0)
+        })
+        .expect("executor pins");
+    assert_eq!(
+        executor_pins, 0,
+        "transport must never enroll executor authority"
     );
     fixture.close().await;
 }
 
+// The remaining hosted write regressions await fresh independently selected
+// HYBRID trust from the Part 2 Fetch adapter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "heddle#1961 Part 2: route fresh HYBRID witness evidence through Fetch"]
 async fn scoped_derived_agent_clones_and_pushes_its_spool() {

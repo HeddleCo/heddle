@@ -25,10 +25,13 @@ supplied by the merge. Part 2 has not modified the core implementation.
 - `352c99e8`, amended at `b6282ddd`: `crypto::import_authority::{WitnessEvidence,
   NativeClosure, NativeAuthorityContext, verify_native_genesis,
   verify_native_operation, verify_delegated_import, verify_publication,
-  verify_genesis_payload, verify_authority_payload, verify_landing_payload}` and
+  verify_genesis_payload, verify_genesis_payload_at_boundary,
+  verify_authority_payload, verify_landing_payload}`,
+  `NativeClosure::verify_with_boundaries` and
   `object_model::object::thread_replication::delegated_import::DelegatedImport`.
 - `b6282ddd`: `repo::thread_replication::hosted_trust::{RootSelection, Clock,
-  SystemClock, HostedTrust::open, HostedTrust::mutate, TrustTransaction,
+  SystemClock, HostedTrust::open, HostedTrust::mutate,
+  HostedTrust::mutate_validated, TrustTransaction,
   select_root, replace_root, select_spool}`.
 - `b6282ddd`: `delegated_import::{AcceptedAuthority, HostedAdmission,
   NativeSubject, NativeEvidence}` and `ThreadReplica::{install_hybrid_import,
@@ -159,24 +162,39 @@ supply the missing selected-install/atomic filesystem callback.
 
 ## Pending alpha.23 repin
 
-As of this checkpoint, api PR #328 and its amendments have not published
-alpha.23. Part 2 stays pinned to alpha.21 until that release exists. The repin
-requires these client changes together with the new fixed vectors:
+API PR #328 published alpha.23 at `3e66aa11` during the resumed gate. The
+completed gate covers alpha.21; the repin follows it. It requires these client
+changes together with the new fixed vectors:
 
 - Read authenticated `GetImportConfiguration` before selecting converter,
-  exact option octets and budgets; validate the complete response.
+  exact option octets and budgets; use `validate_import_configuration`,
+  `conversion_options_digest` and `prepare_scope` to validate that selection.
 - Accept Prepare's typed refusal and its sole permitted host-filled field,
-  the opaque destination CAS token. Retain caller-selected scope byte-for-byte.
+  the opaque destination CAS token. Retain caller-selected scope byte-for-byte;
+  use `validate_preparation_response` rather than comparing the complete scope
+  with the request when its destination token was empty.
 - Submit initial source and optional synthetic base through `CommitImportJob`;
-  validate its exact pending-operation receipt and idempotency binding. Remove
-  the closed ImportSource route and its duplicate branch carrier.
-- Cancel by the active delegation ID and expected authority epoch.
+  validate its exact pending-operation receipt with `validate_commit_request`,
+  `verify_commit_submission`, `validate_commit_response` and
+  `check_commit_replay`. Remove the closed ImportSource route and its duplicate
+  `ImportBranchGenesis` carrier; the original signed proof manifest alone
+  selects branches. Preserve exact caller-scoped retry bytes and receipts.
+- Cancel by the active delegation ID and expected authority epoch. The existing
+  wire field `cancellation_id` changes from a 32-byte cancellation namespace ID
+  to the active 16-byte delegation ID; use `check_cancel_request` and
+  `check_cancel_replay` for its CAS and exact-replay rules.
 - Renew from the non-executable predecessor/CAS snapshot, retaining original
-  genesis bindings and committed slots.
+  genesis bindings and committed slots. Use `verify_renewal_predecessor` /
+  `VerifiedImportRenewalPredecessor` and `verify_renewal_from_state`; that
+  predecessor snapshot cannot authorize execution or historical admission.
 - Bind retry lineage to the first operation ID, and consume API browser
-  preflight with its clock-skew semantics.
+  `initial_operation_id` and browser `preflight_prepared_delegation` with its
+  clock-skew semantics. Actual execution still uses the host clock and has no
+  grace after exclusive expiry.
 - Require the signed observe-at-execution disclosure marker; a known source
-  OID requires an exact pin. Consume the API conversion-options digest helper.
+  OID requires an exact pin. Retain discovered OIDs rather than dropping them
+  when collecting branch names, and use `validate_ref_selection` with the
+  explicit signed `ref_disclosure` field.
 
 The remaining atomic installation/snapshot/selected-closure gaps are independent
 of that API repin. Hosted installation and relay still return typed errors until

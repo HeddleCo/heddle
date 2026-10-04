@@ -25,7 +25,7 @@ This index covers Heddle's top-level reference docs. Start an agent at `heddle h
 - [Heddle CLI exit codes](exit-codes.md): The CLI follows BSD sysexits.h so codes mean the same thing to humans, init
 - [Heddle domain glossary](glossary.md): The remaining domain terms from CONTEXT.md.
 - [.heddleignore](heddleignore.md): .heddleignore is heddle's per-repo file for telling heddle capture,
-- [Resume verification after Part 1 landed](hybrid-part2-evidence.md): Part 1 f9056e6d was plain-merged at 60eaabdd. The resumed client uses API
+- [HYBRID Part 2 verification after Part 1 landed](hybrid-part2-evidence.md): PR: https://github.com/HeddleCo/heddle/pull/1963.
 - [HYBRID Part 2 core interfaces](hybrid-part2-needs.md): Part 2: task/1961-hybrid-part2-transport-client, PR #1963.
 - [Local metadata storage](local-metadata.md): Heddle's v2 mutable Thread and Run state shares metadata.sqlite3 under the
 - [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...

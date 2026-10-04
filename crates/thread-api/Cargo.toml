@@ -44,7 +44,7 @@ semantic-analysis = ["dep:semantic"]
 root-attachment = ["signing", "dep:biscuit-verifier", "dep:base64", "dep:chrono"]
 
 [dependencies]
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.6", optional = true }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.8", optional = true }
 base64 = { workspace = true, optional = true }
 api.workspace = true
 semantic = { workspace = true, optional = true }
