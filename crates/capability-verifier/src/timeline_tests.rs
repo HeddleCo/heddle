@@ -615,12 +615,12 @@ fn timeline_acceptance_with_twenty_rotations_and_recovery() {
             &fixture.state_hash,
             path(),
             &[11; 32],
-            4,
+            4_u64.into(),
             1,
             vec![],
             vec![],
-            NOW,
-            3600,
+            NOW.into(),
+            3600_i64.into(),
         )
         .expect("WASM acceptance binding")
     );
@@ -641,12 +641,12 @@ fn timeline_acceptance_rejects_bundle_over_64_kib() {
             &fixture.state_hash,
             path(),
             &[11; 32],
-            4,
+            4_u64.into(),
             1,
             vec![],
             vec![],
-            NOW,
-            3600,
+            NOW.into(),
+            3600_i64.into(),
         )
         .expect("WASM acceptance binding")
     );

@@ -112,7 +112,9 @@ mod source_state_msgpack {
             return Ok(None);
         };
         let bytes = hex::decode(value).map_err(D::Error::custom)?;
-        rmp_serde::from_slice(&bytes).map(Some).map_err(D::Error::custom)
+        rmp_serde::from_slice(&bytes)
+            .map(Some)
+            .map_err(D::Error::custom)
     }
 }
 

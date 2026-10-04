@@ -591,3 +591,19 @@ curl -s https://crates.io/api/v1/crates/heddle-wire | jq '.crate.max_stable_vers
 
 The workflow's "Published to crates.io" summary table is the
 canonical receipt of what shipped on a given run.
+
+## Capability verifier npm package
+
+The stable release workflow also publishes `@heddleco/capability-verifier-wasm`
+to `https://npm.pkg.github.com`, at exactly the workspace/tag version.
+`build-verifier-npm` builds the locked Rust wasm32 graph from the validated
+tag SHA, generates declarations with pinned wasm-bindgen 0.2.127, and checks
+the npm tarball. `publish-verifier-npm` consumes that tarball after the binary
+release succeeds, using the protected release environment and a step-scoped
+GitHub token with `packages: write`. An existing version is a no-op; any
+registry failure other than an exact-version E404 fails closed. Manual and
+prerelease dry runs build the package but do not publish it.
+
+Generated `crates/capability-verifier/npm/dist` files are never committed.
+Consumers use the matching `@heddleco/api` alpha.21 message contract and pin
+the exact package version; see the [binding API](crates/capability-verifier/npm/README.md).
