@@ -122,18 +122,24 @@ impl<F> SelectedAuthority<F> {
         Some((envelope, keys))
     }
 }
-impl<F: Fn(&wire::ImportPublicProofBundleV1, i64) -> repo::thread_replication::Result<()>>
-    repo::thread_replication::delegated_import::AcceptedAuthority for SelectedAuthority<F>
+impl<
+    F: Fn(
+        &wire::ImportPublicProofBundleV1,
+        i64,
+        &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+    ) -> repo::thread_replication::Result<()>,
+> repo::thread_replication::delegated_import::AcceptedAuthority for SelectedAuthority<F>
 {
     fn authorize_import(
         &self,
         bundle: &wire::ImportPublicProofBundleV1,
         now: i64,
+        context: &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
     ) -> repo::thread_replication::Result<()> {
         if bundle != &self.bundle {
             return Err(Reject::StaleContext.into());
         }
-        (self.authorize)(bundle, now)
+        (self.authorize)(bundle, now, context)
     }
     fn for_witness(
         &self,
@@ -594,7 +600,9 @@ pub(crate) mod tests {
         let authority = SelectedAuthority::new(
             history,
             bundle,
-            |_: &wire::ImportPublicProofBundleV1, _: i64| Ok(()),
+            |_: &wire::ImportPublicProofBundleV1,
+             _: i64,
+             _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
         );
         assert!(!authority.import_revoked(
             &import_statement,
@@ -657,6 +665,7 @@ pub(crate) mod tests {
             &self,
             _: &wire::ImportPublicProofBundleV1,
             now: i64,
+            _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
         ) -> repo::thread_replication::Result<()> {
             assert_eq!(now, 1_350_000, "use receiver time");
             Ok(())

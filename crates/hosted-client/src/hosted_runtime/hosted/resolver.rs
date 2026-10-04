@@ -63,6 +63,7 @@ async fn resolve_endpoint(
                 authority: canonical_server,
                 root_id: key_id.into(),
                 public_key: *public_key,
+                automatic_store: None,
             }))
         }
         (Some(_), None) | (None, Some(_)) => Err(HostedError::DescriptorTrust(
@@ -93,6 +94,7 @@ async fn resolve_automatic_descriptor_trust(
             authority: canonical_server.into(),
             root_id: pin.key_id,
             public_key: root,
+            automatic_store: Some(super::descriptor_trust::descriptor_trust_path()),
         }));
     }
 
@@ -130,6 +132,7 @@ async fn resolve_automatic_descriptor_trust(
         authority: canonical_server.into(),
         root_id: document.key_id,
         public_key,
+        automatic_store: Some(super::descriptor_trust::descriptor_trust_path()),
     }))
 }
 

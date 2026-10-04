@@ -1,6 +1,7 @@
 //! One validated source publication commits original operations, availability,
-//! and its caller-scoped receipt together. Pack validation/install happens first
-//! on a bounded disk worker; no transaction spans transport or object copying.
+//! and its caller-scoped receipt together. Pack validation and staging happen
+//! outside the destination transaction; witnessed artifacts publish through the
+//! existing borrowed journal facade under that transaction.
 use crypto::thread_operation::SignedOperation;
 use objects::{
     object::{OperationId, StateId, thread_replication::ThreadOperation},
@@ -32,6 +33,97 @@ pub struct PreparedPublication<'a> {
 }
 
 impl ThreadReplica {
+    /// Witnessed originals, artifacts, possession and the command receipt share
+    /// Part 1b's authoritative transaction. Every original is verified again;
+    /// a retained admission never substitutes for the supplied fresh evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_hybrid_source(
+        &self,
+        trust: &super::hosted_trust::HostedTrust<impl super::hosted_trust::Clock>,
+        bundle: &[u8],
+        records: &[api::heddle::api::v1alpha2::SignedRecord],
+        authority: &impl super::delegated_import::AcceptedAuthority,
+        store: &impl ObjectStore,
+        prepared: PreparedPublication<'_>,
+        command: Command<'_>,
+        publish: impl FnOnce(
+            &super::hosted_trust::TrustTransaction<'_>,
+            &mut super::install_artifacts::InstallArtifacts<'_>,
+        ) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        if command.namespace.is_empty()
+            || command.namespace.len() > 1024
+            || command.namespace.contains('\0')
+            || prepared.operations.is_empty()
+            || prepared.operations.len() > 10_000
+            || prepared.guards.is_empty()
+            || prepared.guards.len() > 128
+        {
+            return Err(Error::Invalid(
+                "bounded authenticated publication required".into(),
+            ));
+        }
+        let result = std::cell::RefCell::new(None);
+        Self::install_hybrid_import_with(
+            self.path
+                .parent()
+                .ok_or_else(|| Error::Invalid("metadata has no parent".into()))?,
+            trust,
+            bundle,
+            records,
+            authority,
+            store,
+            |context| {
+                let prior = command_replay(context.sql(), &command)?;
+                if prior.is_none() {
+                    check_guards(context.sql(), prepared.guards, &self.path)?;
+                }
+                Ok(())
+            },
+            |context, artifacts| {
+                // Check exact signed bytes and their fresh witnessed admission in
+                // this transaction, after install_in verified the whole bundle.
+                for signed in prepared.operations {
+                    let op = signed.verify()?;
+                    let id = op.id()?;
+                    if op.source_state()?.is_none()
+                        || !records.iter().any(|r| {
+                            r.format == objects::object::thread_replication::OPERATION_FORMAT
+                                && r.canonical_record == signed.canonical
+                                && r.signatures.iter().any(|s| {
+                                    s.public_key == op.publisher && s.signature == signed.signature
+                                })
+                        })
+                    {
+                        return Err(Error::Invalid(
+                            "witnessed publication original absent".into(),
+                        ));
+                    }
+                    let accepted: bool = context.sql().query_row("SELECT EXISTS(SELECT 1 FROM operations o JOIN hosted_import_admissions a ON a.operation=o.id WHERE o.id=?1 AND o.thread=?2 AND o.canonical=?3 AND o.signature=?4 AND o.status=1)", params![id.as_bytes(),op.thread.as_bytes(),signed.canonical,signed.signature], |r| r.get(0))?;
+                    if !accepted {
+                        return Err(Error::Invalid(
+                            "witnessed publication source did not settle".into(),
+                        ));
+                    }
+                }
+                let bytes = publish(context, artifacts)?;
+                self.record_source_possession_in(context.sql(), prepared.revision)?;
+                let bytes = match command_replay(context.sql(), &command)? {
+                    Some(prior) => prior,
+                    None => {
+                        record_command(context.sql(), &command, &bytes)?;
+                        bytes
+                    }
+                };
+                *result.borrow_mut() = Some(bytes);
+                Ok(())
+            },
+        )?;
+        result
+            .into_inner()
+            .ok_or_else(|| Error::Invalid("publication receipt absent".into()))
+    }
+
     /// `operations` must already have passed the shared standalone pack/causal
     /// closure validator. `authorize` validates original authors independently
     /// of the current courier. Every dependency Thread was admitted earlier.
@@ -91,25 +183,10 @@ impl ThreadReplica {
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior:Option<(String,Vec<u8>,Vec<u8>,bool)>=tx.query_row("SELECT verb,request_hash,response,pending FROM operation_receipts WHERE namespace=?1 AND operation_id=?2",params![command.namespace,command.id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-        if let Some((method, hash, response, pending)) = prior {
-            if method != command.method || hash != command.request_hash || pending {
-                return Err(Error::Invalid("publication command ID reused".into()));
-            }
+        if let Some(response) = command_replay(&tx, &command)? {
             return Ok(response);
         }
-        for (replica, expected) in guards {
-            let actual: i64 = tx.query_row(
-                "SELECT generation FROM threads WHERE id=?1",
-                [replica.thread.as_bytes()],
-                |row| row.get(0),
-            )?;
-            if actual != *expected {
-                return Err(Error::Invalid(
-                    "source authority or frontier changed during publication".into(),
-                ));
-            }
-        }
+        check_guards(&tx, guards, &self.path)?;
         for (replica, signed, operation) in prepared {
             replica.require_local_integration_source_in(&tx, &operation)?;
             if replica.receive_in(
@@ -129,15 +206,61 @@ impl ThreadReplica {
         }
         self.record_source_possession_in(&tx, revision)?;
         let bytes = response()?;
-        if bytes.len() > 1024 * 1024 {
-            return Err(Error::Invalid("publication receipt bound".into()));
-        }
-        tx.execute("INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",params![command.namespace,command.id.to_string(),crate::operation_dedup::receipt_record_key(command.namespace,command.id).as_bytes(),command.method,command.request_hash.as_slice(),bytes,chrono::Utc::now().timestamp()])?;
+        record_command(&tx, &command, &bytes)?;
         tx.commit()?;
         drop(connection);
         self.notify_committed()?;
         Ok(bytes)
     }
+}
+
+fn command_replay(
+    tx: &rusqlite::Transaction<'_>,
+    command: &Command<'_>,
+) -> Result<Option<Vec<u8>>> {
+    let prior: Option<(String, Vec<u8>, Vec<u8>, bool)> = tx.query_row("SELECT verb,request_hash,response,pending FROM operation_receipts WHERE namespace=?1 AND operation_id=?2", params![command.namespace, command.id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+    if let Some((method, hash, response, pending)) = prior {
+        if method != command.method || hash != command.request_hash || pending {
+            return Err(Error::Invalid("publication command ID reused".into()));
+        }
+        return Ok(Some(response));
+    }
+    Ok(None)
+}
+fn check_guards(
+    tx: &rusqlite::Transaction<'_>,
+    guards: &[(ThreadReplica, i64)],
+    path: &std::path::Path,
+) -> Result<()> {
+    for (replica, expected) in guards {
+        if replica.path != path {
+            return Err(Error::Invalid(
+                "source publication crosses object stores".into(),
+            ));
+        }
+        let actual: i64 = tx.query_row(
+            "SELECT generation FROM threads WHERE id=?1",
+            [replica.thread.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if actual != *expected {
+            return Err(Error::Invalid(
+                "source authority or frontier changed during publication".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+fn record_command(
+    tx: &rusqlite::Transaction<'_>,
+    command: &Command<'_>,
+    bytes: &[u8],
+) -> Result<()> {
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::Invalid("publication receipt bound".into()));
+    }
+    tx.execute("INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",params![command.namespace,command.id.to_string(),crate::operation_dedup::receipt_record_key(command.namespace,command.id).as_bytes(),command.method,command.request_hash.as_slice(),bytes,chrono::Utc::now().timestamp()])?;
+    Ok(())
 }
 
 #[cfg(test)]

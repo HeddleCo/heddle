@@ -526,7 +526,9 @@ impl ThreadReplica {
         self.thread
     }
     pub fn genesis(&self) -> Result<ThreadGenesis> {
-        let connection = self.connect()?;
+        self.genesis_in(&*self.connect()?)
+    }
+    fn genesis_in(&self, connection: &rusqlite::Connection) -> Result<ThreadGenesis> {
         let bytes: Vec<u8> = connection.query_row(
             "SELECT genesis FROM threads WHERE id=?1",
             [self.thread.as_bytes()],

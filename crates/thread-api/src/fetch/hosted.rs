@@ -17,6 +17,12 @@ use repo::{
 
 use super::{Error, StagedSource};
 
+pub struct HostedPublication<'a> {
+    pub replica: &'a ThreadReplica,
+    pub prepared: repo::thread_replication::source_publication::PreparedPublication<'a>,
+    pub command: repo::thread_replication::source_publication::Command<'a>,
+}
+
 impl StagedSource {
     /// `authority` and `trust` are independently selected by the receiver.
     /// Every selected original is admitted again under the durable trust lock;
@@ -28,6 +34,44 @@ impl StagedSource {
         authority: &impl AcceptedAuthority,
         now_seconds: i64,
     ) -> Result<StateId, Error> {
+        self.install_hosted_commit(repository, trust, authority, now_seconds, None, |_| {
+            Ok(Vec::new())
+        })
+        .map(|(state, _)| state)
+    }
+    pub fn publish_hosted(
+        self,
+        repository: &Repository,
+        trust: &HostedTrust<impl Clock>,
+        authority: &impl AcceptedAuthority,
+        now_seconds: i64,
+        publication: HostedPublication<'_>,
+        response: impl FnOnce(
+            &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+        ) -> repo::thread_replication::Result<Vec<u8>>,
+    ) -> Result<Vec<u8>, Error> {
+        self.install_hosted_commit(
+            repository,
+            trust,
+            authority,
+            now_seconds,
+            Some(publication),
+            response,
+        )
+        .map(|(_, receipt)| receipt)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn install_hosted_commit(
+        self,
+        repository: &Repository,
+        trust: &HostedTrust<impl Clock>,
+        authority: &impl AcceptedAuthority,
+        now_seconds: i64,
+        publication: Option<HostedPublication<'_>>,
+        response: impl FnOnce(
+            &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+        ) -> repo::thread_replication::Result<Vec<u8>>,
+    ) -> Result<(StateId, Vec<u8>), Error> {
         let bundle = self.import_authority().ok_or(Error::HostedTrustRequired)?;
         let spool = self
             .ready
@@ -125,46 +169,73 @@ impl StagedSource {
             });
         }
         let state = self.state.id();
-        let replicas = ThreadReplica::install_hybrid_import(
-            repository.heddle_dir(),
-            trust,
-            &bundle.encode_to_vec(),
-            &records,
-            authority,
-            staged_repo.store(),
-            |artifacts| {
-                // An owner/spool update while staging requires fresh preparation.
-                if read_optional(&pin_path).map_err(replica_error)? != previous_pin
-                    || read_optional(&repository.heddle_dir().join("spool-id"))
-                        .map_err(replica_error)?
-                        != previous_spool
-                {
-                    return Err(repo::thread_replication::Error::Hybrid(
-                        api::hybrid_codec::Reject::StaleContext,
-                    ));
-                }
-                publish_store(staged_repo.heddle_dir(), artifacts)?;
-                artifacts.write_file(Path::new("owner-authorization.bin"), &next_pin)?;
-                artifacts.write_file(Path::new("spool-id"), spool.to_string().as_bytes())
-            },
-        )
-        .map_err(preparation)?;
+        let publish = |artifacts: &mut InstallArtifacts<'_>| {
+            // An owner/spool update while staging requires fresh preparation.
+            if read_optional(&pin_path).map_err(replica_error)? != previous_pin
+                || read_optional(&repository.heddle_dir().join("spool-id"))
+                    .map_err(replica_error)?
+                    != previous_spool
+            {
+                return Err(repo::thread_replication::Error::Hybrid(
+                    api::hybrid_codec::Reject::StaleContext,
+                ));
+            }
+            publish_store(staged_repo.heddle_dir(), artifacts)?;
+            artifacts.write_file(Path::new("owner-authorization.bin"), &next_pin)?;
+            artifacts.write_file(Path::new("spool-id"), spool.to_string().as_bytes())?;
+            Ok(())
+        };
+        let (replicas, receipt) = if let Some(publication) = publication {
+            let receipt = publication
+                .replica
+                .publish_hybrid_source(
+                    trust,
+                    &bundle.encode_to_vec(),
+                    &records,
+                    authority,
+                    staged_repo.store(),
+                    publication.prepared,
+                    publication.command,
+                    |context, artifacts| {
+                        publish(artifacts)?;
+                        response(context)
+                    },
+                )
+                .map_err(preparation)?;
+            (Vec::new(), receipt)
+        } else {
+            let replicas = ThreadReplica::install_hybrid_import(
+                repository.heddle_dir(),
+                trust,
+                &bundle.encode_to_vec(),
+                &records,
+                authority,
+                staged_repo.store(),
+                publish,
+            )
+            .map_err(preparation)?;
+            (replicas, Vec::new())
+        };
         repository.store().reload_packs().map_err(preparation)?;
-        let selected = replicas
-            .iter()
-            .find(|r| r.thread_id() == main_id)
-            .ok_or(Error::Invalid("selected replica absent"))?;
-        if self.is_complete() {
-            selected
-                .record_source_possession(state)
+        if !replicas.is_empty() {
+            let selected = replicas
+                .iter()
+                .find(|r| r.thread_id() == main_id)
+                .ok_or(Error::Invalid("selected replica absent"))?;
+            if self.is_complete() {
+                selected
+                    .record_source_possession(state)
+                    .map_err(preparation)?;
+            }
+        }
+        if !replicas.is_empty() {
+            // Account/device lookup uses the committed Spool identity. Registration
+            // is local discovery after authority commit, while the repository lock
+            // still prevents another writer from replacing the installed identity.
+            repo::device_catalog::register(&repo::identity::heddle_home_dir(), repository, spool)
                 .map_err(preparation)?;
         }
-        // Account/device lookup uses the committed Spool identity. Registration
-        // is local discovery after authority commit, while the repository lock
-        // still prevents another writer from replacing the installed identity.
-        repo::device_catalog::register(&repo::identity::heddle_home_dir(), repository, spool)
-            .map_err(preparation)?;
-        Ok(state)
+        Ok((state, receipt))
     }
 }
 
@@ -496,7 +567,11 @@ pub(crate) mod tests {
             let authority = SelectedAuthority::new(
                 history,
                 bundle.clone(),
-                |_: &ImportPublicProofBundleV1, _: i64| Ok(()),
+                |_: &ImportPublicProofBundleV1,
+                 _: i64,
+                 _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
+                    Ok(())
+                },
             );
             assert_eq!(
                 staged
@@ -571,8 +646,12 @@ pub(crate) mod tests {
         let trust =
             HostedTrust::open(repo.heddle_dir(), &root.authority, ReceiverClock).expect("trust");
         let calls = AtomicUsize::new(0);
-        let authority =
-            SelectedAuthority::new(history, bundle, |_: &ImportPublicProofBundleV1, _: i64| {
+        let authority = SelectedAuthority::new(
+            history,
+            bundle,
+            |_: &ImportPublicProofBundleV1,
+             _: i64,
+             _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
                 if calls.fetch_add(1, Ordering::SeqCst) > 1 {
                     assert!(
                         repo.heddle_dir().join("owner-authorization.bin").exists(),
@@ -584,7 +663,8 @@ pub(crate) mod tests {
                     ));
                 }
                 Ok(())
-            });
+            },
+        );
         assert!(
             staged
                 .install_hosted(&repo, &trust, &authority, 1350)
@@ -644,7 +724,9 @@ pub(crate) mod tests {
         let authority = Arc::new(SelectedAuthority::new(
             history,
             bundle.clone(),
-            |_: &ImportPublicProofBundleV1, _: i64| Ok(()),
+            |_: &ImportPublicProofBundleV1,
+             _: i64,
+             _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
         ));
         staged
             .install_hosted(&repo, &trust, authority.as_ref(), 1350)

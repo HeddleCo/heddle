@@ -358,6 +358,12 @@ fn write_auth_trust(writer: &mut impl Write, outcome: AuthTrust, json: bool) -> 
         writeln!(writer, "Descriptor key id:     {}", outcome.key_id)?;
         writeln!(writer, "Descriptor public key: {}", outcome.public_key)?;
         writeln!(writer, "Fingerprint:           {}", outcome.fingerprint)?;
+        if outcome.replaced {
+            writeln!(
+                writer,
+                "Next: Repeat this replacement with --repository PATH for each affected repository."
+            )?;
+        }
     }
     Ok(())
 }
@@ -781,6 +787,7 @@ fn auth_command(command: AuthCommands, interactive: bool) -> AuthCommand {
                     server: args.server,
                 },
                 AuthTrustCommands::Replace(args) => AuthTrustCommand::Replace {
+                    repository: args.repository,
                     server: args.server,
                     expected_current_public_key: args.expect_current_public_key,
                     key_id: args.key_id,
@@ -1436,6 +1443,7 @@ mod tests {
         match auth_command(
             AuthCommands::Trust {
                 command: AuthTrustCommands::Replace(AuthTrustReplaceArgs {
+                    repository: None,
                     server: "api.heddle.test".into(),
                     expect_current_public_key: "old".into(),
                     key_id: "new-key".into(),
@@ -1447,6 +1455,7 @@ mod tests {
             AuthCommand::Trust {
                 command:
                     AuthTrustCommand::Replace {
+                        repository: None,
                         server,
                         expected_current_public_key,
                         key_id,

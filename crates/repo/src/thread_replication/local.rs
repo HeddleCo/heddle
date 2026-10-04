@@ -21,24 +21,42 @@ use rusqlite::{OptionalExtension as _, params};
 use super::{Admission, Error, Result, ThreadReplica, install_artifacts::InstallationLock};
 use crate::Repository;
 
+pub(super) fn holds_native_owner_key_serialized(
+    key: &[u8; 32],
+    serialization: &InstallationLock,
+) -> Result<bool> {
+    if let Some(local) = crate::identity::load_local(
+        &serialization
+            .directory()
+            .join(crate::identity::LOCAL_IDENTITY_FILE),
+    )? && Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key
+    {
+        return Ok(true);
+    }
+    if let Some(device) = crate::identity::load_device(&crate::identity::device_identity_path())?
+        && Ed25519Signer::from_pem(&device.private_key_pem)?.public_key() == key
+    {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 impl Repository {
     /// Read-only proof that this device still holds the unclaimed owner's key.
     /// Looking at a Thread must never mint a replacement identity.
     pub fn holds_native_owner_key(&self, key: &[u8; 32]) -> Result<bool> {
-        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
-        if let Some(local) = crate::identity::load_local(
-            &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
-        )? && Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key
-        {
-            return Ok(true);
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        self.holds_native_owner_key_serialized(key, &serialization)
+    }
+    pub(crate) fn holds_native_owner_key_serialized(
+        &self,
+        key: &[u8; 32],
+        serialization: &InstallationLock,
+    ) -> Result<bool> {
+        if self.heddle_dir().canonicalize()? != serialization.directory() {
+            return Err(Error::Invalid("source repository changed".into()));
         }
-        if let Some(device) =
-            crate::identity::load_device(&crate::identity::device_identity_path())?
-            && Ed25519Signer::from_pem(&device.private_key_pem)?.public_key() == key
-        {
-            return Ok(true);
-        }
-        Ok(false)
+        holds_native_owner_key_serialized(key, serialization)
     }
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {

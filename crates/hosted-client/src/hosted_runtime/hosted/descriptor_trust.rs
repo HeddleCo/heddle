@@ -30,8 +30,15 @@ pub struct HostedRootSelection {
     pub(crate) authority: String,
     pub(crate) root_id: String,
     pub(crate) public_key: [u8; 32],
+    pub(crate) automatic_store: Option<PathBuf>,
 }
 impl HostedRootSelection {
+    pub(crate) fn require_current(&self) -> Result<()> {
+        if let Some(path) = &self.automatic_store {
+            require_current_pin(path, &self.authority, &self.root_id, &self.public_key)?;
+        }
+        Ok(())
+    }
     pub fn authority(&self) -> &str {
         &self.authority
     }
@@ -43,15 +50,45 @@ impl HostedRootSelection {
     }
 }
 
+pub(crate) fn require_current_pin(
+    path: &Path,
+    authority: &str,
+    root_id: &str,
+    key: &[u8; 32],
+) -> Result<()> {
+    let store = load_store_from(path)?;
+    let pin = store
+        .servers
+        .get(authority)
+        .context("descriptor root selection no longer exists")?;
+    if pin.key_id != root_id || pin.public_key_bytes()? != *key {
+        bail!(
+            "descriptor root selection changed; reconnect after explicit repository trust replacement"
+        );
+    }
+    Ok(())
+}
+
 type ProofCache =
     BTreeMap<(Vec<u8>, Vec<u8>), api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse>;
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct TestWitnessResponses {
+    pub set: Option<api::heddle::api::common::SignedHostedWitnessSetV1>,
+    pub proofs: Vec<(
+        api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofRequest,
+        api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse,
+    )>,
+}
 /// Public witness metadata from the selected HTTPS authority. No credential,
 /// original statement, Thread identity or account identity is sent to lookup.
 pub struct HostedWitnessLookup {
     server: String,
     config: config::ClientConfig,
     proofs: Mutex<ProofCache>,
+    #[cfg(test)]
+    pub(crate) test_responses: Option<TestWitnessResponses>,
 }
 
 impl HostedWitnessLookup {
@@ -62,6 +99,8 @@ impl HostedWitnessLookup {
             server,
             config: config.clone(),
             proofs: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            test_responses: None,
         })
     }
 
@@ -70,6 +109,12 @@ impl HostedWitnessLookup {
     pub async fn fetch_set(
         &self,
     ) -> super::Result<api::heddle::api::common::SignedHostedWitnessSetV1> {
+        #[cfg(test)]
+        if let Some(responses) = &self.test_responses {
+            return responses.set.clone().ok_or_else(|| {
+                super::HostedError::BootstrapHttp("witness set unavailable".into())
+            });
+        }
         api::import_authority::canonical_https(&self.server, true)?;
         let url = format!("{}/.well-known/heddle/hosted-witnesses", self.server);
         let (client, url, host) =
@@ -97,6 +142,32 @@ impl HostedWitnessLookup {
     }
 }
 
+pub(crate) async fn refresh_import_proofs(
+    lookup: &HostedWitnessLookup,
+    bundle: &mut api::heddle::api::v1alpha2::ImportPublicProofBundleV1,
+    selected: api::witness_trust::SetExpectation<'_>,
+    previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+    let signed = lookup.fetch_set().await?;
+    let now = selected.now_unix_millis;
+    let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
+    let mut prepared = bundle.clone();
+    thread_api::hybrid::history::complete_bundle(lookup, &verified, &mut prepared, now)
+        .await
+        .map_err(|error| match error {
+            thread_api::hybrid::history::Error::Rejected(error) => {
+                super::HostedError::Hybrid(error)
+            }
+            thread_api::hybrid::history::Error::Lookup(error) => error,
+            thread_api::hybrid::history::Error::NotFound => {
+                super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
+            }
+        })?;
+    prepared.witness_set = Some(signed);
+    thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
+    Ok(verified)
+}
+
 impl thread_api::hybrid::history::HistoryProofLookup for HostedWitnessLookup {
     type Error = super::HostedError;
 
@@ -108,6 +179,14 @@ impl thread_api::hybrid::history::HistoryProofLookup for HostedWitnessLookup {
         use api::hybrid_codec::Reject;
         use prost::Message;
         api::witness_trust::validate_lookup(request)?;
+        #[cfg(test)]
+        if let Some(responses) = &self.test_responses {
+            return Ok(responses
+                .proofs
+                .iter()
+                .find(|(r, _)| r == request)
+                .map(|(_, response)| response.clone()));
+        }
         api::import_authority::canonical_https(&self.server, true)?;
         let selector = (
             request.executor_id.clone(),
@@ -363,6 +442,7 @@ pub fn replace_descriptor_trust(
     expected_current_public_key: &str,
     new_key_id: &str,
     new_public_key: &str,
+    repository: Option<&Path>,
 ) -> Result<DescriptorTrustRecord> {
     let expected = parse_descriptor_public_key(expected_current_public_key)?;
     let new_key = validate_descriptor_pair(new_key_id, new_public_key)?;
@@ -375,12 +455,30 @@ pub fn replace_descriptor_trust(
     let current = store.servers.get(canonical_server).ok_or_else(|| {
         anyhow::anyhow!("no automatic descriptor trust pin exists for {canonical_server}")
     })?;
-    if current.public_key_bytes()? != expected {
+    let repository_only = repository.is_some()
+        && current.key_id == new_key_id
+        && current.public_key_bytes()? == new_key;
+    if current.public_key_bytes()? != expected && !repository_only {
         bail!(
             "descriptor trust replacement refused for {canonical_server}: \
              --expect-current-public-key does not match the current descriptor public key"
         );
     }
+    // Select only a repository explicitly named by the trust ceremony. Other
+    // enrolled repositories fail closed against the changed automatic pin until
+    // this command is repeated with their path and the same expected old key.
+    let selected_repository = repository.map(repo::Repository::open).transpose()?;
+    let expected_root = if let Some(repository) = &selected_repository {
+        use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+        let snapshot = HostedTrust::open(repository.heddle_dir(), canonical_server, SystemClock)?
+            .snapshot()?;
+        if snapshot.root.public_key != expected {
+            bail!("repository descriptor root does not match --expect-current-public-key");
+        }
+        Some(snapshot.root)
+    } else {
+        None
+    };
     let replacement = DescriptorTrustRecord {
         key_id: new_key_id.to_string(),
         public_key: hex::encode(new_key),
@@ -390,6 +488,17 @@ pub fn replace_descriptor_trust(
         .servers
         .insert(canonical_server.to_string(), replacement.clone());
     save_store_to(&path, &store)?;
+    if let (Some(repository), Some(expected_root)) = (selected_repository, expected_root) {
+        repo::thread_replication::hosted_trust::replace_root(
+            repository.heddle_dir(),
+            &expected_root,
+            &repo::thread_replication::hosted_trust::RootSelection {
+                authority: canonical_server.into(),
+                root_id: new_key_id.into(),
+                public_key: new_key,
+            },
+        )?;
+    }
     Ok(replacement)
 }
 
@@ -617,19 +726,26 @@ mod tests {
                     server,
                     &hex::encode([0x33; 32]),
                     "new-id",
-                    &hex::encode(new)
+                    &hex::encode(new),
+                    None
                 )
                 .is_err()
             );
             assert_eq!(fs::read(descriptor_trust_path()).unwrap(), before);
             assert!(
-                replace_descriptor_trust(server, &hex::encode(old), "", &hex::encode(new)).is_err()
+                replace_descriptor_trust(server, &hex::encode(old), "", &hex::encode(new), None)
+                    .is_err()
             );
             assert_eq!(fs::read(descriptor_trust_path()).unwrap(), before);
 
-            let replacement =
-                replace_descriptor_trust(server, &hex::encode(old), "new-id", &hex::encode(new))
-                    .unwrap();
+            let replacement = replace_descriptor_trust(
+                server,
+                &hex::encode(old),
+                "new-id",
+                &hex::encode(new),
+                None,
+            )
+            .unwrap();
             assert_eq!(replacement.key_id, "new-id");
             assert_eq!(replacement.public_key, hex::encode(new));
 

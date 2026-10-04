@@ -268,34 +268,23 @@ impl HostedClient {
     ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
         let root = self.hosted_root().ok_or(api::hybrid_codec::Reject::Root)?;
         let lookup = self.witness_lookup()?;
-        let signed = lookup.fetch_set().await?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let selected = api::witness_trust::SetExpectation {
-            authority: root.authority(),
-            root_id: root.root_id(),
-            root_public_key: root.public_key(),
-            root_epoch,
-            now_unix_millis: now,
-            clock_floor_unix_millis: clock_floor_millis,
-            known_job_keys,
-        };
-        let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
-        let mut prepared = bundle.clone();
-        thread_api::hybrid::history::complete_bundle(lookup, &verified, &mut prepared, now)
-            .await
-            .map_err(|error| match error {
-                thread_api::hybrid::history::Error::Rejected(error) => {
-                    super::HostedError::Hybrid(error)
-                }
-                thread_api::hybrid::history::Error::Lookup(error) => error,
-                thread_api::hybrid::history::Error::NotFound => {
-                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
-                }
-            })?;
-        prepared.witness_set = Some(signed);
-        thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
-        Ok(verified)
+        super::descriptor_trust::refresh_import_proofs(
+            lookup,
+            bundle,
+            api::witness_trust::SetExpectation {
+                authority: root.authority(),
+                root_id: root.root_id(),
+                root_public_key: root.public_key(),
+                root_epoch,
+                now_unix_millis: chrono::Utc::now().timestamp_millis(),
+                clock_floor_unix_millis: clock_floor_millis,
+                known_job_keys,
+            },
+            previous,
+        )
+        .await
     }
+
     /// Revalidate retained proof metadata without redownloading staged content.
     /// Installation must independently recheck the latest durable context.
     pub async fn refresh_staged_import_proofs(
@@ -1258,6 +1247,7 @@ impl HostedClient {
         let descriptor = self
             .hosted_root()
             .ok_or_else(|| native_error(api::hybrid_codec::Reject::Root))?;
+        let descriptor = descriptor.clone();
         let root = RootSelection {
             authority: descriptor.authority().into(),
             root_id: descriptor.root_id().into(),
@@ -1338,7 +1328,12 @@ impl HostedClient {
         let authority = SelectedAuthority::new(
             history,
             bundle,
-            move |_: &contract::ImportPublicProofBundleV1, now: i64| {
+            move |_: &contract::ImportPublicProofBundleV1,
+                  now: i64,
+                  _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
+                descriptor
+                    .require_current()
+                    .map_err(|e| repo::thread_replication::Error::Invalid(e.to_string()))?;
                 if now >= deadline_millis {
                     return Err(repo::thread_replication::Error::Hybrid(
                         api::hybrid_codec::Reject::Expired,

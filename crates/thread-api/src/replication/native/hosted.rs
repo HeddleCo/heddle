@@ -18,6 +18,7 @@ pub struct HostedReplica<C, A> {
     directory: PathBuf,
     trust: Arc<HostedTrust<C>>,
     authority: Arc<A>,
+    export_bundle: Option<Arc<crate::contract::ImportPublicProofBundleV1>>,
 }
 impl<C, A> Clone for HostedReplica<C, A> {
     fn clone(&self) -> Self {
@@ -26,6 +27,7 @@ impl<C, A> Clone for HostedReplica<C, A> {
             directory: self.directory.clone(),
             trust: self.trust.clone(),
             authority: self.authority.clone(),
+            export_bundle: self.export_bundle.clone(),
         }
     }
 }
@@ -43,6 +45,7 @@ impl LocalReplica<FsStore> {
             directory,
             trust,
             authority,
+            export_bundle: None,
         }
     }
 }
@@ -62,21 +65,48 @@ impl ExternalObjectSource for ExistingObjects {
     }
 }
 impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedReplica<C, A> {
-    /// Install received publication artifacts under the selected trust lock.
-    pub fn install_source(
+    /// Prepared receiver metadata remains bound to the selected authority.
+    /// Overlay only the public set/proofs; every original byte must agree.
+    pub fn with_export_bundle(
+        mut self,
+        bundle: crate::contract::ImportPublicProofBundleV1,
+    ) -> Self {
+        self.export_bundle = Some(Arc::new(bundle));
+        self
+    }
+    fn export_bundle(
+        &self,
+        mut bundle: crate::contract::ImportPublicProofBundleV1,
+    ) -> Result<Arc<crate::contract::ImportPublicProofBundleV1>, Error> {
+        if let Some(prepared) = &self.export_bundle {
+            crate::hybrid::history::replace_receiver_metadata(
+                &mut bundle,
+                prepared.as_ref().clone(),
+            )
+            .map_err(|error| Error::Store(error.into()))?;
+        }
+        Ok(Arc::new(bundle))
+    }
+    pub fn publish_source(
         &self,
         source: crate::fetch::StagedSource,
         repository: &repo::Repository,
         now_seconds: i64,
-    ) -> Result<StateId, crate::fetch::Error> {
+        publication: crate::fetch::hosted::HostedPublication<'_>,
+        response: impl FnOnce(
+            &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+        ) -> repo::thread_replication::Result<Vec<u8>>,
+    ) -> Result<Vec<u8>, crate::fetch::Error> {
         if repository.heddle_dir().canonicalize()? != self.directory.canonicalize()? {
             return Err(api::hybrid_codec::Reject::Root.into());
         }
-        source.install_hosted(
+        source.publish_hosted(
             repository,
             &self.trust,
             self.authority.as_ref(),
             now_seconds,
+            publication,
+            response,
         )
     }
 
@@ -215,7 +245,7 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> ReplicaSt
         if stored.authority_admission.is_some() {
             return Err(Error::HostedTrustRequired);
         }
-        let bundle = Arc::new(bundle);
+        let bundle = self.export_bundle(bundle)?;
         let status = self.admit(stored.original.clone(), bundle.clone()).await?;
         Ok(Some((
             ReceivedOperation {
@@ -231,6 +261,7 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> ReplicaSt
             return Err(Error::HostedTrustRequired);
         }
         if let Some(bundle) = received.import_authority {
+            let bundle = self.export_bundle(bundle.as_ref().clone())?;
             self.admit(received.original, bundle).await
         } else {
             // A cached admission cannot replace fresh evidence on this path.

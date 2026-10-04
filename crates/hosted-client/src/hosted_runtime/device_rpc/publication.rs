@@ -278,6 +278,7 @@ impl DeviceRpc {
         }
         drop(files);
         let home = self.home.clone();
+        let witnessed = hosted.is_some();
         let admitted = session.clone();
         let opening = open.clone();
         let command_id = request.client_operation_id.clone();
@@ -303,12 +304,13 @@ impl DeviceRpc {
                     "publication genesis differs from independently admitted original"
                 );
                 admitted.authorize_thread(&repository, &dependency)?;
+                admitted.bind_thread(dependency.thread_id())?;
                 guards.push((dependency.clone(), dependency.generation()?));
             }
-            check_policy(&admitted, &replica, &opening)?;
+            let expected_policy = check_policy(&admitted, &replica, &opening)?;
             let operations = validated.operations().to_vec();
             let authority_admissions = validated.authority_admissions().clone();
-            let ordinary_paths = if let Some(hosted) = hosted {
+            if let Some(hosted) = hosted {
                 let (owner, keyring) =
                     repository.pinned_owner_observation(chrono::Utc::now().timestamp())?;
                 let ready = TransferReady {
@@ -322,22 +324,66 @@ impl DeviceRpc {
                     ..Default::default()
                 };
                 let staged = validated.into_hosted_source(ready)?;
-                hosted.install_source(staged, &repository, chrono::Utc::now().timestamp())?;
-                for (dependency, generation) in &mut guards {
-                    *generation = dependency.generation()?;
-                }
-                None
-            } else {
-                Some(validated.artifact_paths())
-            };
+                let bytes = hosted.publish_source(
+                    staged,
+                    &repository,
+                    chrono::Utc::now().timestamp(),
+                    thread_api::fetch::hosted::HostedPublication {
+                        replica: &replica,
+                        prepared:
+                            repo::thread_replication::source_publication::PreparedPublication {
+                                operations: &operations,
+                                authority_admissions: &authority_admissions,
+                                revision,
+                                guards: &guards,
+                            },
+                        command: repo::thread_replication::source_publication::Command {
+                            namespace: &namespace,
+                            id: operation,
+                            method: METHOD,
+                            request_hash,
+                        },
+                    },
+                    |context| {
+                        admitted
+                            .check_current_in(&home, context)
+                            .map_err(replica_error)?;
+                        let policy_version = context.property_version(
+                            replica.thread_id(),
+                            &objects::object::thread_replication::metadata::Property::Sharing,
+                        )?;
+                        if policy_version != expected_policy {
+                            return Err(repo::thread_replication::Error::Invalid(
+                                "publication sharing policy changed".into(),
+                            ));
+                        }
+                        Ok(PublicationReceipt {
+                            client_operation_id: command_id,
+                            destination: opening.destination.clone(),
+                            thread: opening.thread.clone(),
+                            revision: opening.revision.clone(),
+                            sharing_policy_version: policy_version.as_bytes().to_vec(),
+                            accepted_inventory: Some(ObjectAddress {
+                                algorithm: "blake3".into(),
+                                digest: inventory.as_bytes().to_vec(),
+                            }),
+                            outcome: Some(publication_receipt::Outcome::Accepted(
+                                Applied::default(),
+                            )),
+                            import_authority: opening.import_authority.clone(),
+                        }
+                        .encode_to_vec())
+                    },
+                )?;
+                return Ok(PublicationReceipt::decode(bytes.as_slice())?);
+            }
+            let ordinary_paths = validated.artifact_paths();
             for signed in &operations {
                 authorize_original(&guards, signed, &authority_admissions, &admitted, &home)?;
             }
-            if let Some(paths) = ordinary_paths {
-                repository
-                    .store()
-                    .install_pack_streaming(&paths[0], &paths[1])?;
-            }
+            repository
+                .store()
+                .install_pack_streaming(&ordinary_paths[0], &ordinary_paths[1])?;
             admitted.check_current(&home)?;
             for (dependency, _) in &guards {
                 admitted.authorize_thread(&repository, dependency)?;
@@ -381,7 +427,12 @@ impl DeviceRpc {
             Ok::<_, anyhow::Error>(PublicationReceipt::decode(bytes.as_slice())?)
         })
         .await??;
-        session.check_current(&self.home)?;
+        // Witnessed publication already authorized its final outcome inside the
+        // authoritative commit. Return that receipt without a second rejection
+        // point after artifacts, possession and the receipt have committed.
+        if !witnessed {
+            session.check_current(&self.home)?;
+        }
         writer
             .send(
                 PublishContentServerFrame {
@@ -500,4 +551,8 @@ fn authorize_original(
     // Hosted execution is separately checked against receiver-owned executor pins
     // by publish_prepared_source before any source operation can commit.
     Ok(())
+}
+
+fn replica_error(error: anyhow::Error) -> repo::thread_replication::Error {
+    repo::thread_replication::Error::Invalid(error.to_string())
 }

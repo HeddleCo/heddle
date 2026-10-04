@@ -16,7 +16,7 @@ struct BoundSources {
     threads: BTreeSet<objects::object::ContentHash>,
     epoch: Vec<u8>,
 }
-pub(super) struct Session {
+pub(crate) struct Session {
     sources: Mutex<BoundSources>,
     pub principal: String,
     pub actor: String,
@@ -31,7 +31,15 @@ pub(super) struct Session {
     method: &'static MethodDescriptor,
     pub expires: i64,
     pub request_proof: objects::object::ContentHash,
+    #[cfg(test)]
+    pub(super) before_current_check: Option<ArcCurrentCheck>,
 }
+#[cfg(test)]
+type ArcCurrentCheck = std::sync::Arc<
+    dyn Fn(&repo::thread_replication::hosted_trust::TrustTransaction<'_>) -> Result<()>
+        + Send
+        + Sync,
+>;
 impl Session {
     pub fn run_reader(&self) -> repo::device_runs::RunReader<'_> {
         if self.owner {
@@ -166,6 +174,42 @@ impl Session {
         Ok(())
     }
     pub fn check_current(&self, home: &Path) -> Result<()> {
+        self.check_authority(home)?;
+        let registered = repo::device_catalog::load(home, self.spool.id)?;
+        self.check_registration(&registered)?;
+        self.check_sources()
+    }
+    pub(super) fn check_current_in(
+        &self,
+        home: &Path,
+        context: &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.before_current_check {
+            hook(context)?;
+        }
+        self.check_authority(home)?;
+        self.check_registration(&context.device_spool(home, self.spool.id)?)?;
+        let threads = self
+            .sources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source authorization guard poisoned"))?
+            .threads
+            .clone();
+        for thread in threads {
+            anyhow::ensure!(
+                context.device_thread_visible(
+                    thread,
+                    self.spool.id,
+                    uuid::Uuid::parse_str(&self.principal)?,
+                    self.agent_id.as_deref()
+                )?,
+                "Thread audience does not include authenticated caller"
+            );
+        }
+        Ok(())
+    }
+    fn check_authority(&self, home: &Path) -> Result<()> {
         self.check_clock()?;
         let authority = repo::device_authority::load(home, Utc::now().timestamp())?;
         authority.verify_presented_authority(
@@ -196,13 +240,14 @@ impl Session {
         if self.owner && current.authority_key().public_key != self.root.to_bytes() {
             bail!("device owner authority changed");
         }
-        let registered = repo::device_catalog::load(home, self.spool.id)?;
+        Ok(())
+    }
+    fn check_registration(&self, registered: &DeviceSpool) -> Result<()> {
         if registered.capability_path != self.spool.capability_path
             || registered.heddle_dir != self.spool.heddle_dir
         {
             bail!("device spool registration changed");
         }
-        self.check_sources()?;
         Ok(())
     }
 }
@@ -330,6 +375,8 @@ pub(super) fn authorize(
     };
     Ok(Session {
         sources: Mutex::new(BoundSources::default()),
+        #[cfg(test)]
+        before_current_check: None,
         principal,
         agent_id,
         owner: owner_credential,

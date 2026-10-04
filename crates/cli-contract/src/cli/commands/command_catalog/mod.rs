@@ -1643,7 +1643,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         feature_gated(
             json_discriminators(
                 documented_schemas(
-                    user_scoped(CONFIG_MUTATION_NO_OP_ID),
+                    user_scoped(CommandContract {
+                        writes_metadata: true,
+                        ..CONFIG_MUTATION_NO_OP_ID
+                    }),
                     &["auth trust replace"],
                 ),
                 &[json_discriminator(

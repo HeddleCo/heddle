@@ -89,6 +89,7 @@ pub enum AuthTrustCommand {
         server: String,
     },
     Replace {
+        repository: Option<std::path::PathBuf>,
         server: String,
         expected_current_public_key: String,
         key_id: String,

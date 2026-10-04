@@ -2,7 +2,7 @@
 //! Native source downloads retain original Thread identities and causal proofs.
 //! Pack chunks are staging bytes: install only after the verified Complete frame.
 #[cfg(feature = "native")]
-pub(crate) mod hosted;
+pub mod hosted;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "native")]

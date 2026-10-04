@@ -24,6 +24,20 @@ ordinary locally owned source continues through its existing native installer.
 Hosted publication retains the same bundle through actual-artifact validation
 and supplies independently pinned ownership to the hosted installation path.
 
+The security-review correction extends this same facade with
+`ThreadReplica::publish_hybrid_source`. Witnessed admission, journaled artifacts,
+current publication access and policy, dependency generations, possession and the
+caller-scoped command receipt commit in one transaction. Receipt replay still
+verifies fresh witnessed evidence; it never routes imported originals through
+ordinary `receive_in`. There is one journal and no compensating deletion.
+
+`AcceptedAuthority::authorize_import` now borrows `TrustTransaction`, including
+the held installation serialization. Current device checks read registration,
+Spool identity, ownership and source audience through that context, while still
+checking token expiry, publisher and token revocation and current account
+authority. The active-installation reentry guard stays intact. These are the
+minimal Part 1b API extensions made in Part 2 to connect the production adapter.
+
 ## Selected branch installation
 
 The complete public bundle authenticates the logical job's history, including
@@ -48,6 +62,26 @@ then re-reads current trust under serialization; the snapshot grants no authorit
 owner observation for device relay. Incoming evidence cannot create this pin.
 `SelectedAuthority` resolves exact verified owner histories and typed revocations;
 unknown identifiers or the wrong cancellation/key namespace fail closed.
+
+Device Fetch and each operation exported by a retained replication stream use
+the existing public-proof refresh machinery before binding `SelectedAuthority`.
+The durable snapshot selects the root, previous checkpoint, clock floor and job
+associations; lookup completes exact retirement proofs and only receiver metadata
+is replaced. Originals and source content remain unchanged. Final installation
+still validates current durable trust, so a concurrent newer set rejects prepared
+evidence.
+
+## Explicit root replacement
+
+`heddle auth trust replace --repository PATH` applies the existing explicit
+descriptor-pin ceremony to an enrolled repository through Part 1b's
+expected-old-root CAS and epoch increment. The signed checkpoint, retirement
+seals, revocation tombstones, job associations and clock floor survive. Repeat
+the command with the same expected old key for each affected repository.
+Retained automatic clients and device relays check the current descriptor pin
+and fail closed immediately after deployment replacement, including the interval
+before a repository's scoped replacement completes. Incoming bundles never enroll
+or replace a root.
 
 ## Wire and rollout
 

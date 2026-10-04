@@ -13,7 +13,7 @@ mod connection_path_tests;
 mod content;
 mod context;
 mod credential;
-mod descriptor_trust;
+pub(crate) mod descriptor_trust;
 mod error;
 mod evidence;
 pub(crate) mod helpers;
@@ -35,6 +35,8 @@ mod netd_trust_tests;
 pub(crate) mod operation_id;
 mod provider_transport;
 mod resolver;
+#[cfg(test)]
+mod security_rotation_tests;
 mod session;
 #[cfg(test)]
 mod session_tests;
@@ -222,7 +224,9 @@ impl std::fmt::Debug for HostedClient {
 
 impl HostedClient {
     pub fn hosted_root(&self) -> Option<&descriptor_trust::HostedRootSelection> {
-        self.hosted_root.as_ref()
+        self.hosted_root
+            .as_ref()
+            .filter(|root| root.require_current().is_ok())
     }
 
     pub fn witness_lookup(&self) -> Result<&descriptor_trust::HostedWitnessLookup> {

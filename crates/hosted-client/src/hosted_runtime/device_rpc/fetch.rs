@@ -127,7 +127,10 @@ impl DeviceRpc {
         let feed = self.feed(&session)?;
         let mut changes = feed.changes.subscribe();
         let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
-        let import_authority = selected.hybrid_import_bundle()?;
+        let mut import_authority = selected.hybrid_import_bundle()?;
+        if let Some(bundle) = &mut import_authority {
+            self.refresh_export_bundle(&session, bundle).await?;
+        }
         let hosted = if let Some(bundle) = &import_authority {
             api::import_authority::require_hybrid_peer(open.protocol.as_ref())?;
             Some(self.hosted_backend(

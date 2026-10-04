@@ -139,35 +139,117 @@ impl DeviceRpc {
         );
         let _notifier = AbortTask(notifier.abort_handle());
         let feed = live_replication::Feed::from_changes(replica.thread_id(), receiver);
-        let bundle = accepted
-            .import_authority
-            .clone()
-            .or(replica.hybrid_import_bundle()?);
-        let backend = LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
-            .with_device_authority(self.home.clone());
-        if let Some(bundle) = bundle {
-            let backend = self.hosted_backend(backend, session.clone(), bundle)?;
-            let causal =
-                replication::Session::new(OwnedReplica(backend), peer, negotiated, max_items)?
-                    .with_protocol(open.protocol.as_ref(), accepted.ready.protocol.as_ref())?;
-            self.run_replica(causal, accepted.ready, session, feed, reader, writer)
-                .await
-        } else {
-            let causal =
-                replication::Session::new(OwnedReplica(backend), peer, negotiated, max_items)?
-                    .with_protocol(open.protocol.as_ref(), accepted.ready.protocol.as_ref())?;
-            self.run_replica(causal, accepted.ready, session, feed, reader, writer)
-                .await
+        let backend = DeviceReplica {
+            device: self.clone(),
+            replica: replica.clone(),
+            local: LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
+                .with_device_authority(self.home.clone()),
+            session: session.clone(),
+        };
+        let causal = replication::Session::new(backend, peer, negotiated, max_items)?
+            .with_protocol(open.protocol.as_ref(), accepted.ready.protocol.as_ref())?;
+        self.run_replica(causal, accepted.ready, session, feed, reader, writer)
+            .await
+    }
+    #[cfg(test)]
+    pub(super) fn relay(
+        &self,
+        replica: repo::thread_replication::ThreadReplica,
+        local: LocalReplica<FsStore>,
+        session: Arc<auth::Session>,
+    ) -> impl ReplicaStore<Error = Error> {
+        DeviceReplica {
+            device: self.clone(),
+            replica,
+            local,
+            session,
         }
     }
-    pub(super) fn hosted_backend(
+    pub(super) async fn refresh_export_bundle(
+        &self,
+        session: &auth::Session,
+        bundle: &mut ImportPublicProofBundleV1,
+    ) -> Result<()> {
+        use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+        let authority = &bundle
+            .witness_set
+            .as_ref()
+            .and_then(|s| s.body.as_ref())
+            .context("hosted witness set absent")?
+            .deployment_authority;
+        let trust = HostedTrust::open(&session.spool.heddle_dir, authority, SystemClock)?;
+        let snapshot = trust.snapshot()?;
+        self.require_current_root(&snapshot.root)?;
+        let config = config::UserConfig::load_default()?.hosted_runtime_config(None)?;
+        let lookup = super::super::hosted::descriptor_trust::HostedWitnessLookup::new(
+            &snapshot.root.authority,
+            &config,
+        )?;
+        #[cfg(test)]
+        let lookup = {
+            let mut lookup = lookup;
+            lookup.test_responses = self
+                .test_witness_responses
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test lookup poisoned"))?
+                .clone();
+            lookup
+        };
+        let jobs = snapshot
+            .known_job_associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        super::super::hosted::descriptor_trust::refresh_import_proofs(
+            &lookup,
+            bundle,
+            api::witness_trust::SetExpectation {
+                authority: &snapshot.root.authority,
+                root_id: &snapshot.root.root_id,
+                root_public_key: &snapshot.root.public_key,
+                root_epoch: snapshot.root_epoch,
+                now_unix_millis: chrono::Utc::now().timestamp_millis(),
+                clock_floor_unix_millis: snapshot.clock_floor_millis,
+                known_job_keys: &jobs,
+            },
+            snapshot.previous.as_ref(),
+        )
+        .await?;
+        Ok(())
+    }
+    fn require_current_root(
+        &self,
+        root: &repo::thread_replication::hosted_trust::RootSelection,
+    ) -> Result<()> {
+        let config = config::UserConfig::load_default()?.hosted_runtime_config(None)?;
+        if let (Some(id), Some(key)) = (config.descriptor_key_id, config.descriptor_public_key) {
+            anyhow::ensure!(
+                id == root.root_id && key == root.public_key,
+                "explicit descriptor root selection changed"
+            );
+        } else {
+            super::super::hosted::descriptor_trust::require_current_pin(
+                &self.home.join("descriptor-trust.toml"),
+                &root.authority,
+                &root.root_id,
+                &root.public_key,
+            )?;
+        }
+        Ok(())
+    }
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn hosted_backend(
         &self,
         local: LocalReplica<FsStore>,
         session: Arc<auth::Session>,
         bundle: ImportPublicProofBundleV1,
     ) -> Result<
         DeviceHostedReplica<
-            impl Fn(&ImportPublicProofBundleV1, i64) -> repo::thread_replication::Result<()>
+            impl Fn(
+                &ImportPublicProofBundleV1,
+                i64,
+                &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+            ) -> repo::thread_replication::Result<()>
             + Send
             + Sync
             + 'static
@@ -198,23 +280,39 @@ impl DeviceRpc {
             authority,
             SystemClock,
         )?);
+        let root = trust.snapshot()?.root;
+        self.require_current_root(&root)?;
+        let device = self.clone();
         let home = self.home.clone();
         let directory = session.spool.heddle_dir.clone();
-        let authority = Arc::new(SelectedAuthority::new(
-            history,
-            bundle,
-            move |_: &ImportPublicProofBundleV1, _: i64| {
-                session
-                    .check_current(&home)
-                    .map_err(|error| repo::thread_replication::Error::Invalid(error.to_string()))
-            },
-        ));
-        Ok(local.with_hosted_authority(directory, trust, authority))
+        let export = bundle.clone();
+        let authority =
+            Arc::new(
+                SelectedAuthority::new(
+                    history,
+                    bundle,
+                    move |_: &ImportPublicProofBundleV1,
+                          _: i64,
+                          context: &repo::thread_replication::hosted_trust::TrustTransaction<
+                        '_,
+                    >| {
+                        device.require_current_root(&root).map_err(|error| {
+                            repo::thread_replication::Error::Invalid(error.to_string())
+                        })?;
+                        session.check_current_in(&home, context).map_err(|error| {
+                            repo::thread_replication::Error::Invalid(error.to_string())
+                        })
+                    },
+                ),
+            );
+        Ok(local
+            .with_hosted_authority(directory, trust, authority)
+            .with_export_bundle(export))
     }
     #[allow(clippy::too_many_arguments)]
     async fn run_replica<B: ReplicaStore<Error = Error>>(
         &self,
-        causal: replication::Session<OwnedReplica<B>>,
+        causal: replication::Session<B>,
         ready: ReplicationReady,
         session: Arc<auth::Session>,
         feed: live_replication::Feed,
@@ -262,14 +360,19 @@ impl DeviceRpc {
 /// exact method/resource caveats and request proof. Hosted publication policy
 /// does not restrict an owner's direct access to their own private device.
 #[derive(Clone)]
-struct OwnedReplica<B>(B);
-impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
+struct DeviceReplica {
+    device: DeviceRpc,
+    replica: repo::thread_replication::ThreadReplica,
+    local: LocalReplica<FsStore>,
+    session: Arc<auth::Session>,
+}
+impl ReplicaStore for DeviceReplica {
     type Error = Error;
     fn thread_id(&self) -> ContentHash {
-        self.0.thread_id()
+        self.local.thread_id()
     }
     async fn generation(&self) -> Result<i64, Error> {
-        self.0.generation().await
+        self.local.generation().await
     }
     async fn sharing(&self, _destination: [u8; 32]) -> Result<BTreeSet<ThreadFacet>, Error> {
         Ok(BTreeSet::from(ThreadFacet::ALL))
@@ -280,23 +383,55 @@ impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
         after: Option<ContentHash>,
         limit: usize,
     ) -> Result<Vec<ContentHash>, Error> {
-        self.0.frontier_page(facet, after, limit).await
+        self.local.frontier_page(facet, after, limit).await
     }
     async fn operation(
         &self,
         id: ContentHash,
     ) -> Result<Option<(ReceivedOperation, Admission)>, Error> {
-        self.0.operation(id).await
+        let replica = self.replica.clone();
+        let bundle = tokio::task::spawn_blocking(move || replica.hybrid_import_bundle()).await??;
+        if let Some(mut bundle) = bundle {
+            self.device
+                .refresh_export_bundle(&self.session, &mut bundle)
+                .await
+                .map_err(|error| {
+                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
+                })?;
+            let backend = self
+                .device
+                .hosted_backend(self.local.clone(), self.session.clone(), bundle)
+                .map_err(|error| {
+                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
+                })?;
+            backend.operation(id).await
+        } else {
+            self.local.operation(id).await
+        }
     }
     async fn receive(&self, operation: ReceivedOperation) -> Result<Admission, Error> {
-        self.0.receive(operation).await
+        if let Some(bundle) = &operation.import_authority {
+            let backend = self
+                .device
+                .hosted_backend(
+                    self.local.clone(),
+                    self.session.clone(),
+                    bundle.as_ref().clone(),
+                )
+                .map_err(|error| {
+                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
+                })?;
+            backend.receive(operation).await
+        } else {
+            self.local.receive(operation).await
+        }
     }
     async fn remember_peer_heads(
         &self,
         peer: [u8; 32],
         heads: Vec<(ThreadFacet, ContentHash)>,
     ) -> Result<(), Error> {
-        self.0.remember_peer_heads(peer, heads).await
+        self.local.remember_peer_heads(peer, heads).await
     }
     async fn record_peer_receipt(
         &self,
@@ -304,7 +439,7 @@ impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
         id: ContentHash,
         admission: Admission,
     ) -> Result<(), Error> {
-        self.0.record_peer_receipt(peer, id, admission).await
+        self.local.record_peer_receipt(peer, id, admission).await
     }
     async fn settled_peer_heads(
         &self,
@@ -312,7 +447,7 @@ impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
         facets: BTreeSet<ThreadFacet>,
         limit: usize,
     ) -> Result<Vec<(ContentHash, Admission)>, Error> {
-        self.0.settled_peer_heads(peer, facets, limit).await
+        self.local.settled_peer_heads(peer, facets, limit).await
     }
     async fn needed_from_peer(
         &self,
@@ -320,6 +455,6 @@ impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
         facets: BTreeSet<ThreadFacet>,
         limit: usize,
     ) -> Result<Vec<ContentHash>, Error> {
-        self.0.needed_from_peer(peer, facets, limit).await
+        self.local.needed_from_peer(peer, facets, limit).await
     }
 }
