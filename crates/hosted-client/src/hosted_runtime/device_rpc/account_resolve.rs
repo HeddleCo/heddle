@@ -148,7 +148,10 @@ impl DeviceRpc {
                 coverage: coverage as i32,
             });
         }
-        let response = ResolveResourcesResponse { results };
+        let response = ResolveResourcesResponse {
+            results,
+            accepted_budget: Some(budget),
+        };
         ensure!(
             response.encoded_len() <= budget.max_snapshot_bytes as usize,
             "resolved resources exceed byte budget"

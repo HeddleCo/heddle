@@ -57,6 +57,7 @@ async fn import_connected(
         .require_import_authority_protocol()
         .await
         .context("negotiate hosted import authority before provisioning")?;
+    api::import_authority::validate_import_source(&contract::ImportSourceRequest::default())?;
     let (destination, created) = provision_hosted_source_destination(client, destination)
         .await
         .context("provision hosted import destination")?;

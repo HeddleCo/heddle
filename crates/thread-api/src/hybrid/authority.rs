@@ -226,7 +226,7 @@ mod tests {
 
     fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha21.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha23.json"))
                 .expect("fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
@@ -383,7 +383,7 @@ mod tests {
             }
         }
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha21.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha23.json"))
                 .expect("published fixture");
         fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
             let vector = fixture["wire_vectors"]

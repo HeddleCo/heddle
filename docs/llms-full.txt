@@ -4018,8 +4018,10 @@ Source: docs/hybrid-part2-evidence.md
 
 PR: https://github.com/HeddleCo/heddle/pull/1963.
 Branch: `task/1961-hybrid-part2-transport-client`.
-Part 1 `f9056e6d` was plain-merged at `60eaabdd`. The client is pinned to API
-alpha.21 (`05c4d08c`); its fixture is copied unchanged from that published tag.
+Part 1 `f9056e6d` was plain-merged at `60eaabdd`. This first section records
+the completed alpha.21 checkpoint (`e1cfb1ba`) before alpha.23 published. Its
+fixture was copied unchanged from alpha.21 (`05c4d08c`). The branch is now
+repinned to alpha.23; results for that repin are recorded separately below.
 Fixture SHA-256: `30852e349b9b17ec7ea65df18d307be760eb908f04d4721ee7dc46ca4832ded2`.
 
 The api#318 boundary binding is verified and its transport blanket rejection
@@ -4171,8 +4173,127 @@ the PR's draft status. The owner's original file split excludes core edits; a
 scope decision is pending.
 
 Alpha.23 published during this gate at `3e66aa11`. These results belong to
-alpha.21; the required repin is the next change and needs its own gate. The
-dependency document records its exact client changes.
+alpha.21; the following section records the completed repin and its separate
+gate. The dependency document records the exact client changes.
+
+## Alpha.23 repin and current verification
+
+API alpha.23 published during the resumed gate. The required repin selects
+`3e66aa11e93a47692004fa1d8c2fdb11991a3f32` in all API manifests and the lockfile,
+with one Git API dependency and no unrelated lockfile changes. The complete
+unmodified transport/client fixture is now `hybrid-alpha23.json`, SHA-256
+`ee4c25afb126aff7a2d5d9abd340b04f5b8f37c4cfa8eea13ed61db5651bf53d`.
+
+The client lifecycle uses authenticated configuration discovery, exact caller
+scope/token issuance and typed refusal, Commit-only source/proof submission,
+lineage-bound receipt validation, the active host-issued cancellation ID,
+non-executable predecessor recovery and advertised browser skew without expiry
+grace. Sley discovery retains known OIDs; private-provider callers can supply
+independent target knowledge, or explicit unavailable knowledge requiring signed
+observe disclosure. No generic capture credential becomes import permission.
+
+The alpha.22 wire additions also require metadata settings masks and effective
+ResolveResources budget echoes. Metadata revisions leave settings untouched;
+local settings patches apply only selected top-level fields under the existing
+catalog transaction. The integration test covers unselected values, selected
+values, malformed masks and rejection without advancing CAS.
+
+Actual alpha.23 gate tails:
+
+```text
+cargo clippy --workspace --all-targets --locked -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 25s
+CI FEATURE FAILURES []
+ADDITIONAL CI FEATURES PASSED
+WASM CORE EXIT 0
+WASM ROOT EXIT 0
+# thread-api default tests
+140 passed; 0 failed; 0 ignored
+# thread-api native feature tests
+131 passed; 0 failed; 0 ignored
+# complete feature matrix: 20/21 commands pass
+MATRIX FAILURES [16]
+# matrix command 16: untouched Part 1 repository fixture tests
+56 passed; 6 failed; 0 ignored
+# exact workspace command stops in untouched Part 1 crypto fixtures
+53 passed; 12 failed; 0 ignored
+# targeted capability import-delegation fixtures
+0 passed; 8 failed; 0 ignored
+```
+
+The workspace run completed 74 suites with 2,551 passing tests and 79 existing
+ignores before stopping in crypto. The CLI hosted publication/fresh Fetch suite
+passed all four tests, including 140 and 1,000 States. Git discovery and source
+advertisement-budget tests pass. All five CI feature commands, additional CI
+checks/tests, telemetry and both WASM builds pass. Every thread-api matrix command
+passes except the repository command that consumes the old core fixture.
+
+The core failures are visible and **not waived**. Crypto/capability tests report
+`Hybrid(Signature)` on their old signed scopes; repository controls report
+`Hybrid(ImportPermission)` or mismatched old expectations. Those three fixtures
+remain alpha.21 under the original Part 1 file split. They need the coordinated
+alpha.23 refresh and any amended test expectations from the Part 1 owner.
+
+The first hosted-client run found a stale cleanup CAS in the newly expanded
+settings-mask test; that test was corrected. The corrected full run passes that
+control and 462 tests, with three existing ignores, but one existing device RPC
+capacity test hits its mutation deadline with forty live views. Its isolated
+rerun also fails the unchanged five-second mutation deadline:
+
+```text
+real_device_rpc_captures_without_weft_and_rejects_unowned_authority
+FAILED. 0 passed; 1 failed; 465 filtered out; finished in 150.11s
+```
+
+Neither timeout nor core failure is hidden. The active request/retained-view
+permit assertions pass before the timeout; this does not establish its cause.
+The alpha.21 workspace gate passed this same capacity test. No deadline has been
+increased and no performance failure is waived.
+
+Logs: `/tmp/hybrid-p2-v23-workspace-tests.log`,
+`/tmp/hybrid-p2-v23-final-clippy.log`, `/tmp/hybrid-p2-v23-ci-features.log`,
+`/tmp/hybrid-p2-v23-extra-features.log`, `/tmp/hybrid-p2-v23-matrix.log`,
+`/tmp/hybrid-p2-v23-hosted-final-tests.log`,
+`/tmp/hybrid-p2-v23-capability-tests.log`,
+`/tmp/hybrid-p2-v23-device-rerun.log`.
+
+## Alpha.23 guard-removal reruns
+
+Both tests and passing controls now consume the actual published alpha.23
+fixture. The durable experiment edits only the isolated `/tmp` source copy;
+production core files remain unchanged. The verify-before-install experiment
+restores the owned source file byte-for-byte in `finally` before its green run.
+
+```text
+# durable cached-context guard removed
+staged N must never authorize install after durable N+1 revocation
+FAILED. 0 passed; 1 failed; 139 filtered out; finished in 5.03s
+# exact guard restored
+ok. 1 passed; 0 failed; 139 filtered out; finished in 2.62s
+# original restored HYBRID suite
+ok. 19 passed; 0 failed; 121 filtered out; finished in 3.00s
+
+# verify-before-install guard removed
+rejection must precede Spool mutation
+FAILED. 0 passed; 1 failed; 139 filtered out; finished in 0.73s
+# exact guard restored
+ok. 1 passed; 0 failed; 139 filtered out; finished in 1.33s
+```
+
+Logs: `/tmp/hybrid-p2-v23-cached-{red,green}.log`,
+`/tmp/hybrid-p2-v23-hybrid-restored.log`,
+`/tmp/hybrid-p2-v23-install-{red,green}.log`.
+Restored core SHA-256 (original and copy):
+`122f763fb3e2e450ce1e540e9edc51762fd7114f78a660b2202a3ab69d1017b8`.
+
+PR #1963 remains draft: the exact full alpha.23 gate is not green, and the
+selected hosted installer, atomic staged filesystem installation and read-only
+trust snapshot interfaces in `hybrid-part2-needs.md` remain pending.
+
+The new `task/1961-hybrid-part1b-core-seams` worktree contains uncommitted drafts
+for those interfaces. Its branch still points at integration `f9056e6d`; Part 2
+will consume committed public APIs and plain-merge when they land. Draft source
+is not reported as a landed dependency or passing production installation.
 
 ========================================================================
 Source: docs/hybrid-part2-needs.md
@@ -4184,8 +4305,9 @@ Part 2: `task/1961-hybrid-part2-transport-client`, PR #1963.
 Part 1: `task/1961-hybrid-import-authority-host-witness-hed`.
 
 Part 1 landed through PR #1964 at integration `f9056e6d` and was plain-merged
-into Part 2 at `60eaabdd`. Both crates and fixed vectors now consume API
-alpha.21. The api#318 boundary binding is real and is verified; transport no
+into Part 2 at `60eaabdd`. The resumed alpha.21 gate passed. Part 2 then repinned all API
+dependencies to alpha.23 at `3e66aa11` when it published, and regenerated its
+transport/client vectors from the exact published fixture. The api#318 boundary binding is real and is verified; transport no
 longer rejects that basis. The one
 `hybrid::SYNC_MANDATORY_GATE` switch stays OFF until api#307, including Sync
 stream openings and RPC preludes.
@@ -4340,45 +4462,87 @@ succeeds. Restoring the guard passes the same test. No core source change is
 included in Part 2. This proves durable high-water enforcement; it does not
 supply the missing selected-install/atomic filesystem callback.
 
-## Pending alpha.23 repin
+## Alpha.23 client repin
 
-API PR #328 published alpha.23 at `3e66aa11` during the resumed gate. The
-completed gate covers alpha.21; the repin follows it. It requires these client
-changes together with the new fixed vectors:
+API PR #328 published alpha.23 at `3e66aa11e93a47692004fa1d8c2fdb11991a3f32` during
+this gate. All API manifests now select that version, with one locked Git source.
+The full alpha.21 gate below predates this change; alpha.23 results are separate.
 
-- Read authenticated `GetImportConfiguration` before selecting converter,
-  exact option octets and budgets; use `validate_import_configuration`,
-  `conversion_options_digest` and `prepare_scope` to validate that selection.
-- Accept Prepare's typed refusal and its sole permitted host-filled field,
-  the opaque destination CAS token. Retain caller-selected scope byte-for-byte;
-  use `validate_preparation_response` rather than comparing the complete scope
-  with the request when its destination token was empty.
-- Submit initial source and optional synthetic base through `CommitImportJob`;
-  validate its exact pending-operation receipt with `validate_commit_request`,
-  `verify_commit_submission`, `validate_commit_response` and
-  `check_commit_replay`. Remove the closed ImportSource route and its duplicate
-  `ImportBranchGenesis` carrier; the original signed proof manifest alone
-  selects branches. Preserve exact caller-scoped retry bytes and receipts.
-- Cancel by the active delegation ID and expected authority epoch. The existing
-  wire field `cancellation_id` changes from a 32-byte cancellation namespace ID
-  to the active 16-byte delegation ID; use `check_cancel_request` and
-  `check_cancel_replay` for its CAS and exact-replay rules.
-- Renew from the non-executable predecessor/CAS snapshot, retaining original
-  genesis bindings and committed slots. Use `verify_renewal_predecessor` /
-  `VerifiedImportRenewalPredecessor` and `verify_renewal_from_state`; that
-  predecessor snapshot cannot authorize execution or historical admission.
-- Bind retry lineage to the first operation ID, and consume API browser
-  `initial_operation_id` and browser `preflight_prepared_delegation` with its
-  clock-skew semantics. Actual execution still uses the host clock and has no
-  grace after exclusive expiry.
-- Require the signed observe-at-execution disclosure marker; a known source
-  OID requires an exact pin. Retain discovered OIDs rather than dropping them
-  when collecting branch names, and use `validate_ref_selection` with the
-  explicit signed `ref_disclosure` field.
+The hosted-client lifecycle now consumes the published interfaces:
 
-The remaining atomic installation/snapshot/selected-closure gaps are independent
-of that API repin. Hosted installation and relay still return typed errors until
-those core seams can enforce the complete mutation boundary.
+- `get_import_configuration(destination) -> ImportConfiguration` makes the
+  authenticated destination-writer read and validates bounded exact option
+  choices using `validate_import_configuration`. Preparation requires that
+  destination-bound configuration and independently discovered source refs.
+  The caller chooses the converter, exact option octets/digest and budgets;
+  `prepare_scope` checks support, with the host rechecking current policy.
+- `prepare_import_job(configuration, refs, request) -> PreparedImportJob`
+  handles typed refusal and preserves every choice. Only empty
+  `destination_version` requests the current opaque CAS token.
+  `validate_preparation_response` enforces that sole host-filled field.
+- `commit_import_job(prepared, request, resolved_provider, expected_owner)`
+  submits `CommitImportJobRequest` with its required source, optional synthetic
+  empty base and unchanged signed proof. `validate_commit_request` checks the
+  original ordered carrier; `PreparedImportJob::preflight` calls the API's
+  browser preflight with independently selected owner context.
+  `validate_commit_response` binds the pending receipt to the reserved lineage
+  UUID, destination and request ID; the client also binds its endpoint.
+  The host owns current authorization, native base verification, replay storage
+  and activation CAS. `check_commit_replay` is covered by fixed-vector tests.
+- `renew_import_job(prepared, request, predecessor_context, current_context)`
+  verifies the authenticated Prepare CAS snapshot through
+  `verify_renewal_predecessor`, retaining its distinct **non-executable**
+  `VerifiedImportRenewalPredecessor`, and verifies replacement authorization
+  through `verify_renewal_from_state`. Original bindings and committed slots
+  are preserved; prepared/current/retained contexts remain distinct.
+- `cancel_import_job(request, active)` uses `check_cancel_request` against the
+  active delegation. **The published Rust helper requires its 32-byte
+  host-issued cancellation ID, not the 16-byte delegation UUID.** This corrects
+  the earlier draft note's width interpretation. Parent/predecessor IDs cannot
+  select Cancel. The host checks durable epoch/terminal state and resolves
+  `check_cancel_replay` before current-state checks; exact replay and mismatched
+  selectors are covered by the published vectors.
+- `initial_operation_id` validates the caller UUID as the reserved first
+  physical operation ID. It remains separate from request idempotency keys.
+  Browser `preflight_prepared_delegation` permits advertised bounded clock skew
+  and never grants execution or expiry grace.
+- Sley source discovery now returns original advertised OIDs as well as names.
+  Known branches must pin those exact OIDs through `validate_ref_selection`;
+  ambiguous duplicate advertisements reject. Unknown OIDs require explicit
+  signed observe disclosure; discovering a name never implies consent.
+
+The old `ImportSource` route and `ImportBranchGenesis` second carrier are removed
+from initial submission. That route returns the API's actual typed
+`ImportSourceRequiresCommit` rejection. CLI `import url` checks the closed route
+before provisioning; it needs a caller-signed Prepare/Commit authoring flow to
+become usable. Local conversion and hosted native publication remain separate
+paths. No generic Thread/capture credential is reinterpreted as import permission.
+
+The repin also adds the alpha.22 settings mask and ResolveResources budget echo.
+Metadata revisions leave settings untouched. Local device revisions patch only
+selected top-level settings under the existing catalog transaction; malformed
+masks reject without mutation. ResolveResources echoes its effective budget.
+
+## Part 1 alpha.23 fixtures
+
+The original split also prohibits changes to these core fixtures:
+
+- `crates/crypto/tests/fixtures/import-authority-host-witness-v1.json`
+- `crates/capability-verifier/conformance/hybrid/import-authority-host-witness-v1.json`
+- `crates/repo/tests/fixtures/hybrid/import-authority-host-witness-v1.json`
+
+They still carry alpha.21 scope/certificate signatures. Alpha.23 appended signed
+`ref_disclosure` to the canonical branch limit and regenerated every enclosing
+scope/permission/delegation signature. Core fixtures must be refreshed from the
+published tag and any changed test expectations reconciled by Part 1. Accepting
+old signatures through a compatibility verifier is forbidden. Part 2's fixture
+is the complete, unmodified alpha.23 artifact; no historical accepted vector was
+manually rewritten.
+
+The atomic installation/snapshot/selected-closure gaps above still apply.
+Hosted installation and relay retain typed rejections until those seams enforce
+the complete mutation boundary. PR #1963 stays draft while those paths and core
+fixture updates remain pending.
 
 ========================================================================
 Source: docs/local-metadata.md

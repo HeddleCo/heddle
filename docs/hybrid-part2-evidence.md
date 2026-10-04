@@ -2,8 +2,10 @@
 
 PR: https://github.com/HeddleCo/heddle/pull/1963.
 Branch: `task/1961-hybrid-part2-transport-client`.
-Part 1 `f9056e6d` was plain-merged at `60eaabdd`. The client is pinned to API
-alpha.21 (`05c4d08c`); its fixture is copied unchanged from that published tag.
+Part 1 `f9056e6d` was plain-merged at `60eaabdd`. This first section records
+the completed alpha.21 checkpoint (`e1cfb1ba`) before alpha.23 published. Its
+fixture was copied unchanged from alpha.21 (`05c4d08c`). The branch is now
+repinned to alpha.23; results for that repin are recorded separately below.
 Fixture SHA-256: `30852e349b9b17ec7ea65df18d307be760eb908f04d4721ee7dc46ca4832ded2`.
 
 The api#318 boundary binding is verified and its transport blanket rejection
@@ -155,5 +157,124 @@ the PR's draft status. The owner's original file split excludes core edits; a
 scope decision is pending.
 
 Alpha.23 published during this gate at `3e66aa11`. These results belong to
-alpha.21; the required repin is the next change and needs its own gate. The
-dependency document records its exact client changes.
+alpha.21; the following section records the completed repin and its separate
+gate. The dependency document records the exact client changes.
+
+## Alpha.23 repin and current verification
+
+API alpha.23 published during the resumed gate. The required repin selects
+`3e66aa11e93a47692004fa1d8c2fdb11991a3f32` in all API manifests and the lockfile,
+with one Git API dependency and no unrelated lockfile changes. The complete
+unmodified transport/client fixture is now `hybrid-alpha23.json`, SHA-256
+`ee4c25afb126aff7a2d5d9abd340b04f5b8f37c4cfa8eea13ed61db5651bf53d`.
+
+The client lifecycle uses authenticated configuration discovery, exact caller
+scope/token issuance and typed refusal, Commit-only source/proof submission,
+lineage-bound receipt validation, the active host-issued cancellation ID,
+non-executable predecessor recovery and advertised browser skew without expiry
+grace. Sley discovery retains known OIDs; private-provider callers can supply
+independent target knowledge, or explicit unavailable knowledge requiring signed
+observe disclosure. No generic capture credential becomes import permission.
+
+The alpha.22 wire additions also require metadata settings masks and effective
+ResolveResources budget echoes. Metadata revisions leave settings untouched;
+local settings patches apply only selected top-level fields under the existing
+catalog transaction. The integration test covers unselected values, selected
+values, malformed masks and rejection without advancing CAS.
+
+Actual alpha.23 gate tails:
+
+```text
+cargo clippy --workspace --all-targets --locked -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 25s
+CI FEATURE FAILURES []
+ADDITIONAL CI FEATURES PASSED
+WASM CORE EXIT 0
+WASM ROOT EXIT 0
+# thread-api default tests
+140 passed; 0 failed; 0 ignored
+# thread-api native feature tests
+131 passed; 0 failed; 0 ignored
+# complete feature matrix: 20/21 commands pass
+MATRIX FAILURES [16]
+# matrix command 16: untouched Part 1 repository fixture tests
+56 passed; 6 failed; 0 ignored
+# exact workspace command stops in untouched Part 1 crypto fixtures
+53 passed; 12 failed; 0 ignored
+# targeted capability import-delegation fixtures
+0 passed; 8 failed; 0 ignored
+```
+
+The workspace run completed 74 suites with 2,551 passing tests and 79 existing
+ignores before stopping in crypto. The CLI hosted publication/fresh Fetch suite
+passed all four tests, including 140 and 1,000 States. Git discovery and source
+advertisement-budget tests pass. All five CI feature commands, additional CI
+checks/tests, telemetry and both WASM builds pass. Every thread-api matrix command
+passes except the repository command that consumes the old core fixture.
+
+The core failures are visible and **not waived**. Crypto/capability tests report
+`Hybrid(Signature)` on their old signed scopes; repository controls report
+`Hybrid(ImportPermission)` or mismatched old expectations. Those three fixtures
+remain alpha.21 under the original Part 1 file split. They need the coordinated
+alpha.23 refresh and any amended test expectations from the Part 1 owner.
+
+The first hosted-client run found a stale cleanup CAS in the newly expanded
+settings-mask test; that test was corrected. The corrected full run passes that
+control and 462 tests, with three existing ignores, but one existing device RPC
+capacity test hits its mutation deadline with forty live views. Its isolated
+rerun also fails the unchanged five-second mutation deadline:
+
+```text
+real_device_rpc_captures_without_weft_and_rejects_unowned_authority
+FAILED. 0 passed; 1 failed; 465 filtered out; finished in 150.11s
+```
+
+Neither timeout nor core failure is hidden. The active request/retained-view
+permit assertions pass before the timeout; this does not establish its cause.
+The alpha.21 workspace gate passed this same capacity test. No deadline has been
+increased and no performance failure is waived.
+
+Logs: `/tmp/hybrid-p2-v23-workspace-tests.log`,
+`/tmp/hybrid-p2-v23-final-clippy.log`, `/tmp/hybrid-p2-v23-ci-features.log`,
+`/tmp/hybrid-p2-v23-extra-features.log`, `/tmp/hybrid-p2-v23-matrix.log`,
+`/tmp/hybrid-p2-v23-hosted-final-tests.log`,
+`/tmp/hybrid-p2-v23-capability-tests.log`,
+`/tmp/hybrid-p2-v23-device-rerun.log`.
+
+## Alpha.23 guard-removal reruns
+
+Both tests and passing controls now consume the actual published alpha.23
+fixture. The durable experiment edits only the isolated `/tmp` source copy;
+production core files remain unchanged. The verify-before-install experiment
+restores the owned source file byte-for-byte in `finally` before its green run.
+
+```text
+# durable cached-context guard removed
+staged N must never authorize install after durable N+1 revocation
+FAILED. 0 passed; 1 failed; 139 filtered out; finished in 5.03s
+# exact guard restored
+ok. 1 passed; 0 failed; 139 filtered out; finished in 2.62s
+# original restored HYBRID suite
+ok. 19 passed; 0 failed; 121 filtered out; finished in 3.00s
+
+# verify-before-install guard removed
+rejection must precede Spool mutation
+FAILED. 0 passed; 1 failed; 139 filtered out; finished in 0.73s
+# exact guard restored
+ok. 1 passed; 0 failed; 139 filtered out; finished in 1.33s
+```
+
+Logs: `/tmp/hybrid-p2-v23-cached-{red,green}.log`,
+`/tmp/hybrid-p2-v23-hybrid-restored.log`,
+`/tmp/hybrid-p2-v23-install-{red,green}.log`.
+Restored core SHA-256 (original and copy):
+`122f763fb3e2e450ce1e540e9edc51762fd7114f78a660b2202a3ab69d1017b8`.
+
+PR #1963 remains draft: the exact full alpha.23 gate is not green, and the
+selected hosted installer, atomic staged filesystem installation and read-only
+trust snapshot interfaces in `hybrid-part2-needs.md` remain pending.
+
+The new `task/1961-hybrid-part1b-core-seams` worktree contains uncommitted drafts
+for those interfaces. Its branch still points at integration `f9056e6d`; Part 2
+will consume committed public APIs and plain-merge when they land. Draft source
+is not reported as a landed dependency or passing production installation.
