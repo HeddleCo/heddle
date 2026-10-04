@@ -76,6 +76,23 @@ if matches!(decision, Decision::Deny(_)) {
 # }
 ```
 
+### Import Commit admission
+
+Hosts call `import_delegation::verify_commit_admission` with their stored
+`PrepareImportJobResponse`, signed child, exact typed parent (when required),
+signed genesis bindings, independently selected `CurrentContext` and current
+revocation lookup. It checks owner lineage and effective owner expiry at the
+actual host time T, then composes the API's `verify_prepared_delegation`.
+A child with `T < N <= T+S` can be admitted; its parent must already be valid
+at T and contain the entire child window. Expiry remains exclusive.
+
+Success establishes admission eligibility only. `verify_current` and
+`verify_new_operation` still require execution time `N <= T < E`; historical
+verification retains its exact authenticated observation. Hosts must also
+verify native originals, creator signatures/envelopes and retained renewal
+genesis contexts, and enforce policy, custody and activation gates atomically.
+Commit admission is a native Rust API with no browser binding.
+
 ### Browser and TypeScript consumers
 
 The npm package `@heddleco/capability-verifier-wasm` is generated from this same
