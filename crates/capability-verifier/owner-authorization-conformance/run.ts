@@ -107,6 +107,7 @@ function mutateHex(value: string, operation: number, random: Random): string {
   const evenLength = value.length - (value.length % 2);
   switch (operation % 6) {
     case 0: {
+      if (value.length === 0) return "00";
       const index = random.int(value.length);
       const replacement = value[index] === "0" ? "1" : "0";
       return `${value.slice(0, index)}${replacement}${value.slice(index + 1)}`;

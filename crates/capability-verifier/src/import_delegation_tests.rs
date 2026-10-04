@@ -221,6 +221,14 @@ fn sign_changed<T: hybrid_codec::Canonical>(
     domain: &str,
     body: &T,
 ) -> AuthorizationSignature {
+    sign_digest(
+        f,
+        role,
+        &hybrid_codec::signing_digest(domain, body).expect("preimage"),
+    )
+}
+
+fn sign_digest(f: &Value, role: &str, digest: &[u8]) -> AuthorizationSignature {
     use ed25519_dalek::{Signer, SigningKey};
     let seed: [u8; 32] = hex::decode(f["keys"][role]["seed_hex"].as_str().expect("seed"))
         .expect("seed bytes")
@@ -229,10 +237,395 @@ fn sign_changed<T: hybrid_codec::Canonical>(
     AuthorizationSignature {
         signer_key_id: hybrid_codec::key_id(&key(f, role)),
         signature: SigningKey::from_bytes(&seed)
-            .sign(&hybrid_codec::signing_digest(domain, body).expect("preimage"))
+            .sign(digest)
             .to_bytes()
             .to_vec(),
     }
+}
+
+const CLAIM_TIME: i64 = 1100;
+const CLAIM_DEADLINE: i64 = 1200;
+
+fn deferred_owners(f: &Value) -> (VerifiedOwnerState, VerifiedOwnerState, OwnerHistory) {
+    use crate::canonical::{
+        OWNER_ROOT_DOMAIN, OWNER_TRANSITION_DOMAIN, digest, owner_root_body, owner_root_without_id,
+        transition_body,
+    };
+    let mut history: OwnerHistory = record(f, "owner_history");
+    let signed = history.root.as_mut().expect("root");
+    let root = signed.root.as_mut().expect("root body");
+    root.claimable_deferred_human = true;
+    root.claimable_until_unix_seconds = CLAIM_DEADLINE;
+    root.owner_id = digest(
+        OWNER_ROOT_DOMAIN,
+        &owner_root_without_id(root).expect("root id"),
+    )
+    .to_vec();
+    let signing = digest(
+        OWNER_ROOT_DOMAIN,
+        &owner_root_body(root).expect("root body"),
+    );
+    signed.authority_proof = Some(sign_digest(f, "owner", &signing));
+    signed.recovery_key_proofs = ["guardian_a", "guardian_b"]
+        .map(|role| sign_digest(f, role, &signing))
+        .to_vec();
+    signed
+        .recovery_key_proofs
+        .sort_by(|a, b| a.signer_key_id.cmp(&b.signer_key_id));
+    let deferred = crate::verify_owner_root(signed).expect("authentic deferred root");
+    let transition = OwnerKeyTransition {
+        format_version: 1,
+        owner_id: deferred.owner_id().to_vec(),
+        previous_state_hash: deferred.state_hash().to_vec(),
+        sequence: 1,
+        kind: OwnerKeyTransitionKind::ClaimDeferredHuman as i32,
+        next_authority_key: Some(AuthorizationVerificationKey {
+            algorithm: AuthorizationKeyAlgorithm::Ed25519 as i32,
+            public_key: key(f, "device"),
+        }),
+        next_recovery_policy: Some(deferred.recovery_policy().clone()),
+        valid_from_unix_seconds: CLAIM_TIME,
+        previous_key_valid_until_unix_seconds: 0,
+        nonce: vec![0x61; 32],
+    };
+    let signing = digest(
+        OWNER_TRANSITION_DOMAIN,
+        &transition_body(&transition).expect("claim"),
+    );
+    let mut claim = SignedOwnerKeyTransition {
+        transition: Some(transition),
+        authorizations: vec![sign_digest(f, "owner", &signing)],
+        next_authority_key_proof: Some(sign_digest(f, "device", &signing)),
+        next_recovery_key_proofs: ["guardian_a", "guardian_b"]
+            .map(|role| sign_digest(f, role, &signing))
+            .to_vec(),
+    };
+    claim
+        .next_recovery_key_proofs
+        .sort_by(|a, b| a.signer_key_id.cmp(&b.signer_key_id));
+    let claimed = crate::apply_transition(
+        &deferred,
+        &claim,
+        CLAIM_TIME,
+        VerificationLimits::new(3600).expect("limits"),
+    )
+    .expect("human claims within deadline");
+    history.accepted_transitions = vec![claim];
+    history.state_hash = claimed.state_hash().to_vec();
+    (deferred, claimed, history)
+}
+
+fn deferred_keyring(f: &Value, owner: &VerifiedOwnerState) -> VerifiedCloneKeyring {
+    let (_, ring, _) = selected(f);
+    let mut wire = ring.wire().clone();
+    wire.owner_root = Some(owner.signed_root().clone());
+    wire.accepted_state_hash = owner.state_hash().to_vec();
+    wire.pin.as_mut().expect("pin").expected_owner_id = owner.owner_id().to_vec();
+    crate::verify_clone_keyring(
+        wire,
+        1050,
+        VerificationLimits::new(3600).expect("limits"),
+        &[],
+    )
+    .expect("deferred lineage")
+}
+
+fn direct_delegation(
+    f: &Value,
+    c: &CurrentContext<'_>,
+    role: &str,
+    not_before: i64,
+    expires_at: i64,
+) -> SignedImportJobDelegationV1 {
+    let mut signed: SignedImportJobDelegationV1 = record(f, "delegation");
+    let body = signed.body.as_mut().expect("delegation body");
+    let (identity, chain, _) =
+        native_identity(&c.selection, c.now_millis / 1000).expect("selection");
+    body.identity = Some(identity);
+    body.owner_chain_digest = chain;
+    body.delegating_public_key = key(f, role);
+    body.parent_permission_digest = vec![0; 32];
+    body.not_before_unix_seconds = not_before;
+    body.expires_at_unix_seconds = expires_at;
+    signed.delegating_signature = Some(sign_changed(f, role, contract::DELEGATION_DOMAIN, body));
+    signed
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn claimed_human_import_authority_survives_original_claim_deadline() {
+    let f = fixture();
+    let (deferred, claimed, _) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    let c = context(&claimed, &ring, &digest, &initial, &[], CLAIM_DEADLINE + 50);
+    ring.verify_current_owner(&claimed, CLAIM_DEADLINE + 50, c.selection.limits)
+        .expect("claimed current owner remains valid");
+    let signed = direct_delegation(&f, &c, "device", CLAIM_DEADLINE + 49, CLAIM_DEADLINE + 90);
+    let result = verify_current(&signed, None, &c, |_| false);
+    println!(
+        "claimed human import after original deadline: {:?}",
+        result.as_ref().map(|_| ())
+    );
+    result.expect("accepted human authority survives the original deferred deadline");
+    assert_eq!(claimed.authority_expires_at_seconds(), i64::MAX);
+    assert!(matches!(
+        verify_current(
+            &signed,
+            None,
+            &c,
+            |r| matches!(r, Revocation::Key(id) if id == hybrid_codec::key_id(&key(&f, "device")))
+        ),
+        Err(Error::Hybrid(contract::Reject::Revoked))
+    ));
+    assert_eq!(
+        claimed.issuer_at(&deferred.state_hash(), CLAIM_DEADLINE + 50),
+        Err(Error::Expired)
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn unclaimed_deferred_import_authority_keeps_its_deadline() {
+    let f = fixture();
+    let (deferred, _, _) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    let mut c = context(&deferred, &ring, &digest, &initial, &[], 1050);
+    assert_eq!(deferred.authority_expires_at_seconds(), CLAIM_DEADLINE);
+    let signed = direct_delegation(&f, &c, "owner", 1000, CLAIM_DEADLINE);
+    verify_current(&signed, None, &c, |_| false).expect("unclaimed in-window control");
+    let too_long = direct_delegation(&f, &c, "owner", 1000, CLAIM_DEADLINE + 1);
+    assert!(matches!(
+        verify_current(&too_long, None, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Scope))
+    ));
+    c.now_millis = CLAIM_DEADLINE * 1000;
+    assert!(matches!(
+        verify_current(&signed, None, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    ));
+    c.now_millis += 1000;
+    assert!(matches!(
+        verify_current(&signed, None, &c, |_| false),
+        Err(Error::Expired)
+    ));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn claimed_import_authority_still_rejects_rotated_issuers() {
+    use crate::canonical::{OWNER_TRANSITION_DOMAIN, digest, transition_body};
+    let f = fixture();
+    let (deferred, claimed, history) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, genesis) = selected(&f);
+    let initial = deferred.owner_id();
+    let mut c = context(&claimed, &ring, &genesis, &initial, &[], 1250);
+    let signed = direct_delegation(&f, &c, "device", 1249, 1290);
+    verify_current(&signed, None, &c, |_| false).expect("claimed authority control");
+    let mut rotation = history.accepted_transitions[0]
+        .transition
+        .clone()
+        .expect("claim body");
+    rotation.kind = OwnerKeyTransitionKind::Rotate as i32;
+    rotation.sequence = 2;
+    rotation.previous_state_hash = claimed.state_hash().to_vec();
+    rotation.valid_from_unix_seconds = 1251;
+    rotation
+        .next_authority_key
+        .as_mut()
+        .expect("key")
+        .public_key = key(&f, "rotated_owner");
+    let signing = digest(
+        OWNER_TRANSITION_DOMAIN,
+        &transition_body(&rotation).expect("rotation"),
+    );
+    let rotated = crate::apply_transition(
+        &claimed,
+        &SignedOwnerKeyTransition {
+            transition: Some(rotation),
+            authorizations: vec![sign_digest(&f, "device", &signing)],
+            next_authority_key_proof: Some(sign_digest(&f, "rotated_owner", &signing)),
+            next_recovery_key_proofs: vec![],
+        },
+        1251,
+        c.selection.limits,
+    )
+    .expect("accepted rotation");
+    c.selection.owner = &rotated;
+    c.now_millis = 1252000;
+    assert!(matches!(
+        verify_current(&signed, None, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Root))
+    ));
+    let retired = direct_delegation(&f, &c, "device", 1251, 1290);
+    assert!(matches!(
+        verify_current(&retired, None, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::ImportPermission))
+    ));
+    assert_eq!(
+        rotated.issuer_at(&claimed.state_hash(), 1252),
+        Err(Error::Expired)
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn historical_import_expiry_uses_owner_state_at_observation() {
+    let f = fixture();
+    let (deferred, claimed, _) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    let root = key(&f, "root");
+    let set = witness_trust::verify_set(
+        &record(&f, "current_set"),
+        &witness_trust::SetExpectation {
+            authority: "https://weft.example.test",
+            root_id: "descriptor-root-1",
+            root_public_key: &root,
+            root_epoch: 1,
+            now_unix_millis: 1260000,
+            clock_floor_unix_millis: 1000000,
+            known_job_keys: &[key(&f, "job")],
+        },
+        None,
+    )
+    .expect("authenticated current witness set");
+    for (owner, role, observation, expiry, expected) in [
+        (&deferred, "owner", 1050, CLAIM_DEADLINE, None),
+        (
+            &deferred,
+            "owner",
+            1050,
+            CLAIM_DEADLINE + 1,
+            Some(contract::Reject::Scope),
+        ),
+        (&claimed, "device", 1250, 1290, None),
+        (&claimed, "device", 1150, 1290, None),
+    ] {
+        let mut c = context(owner, &ring, &digest, &initial, &[], observation);
+        let signed = direct_delegation(&f, &c, role, observation - 1, expiry);
+        let (identity, _, bound) =
+            native_identity(&c.selection, observation).expect("historical selection");
+        assert_eq!(
+            bound,
+            if observation < CLAIM_TIME {
+                CLAIM_DEADLINE
+            } else {
+                i64::MAX
+            }
+        );
+        let mut statement: host::SignedHostedWitnessStatementV1 =
+            record(&f, "publication_statement");
+        let body = statement.body.as_mut().expect("statement body");
+        body.spool_uuid = identity.spool_uuid;
+        body.spool_genesis_digest = identity.spool_genesis_digest;
+        body.owner_id = identity.owner_id;
+        body.owner_state_hash = identity.owner_state_hash;
+        body.ownership_transfer_sequence = identity.ownership_transfer_sequence;
+        body.authority_digest =
+            contract::signed_delegation_digest(&signed).expect("delegation digest");
+        body.observed_at_unix_millis = observation * 1000;
+        statement.signature = sign_digest(
+            &f,
+            "witness",
+            &witness_trust::statement_signing_digest(body).expect("statement digest"),
+        )
+        .signature;
+        let resolved = witness_trust::resolve_statement(&set, &statement, None, false, 1260000)
+            .expect("authenticated historical observation");
+        c.now_millis = 1260000;
+        let result = verify_historical(&signed, None, &c, &statement, &resolved, &set, |_| false);
+        match expected {
+            Some(reject) => {
+                assert!(matches!(result, Err(Error::Hybrid(actual)) if actual == reject))
+            }
+            None => {
+                result.expect("historical authority at observation");
+            }
+        }
+        if observation < CLAIM_TIME {
+            c.selection.owner = &claimed;
+            assert!(matches!(
+                verify_historical(&signed, None, &c, &statement, &resolved, &set, |_| false),
+                Err(Error::Hybrid(contract::Reject::Root))
+            ));
+        }
+    }
+}
+
+#[test]
+#[ignore = "regenerate the signed claimed-owner differential fixture"]
+#[cfg(not(target_arch = "wasm32"))]
+fn print_claimed_owner_fixture_json() {
+    let f = fixture();
+    let (deferred, claimed, history) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    let mut cases = Vec::new();
+    for (id, owner, role, now, expiry, error) in [
+        (
+            "claimed-human-after-deadline",
+            &claimed,
+            "device",
+            1250,
+            1290,
+            None,
+        ),
+        (
+            "unclaimed-before-deadline",
+            &deferred,
+            "owner",
+            1050,
+            1200,
+            None,
+        ),
+        (
+            "unclaimed-exceeds-deadline",
+            &deferred,
+            "owner",
+            1050,
+            1201,
+            Some("delegation scope violation"),
+        ),
+        (
+            "unclaimed-after-deadline",
+            &deferred,
+            "owner",
+            1201,
+            1200,
+            Some("owner-authorization object is expired"),
+        ),
+    ] {
+        let c = context(owner, &ring, &digest, &initial, &[], now.min(1199));
+        let signed = direct_delegation(&f, &c, role, 1000, expiry);
+        let mut selected_history = history.clone();
+        if role == "owner" {
+            selected_history.accepted_transitions.clear();
+            selected_history.state_hash = deferred.state_hash().to_vec();
+        }
+        cases.push(serde_json::json!({
+            "id": id,
+            "certificate_hex": hex::encode(signed.encode_to_vec()),
+            "owner_history_hex": hex::encode(selected_history.encode_to_vec()),
+            "now": now.to_string(),
+            "expected_error": error,
+        }));
+    }
+    println!(
+        "CLAIMED_OWNER_FIXTURE={}",
+        serde_json::json!({
+            "keyring_hex": hex::encode(ring.wire().encode_to_vec()),
+            "initial_owner_hex": hex::encode(initial),
+            "spool_genesis_hex": hex::encode(digest),
+            "cases": cases,
+        })
+    );
 }
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]

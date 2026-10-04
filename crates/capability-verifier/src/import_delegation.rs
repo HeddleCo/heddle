@@ -189,12 +189,11 @@ pub fn native_lineage(selection: &Selection<'_>) -> Result<(ImportIdentityV1, Ve
         owner_state_hash: owner.state_hash().to_vec(),
         ownership_transfer_sequence: keyring.wire().ownership_transfers.len() as u64,
     };
-    let expiry = if root.claimable_deferred_human && root.claimable_until_unix_seconds > 0 {
-        root.claimable_until_unix_seconds
-    } else {
-        i64::MAX
-    };
-    Ok((identity, contract::owner_chain_digest(&chain)?, expiry))
+    Ok((
+        identity,
+        contract::owner_chain_digest(&chain)?,
+        owner.authority_expires_at_seconds(),
+    ))
 }
 
 fn verify_at(
@@ -296,6 +295,8 @@ pub fn verify_current(
 /// callback resolves revocations at that accepted order, not today's policy.
 /// The API resolver must authenticate the witness before this entry point;
 /// its opaque context is rechecked here, and author time is never consulted.
+/// The selection must contain the effective owner state accepted at the
+/// witnessed observation, including only claims accepted by that time.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_historical(
     signed: &SignedImportJobDelegationV1,
