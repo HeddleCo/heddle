@@ -34,7 +34,10 @@ The corrected owner-chain vectors are enabled; there is no alpha.28 skip.
 - Complete witness history survives Fetch, Push and device relay. Refresh changes
   only the public witness set and exact retirement paths, preserves original
   bytes, and rechecks durable root epoch/high-water/time at commit. Revoked
-  witness keys cannot be refreshed into authority.
+  witness keys cannot be refreshed into authority. Refresh samples receiver time
+  after HTTPS lookup, so a newly issued response verifies at arrival and an
+  already expired response cannot borrow the earlier request time. Both native
+  and import carriers exercise that timing rule and preserve originals on refusal.
 - CLI/client StartThread freezes authority and genesis, signs the creator
   binding, then signs request PoP. Local adopt retains the original local key
   and publishes its explicit claim. Present bindings require capable peers and
