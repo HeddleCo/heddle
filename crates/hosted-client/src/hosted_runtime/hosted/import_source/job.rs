@@ -68,7 +68,7 @@ impl HostedClient {
         proof: &wire::ImportPublicProofBundleV1,
         client_operation_id: String,
     ) -> Result<wire::MutationResponse> {
-        let signed = exact_signed_proposal(prepared, proof)?;
+        let signed = exact_signed_proposal(prepared, proof, chrono::Utc::now().timestamp())?;
         verify_delegating_signature(signed)?;
         if prepared.response.renewal_state.is_some() {
             return Err(Reject::StaleContext.into());
@@ -92,7 +92,7 @@ impl HostedClient {
         client_operation_id: String,
     ) -> Result<wire::MutationResponse> {
         authority::validate_renewal_preparation(&prepared.response)?;
-        let signed = exact_signed_proposal(prepared, proof)?;
+        let signed = exact_signed_proposal(prepared, proof, chrono::Utc::now().timestamp())?;
         verify_delegating_signature(signed)?;
         let state = prepared
             .response
@@ -170,9 +170,13 @@ fn validate_preparation(
     {
         return Err(Reject::Scope.into());
     }
-    if response.reservation_expires_at_unix_seconds <= now
-        || response.reservation_expires_at_unix_seconds
-            > now.checked_add(3600).ok_or(Reject::Bounds)?
+    let at = i128::from(response.prepared_at_unix_seconds);
+    let skew = i128::from(response.clock_skew_allowance_seconds);
+    if at < 0
+        || i128::from(now) + skew < at
+        || i128::from(response.reservation_expires_at_unix_seconds) != at + 3600
+        || response.reservation_expires_at_unix_seconds <= now
+        || response.max_validity_duration_seconds == 0
     {
         return Err(Reject::Expired.into());
     }
@@ -192,16 +196,51 @@ fn validate_preparation(
 fn exact_signed_proposal<'a>(
     prepared: &PreparedImportJob,
     proof: &'a wire::ImportPublicProofBundleV1,
+    now: i64,
 ) -> Result<&'a wire::SignedImportJobDelegationV1> {
     if proof.format_version != 1 || proof.encoded_len() > authority::MAX_BUNDLE_BYTES {
         return Err(Reject::Bounds.into());
     }
     let signed = proof.delegations.last().ok_or(Reject::ImportPermission)?;
-    if signed.body != prepared.response.proposal {
-        return Err(Reject::Scope.into());
+    let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
+    let proposal = prepared
+        .response
+        .proposal
+        .as_ref()
+        .ok_or(Reject::Canonical)?;
+    if api::hybrid_codec::canonical(&authority::delegation_preparation(body))?
+        != api::hybrid_codec::canonical(proposal)?
+    {
+        return Err(Reject::PreparedFields.into());
     }
-    if prepared.response.reservation_expires_at_unix_seconds <= chrono::Utc::now().timestamp() {
+    let scope = proposal.scope.as_ref().ok_or(Reject::Canonical)?;
+    if body.branch_manifest.len() != scope.branches.len()
+        || body
+            .branch_manifest
+            .iter()
+            .zip(&scope.branches)
+            .any(|(manifest, branch)| manifest.limit.as_ref() != Some(branch))
+    {
+        return Err(Reject::PreparedFields.into());
+    }
+    if prepared.response.reservation_expires_at_unix_seconds <= now {
         return Err(Reject::Expired.into());
+    }
+    // This preflight supplies no owner permission. The host repeats the exact
+    // preparation comparison and actual-clock checks under its activation CAS.
+    let start = i128::from(body.not_before_unix_seconds);
+    let end = i128::from(body.expires_at_unix_seconds);
+    let at = i128::from(prepared.response.prepared_at_unix_seconds);
+    let skew = i128::from(prepared.response.clock_skew_allowance_seconds);
+    if start < 0
+        || start < at - skew
+        || start > i128::from(now) + skew
+        || end <= start
+        || end <= i128::from(now)
+        || prepared.response.max_validity_duration_seconds == 0
+        || end - start > i128::from(prepared.response.max_validity_duration_seconds)
+    {
+        return Err(Reject::ValidityBounds.into());
     }
     Ok(signed)
 }
@@ -229,9 +268,9 @@ mod tests {
     fn wire<T: Message + Default>(section: &str, name: &str) -> T {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha18.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha21.json"
         )))
-        .expect("alpha.18 fixed vectors");
+        .expect("alpha.21 fixed vectors");
         let bytes = hex::decode(
             fixture[section][name]["wire_hex"]
                 .as_str()
@@ -290,5 +329,55 @@ mod tests {
         changed.body.as_mut().expect("body").job_public_key[0] ^= 1;
         assert!(verify_delegating_signature(&changed).is_err());
         verify_delegating_signature(&signed).expect("original proposal/signature pair");
+    }
+
+    #[test]
+    fn commit_compares_the_frozen_preparation_and_ordered_branch_limits() {
+        let response: wire::PrepareImportJobResponse = wire("wire_vectors", "commit_preparation");
+        let signed: wire::SignedImportJobDelegationV1 = wire("signed_vectors", "delegation");
+        let prepared = PreparedImportJob {
+            destination: wire::SpoolRef::default(),
+            response,
+        };
+        let mut proof = wire::ImportPublicProofBundleV1 {
+            format_version: 1,
+            delegations: vec![signed],
+            ..Default::default()
+        };
+        exact_signed_proposal(&prepared, &proof, 1100).expect("original completed proposal");
+        let original = proof.clone();
+        proof.delegations[0]
+            .body
+            .as_mut()
+            .expect("body")
+            .job_public_key[0] ^= 1;
+        assert!(matches!(
+            exact_signed_proposal(&prepared, &proof, 1100),
+            Err(super::super::super::HostedError::Hybrid(
+                Reject::PreparedFields
+            ))
+        ));
+        proof = original.clone();
+        proof.delegations[0]
+            .body
+            .as_mut()
+            .expect("body")
+            .branch_manifest
+            .reverse();
+        assert!(matches!(
+            exact_signed_proposal(&prepared, &proof, 1100),
+            Err(super::super::super::HostedError::Hybrid(
+                Reject::PreparedFields
+            ))
+        ));
+        assert!(matches!(
+            exact_signed_proposal(
+                &prepared,
+                &original,
+                prepared.response.reservation_expires_at_unix_seconds
+            ),
+            Err(super::super::super::HostedError::Hybrid(Reject::Expired))
+        ));
+        exact_signed_proposal(&prepared, &original, 1100).expect("unchanged signed control");
     }
 }

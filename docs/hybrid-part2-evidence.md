@@ -1,4 +1,36 @@
-# HYBRID Part 2 verification evidence
+# Resume verification after Part 1 landed
+
+Part 1 `f9056e6d` was plain-merged at `60eaabdd`. The resumed client uses API
+alpha.21 and its original fixed vectors. The boundary acceptance transport
+control passes with exact API binding; its missing-binding negative rejects.
+
+The real durable installer interleaving proof is complete:
+
+```text
+# independent handle persists N+1; high-water guard removed in an isolated source copy
+staged N must never authorize install after durable N+1 revocation
+test result: FAILED. 0 passed; 1 failed; 139 filtered out
+# same guard restored, same isolated test
+ test result: ok. 1 passed; 0 failed; 139 filtered out
+# resumed production HYBRID suite, including boundary and durable interleaving
+ test result: ok. 15 passed; 0 failed; 125 filtered out
+# prepared jobs, original signed scope, ordered branch limits, import/retry completeness
+ test result: ok. 13 passed; 0 failed; 444 filtered out
+```
+
+Logs: `/tmp/hybrid-p2-cached-red.log`, `/tmp/hybrid-p2-cached-green.log`,
+`/tmp/hybrid-p2-hybrid-restored.log`, `/tmp/hybrid-p2-jobs.log`. The original
+Part 1 core files are unchanged. A first production-path run reused a temporary
+copy's guard-removed Cargo artifact; it is not claimed as a passing run. Rebuilding
+the restored core and rerunning passed. No cargo clean was used.
+
+The old full-gate results below belong to the earlier alpha.19 checkpoint,
+**not** this resumed head. The atomic filesystem callback, read-only snapshot and
+selected native closure remain absent from landed Part 1; see
+[hybrid-part2-needs.md](hybrid-part2-needs.md). They still block complete hosted
+installation/relay and draft removal. Alpha.23 remains unpublished.
+
+# Earlier HYBRID Part 2 verification evidence
 
 Branch: `task/1961-hybrid-part2-transport-client`.
 PR: https://github.com/HeddleCo/heddle/pull/1963.

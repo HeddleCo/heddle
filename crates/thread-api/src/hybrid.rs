@@ -56,13 +56,6 @@ pub fn bundle(value: Option<&ImportPublicProofBundleV1>) -> Result<(), Rejection
     if let Some(value) = value {
         api::import_authority::validate_public_bundle(value)
             .map_err(|_| "incomplete HYBRID import authority (api#307 cutover)")?;
-        if value
-            .statements
-            .iter()
-            .any(|s| s.body.as_ref().is_some_and(|body| body.basis == 2))
-        {
-            return Err("HYBRID boundary acceptance binding requires api#318");
-        }
     }
     Ok(())
 }

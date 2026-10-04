@@ -40,8 +40,8 @@ fn sync_call_context_and_openings_share_the_disabled_cutover_switch() {
 #[test]
 fn a_complete_public_bundle_has_a_capable_transport_control() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha18.json"))
-            .expect("alpha.18 vectors");
+        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha21.json"))
+            .expect("alpha.21 vectors");
     let bytes = hex::decode(
         fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
             .as_str()
@@ -72,6 +72,64 @@ fn a_complete_public_bundle_has_a_capable_transport_control() {
     old.protocol = None;
     assert!(super::replication_open(&old).is_err());
     super::replication_open(&open).expect("complete capable control remains accepted");
+}
+
+#[test]
+fn boundary_acceptance_is_carried_with_its_exact_api_binding() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha21.json"))
+            .expect("published vectors");
+    let record = |section: &str, name: &str| {
+        hex::decode(
+            fixture[section][name]["wire_hex"]
+                .as_str()
+                .expect("wire bytes"),
+        )
+        .expect("hex")
+    };
+    let mut bundle = ImportPublicProofBundleV1::decode(
+        record("wire_vectors", "complete_renewed_export").as_slice(),
+    )
+    .expect("complete export");
+    let payload = ImportGenesisWitnessV1::decode(
+        record("wire_vectors", "boundary_genesis_payload").as_slice(),
+    )
+    .expect("exact boundary payload");
+    let statement = api::heddle::api::common::SignedHostedWitnessStatementV1::decode(
+        record("signed_vectors", "boundary_genesis_statement").as_slice(),
+    )
+    .expect("original boundary statement");
+    let original = bundle
+        .genesis_witnesses
+        .iter_mut()
+        .find(|p| p.original_genesis == payload.original_genesis)
+        .expect("selected original genesis");
+    let old_payload = api::hybrid_codec::canonical(original).expect("original payload");
+    *original = payload.clone();
+    bundle.statements.retain(|s| {
+        !s.body
+            .as_ref()
+            .is_some_and(|s| s.purpose == 1 && s.canonical_payload == old_payload)
+    });
+    bundle.statements.push(statement.clone());
+    let open = ReplicationOpen {
+        protocol: Some(super::protocol()),
+        import_authority: Some(bundle.clone()),
+        ..Default::default()
+    };
+    super::replication_open(&open).expect("complete boundary evidence is transportable");
+    api::import_authority::verify_witness_payload(
+        statement.body.as_ref().expect("statement"),
+        api::import_authority::WitnessPayload::Genesis(&payload),
+    )
+    .expect("API verifies exact originals, manifest, intent and receipts");
+    let mut missing = bundle;
+    missing
+        .genesis_witnesses
+        .iter_mut()
+        .for_each(|p| p.boundary_acceptance = None);
+    assert!(super::bundle(Some(&missing)).is_err());
+    super::replication_open(&open).expect("unchanged boundary control");
 }
 impl MessageReader for Empty {
     type Error = Error;

@@ -511,8 +511,8 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
 #[tokio::test]
 async fn hybrid_relay_preserves_the_complete_bundle_only_after_exact_negotiation() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha18.json"))
-            .expect("alpha.18 fixed vectors");
+        serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha21.json"))
+            .expect("alpha.21 fixed vectors");
     let decode = |name: &str| {
         hex::decode(
             fixture["wire_vectors"][name]["wire_hex"]

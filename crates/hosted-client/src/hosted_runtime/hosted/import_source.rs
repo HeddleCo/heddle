@@ -525,9 +525,9 @@ mod tests {
     fn signed_import_request() -> contract::ImportSourceRequest {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha18.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha21.json"
         )))
-        .expect("alpha.18 fixed vectors");
+        .expect("alpha.21 fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
                 .as_str()
