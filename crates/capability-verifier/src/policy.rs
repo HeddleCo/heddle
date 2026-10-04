@@ -57,7 +57,7 @@ pub enum OwnerGovernanceError {
     /// signed spool policy transfer sequence is back-dated.
     #[error("signed spool policy transfer sequence is back-dated")]
     BackdatedK,
-    /// signed spool policy revokes its own authority key.
+    /// signed spool policy introduces a revocation of an owner-history authority key.
     #[error("signed spool policy revokes its own authority key")]
     SelfRevocation,
 }
@@ -356,6 +356,11 @@ fn verify_owner_signature(
 pub fn proposed_revocations(
     policy: &SignedSpoolPolicy,
 ) -> Result<BTreeSet<Vec<u8>>, OwnerGovernanceError> {
+    if policy.revoked_key_ids.len() > 4096 {
+        return Err(OwnerGovernanceError::Invalid(
+            "revoked_key_ids count exceeds 4096".into(),
+        ));
+    }
     let mut set = BTreeSet::new();
     for id in &policy.revoked_key_ids {
         if id.len() != 32 {
@@ -406,6 +411,8 @@ pub struct VerifySignedPolicy<'a> {
     pub required_transfer_sequence: u64,
     /// Authority key.
     pub authority_key: &'a AuthorizationVerificationKey,
+    /// All authority key ids from the owner's verified accepted history.
+    pub owner_authority_key_ids: &'a [[u8; 32]],
     /// Accepted grow only.
     pub accepted_grow_only: &'a BTreeMap<String, BTreeSet<Vec<u8>>>,
     /// Ancestor ceiling.
@@ -424,6 +431,7 @@ pub fn verify_signed_spool_policy_record(
         accepted_owner_state_hash,
         required_transfer_sequence,
         authority_key,
+        owner_authority_key_ids,
         accepted_grow_only,
         ancestor_ceiling,
     } = input;
@@ -510,7 +518,17 @@ pub fn verify_signed_spool_policy_record(
 
     let proposed = proposed_revocations(&policy)?;
     let authority_id = owner_key_id(authority_key);
-    if proposed.iter().any(|id| id.as_slice() == authority_id) {
+    // F7 applies on introduction. An inherited revocation must remain in the
+    // grow-only set even when a later owner has used that key as an authority.
+    if proposed.iter().any(|id| {
+        !accepted_grow_only
+            .get("revoked_key_ids")
+            .is_some_and(|set| set.contains(id))
+            && (id.as_slice() == authority_id
+                || owner_authority_key_ids
+                    .iter()
+                    .any(|key| id.as_slice() == key))
+    }) {
         return Err(OwnerGovernanceError::SelfRevocation);
     }
 
@@ -551,7 +569,7 @@ where
         &[u8; 32],
         &[u8; 32],
         u64,
-    ) -> Result<AuthorizationVerificationKey, OwnerGovernanceError>,
+    ) -> Result<(AuthorizationVerificationKey, Vec<[u8; 32]>), OwnerGovernanceError>,
 {
     if chain.is_empty() {
         return Err(OwnerGovernanceError::Invalid(
@@ -577,7 +595,8 @@ where
         if k == k_max {
             saw_k_max = true;
         }
-        let authority_key = resolve_owner(&owner_id, &owner_state_hash, k)?;
+        let (authority_key, owner_authority_key_ids) =
+            resolve_owner(&owner_id, &owner_state_hash, k)?;
         let verified = verify_signed_spool_policy_record(VerifySignedPolicy {
             signed,
             spool_uuid: *spool_uuid,
@@ -586,6 +605,7 @@ where
             accepted_owner_state_hash: owner_state_hash,
             required_transfer_sequence: k,
             authority_key: &authority_key,
+            owner_authority_key_ids: &owner_authority_key_ids,
             accepted_grow_only: &accepted_grow_only,
             ancestor_ceiling: None,
         })?;
@@ -686,10 +706,18 @@ pub fn verify_resource_policy_chain(
                     return Err(OwnerGovernanceError::NotOwnerSigned);
                 }
             }
-            owner
+            let authority = owner
                 .provenance_issuer(hash, sequence)
                 .cloned()
-                .map_err(|_| OwnerGovernanceError::NotOwnerSigned)
+                .map_err(|_| OwnerGovernanceError::NotOwnerSigned)?;
+            // Signing is phase-bounded, but F7 excludes every accepted key of
+            // this owner, including rotations after it surrendered the Spool.
+            let ids = owners
+                .iter()
+                .filter(|o| o.owner_id() == *id)
+                .flat_map(crate::VerifiedOwnerState::authority_key_ids)
+                .collect();
+            Ok((authority, ids))
         },
     )?)
 }
@@ -766,6 +794,7 @@ mod tests {
             accepted_owner_state_hash: owner_hash(),
             required_transfer_sequence: 0,
             authority_key: key,
+            owner_authority_key_ids: &[owner_key_id(key)],
             accepted_grow_only: &BTreeMap::new(),
             ancestor_ceiling: None,
         })
@@ -829,6 +858,7 @@ mod tests {
             accepted_owner_state_hash: owner_hash(),
             required_transfer_sequence: 0,
             authority_key: &key,
+            owner_authority_key_ids: &[owner_key_id(&key)],
             accepted_grow_only: &BTreeMap::new(),
             ancestor_ceiling: Some(Audience::Private),
         })
@@ -871,6 +901,7 @@ mod tests {
             accepted_owner_state_hash: owner_hash(),
             required_transfer_sequence: 0,
             authority_key: &key,
+            owner_authority_key_ids: &[owner_key_id(&key)],
             accepted_grow_only: &verified.grow_only,
             ancestor_ceiling: None,
         })
@@ -899,9 +930,10 @@ mod tests {
     fn back_dated_k_tip_is_refused() {
         let (signing, key) = authority();
         let signed = sign(base_body(), &signing, &key);
-        let error =
-            verify_signed_policy_chain(&[signed], &[0x11; 16], 1, |_, _, _| Ok(key.clone()))
-                .expect_err("n2");
+        let error = verify_signed_policy_chain(&[signed], &[0x11; 16], 1, |_, _, _| {
+            Ok((key.clone(), vec![owner_key_id(&key)]))
+        })
+        .expect_err("n2");
         assert_eq!(error, OwnerGovernanceError::BackdatedK);
     }
 

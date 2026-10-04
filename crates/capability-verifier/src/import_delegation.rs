@@ -74,6 +74,7 @@ pub fn verify_policy_record(
         )?,
         required_transfer_sequence: body.ownership_transfer_sequence,
         authority_key: issuer,
+        owner_authority_key_ids: &owner.authority_key_ids().collect::<Vec<_>>(),
         accepted_grow_only: &std::collections::BTreeMap::new(),
         ancestor_ceiling: None,
     })?;
@@ -449,8 +450,10 @@ pub fn verify_bytes(
                 .as_ref()
                 .ok_or_else(|| crate::Error::Invalid("owner root missing".into()))?,
         )?;
-        if history.accepted_transitions.len() > 64 {
-            return Err(crate::Error::TooLarge { limit: 64 });
+        if history.accepted_transitions.len() > VerificationLimits::MAX_TRANSITIONS {
+            return Err(crate::Error::TooLarge {
+                limit: VerificationLimits::MAX_TRANSITIONS,
+            });
         }
         for transition in &history.accepted_transitions {
             owner = crate::apply_accepted_transition(&owner, transition, now_unix_seconds, limits)?;

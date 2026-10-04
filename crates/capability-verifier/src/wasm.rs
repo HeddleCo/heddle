@@ -48,6 +48,25 @@ fn verification_error(error: crate::Error) -> JsValue {
     }
 }
 
+// TryFrom<JsValue> checks the original bigint against the converted integer,
+// rejecting ABI truncation. Test typeof first so numbers get our typed error.
+fn checked_integer<T: TryFrom<JsValue, Error = JsValue>>(
+    value: JsValue,
+    field: &str,
+) -> Result<T, JsValue> {
+    if !value.is_bigint() {
+        return Err(verification_error(crate::Error::Invalid(format!(
+            "{field} must be a bigint"
+        ))));
+    }
+    T::try_from(value).map_err(|_| {
+        verification_error(crate::Error::Invalid(format!(
+            "{field} is outside the {} range",
+            std::any::type_name::<T>()
+        )))
+    })
+}
+
 #[derive(Serialize)]
 struct ImportSummary {
     certificate_digest_hex: String,
@@ -61,10 +80,14 @@ pub fn verify_ownership_transfer_binding(
     source_history: &[u8],
     destination_history: &[u8],
     resource_uuid: &[u8],
-    expected_sequence: u64,
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] expected_sequence: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let expected_sequence: u64 = checked_integer(expected_sequence, "expected_sequence")?;
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     object(
         &crate::observed::verify_ownership_transfer_bytes(
             transfer,
@@ -84,9 +107,12 @@ pub fn verify_ownership_transfer_binding(
 pub fn verify_resource_keyring_binding(
     keyring: &[u8],
     current_owner: &[u8],
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     object(
         &crate::observed::verify_resource_keyring_bytes(
             keyring,
@@ -103,8 +129,8 @@ pub fn verify_resource_keyring_binding(
 pub fn verify_ownership_transfer_chain_binding(
     keyring: &[u8],
     current_owner: &[u8],
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
     verify_resource_keyring_binding(
         keyring,
@@ -118,8 +144,9 @@ pub fn verify_ownership_transfer_chain_binding(
 #[wasm_bindgen(js_name = verifySpoolOwnerGenesis, unchecked_return_type = "GenesisSummary")]
 pub fn verify_spool_owner_genesis_binding(
     genesis: &[u8],
-    now_unix_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
     object(
         &crate::observed::verify_spool_owner_genesis_bytes(genesis, now_unix_seconds)
             .map_err(verification_error)?,
@@ -132,9 +159,12 @@ pub fn verify_signed_policy_chain_binding(
     #[wasm_bindgen(unchecked_param_type = "Uint8Array[]")] records: Vec<JsValue>,
     keyring: &[u8],
     current_owner: &[u8],
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     if records.len() > VerificationLimits::MAX_BUNDLE_BYTES {
         return Err(verification_error(crate::Error::TooLarge {
             limit: VerificationLimits::MAX_BUNDLE_BYTES,
@@ -187,9 +217,12 @@ pub fn verify_import_delegation_binding(
     known_job_associations_json: &str,
     cancelled_ids_json: &str,
     revoked_key_ids_json: &str,
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     let digest = crate::import_delegation::verify_bytes(
         certificate,
         permission,
@@ -240,9 +273,12 @@ pub fn verify_purge_authorization_binding(
     current_owner_state_hash: &[u8],
     spool_uuid: &[u8],
     spool_path_segments: Vec<String>,
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<JsValue, JsValue> {
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     let limits = VerificationLimits::new(max_capability_ttl_seconds).map_err(verification_error)?;
     let Ok(body) =
         canonical_message::<PurgeOperationSigningBody>(operation_body, MAX_OPERATION_BODY_BYTES)
@@ -310,13 +346,17 @@ pub fn verify_timeline_acceptance_binding(
     accepted_state_hash: &[u8],
     spool_path_segments: Vec<String>,
     request_sha256: &[u8],
-    first_position: u64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] first_position: JsValue,
     event_count: u32,
     revoked_capability_ids_hex: Vec<String>,
     revoked_subject_ids_hex: Vec<String>,
-    now_unix_seconds: i64,
-    max_capability_ttl_seconds: i64,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
 ) -> Result<bool, JsValue> {
+    let first_position: u64 = checked_integer(first_position, "first_position")?;
+    let now_unix_seconds: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let max_capability_ttl_seconds: i64 =
+        checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
     let limits = VerificationLimits::new(max_capability_ttl_seconds).map_err(verification_error)?;
     let verified = (|| -> crate::Result<()> {
         let origin: TimelineOriginEndorsement = canonical_message(origin_bytes, 4096)?;

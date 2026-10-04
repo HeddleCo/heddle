@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Native dispatch for the differential corpus of production byte bindings.
-use crate::{Error, Result, observed};
 use serde_json::{Value, json};
+
+use crate::{Error, Result, observed};
 
 /// Evaluate one byte-identical production case. The envelope retains the typed
 /// rejection so differential tests compare codes as well as diagnostics.
@@ -15,10 +16,12 @@ pub fn evaluate(case: &Value) -> Result<Value> {
             )
             .map_err(|e| Error::Invalid(e.to_string()))
         };
-        let now = case["now"]
-            .as_i64()
-            .ok_or_else(|| Error::Invalid("missing now".into()))?;
-        let ttl = case["max_ttl"].as_i64().unwrap_or(3600);
+        let now = integer::<i64>(case, "now", "now_unix_seconds")?;
+        let ttl = if case.get("max_ttl").is_some() {
+            integer::<i64>(case, "max_ttl", "max_capability_ttl_seconds")?
+        } else {
+            3600
+        };
         let value = match case["api"].as_str() {
             Some("owner-root") => {
                 serde_json::to_value(observed::verify_owner_root_bytes(&bytes("root_hex")?)?)
@@ -36,9 +39,7 @@ pub fn evaluate(case: &Value) -> Result<Value> {
                 &bytes("source_history_hex")?,
                 &bytes("destination_history_hex")?,
                 &bytes("resource_uuid_hex")?,
-                case["sequence"]
-                    .as_u64()
-                    .ok_or_else(|| Error::Invalid("missing sequence".into()))?,
+                integer::<u64>(case, "sequence", "expected_sequence")?,
                 now,
                 ttl,
             )?),
@@ -75,4 +76,17 @@ pub fn evaluate(case: &Value) -> Result<Value> {
         Ok(value) => json!({"ok": value}),
         Err(error) => json!({"error": observed::VerificationError::from(error)}),
     })
+}
+
+fn integer<T: std::str::FromStr>(case: &Value, field: &str, parameter: &str) -> Result<T> {
+    case[field]
+        .as_str()
+        .ok_or_else(|| Error::Invalid(format!("missing decimal {field}")))?
+        .parse()
+        .map_err(|_| {
+            Error::Invalid(format!(
+                "{parameter} is outside the {} range",
+                std::any::type_name::<T>()
+            ))
+        })
 }

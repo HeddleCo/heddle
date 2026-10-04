@@ -36,8 +36,8 @@ pub fn evaluate(json: &str) -> Result<Value, String> {
         &c.associations_json,
         &c.cancellations_json,
         &c.revoked_json,
-        c.now.parse::<i64>().map_err(|e| e.to_string())?,
-        c.max_ttl.parse::<i64>().map_err(|e| e.to_string())?,
+        c.now.parse::<i64>().map_err(|_| "invalid owner-authorization object: now_unix_seconds is outside the i64 range")?,
+        c.max_ttl.parse::<i64>().map_err(|_| "invalid owner-authorization object: max_capability_ttl_seconds is outside the i64 range")?,
     )
     .map(|digest| json!(hex::encode(digest)))
     .map_err(|e| e.to_string())

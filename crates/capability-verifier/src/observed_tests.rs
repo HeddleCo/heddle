@@ -1,6 +1,7 @@
+use serde_json::{Value, json};
+
 use super::*;
 use crate::{policy, wire::*};
-use serde_json::{Value, json};
 
 fn observed_owner(
     root: &SignedOwnerRoot,
@@ -527,7 +528,74 @@ fn production_cases() -> Vec<Value> {
         hex::encode(first.encode_to_vec()),
         hex::encode(correct_entry.encode_to_vec())
     ]);
-    cases.push(pre_entry);
+    cases.push(pre_entry.clone());
+    // A rotated signing owner may not revoke its retired root key. A policy
+    // signed at the root also cannot revoke a later accepted authority key.
+    for (id, state, signer, forbidden) in [
+        (
+            "policy-rotated-owner-revoke-history",
+            &entry_state,
+            TestKey::new(14),
+            destination_key.wire(),
+        ),
+        (
+            "policy-historical-state-revoke-later-authority",
+            &destination,
+            TestKey::new(11),
+            TestKey::new(14).wire(),
+        ),
+    ] {
+        let mut ids = vec![vec![0x44; 32], policy::owner_key_id(&forbidden).to_vec()];
+        ids.sort();
+        let bad = policy_record(state, &signer, head.clone(), 2, 1, ids);
+        let mut case = c.clone();
+        case["id"] = json!(id);
+        case["current_owner_hex"] = json!(hex::encode(entry_observed.encode_to_vec()));
+        case["records_hex"] = json!([
+            hex::encode(first.encode_to_vec()),
+            hex::encode(bad.encode_to_vec())
+        ]);
+        case["expected_accept"] = json!(false);
+        case["expected_code"] = json!("policy_self_revocation");
+        cases.push(case);
+    }
+    // Revocations introduced by a previous owner carry through a transfer,
+    // even if the new owner's history contains the already revoked key.
+    let mut inherited_ids = vec![policy::owner_key_id(&destination_key.wire()).to_vec()];
+    inherited_ids.sort();
+    let inherited_first = policy_record(
+        &source,
+        &TestKey::new(1),
+        policy::zero_head(),
+        1,
+        0,
+        inherited_ids.clone(),
+    );
+    let inherited_head = SignedPolicyHead {
+        sequence: 1,
+        state_hash: inherited_first
+            .body
+            .as_ref()
+            .expect("body")
+            .policy_state_hash
+            .clone(),
+    };
+    let inherited_second = policy_record(
+        &entry_state,
+        &TestKey::new(14),
+        inherited_head,
+        2,
+        1,
+        inherited_ids,
+    );
+    let mut inherited = c.clone();
+    inherited["id"] = json!("policy-inherited-history-key-revocation");
+    inherited["current_owner_hex"] = json!(hex::encode(entry_observed.encode_to_vec()));
+    inherited["records_hex"] = json!([
+        hex::encode(inherited_first.encode_to_vec()),
+        hex::encode(inherited_second.encode_to_vec())
+    ]);
+    cases.push(inherited);
     let mut empty = c.clone();
     empty["id"] = json!("policy-empty-chain");
     empty["records_hex"] = json!([]);
@@ -540,6 +608,13 @@ fn production_cases() -> Vec<Value> {
     incomplete["expected_accept"] = json!(false);
     incomplete["expected_code"] = json!("policy_backdated_transfer");
     cases.push(incomplete);
+    for case in &mut cases {
+        for field in ["now", "max_ttl", "sequence"] {
+            if let Some(value) = case.get(field).cloned() {
+                case[field] = json!(value.to_string());
+            }
+        }
+    }
     cases
 }
 
@@ -625,34 +700,44 @@ fn print_production_fixture() {
 
 #[cfg(target_arch = "wasm32")]
 fn evaluate_binding(c: &Value) -> Value {
-    use crate::wasm;
     use wasm_bindgen::{JsCast, JsValue};
+
+    use crate::wasm;
     let bytes = |name: &str| hex::decode(c[name].as_str().expect("hex field")).expect("hex");
-    let now = c["now"].as_i64().expect("now");
+    let now = c["now"]
+        .as_str()
+        .expect("decimal now")
+        .parse::<i64>()
+        .expect("now");
     let result = match c["api"].as_str().expect("API") {
         "owner-root" => wasm::verify_owner_root_binding(&bytes("root_hex")),
         "resource-keyring" => wasm::verify_resource_keyring_binding(
             &bytes("keyring_hex"),
             &bytes("current_owner_hex"),
-            now,
-            3600,
+            now.into(),
+            3600_i64.into(),
         ),
         "transfer-chain" => wasm::verify_ownership_transfer_chain_binding(
             &bytes("keyring_hex"),
             &bytes("current_owner_hex"),
-            now,
-            3600,
+            now.into(),
+            3600_i64.into(),
         ),
         "transfer" => wasm::verify_ownership_transfer_binding(
             &bytes("transfer_hex"),
             &bytes("source_history_hex"),
             &bytes("destination_history_hex"),
             &bytes("resource_uuid_hex"),
-            c["sequence"].as_u64().expect("sequence"),
-            now,
-            3600,
+            c["sequence"]
+                .as_str()
+                .expect("decimal sequence")
+                .parse::<u64>()
+                .expect("sequence")
+                .into(),
+            now.into(),
+            3600_i64.into(),
         ),
-        "genesis" => wasm::verify_spool_owner_genesis_binding(&bytes("genesis_hex"), now),
+        "genesis" => wasm::verify_spool_owner_genesis_binding(&bytes("genesis_hex"), now.into()),
         "policy" => {
             let records = c["records_hex"]
                 .as_array()
@@ -667,8 +752,8 @@ fn evaluate_binding(c: &Value) -> Value {
                 records,
                 &bytes("keyring_hex"),
                 &bytes("current_owner_hex"),
-                now,
-                3600,
+                now.into(),
+                3600_i64.into(),
             )
         }
         _ => panic!("unknown test API"),
@@ -707,8 +792,8 @@ fn production_bindings_match_native_objects_and_error_codes() {
         vec![wasm_bindgen::JsValue::from_str("not protobuf bytes")],
         &[],
         &[],
-        NOW,
-        3600,
+        NOW.into(),
+        3600_i64.into(),
     )
     .expect_err("wrong input type");
     assert_eq!(
@@ -740,4 +825,184 @@ fn single_policy_provenance_rejects_malformed_predecessor() {
         crate::import_delegation::verify_policy_record(&signed, &[&owner]),
         Err(Error::Policy(policy::OwnerGovernanceError::Invalid(_)))
     ));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn policy_rejects_rotated_owner_history_keys_at_introduction() {
+    for case in production_cases().into_iter().filter(|c| {
+        matches!(
+            c["id"].as_str(),
+            Some(
+                "policy-rotated-owner-revoke-history"
+                    | "policy-historical-state-revoke-later-authority"
+            )
+        )
+    }) {
+        let result = conformance::production::evaluate(&case).expect("evaluate");
+        assert_eq!(
+            result["error"]["code"], "policy_self_revocation",
+            "{}: {result}",
+            case["id"]
+        );
+    }
+    let (ring, _) = base_keyring();
+    let owner = verify_clone_keyring(ring, NOW, limits(), &[])
+        .expect("ring")
+        .owner_state()
+        .clone();
+    let signed = policy_record(
+        &owner,
+        &TestKey::new(7),
+        policy::zero_head(),
+        1,
+        0,
+        vec![policy::owner_key_id(&TestKey::new(1).wire()).to_vec()],
+    );
+    assert!(matches!(
+        crate::import_delegation::verify_policy_record(&signed, &[&owner]),
+        Err(Error::Policy(policy::OwnerGovernanceError::SelfRevocation))
+    ));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn single_policy_provenance_bounds_revocation_count() {
+    let (ring, _) = base_keyring();
+    let owner = verify_owner_root(ring.owner_root.as_ref().expect("root")).expect("owner");
+    for count in [4096, 4097] {
+        let ids = (0..count)
+            .map(|i: u64| {
+                let mut id = vec![0; 32];
+                id[24..].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        let signed = policy_record(&owner, &TestKey::new(1), policy::zero_head(), 1, 0, ids);
+        let result = crate::import_delegation::verify_policy_record(&signed, &[&owner]);
+        if count == 4096 {
+            result.expect("4096 revocations are permitted");
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::Policy(policy::OwnerGovernanceError::Invalid(_)))
+            ));
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn import_byte_adapter_uses_general_owner_transition_bound() {
+    use std::collections::BTreeSet;
+
+    use heddle_api::{hybrid_codec, import_authority as contract};
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../conformance/hybrid/import-authority-host-witness-v1.json"
+    ))
+    .expect("fixture");
+    let mut certificate = SignedImportJobDelegationV1::decode(
+        hex::decode(
+            fixture["signed_vectors"]["delegation"]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex")
+        .as_slice(),
+    )
+    .expect("certificate");
+    let (mut ring, _) = base_keyring();
+    ring.accepted_transitions.clear();
+    let root = ring.owner_root.clone().expect("root");
+    let initial = verify_owner_root(&root).expect("root state");
+    ring.accepted_state_hash = initial.state_hash().to_vec();
+    let genesis_digest = crate::creation::spool_genesis_digest(
+        ring.owner_genesis
+            .as_ref()
+            .expect("genesis")
+            .genesis
+            .as_ref()
+            .expect("body"),
+    )
+    .expect("digest");
+    let mut history = OwnerHistory {
+        root: Some(root),
+        accepted_transitions: vec![],
+        state_hash: initial.state_hash().to_vec(),
+    };
+    let mut owner = initial.clone();
+    let mut signer = TestKey::new(1);
+    for count in 1..=VerificationLimits::MAX_TRANSITIONS + 1 {
+        let next = TestKey::new(if count % 2 == 0 { 8 } else { 7 });
+        let signed = rotation(&owner, &signer, &next);
+        owner =
+            apply_accepted_transition(&owner, &signed, NOW, limits()).expect("accepted rotation");
+        signer = next;
+        history.accepted_transitions.push(signed);
+        history.state_hash = owner.state_hash().to_vec();
+        if ![
+            65,
+            VerificationLimits::MAX_TRANSITIONS,
+            VerificationLimits::MAX_TRANSITIONS + 1,
+        ]
+        .contains(&count)
+        {
+            continue;
+        }
+        let body = certificate.body.as_mut().expect("body");
+        body.identity = Some(ImportIdentityV1 {
+            spool_uuid: SPOOL.to_vec(),
+            spool_genesis_digest: genesis_digest.to_vec(),
+            owner_id: owner.owner_id().to_vec(),
+            owner_account_uuid: OWNER_UUID.to_vec(),
+            owner_state_hash: owner.state_hash().to_vec(),
+            ownership_transfer_sequence: 0,
+        });
+        body.delegating_public_key = signer.wire().public_key;
+        body.parent_permission_digest = vec![0; 32];
+        body.not_before_unix_seconds = NOW - 1;
+        body.expires_at_unix_seconds = NOW + 100;
+        body.owner_chain_digest = contract::owner_chain_digest(&ImportOwnerChainV1 {
+            spool_genesis_digest: genesis_digest.to_vec(),
+            owner_state_hashes: BTreeSet::from([
+                initial.state_hash().to_vec(),
+                owner.state_hash().to_vec(),
+            ])
+            .into_iter()
+            .collect(),
+            transfer_audit_hashes: vec![],
+        })
+        .expect("chain digest");
+        certificate.delegating_signature = Some(
+            signer.sign_digest(
+                &hybrid_codec::signing_digest(contract::DELEGATION_DOMAIN, body)
+                    .expect("digest")
+                    .try_into()
+                    .expect("digest width"),
+            ),
+        );
+        let result = crate::import_delegation::verify_bytes(
+            &certificate.encode_to_vec(),
+            &[],
+            &ring.encode_to_vec(),
+            &history.encode_to_vec(),
+            &initial.owner_id(),
+            &genesis_digest,
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+            NOW,
+            3600,
+        );
+        if count <= VerificationLimits::MAX_TRANSITIONS {
+            let digest = result.expect("complete history within general bound");
+            assert_eq!(
+                digest,
+                contract::signed_delegation_digest(&certificate).expect("digest")
+            );
+        } else {
+            assert!(matches!(result, Err(Error::TooLarge { .. })));
+        }
+    }
 }

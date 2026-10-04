@@ -197,6 +197,23 @@ const productionCases: CorpusCase[] = productionFixture.cases.map((c: JsonRecord
   id: `production-${String(c.id)}`, fixture_kind: "production", fixture_json: JSON.stringify(c),
 }));
 corpusCases.push(...productionCases);
+// Decimal strings carry the original context without a Number round-trip.
+const transferControl = productionFixture.cases.find((c: JsonRecord) => c.api === "transfer" && c.expected_accept);
+for (const [field, low, high] of [["sequence", 0n, (1n << 64n) - 1n], ["now", -(1n << 63n), (1n << 63n) - 1n], ["max_ttl", -(1n << 63n), (1n << 63n) - 1n]] as const) {
+  const valid = BigInt(String(transferControl[field] ?? 3600));
+  for (const value of [low - 1n, low, low + 1n, high - 1n, high, high + 1n, valid - (1n << 64n), valid + (1n << 64n)]) {
+    const c = { ...transferControl, [field]: value.toString() };
+    corpusCases.push({ id: `integer-transfer-${field}-${value}`, fixture_kind: "production", fixture_json: JSON.stringify(c) });
+  }
+}
+const importControl = asRecord(JSON.parse(importCases.find(c => c.id === "import-device-control")!.fixture_json), "import control");
+for (const field of ["now", "max_ttl"]) {
+  const valid = BigInt(String(importControl[field]));
+  for (const value of [-(1n << 63n) - 1n, -(1n << 63n), -(1n << 63n) + 1n, (1n << 63n) - 2n, (1n << 63n) - 1n, 1n << 63n, valid - (1n << 64n), valid + (1n << 64n), ((1n << 63n) - 1n) / 1000n + 1n, -(1n << 63n) / 1000n - 1n]) {
+    const c = { ...importControl, [field]: value.toString() };
+    corpusCases.push({ id: `integer-import-${field}-${value}`, fixture_kind: "import", fixture_json: JSON.stringify(c) });
+  }
+}
 for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
   const selected = productionCases[random.int(productionCases.length)];
   const c = asRecord(JSON.parse(selected.fixture_json), "production inputs");
@@ -248,14 +265,14 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
   if (testCase.fixture_kind === "production") {
     const c = asRecord(JSON.parse(testCase.fixture_json), "production inputs");
     const bytes = (field: string) => new Uint8Array(Buffer.from(String(c[field]), "hex"));
-    const now = BigInt(Number(c.now)), ttl = BigInt(Number(c.max_ttl ?? 3600));
+    const now = BigInt(String(c.now)), ttl = BigInt(String(c.max_ttl ?? 3600));
     try {
       let value: unknown;
       switch (c.api) {
         case "owner-root": value = wasm.verifyOwnerRoot(bytes("root_hex")); break;
         case "resource-keyring": value = wasm.verifyResourceKeyring(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
         case "transfer-chain": value = wasm.verifyOwnershipTransferChain(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
-        case "transfer": value = wasm.verifyOwnershipTransfer(bytes("transfer_hex"), bytes("source_history_hex"), bytes("destination_history_hex"), bytes("resource_uuid_hex"), BigInt(Number(c.sequence)), now, ttl); break;
+        case "transfer": value = wasm.verifyOwnershipTransfer(bytes("transfer_hex"), bytes("source_history_hex"), bytes("destination_history_hex"), bytes("resource_uuid_hex"), BigInt(String(c.sequence)), now, ttl); break;
         case "genesis": value = wasm.verifySpoolOwnerGenesis(bytes("genesis_hex"), now); break;
         case "policy": value = wasm.verifySignedPolicyChain((c.records_hex as string[]).map(v => new Uint8Array(Buffer.from(v, "hex"))), bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
         default: throw new Error("unknown production API");
@@ -372,9 +389,9 @@ for (const value of timelineFixture.cases) {
   }
   const actual = wasm.verifyTimelineAcceptance(
     bytes("origin_hex"), bytes("acceptance_hex"), bytes("current_owner_state_hash_hex"),
-    pathSegments, bytes("request_sha256_hex"), BigInt(Number(testCase.first_position)),
+    pathSegments, bytes("request_sha256_hex"), BigInt(String(testCase.first_position)),
     Number(testCase.event_count), revokedCapabilities, revokedSubjects,
-    BigInt(Number(testCase.now_unix_seconds)), BigInt(timelineFixture.max_capability_ttl_seconds),
+    BigInt(String(testCase.now_unix_seconds)), BigInt(timelineFixture.max_capability_ttl_seconds),
   );
   if (actual !== testCase.expected_accept) {
     divergences.push(`direct-timeline-${String(testCase.name)}: expected=${String(testCase.expected_accept)} actual=${String(actual)}`);

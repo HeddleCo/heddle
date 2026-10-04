@@ -29,6 +29,13 @@ lowercase hex. Every production rejection throws a `VerificationError`
 object with an exhaustive `code` union and a diagnostic `message`; dispatch
 on `code`. Successful results are JS objects, not JSON strings.
 
+Each integer is checked before conversion: sequences/positions must fit `u64`,
+and times/TTL must fit `i64`. Numbers and other JS types throw a typed `invalid`
+error. Native time and positive-TTL rules still apply; import seconds-to-ms
+conversion rejects overflow. Policy revocations are capped at 4096 per record
+and cannot introduce any authority key from the signing owner's verified
+accepted history. Owner histories use the general 256-transition bound.
+
 | Binding | Signature | Observed wire messages / result |
 | --- | --- | --- |
 | `verifyOwnerRoot` | `(root: Uint8Array): OwnerSummary` | `SignedOwnerRoot`; exact root authority |
