@@ -2,7 +2,7 @@
 
 Production browser bindings for `heddleco-capability-verifier`. All proof
 verification runs in Rust. This revision builds version **0.28.8**, using
-`heddle-api` **0.31.0-alpha.21**. Tapestry should pin
+`heddle-api` **0.31.0-alpha.27**. Tapestry should pin
 `@heddleco/capability-verifier-wasm@0.28.8` exactly when that artifact is
 published. If the next Heddle release bumps the workspace version, pin that
 exact release version instead: CI requires npm, Cargo and the validated tag

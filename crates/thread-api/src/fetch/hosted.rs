@@ -152,8 +152,8 @@ impl StagedSource {
                 .map_err(preparation)?;
         }
         // Account/device lookup uses the committed Spool identity. Registration
-        // is local discovery and runs only after successful authority commit.
-        drop(_write_lock);
+        // is local discovery after authority commit, while the repository lock
+        // still prevents another writer from replacing the installed identity.
         repo::device_catalog::register(&repo::identity::heddle_home_dir(), repository, spool)
             .map_err(preparation)?;
         Ok(state)
