@@ -10,7 +10,7 @@ use wire::ProtocolError;
 use super::{HostedClient, operation_id::ClientOperationId};
 
 mod job;
-pub use job::{ImportConfiguration, PreparedImportJob};
+pub use job::{ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob};
 
 #[cfg(test)]
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
@@ -484,9 +484,9 @@ mod tests {
     fn signed_proof() -> contract::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha23.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
         )))
-        .expect("alpha.23 fixed vectors");
+        .expect("alpha.24 fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
                 .as_str()
@@ -563,7 +563,7 @@ mod tests {
     fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha23.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
         )))
         .expect("vectors");
         let bytes = hex::decode(
@@ -605,7 +605,7 @@ mod tests {
     fn unavailable_oids_require_explicit_signed_observe_disclosure() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha23.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
         )))
         .expect("fixture");
         let decode = |name: &str| {

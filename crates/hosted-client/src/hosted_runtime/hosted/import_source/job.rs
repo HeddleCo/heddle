@@ -18,12 +18,37 @@ impl ImportConfiguration {
     }
 }
 
+/// Authenticated destination-writer snapshot for reviewing the remaining scope.
+/// Prepare must return this exact snapshot before the caller signs a renewal.
+#[derive(Clone, Debug)]
+pub struct ImportJobState {
+    request: wire::GetImportJobStateRequest,
+    response: wire::GetImportJobStateResponse,
+}
+impl ImportJobState {
+    pub fn response(&self) -> &wire::GetImportJobStateResponse {
+        &self.response
+    }
+}
+
+/// Complete validated request bytes. Replays retain this body, including its
+/// operation ID; the transport signs a fresh request PoP outside the body.
+pub struct ImportRenewalSubmission {
+    bytes: Vec<u8>,
+}
+impl ImportRenewalSubmission {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// Exact authenticated proposal retained until the caller signs. This value is
 /// not delegated permission and cannot authorize native installation.
 #[derive(Clone, Debug)]
 pub struct PreparedImportJob {
     destination: wire::SpoolRef,
     response: wire::PrepareImportJobResponse,
+    renewal_read: Option<ImportJobState>,
 }
 impl PreparedImportJob {
     pub fn response(&self) -> &wire::PrepareImportJobResponse {
@@ -31,6 +56,18 @@ impl PreparedImportJob {
     }
     pub fn destination(&self) -> &wire::SpoolRef {
         &self.destination
+    }
+
+    pub fn renewal_submission(
+        &self,
+        request: &wire::RenewImportJobRequest,
+        predecessor_context: &authority::ImportOwnerExpectation<'_>,
+        current_context: &authority::ImportOwnerExpectation<'_>,
+    ) -> Result<ImportRenewalSubmission> {
+        validate_renewal(self, request, predecessor_context, current_context)?;
+        Ok(ImportRenewalSubmission {
+            bytes: request.encode_to_vec(),
+        })
     }
 
     /// The owner context must come from independent owner/keyring verification.
@@ -69,6 +106,24 @@ impl PreparedImportJob {
 }
 
 impl HostedClient {
+    pub async fn get_import_job_state(
+        &self,
+        request: &wire::GetImportJobStateRequest,
+    ) -> Result<ImportJobState> {
+        authority::validate_job_state_request(request)?;
+        self.require_import_authority_protocol().await?;
+        let response = self
+            .call_unary(
+                "/heddle.api.v1alpha2.IntegrationService/GetImportJobState",
+                request,
+            )
+            .await?;
+        authority::validate_job_state_response(request, &response)?;
+        Ok(ImportJobState {
+            request: request.clone(),
+            response,
+        })
+    }
     /// Check semantic support before provisioning an import destination or
     /// staging an import job. Method discovery alone cannot establish support.
     pub async fn require_import_authority_protocol(&self) -> Result<()> {
@@ -107,6 +162,35 @@ impl HostedClient {
         refs: &super::ImportSourceRefs,
         request: &wire::PrepareImportJobRequest,
     ) -> Result<PreparedImportJob> {
+        self.prepare_import_job_from_read(configuration, refs, request, None)
+            .await
+    }
+
+    pub async fn prepare_import_renewal(
+        &self,
+        configuration: &ImportConfiguration,
+        refs: &super::ImportSourceRefs,
+        request: &wire::PrepareImportJobRequest,
+        read: &ImportJobState,
+    ) -> Result<PreparedImportJob> {
+        self.prepare_import_job_from_read(configuration, refs, request, Some(read))
+            .await
+    }
+
+    async fn prepare_import_job_from_read(
+        &self,
+        configuration: &ImportConfiguration,
+        refs: &super::ImportSourceRefs,
+        request: &wire::PrepareImportJobRequest,
+        read: Option<&ImportJobState>,
+    ) -> Result<PreparedImportJob> {
+        match read {
+            Some(read)
+                if read.request.destination == request.destination
+                    && read.request.logical_job_id == request.renew_logical_job_id => {}
+            None if request.renew_logical_job_id.is_empty() => {}
+            _ => return Err(Reject::StaleContext.into()),
+        }
         let destination = request.destination.as_ref().ok_or(Reject::Canonical)?;
         let identity = request.identity.as_ref().ok_or(Reject::Canonical)?;
         let spool = uuid::Uuid::parse_str(&destination.id).map_err(|_| Reject::Canonical)?;
@@ -139,6 +223,9 @@ impl HostedClient {
             )
             .await?;
         validate_preparation(request, &response, chrono::Utc::now().timestamp())?;
+        if let Some(read) = read {
+            authority::validate_renewal_preparation_from_read(request, &response, &read.response)?;
+        }
         let returned = response
             .proposal
             .as_ref()
@@ -152,6 +239,7 @@ impl HostedClient {
         Ok(PreparedImportJob {
             destination: destination.clone(),
             response,
+            renewal_read: read.cloned(),
         })
     }
 
@@ -194,15 +282,11 @@ impl HostedClient {
     /// CAS handle, then independently check current replacement authority.
     pub async fn renew_import_job(
         &self,
-        prepared: &PreparedImportJob,
-        request: &wire::RenewImportJobRequest,
-        predecessor_context: &authority::ImportOwnerExpectation<'_>,
-        current_context: &authority::ImportOwnerExpectation<'_>,
+        submission: &ImportRenewalSubmission,
     ) -> Result<wire::MutationResponse> {
-        validate_renewal(prepared, request, predecessor_context, current_context)?;
-        self.call_unary(
+        self.call_unary_encoded(
             "/heddle.api.v1alpha2.IntegrationService/RenewImportJob",
-            request,
+            submission.bytes(),
         )
         .await
     }
@@ -247,30 +331,22 @@ fn validate_renewal(
     if request.destination.as_ref() != Some(&prepared.destination) {
         return Err(Reject::Scope.into());
     }
-    authority::validate_renewal_preparation(&prepared.response)?;
-    let proof = request.proof.as_ref().ok_or(Reject::Canonical)?;
-    prepared.preflight(proof, current_context)?;
-    let replacement = proof.delegations.last().ok_or(Reject::ImportPermission)?;
-    let state = prepared
-        .response
-        .renewal_state
-        .as_ref()
-        .ok_or(Reject::Canonical)?;
-    let active = state.active_predecessor.as_ref().ok_or(Reject::Canonical)?;
-    let predecessor = authority::verify_renewal_predecessor(
-        state,
-        member_permission(proof, active)?,
-        predecessor_context,
-    )?;
-    let renewal = request.renewal.as_ref().ok_or(Reject::Canonical)?;
-    if renewal.body.as_ref().and_then(|b| b.replacement.as_ref()) != Some(replacement) {
+    let read = prepared.renewal_read.as_ref().ok_or(Reject::StaleContext)?;
+    if prepared.response.renewal_state != read.response.state {
         return Err(Reject::StaleContext.into());
     }
-    authority::verify_renewal_from_state(
-        renewal,
-        &predecessor,
-        state,
-        member_permission(proof, replacement)?,
+    authority::validate_renewal_preparation(&prepared.response)?;
+    let replacement = request
+        .renewal
+        .as_ref()
+        .and_then(|r| r.body.as_ref())
+        .and_then(|r| r.replacement.as_ref())
+        .ok_or(Reject::Canonical)?;
+    exact_signed_delegation(prepared, replacement, current_context.now_unix_seconds)?;
+    authority::verify_renew_submission(
+        request,
+        &read.response,
+        predecessor_context,
         current_context,
     )?;
     Ok(())
@@ -332,6 +408,15 @@ fn exact_signed_proposal<'a>(
         return Err(Reject::Bounds.into());
     }
     let signed = proof.delegations.last().ok_or(Reject::ImportPermission)?;
+    exact_signed_delegation(prepared, signed, now)?;
+    Ok(signed)
+}
+
+fn exact_signed_delegation(
+    prepared: &PreparedImportJob,
+    signed: &wire::SignedImportJobDelegationV1,
+    now: i64,
+) -> Result<()> {
     let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
     let proposal = prepared
         .response
@@ -372,7 +457,7 @@ fn exact_signed_proposal<'a>(
     {
         return Err(Reject::ValidityBounds.into());
     }
-    Ok(signed)
+    Ok(())
 }
 
 pub(super) fn verify_delegating_signature(
@@ -398,9 +483,9 @@ mod tests {
     fn wire<T: Message + Default>(section: &str, name: &str) -> T {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha23.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
         )))
-        .expect("alpha.23 fixed vectors");
+        .expect("alpha.24 fixed vectors");
         let bytes = hex::decode(
             fixture[section][name]["wire_hex"]
                 .as_str()
@@ -468,6 +553,7 @@ mod tests {
         let prepared = PreparedImportJob {
             destination: wire::SpoolRef::default(),
             response,
+            renewal_read: None,
         };
         let mut proof = wire::ImportPublicProofBundleV1 {
             format_version: 1,
@@ -514,9 +600,9 @@ mod tests {
     fn fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha23.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
         )))
-        .expect("published alpha.23 vectors")
+        .expect("published alpha.24 vectors")
     }
 
     fn with_context(now: i64, check: impl FnOnce(&authority::ImportOwnerExpectation<'_>)) {
@@ -550,6 +636,10 @@ mod tests {
                 .destination
                 .expect("destination"),
             response: wire("wire_vectors", response),
+            renewal_read: (response == "renewal_preparation").then(|| ImportJobState {
+                request: wire("wire_vectors", "job_state_request"),
+                response: wire("wire_vectors", "job_state_partial"),
+            }),
         }
     }
 
@@ -731,12 +821,7 @@ mod tests {
     #[test]
     fn renewal_recovers_expired_predecessor_without_turning_it_into_execution_authority() {
         let prepared = prepared("renewal_preparation");
-        let request = wire::RenewImportJobRequest {
-            destination: Some(prepared.destination.clone()),
-            renewal: Some(wire("signed_vectors", "renewal")),
-            proof: Some(wire("wire_vectors", "complete_renewed_export")),
-            client_operation_id: "renew-once".into(),
-        };
+        let request: wire::RenewImportJobRequest = wire("wire_vectors", "renew_request_partial");
         with_context(1350, |expected| {
             validate_renewal(&prepared, &request, expected, expected)
                 .expect("expired predecessor with current narrower replacement");
@@ -759,6 +844,37 @@ mod tests {
             assert!(validate_renewal(&prepared, &changed, expected, expected).is_err());
             validate_renewal(&prepared, &request, expected, expected)
                 .expect("unchanged renewal/CAS");
+        });
+    }
+
+    #[test]
+    fn renewal_read_fences_prepare_and_frozen_submission_preserves_accepted_history() {
+        let read: wire::GetImportJobStateResponse = wire("wire_vectors", "job_state_partial");
+        let request: wire::PrepareImportJobRequest = wire("wire_vectors", "renew_prepare_request");
+        let response: wire::PrepareImportJobResponse = wire("wire_vectors", "renewal_preparation");
+        authority::validate_renewal_preparation_from_read(&request, &response, &read)
+            .expect("exact authenticated CAS");
+        let before_publication = wire("wire_vectors", "job_state_empty");
+        assert_eq!(
+            authority::validate_renewal_preparation_from_read(&request, &response, &before_publication),
+            Err(Reject::StaleContext)
+        );
+        let prepared = prepared("renewal_preparation");
+        let request: wire::RenewImportJobRequest = wire("wire_vectors", "renew_request_partial");
+        with_context(1350, |expected| {
+            let frozen = prepared.renewal_submission(&request, expected, expected)
+                .expect("submission with candidate outside accepted history");
+            assert_eq!(frozen.bytes(), request.encode_to_vec());
+            authority::check_renew_replay(frozen.bytes(), frozen.bytes()).expect("exact replay");
+            let mut candidate_in_history = request.clone();
+            candidate_in_history.proof.as_mut().expect("proof").delegations.push(
+                request.renewal.as_ref().expect("renewal").body.as_ref().expect("body")
+                    .replacement.clone().expect("candidate")
+            );
+            assert!(prepared.renewal_submission(&candidate_in_history, expected, expected).is_err());
+            assert_eq!(authority::check_renew_replay(&candidate_in_history.encode_to_vec(), frozen.bytes()),
+                Err(Reject::OperationIdReused));
+            assert_eq!(frozen.bytes(), request.encode_to_vec(), "caller edits cannot change replay");
         });
     }
 }

@@ -15,7 +15,7 @@ use super::history::*;
 use crate::contract::{GetHostedWitnessHistoryProofRequest, GetHostedWitnessHistoryProofResponse};
 
 fn fixture() -> serde_json::Value {
-    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha23.json"))
+    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha24.json"))
         .expect("fixed fixture")
 }
 fn wire<T: prost::Message + Default>(section: &str, name: &str) -> T {
