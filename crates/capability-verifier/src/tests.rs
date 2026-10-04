@@ -49,6 +49,9 @@ mod timeline_tests;
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 
+#[path = "observed_tests.rs"]
+mod observed_tests;
+
 struct TestKey {
     seed: [u8; 32],
     signing: SigningKey,

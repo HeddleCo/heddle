@@ -157,8 +157,8 @@ pub fn verify_transfer_audit_chain(
         if record.committed_at_unix_seconds < 0
             || (index == 0 && !record.previous_audit_record_hash.is_empty())
             || (index > 0
-                && record.previous_audit_record_hash.as_slice()
-                    != previous_hash.expect("previous audit hash"))
+                && Some(record.previous_audit_record_hash.as_slice())
+                    != previous_hash.as_ref().map(|hash| hash.as_slice()))
             || record.audit_record_hash.len() != 32
         {
             return Err(Error::BrokenChain(

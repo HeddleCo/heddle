@@ -30,6 +30,7 @@ enum FixtureKind {
     Keyring,
     Timeline,
     Import,
+    Production,
 }
 
 #[derive(Serialize)]
@@ -95,6 +96,12 @@ fn run() -> Result<Vec<Outcome>, String> {
 fn evaluate(kind: FixtureKind, fixture_json: &str) -> Result<Value, String> {
     match kind {
         FixtureKind::Import => return import::evaluate(fixture_json),
+        FixtureKind::Production => {
+            return heddleco_capability_verifier::conformance::production::evaluate(
+                &serde_json::from_str(fixture_json).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string());
+        }
         FixtureKind::Purge => {
             serde_json::to_value(run_fixture(fixture_json).map_err(|error| error.to_string())?)
         }

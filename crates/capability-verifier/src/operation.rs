@@ -186,6 +186,7 @@ fn denial(error: &Error) -> Denial {
         }
         Error::CapabilityDenied(_) => Denial::Capability,
         Error::Invalid(_) | Error::NonCanonicalProtobuf | Error::Decode(_) => Denial::Malformed,
+        Error::Policy(_) => Denial::InvalidProof,
     }
 }
 

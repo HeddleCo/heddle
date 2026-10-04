@@ -48,83 +48,10 @@ pub fn verify_policy_record(
     signed: &crate::wire::SignedSpoolPolicyRecord,
     owners: &[&VerifiedOwnerState],
 ) -> Result<()> {
-    use crate::canonical::Encoder;
     let body = signed
         .body
         .as_ref()
         .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
-    fn bytes(body: &crate::wire::SignedPolicyBody, include_hash: bool) -> Result<Vec<u8>> {
-        let mut e = Encoder::new();
-        if body.format_version != 1 || !body.merge_parent_state_hashes.is_empty() {
-            return Err(Error::Hybrid(contract::Reject::Version));
-        }
-        let head = body
-            .expected_head
-            .as_ref()
-            .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
-        if body.spool_uuid.len() != 16
-            || head.state_hash.len() != 32
-            || body.owner_id.len() != 32
-            || body.owner_state_hash.len() != 32
-            || head.sequence.checked_add(1) != Some(body.sequence)
-        {
-            return Err(Error::Hybrid(contract::Reject::Scope));
-        }
-        e.u32(body.format_version);
-        e.bytes(&body.spool_uuid)?;
-        e.bytes(&head.state_hash)?;
-        e.u64(head.sequence);
-        e.u64(body.sequence);
-        e.u32(0);
-        let p = body
-            .policy
-            .as_ref()
-            .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
-        if p.revoked_key_ids.len() > 4096
-            || p.revoked_key_ids.iter().any(|id| id.len() != 32)
-            || p.revoked_key_ids.windows(2).any(|w| w[0] >= w[1])
-        {
-            return Err(Error::Hybrid(contract::Reject::Canonical));
-        }
-        e.count(p.revoked_key_ids.len())?;
-        for id in &p.revoked_key_ids {
-            e.bytes(id)?;
-        }
-        match p.max_audience {
-            None => e.raw(&[0]),
-            Some(a) if (1..=3).contains(&a) => {
-                e.raw(&[1]);
-                e.i32(a);
-            }
-            _ => return Err(Error::Hybrid(contract::Reject::Semantic)),
-        };
-        if body.merge_policies.len() != 2
-            || body.merge_policies[0].setting_key != "max_audience"
-            || body.merge_policies[0].semantics != 1
-            || body.merge_policies[1].setting_key != "revoked_key_ids"
-            || body.merge_policies[1].semantics != 2
-        {
-            return Err(Error::Hybrid(contract::Reject::Semantic));
-        }
-        e.count(body.merge_policies.len())?;
-        for rule in &body.merge_policies {
-            e.string(&rule.setting_key)?;
-            e.i32(rule.semantics);
-        }
-        e.bytes(&body.owner_id)?;
-        e.bytes(&body.owner_state_hash)?;
-        e.u64(body.ownership_transfer_sequence);
-        if include_hash {
-            e.bytes(&body.policy_state_hash)?;
-        }
-        Ok(e.finish())
-    }
-    let canonical = bytes(body, false)?;
-    if crate::canonical::digest(b"heddle-spool-signed-policy-v2", &canonical).as_slice()
-        != body.policy_state_hash
-    {
-        return Err(Error::Hybrid(contract::Reject::Scope));
-    }
     let owner = owners
         .iter()
         .find(|o| o.owner_id().as_slice() == body.owner_id)
@@ -133,24 +60,23 @@ pub fn verify_policy_record(
         &body.owner_state_hash,
         owner.issuers_sequence(&body.owner_state_hash)?,
     )?;
-    crate::crypto::verify_signature(
-        issuer,
-        signed
-            .owner_signature
+    crate::policy::verify_signed_spool_policy_record(crate::policy::VerifySignedPolicy {
+        signed,
+        spool_uuid: crate::canonical::fixed(&body.spool_uuid, "Spool UUID")?,
+        accepted_head: body
+            .expected_head
             .as_ref()
-            .ok_or(Error::InvalidSignature)?,
-        b"heddle-spool-signed-policy-signature-v2",
-        &bytes(body, true)?,
-    )?;
-    if body
-        .policy
-        .as_ref()
-        .ok_or(Error::Hybrid(contract::Reject::Canonical))?
-        .revoked_key_ids
-        .contains(&crate::canonical::key_id(issuer).to_vec())
-    {
-        return Err(Error::Hybrid(contract::Reject::Semantic));
-    }
+            .ok_or(Error::Hybrid(contract::Reject::Canonical))?,
+        accepted_owner_id: owner.owner_id(),
+        accepted_owner_state_hash: crate::canonical::fixed(
+            &body.owner_state_hash,
+            "owner state hash",
+        )?,
+        required_transfer_sequence: body.ownership_transfer_sequence,
+        authority_key: issuer,
+        accepted_grow_only: &std::collections::BTreeMap::new(),
+        ancestor_ceiling: None,
+    })?;
     Ok(())
 }
 

@@ -8,7 +8,7 @@ import {
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-type FixtureKind = "purge" | "transfer" | "keyring" | "timeline" | "import";
+type FixtureKind = "purge" | "transfer" | "keyring" | "timeline" | "import" | "production";
 
 type CorpusCase = {
   id: string;
@@ -192,6 +192,21 @@ for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
   });
 }
 
+const productionFixture = JSON.parse(readFileSync(path.join(repositoryRoot, "conformance", "fixtures", "production-v1.json"), "utf8"));
+const productionCases: CorpusCase[] = productionFixture.cases.map((c: JsonRecord) => ({
+  id: `production-${String(c.id)}`, fixture_kind: "production", fixture_json: JSON.stringify(c),
+}));
+corpusCases.push(...productionCases);
+for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
+  const selected = productionCases[random.int(productionCases.length)];
+  const c = asRecord(JSON.parse(selected.fixture_json), "production inputs");
+  const targets = hexTargets(c);
+  if (targets.length === 0) continue;
+  const target = targets[random.int(targets.length)];
+  target.owner[target.key] = mutateHex(String(target.owner[target.key]), [0, 1, 2, 4][mutation % 4], random);
+  corpusCases.push({ id: `production-seed-${seed}-mutation-${mutation}`, fixture_kind: "production", fixture_json: JSON.stringify(c) });
+}
+
 mkdirSync(scratch, { recursive: true });
 const corpusPath = path.join(scratch, `owner-authorization-corpus-${seed}.json`);
 writeFileSync(corpusPath, JSON.stringify({ seed, cases: corpusCases }));
@@ -225,10 +240,33 @@ if (wasm.verifierVersion() !== packageMetadata.version) {
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) return String(error.message);
   return String(error);
 }
 
 function evaluateWasm(testCase: CorpusCase): Outcome {
+  if (testCase.fixture_kind === "production") {
+    const c = asRecord(JSON.parse(testCase.fixture_json), "production inputs");
+    const bytes = (field: string) => new Uint8Array(Buffer.from(String(c[field]), "hex"));
+    const now = BigInt(Number(c.now)), ttl = BigInt(Number(c.max_ttl ?? 3600));
+    try {
+      let value: unknown;
+      switch (c.api) {
+        case "owner-root": value = wasm.verifyOwnerRoot(bytes("root_hex")); break;
+        case "resource-keyring": value = wasm.verifyResourceKeyring(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
+        case "transfer-chain": value = wasm.verifyOwnershipTransferChain(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
+        case "transfer": value = wasm.verifyOwnershipTransfer(bytes("transfer_hex"), bytes("source_history_hex"), bytes("destination_history_hex"), bytes("resource_uuid_hex"), BigInt(Number(c.sequence)), now, ttl); break;
+        case "genesis": value = wasm.verifySpoolOwnerGenesis(bytes("genesis_hex"), now); break;
+        case "policy": value = wasm.verifySignedPolicyChain((c.records_hex as string[]).map(v => new Uint8Array(Buffer.from(v, "hex"))), bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
+        default: throw new Error("unknown production API");
+      }
+      return { id: testCase.id, ok: { ok: value } };
+    } catch (error) {
+      const e = asRecord(error, "typed verification error");
+      if (typeof e.code !== "string" || typeof e.message !== "string") throw new Error("untyped production rejection");
+      return { id: testCase.id, ok: { error: e } };
+    }
+  }
   if (testCase.fixture_kind === "import") {
     const c = asRecord(JSON.parse(testCase.fixture_json), "import inputs");
     const bytes = (field: string) => new Uint8Array(Buffer.from(String(c[field]), "hex"));
@@ -239,7 +277,7 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
         c.forbidden_json, c.associations_json, c.cancellations_json, c.revoked_json,
         BigInt(String(c.now)), BigInt(String(c.max_ttl)),
       );
-      return { id: testCase.id, ok: Buffer.from(digest).toString("hex") };
+      return { id: testCase.id, ok: digest.certificate_digest_hex };
     } catch (error) {
       return { id: testCase.id, error: errorMessage(error) };
     }
@@ -295,7 +333,7 @@ for (const value of purgeFixture.cases) {
       typeof now !== "number") {
     throw new Error("purge fixture path or time is invalid");
   }
-  const actual = JSON.parse(wasm.verifyPurgeAuthorization(
+  const actual = wasm.verifyPurgeAuthorization(
     bytes("authorization_hex"),
     bytes("operation_body_hex"),
     bytes("payload_hex"),
@@ -305,7 +343,7 @@ for (const value of purgeFixture.cases) {
     pathSegments,
     BigInt(now),
     BigInt(maxTtl),
-  ));
+  );
   if (!isDeepStrictEqual(actual, testCase.expected)) {
     divergences.push(
       `direct-binding-${String(testCase.name)}: expected=${JSON.stringify(testCase.expected)} actual=${JSON.stringify(actual)}`,
@@ -369,6 +407,14 @@ for (const c of importCases) {
   const actual = nativeById.get(c.id);
   if (c.expected_error === null ? typeof actual?.ok !== "string" : actual?.error !== c.expected_error) {
     divergences.push(`${c.id}: expected import gate ${c.expected_error ?? "success digest"}, actual=${JSON.stringify(actual)}`);
+  }
+}
+
+for (const c of productionFixture.cases) {
+  const envelope = asRecord(nativeById.get(`production-${c.id}`)?.ok, "production outcome");
+  if (("ok" in envelope) !== c.expected_accept ||
+      (c.expected_code && asRecord(envelope.error, "production error").code !== c.expected_code)) {
+    divergences.push(`production-${c.id}: expected intended reason, actual=${JSON.stringify(envelope)}`);
   }
 }
 
