@@ -268,13 +268,7 @@ fn process_birth(pid: u32) -> Result<Option<String>> {
 #[cfg(not(target_os = "linux"))]
 fn process_birth(pid: u32) -> Result<Option<String>> {
     // Without a portable birth identity, only a definite absent process is dead.
-    let pid = i32::try_from(pid)?;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        Ok(None)
-    } else {
-        Ok(Some("present".into()))
-    }
+    Ok(objects::store::process_alive(pid).then(|| "present".into()))
 }
 pub fn executor_is_dead(executor: &str) -> Result<bool> {
     let mut parts = executor.splitn(3, ':');

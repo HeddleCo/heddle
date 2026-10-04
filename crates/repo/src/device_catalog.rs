@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::thread_replication::install_artifacts::InstallationLock;
+
 pub mod mutations;
 pub mod store;
 #[cfg(test)]
@@ -19,6 +21,7 @@ pub struct DeviceSpool {
     pub capability_path: String,
 }
 pub fn register(home: &Path, repository: &crate::Repository, id: uuid::Uuid) -> Result<()> {
+    let _serialization = InstallationLock::acquire(repository.heddle_dir())?;
     if id.is_nil() {
         bail!("nil local spool identity");
     }
@@ -59,11 +62,18 @@ pub fn load(home: &Path, id: uuid::Uuid) -> Result<DeviceSpool> {
     if entry.id != id || entry.capability_path.is_empty() {
         bail!("local spool registration differs from lookup");
     }
+    let _serialization = InstallationLock::acquire(&entry.heddle_dir)?;
+    validate_spool_id(&entry)?;
+    Ok(entry)
+}
+// Called with installation serialization held, including when a retained
+// catalog binding is used by a later operation.
+fn validate_spool_id(entry: &DeviceSpool) -> Result<()> {
     let actual = std::fs::read_to_string(entry.heddle_dir.join("spool-id"))?;
-    if actual.trim() != id.to_string() {
+    if actual.trim() != entry.id.to_string() {
         bail!("registered repository changed spool identity");
     }
-    Ok(entry)
+    Ok(())
 }
 /// Called by authenticated local setup after resolving a hosted path. This is
 /// presentation/scope binding; it never changes the stable Spool identifier.
@@ -77,7 +87,9 @@ pub fn set_capability_path(home: &Path, id: uuid::Uuid, path: &str) -> Result<()
         bail!("invalid spool capability path");
     }
     // Revalidate the physical binding before changing its capability path.
-    load(home, id)?;
+    let spool = load(home, id)?;
+    let _serialization = InstallationLock::acquire(&spool.heddle_dir)?;
+    validate_spool_id(&spool)?;
     store::Catalog::open(home)?.set_capability_path(id, path)
 }
 /// Resolve a checkout only from locally registered bindings, never a caller path.
@@ -85,6 +97,8 @@ pub fn checkout(
     spool: &DeviceSpool,
     id: &str,
 ) -> Result<crate::thread_replication::checkout::ThreadCheckout> {
+    let _serialization = InstallationLock::acquire(&spool.heddle_dir)?;
+    validate_spool_id(spool)?;
     let id = uuid::Uuid::parse_str(id).context("checkout id must be a UUID")?;
     let file = spool
         .heddle_dir

@@ -234,6 +234,16 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repos
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
+    /// Guard direct pin/sidecar reads on retained handles, through their use.
+    /// Acquire before any narrower filesystem lock; native identity follows
+    /// repo.lock/recovery, then native-identity.lock, then SQL.
+    pub(crate) fn installation_lock(
+        &self,
+    ) -> Result<crate::thread_replication::install_artifacts::InstallationLock> {
+        crate::thread_replication::install_artifacts::InstallationLock::acquire(self.heddle_dir())
+            .map_err(|error| HeddleError::Config(error.to_string()))
+    }
+
     pub fn heddle_dir(&self) -> &Path {
         &self.heddle_dir
     }
@@ -825,6 +835,7 @@ impl Repository {
     }
 
     pub fn record_missing_blob(&self, hash: ContentHash) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         self.partial_fetch_metadata().record_missing_blob(hash)?;
         Ok(())
     }
@@ -843,6 +854,7 @@ impl Repository {
     /// `.heddle/config.toml` after `heddle init`). The genesis state is filtered out of
     /// user-facing log output (see `repository_history::is_synthetic_root`).
     pub fn seed_default_thread(&self) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let main_thread = ThreadName::from("main");
         if self.refs.get_thread(&main_thread)?.is_none() {
             let state =
@@ -873,19 +885,23 @@ impl Repository {
     }
 
     pub fn clear_missing_blob(&self, hash: &ContentHash) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         self.partial_fetch_metadata().clear_missing_blob(hash)?;
         Ok(())
     }
 
     pub fn missing_blobs(&self) -> Result<Vec<ContentHash>> {
+        let _serialization = self.installation_lock()?;
         self.partial_fetch_metadata().missing_blobs()
     }
 
     pub fn clear_all_missing_blobs(&self) -> Result<bool> {
+        let _serialization = self.installation_lock()?;
         self.partial_fetch_metadata().clear_all_missing_blobs()
     }
 
     pub fn is_missing_blob(&self, hash: &ContentHash) -> Result<bool> {
+        let _serialization = self.installation_lock()?;
         self.partial_fetch_metadata().is_missing_blob(hash)
     }
 

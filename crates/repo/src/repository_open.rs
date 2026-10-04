@@ -230,6 +230,9 @@ impl Repository {
         heddle_dir: &Path,
         shared_overlay_source_root: Option<&Path>,
     ) -> Result<FsStore> {
+        let _installation =
+            crate::thread_replication::install_artifacts::InstallationLock::acquire(heddle_dir)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
         let mut fs_store = FsStore::new(heddle_dir);
         fs_store.set_snapshot_delta_search(config.storage.delta_search.snapshot);
         #[cfg(feature = "git-overlay")]
@@ -338,6 +341,21 @@ impl Repository {
             }
 
             if is_heddle_repository_root(dir) {
+                // HYBRID installs already have local metadata. Recover before
+                // interpreting mutable config or selecting the object store.
+                let _installation = if heddle_path
+                    .join(crate::local_metadata::DATABASE_NAME)
+                    .try_exists()?
+                {
+                    Some(
+                        crate::thread_replication::install_artifacts::InstallationLock::acquire(
+                            &heddle_path,
+                        )
+                        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
                 let pointer_path = heddle_path.join("objectstore");
                 let objects_dir = heddle_path.join("objects");
                 if !pointer_path.is_file() && !objects_dir.is_dir() {
@@ -402,6 +420,11 @@ impl Repository {
                         )));
                     }
 
+                    let _shared_installation =
+                        crate::thread_replication::install_artifacts::InstallationLock::acquire(
+                            &shared_galeed_dir,
+                        )
+                        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
                     let config_path = shared_galeed_dir.join("config.toml");
                     let mut config = RepoConfig::load_for_repository(&config_path)?;
                     ensure_supported_repo_format(&config_path, &config)?;

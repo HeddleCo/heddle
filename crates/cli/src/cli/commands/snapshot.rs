@@ -1223,14 +1223,15 @@ mod tests {
             let root = temp.path().to_path_buf();
             let ready = Arc::clone(&ready);
             workers.push(thread::spawn(move || {
-                let repo = Repository::open(root).expect("open worker repository");
                 ready.wait();
+                // Open now serializes installation recovery before readers.
+                let repo = Repository::open(root).expect("open worker repository");
                 bind_git_overlay_active_tip(&repo).expect("bind authoritative Git tip")
             }));
         }
         ready.wait();
 
-        // Both simulated commands are now contending on the repository lock.
+        // Both simulated commands must acquire the repository lock to open.
         // Advance authoritative Git while holding it; neither command may have
         // resolved the stale tip before the publication transaction begins.
         std::fs::write(temp.path().join("README.md"), "new\n").expect("write new tip");

@@ -29,6 +29,7 @@ where
     /// this device or repository. The legacy attachment remains as immutable
     /// evidence; migration appends a domain-tagged signature.
     pub(crate) fn resign_if_owned(&self, state: &State) -> Result<bool> {
+        let _serialization = self.installation_lock()?;
         let stored_id = accepted_state_id(state);
         let hash = state.hash_for_stored_id(&stored_id);
         let signatures: Vec<_> = self
@@ -104,6 +105,7 @@ impl Repository {
     /// signing with a now-exposed key. Resolution is a small file read + PEM
     /// parse — negligible against the tree/blob writes a capture already does.
     pub(crate) fn signing_signer(&self) -> Option<Arc<dyn Signer>> {
+        let _serialization = self.installation_lock().ok()?;
         let local = self.local_identity_path();
         let device = crate::identity::device_identity_path();
         crate::identity::resolve_signer(&local, &device).map(Arc::from)
@@ -114,6 +116,7 @@ impl Repository {
     /// fail-closed because an unsigned sidecar must never become authoritative
     /// after a hosted round trip.
     pub(crate) fn sign_client_metadata(&self, payload: &[u8]) -> Result<StateSignature> {
+        let _serialization = self.installation_lock()?;
         let signer = self.signing_signer().ok_or_else(|| {
             HeddleError::Conflict(
                 "client metadata requires a protected local signing identity".to_string(),
@@ -146,6 +149,7 @@ impl Repository {
         payload: &[u8],
         signature: Option<&StateSignature>,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let signature = signature.ok_or_else(|| {
             HeddleError::InvalidObject(
                 "hosted metadata is unsigned; a trusted client signature is required".to_string(),
@@ -206,6 +210,7 @@ impl Repository {
 
     /// Produce a detached signature when a signing identity is available.
     fn sign_state_best_effort(&self, state: &State) -> Option<StateSignature> {
+        let _serialization = self.installation_lock().ok()?;
         let Some(signer) = self.signing_signer() else {
             debug!("no signing identity available; state captured unsigned");
             return None;
@@ -238,6 +243,7 @@ impl Repository {
 
     /// Persist an authored state and its detached signature attachment.
     pub fn put_authored_state(&self, state: &State) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let signature = self.sign_state_best_effort(state);
         self.store.put_state(state)?;
         if let Some(signature) = signature {
