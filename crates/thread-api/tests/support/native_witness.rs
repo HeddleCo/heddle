@@ -188,6 +188,7 @@ pub(crate) fn bundle(
         policies: vec![policy],
         ..Default::default()
     });
+    bundle.witness_set = Some(set.clone());
     let sign = |purpose,
                 canonical_payload,
                 authority_digest,
@@ -355,4 +356,75 @@ pub(crate) fn bundle(
     }
     api::native_witness::validate_public_bundle(&bundle).expect("complete native witness contract");
     bundle
+}
+
+/// Renew the same active witness without rewriting its original admissions.
+pub(crate) fn current_witness_set(
+    set: &mut host::SignedHostedWitnessSetV1,
+) -> host::SignedHostedWitnessSetV1 {
+    let now = chrono::Utc::now().timestamp_millis();
+    let body = set.body.as_mut().expect("witness set body");
+    if body.valid_until_unix_millis <= now + 30_000 {
+        body.generation += 1;
+        body.issued_at_unix_millis = now - 1000;
+        body.valid_until_unix_millis = now + 240_000;
+        for entry in &mut body.entries {
+            entry.active_until_unix_millis = now + 300_000;
+        }
+        let bytes = api::witness_trust::set_signing_bytes(body).expect("renewed set");
+        set.body_digest = codec::hash(&[&bytes]);
+        set.root_signature = Ed25519Signer::from_seed(&[7; 32])
+            .expect("deployment root")
+            .sign(&bytes)
+            .expect("renewed root signature");
+    }
+    set.clone()
+}
+
+#[test]
+fn expired_fixture_set_renews_under_the_same_root_and_generation_fence() {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut expired = witness_set();
+    let body = expired.body.as_mut().expect("body");
+    body.issued_at_unix_millis = now - 241_000;
+    body.valid_until_unix_millis = now - 1000;
+    let root = Ed25519Signer::from_seed(&[7; 32]).expect("independent deployment root");
+    let bytes = api::witness_trust::set_signing_bytes(body).expect("expired body");
+    expired.body_digest = codec::hash(&[&bytes]);
+    expired.root_signature = root.sign(&bytes).expect("expired root signature");
+    let expected = api::witness_trust::SetExpectation {
+        authority: "https://weft.example.test",
+        root_id: "descriptor-root-1",
+        root_public_key: root.public_key(),
+        root_epoch: 1,
+        now_unix_millis: now,
+        clock_floor_unix_millis: 0,
+        known_job_keys: &[],
+    };
+    assert!(matches!(
+        api::witness_trust::verify_set(&expired, &expected, None),
+        Err(codec::Reject::Expired)
+    ));
+    let prior = api::witness_trust::verify_set(
+        &expired,
+        &api::witness_trust::SetExpectation {
+            now_unix_millis: now - 2000,
+            ..expected
+        },
+        None,
+    )
+    .expect("previously valid root-signed set");
+    let renewed = current_witness_set(&mut expired);
+    let current = api::witness_trust::verify_set(&renewed, &expected, Some(&prior))
+        .expect("fresh signed successor of the durable generation");
+    assert_eq!(current.body().generation, prior.body().generation + 1);
+    assert_eq!(
+        current.body().entries[0].public_key,
+        prior.body().entries[0].public_key
+    );
+    assert_eq!(
+        current_witness_set(&mut expired),
+        renewed,
+        "fresh metadata is stable"
+    );
 }

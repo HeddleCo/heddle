@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HTTPS descriptor discovery for the native hosted CLI fixture.
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
@@ -149,7 +149,10 @@ pub struct TestHttpsServer {
 }
 
 impl TestHttpsServer {
-    pub fn start_with(routes_for: impl FnOnce(&str) -> HashMap<String, VecDeque<Vec<u8>>>) -> Self {
+    pub fn start_with<R>(routes_for: impl FnOnce(&str) -> R) -> Self
+    where
+        R: FnMut(&str) -> Option<Vec<u8>> + Send + 'static,
+    {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fixture HTTPS listener");
         let address = listener.local_addr().expect("fixture address");
         let authority = format!("native-{}.test", uuid::Uuid::now_v7().simple());
@@ -221,12 +224,14 @@ impl Drop for TestHttpsServer {
     }
 }
 
-fn serve_https(
+fn serve_https<R>(
     stream: TcpStream,
     tls: Arc<ServerConfig>,
-    routes: Arc<Mutex<HashMap<String, VecDeque<Vec<u8>>>>>,
+    routes: Arc<Mutex<R>>,
     requests: Arc<Mutex<Vec<String>>>,
-) {
+) where
+    R: FnMut(&str) -> Option<Vec<u8>>,
+{
     // Accepted sockets inherit O_NONBLOCK from the listener on macOS, but
     // this synchronous rustls fixture expects blocking handshakes.
     stream
@@ -259,12 +264,7 @@ fn serve_https(
         .lock()
         .expect("record HTTP request")
         .push(path.to_string());
-    let body = routes
-        .lock()
-        .expect("lock endpoint descriptor routes")
-        .get_mut(path)
-        .and_then(VecDeque::pop_front)
-        .unwrap_or_default();
+    let body = routes.lock().expect("lock endpoint descriptor routes")(path).unwrap_or_default();
     let status = if body.is_empty() {
         "404 Not Found"
     } else {

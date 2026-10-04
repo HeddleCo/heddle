@@ -66,6 +66,9 @@ The publication fixture carries each operation's direct causal dependencies and
 each claim's signed source frontier in its sidecar. Transport retains the full
 closure separately: the 140/1000-state publication tests verify bounded batches,
 fresh-clone ancestry and a later capture without exceeding witness payload bounds.
+The test host renews its root-signed witness set with increasing generations;
+each set keeps the contract's five-minute maximum. Long transport controls retain
+their original admissions when metadata expires, rather than lengthening trust.
 The exact-envelope test also checks the creator binding directly, so an envelope
 commitment regression cannot hide behind the separate witness-payload commitment.
 

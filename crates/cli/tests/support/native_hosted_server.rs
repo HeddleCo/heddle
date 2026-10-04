@@ -153,7 +153,7 @@ struct Fixture {
     thread_id: Vec<u8>,
     owner_genesis: v2::SignedSpoolOwnerGenesis,
     owner: v2::OwnerState,
-    witness_set: api::heddle::api::common::SignedHostedWitnessSetV1,
+    witness_set: Arc<Mutex<api::heddle::api::common::SignedHostedWitnessSetV1>>,
     _https: Arc<https::TestHttpsServer>,
     captured: Arc<Mutex<PublicationCapture>>,
 }
@@ -278,35 +278,32 @@ async fn start_inner(
         .to_string();
     let descriptor =
         https::signed_descriptor(&server_addr.id.to_string(), &direct, &root, &ephemeral);
-    let witness_metadata = Arc::new(Mutex::new(None));
+    let witness_metadata = Arc::new(Mutex::new(witnessing::witness_set()));
     let generated = Arc::clone(&witness_metadata);
     let https = Arc::new(https::TestHttpsServer::start_with(|authority| {
         use std::collections::{HashMap, VecDeque};
         let set = witnessing::witness_set_for(&format!("https://{authority}"), "clone-test-key");
-        *generated.lock().expect("witness set") = Some(set.clone());
-        HashMap::from([
-            (
-                "/.well-known/heddle/iroh-endpoint".into(),
-                VecDeque::from(vec![descriptor; 256]),
-            ),
-            (
-                "/.well-known/heddle/hosted-witnesses".into(),
-                VecDeque::from(vec![set.encode_to_vec(); 256]),
-            ),
-        ])
+        *generated.lock().expect("witness set") = set;
+        let mut routes = HashMap::from([(
+            "/.well-known/heddle/iroh-endpoint".to_owned(),
+            VecDeque::from(vec![descriptor; 256]),
+        )]);
+        move |path: &str| {
+            if path == "/.well-known/heddle/hosted-witnesses" {
+                let mut set = generated.lock().expect("witness set");
+                Some(witnessing::current_witness_set(&mut set).encode_to_vec())
+            } else {
+                routes.get_mut(path).and_then(VecDeque::pop_front)
+            }
+        }
     }));
-    let witness_set = witness_metadata
-        .lock()
-        .expect("witness set")
-        .clone()
-        .expect("generated set");
     let fixture = Fixture {
         spool,
         thread_name: thread_name.into(),
         thread_id: thread_id.to_vec(),
         owner_genesis,
         owner,
-        witness_set,
+        witness_set: witness_metadata,
         _https: Arc::clone(&https),
         captured: Arc::clone(&captured),
     };
@@ -1794,12 +1791,15 @@ async fn serve_publication(
                     .rev()
                     .find(|p| Some(&p.thread) == open.thread.as_ref())
                     .map(|p| p.native_authority.clone());
+                let set = witnessing::current_witness_set(
+                    &mut fixture.witness_set.lock().expect("current witness set"),
+                );
                 let proof = witnessing::bundle(
                     &fixture.owner_genesis,
                     &fixture.owner,
                     accepted.thread_genesis.as_ref().expect("client original"),
                     &accepted.operations,
-                    &fixture.witness_set,
+                    &set,
                     previous,
                 );
                 accepted.native_authority = Some(proof.clone());
