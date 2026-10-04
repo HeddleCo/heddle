@@ -5,6 +5,83 @@ thread_local! {
     static FAILURE: Cell<Option<(usize, &'static str)>> = const { Cell::new(None) };
     static HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     static CRASH_COUNT: Cell<usize> = const { Cell::new(0) };
+    static BEFORE_LOCK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+pub(super) fn before_lock() {
+    let hook = BEFORE_LOCK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[test]
+fn concurrent_capture_and_native_rename_follow_repository_lock_order() {
+    use objects::lock::RepositoryLockExt;
+    use std::{sync::mpsc, time::Duration};
+
+    let directory = tempfile::tempdir().expect("repository directory");
+    let capture = crate::Repository::init_default(directory.path()).expect("capture handle");
+    let rename = crate::Repository::open(directory.path()).expect("retained rename handle");
+    let identity = RepoLock::at(capture.heddle_dir().join("locks/native-identity.lock"));
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let timeout = Duration::from_secs(10);
+    // Capture owns this same reentrant lock through native admission. Pause
+    // rename exactly before it attempts repository serialization, then probe
+    // its identity lock without ever creating the second blocking edge.
+    let repository_guard = capture.locker().write().expect("capture serialization");
+    let worker = std::thread::spawn(move || {
+        BEFORE_LOCK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                attempt_tx.send(()).expect("attempt signal");
+                resume_rx.recv_timeout(timeout).expect("resume rename");
+            }));
+        });
+        done_tx
+            .send(rename.rename_native_thread("main", "renamed"))
+            .expect("rename result");
+    });
+    let reached = attempt_rx.recv_timeout(timeout);
+    let probe = identity.try_write().expect("nonblocking identity probe");
+    let identity_available = probe.is_some();
+    drop(probe);
+    let captured = if reached.is_ok() && identity_available {
+        std::fs::write(directory.path().join("capture.txt"), b"concurrent capture")
+            .expect("working edit");
+        Some(capture.snapshot_with_attribution(
+            Some("concurrent capture".into()),
+            None,
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Concurrent capture",
+                "capture@example.test",
+            )),
+        ))
+    } else {
+        None
+    };
+    // Release and drain even on the old lock inversion, so the red run cannot hang.
+    drop(repository_guard);
+    let _ = resume_tx.send(());
+    let renamed = done_rx
+        .recv_timeout(timeout)
+        .expect("rename finishes within timeout");
+    worker.join().expect("rename worker");
+    reached.expect("rename reached repository serialization");
+    renamed.expect("rename succeeds");
+    assert!(
+        identity_available,
+        "rename held native identity while waiting for capture's repo.lock"
+    );
+    let state = captured.expect("capture ran").expect("capture succeeds");
+    assert!(
+        !capture
+            .native_thread("renamed")
+            .expect("renamed replica")
+            .source_operation_page(state.id(), None, 1)
+            .expect("native capture admission")
+            .is_empty()
+    );
 }
 pub(super) fn checkpoint(step: &str) {
     if step == "file-flush" {

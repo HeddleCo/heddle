@@ -50,7 +50,9 @@ impl InstallArtifacts<'_> {
 }
 
 /// Exclusive across authorities, processes and repository readers. Acquire
-/// before the clock anchor/SQL transaction. Recovery failure refuses the open.
+/// before native-identity.lock and the clock anchor/SQL transaction. Retain
+/// guards in that order through the operation; recovery failure refuses use
+/// even on an already-open repository handle.
 pub(crate) struct InstallationLock {
     _guard: WriteLockGuard,
     root: Directory,
@@ -64,6 +66,8 @@ impl InstallationLock {
                 "repository installation is still in progress".into(),
             ));
         }
+        #[cfg(test)]
+        tests::before_lock();
         let guard = RepoLock::at(key.join("locks/repo.lock"))
             .write()
             .map_err(|error| Error::Invalid(error.to_string()))?;

@@ -2155,6 +2155,210 @@ fn hybrid_rollback_io_preserves_original_rejection_and_blocks_trusted_use() {
     }
 }
 
+#[test]
+fn hybrid_failed_install_blocks_retained_repository_native_identity_until_retry() {
+    use super::install_artifacts::tests::{clear_failure, fail_rollback};
+    use objects::store::ObjectStore as _;
+    let receiver = HybridReceiver::new();
+    let original = receiver.repo.native_spool_id().expect("original spool");
+    let replacement = uuid::Uuid::now_v7();
+    let replica = receiver
+        .repo
+        .native_thread("main")
+        .expect("original Thread");
+    let base = replica.genesis().expect("genesis").base;
+    let state = receiver
+        .repo
+        .store()
+        .get_state(&base)
+        .expect("base lookup")
+        .expect("base State");
+    let signed = replica.signed_genesis().expect("signed genesis");
+    let owner = receiver
+        .repo
+        .native_original_owner_signer(&replica)
+        .expect("owner");
+    let owner_key = owner.public_key().try_into().expect("owner key");
+    fail_rollback(0, "rename");
+    let rejected = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &[record(&receiver.fixture, "converted_main")],
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |writer| {
+            writer.write_file(
+                std::path::Path::new("spool-id"),
+                replacement.to_string().as_bytes(),
+            )?;
+            Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
+        },
+    );
+    assert!(matches!(
+        rejected,
+        Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
+    ));
+    let intent = receiver.repo.heddle_dir().join("hosted-install.intent");
+    assert!(intent.exists(), "failed undo retains its intent");
+    let mut refused = Vec::new();
+    for _ in 0..2 {
+        refused.extend([
+            ("spool read", receiver.repo.native_spool_id().is_err()),
+            (
+                "spool install",
+                receiver.repo.install_native_spool_id(replacement).is_err(),
+            ),
+            (
+                "create",
+                receiver
+                    .repo
+                    .create_native_thread("unrecovered", base, None, "")
+                    .is_err(),
+            ),
+            (
+                "rename",
+                receiver
+                    .repo
+                    .rename_native_thread("main", "unrecovered")
+                    .is_err(),
+            ),
+            (
+                "adopt",
+                receiver
+                    .repo
+                    .adopt_native_thread("unrecovered", &signed)
+                    .is_err(),
+            ),
+            (
+                "capture",
+                receiver.repo.record_native_capture("main", base).is_err(),
+            ),
+            (
+                "owner key",
+                receiver.repo.holds_native_owner_key(&owner_key).is_err(),
+            ),
+            (
+                "original signer",
+                receiver
+                    .repo
+                    .native_original_owner_signer(&replica)
+                    .is_err(),
+            ),
+            (
+                "Thread signer",
+                receiver.repo.native_thread_signer(&replica).is_err(),
+            ),
+            (
+                "Thread lookup",
+                receiver.repo.native_thread("main").is_err(),
+            ),
+            ("Thread list", receiver.repo.list_native_threads().is_err()),
+            (
+                "client metadata signer",
+                receiver.repo.sign_client_metadata(b"metadata").is_err(),
+            ),
+            ("auto signer", receiver.repo.signing_signer().is_none()),
+            (
+                "authored State",
+                receiver.repo.put_authored_state(&state).is_err(),
+            ),
+            (
+                "entry visibility",
+                receiver
+                    .repo
+                    .get_entry_visibility_bytes(&state.change_id)
+                    .is_err(),
+            ),
+            (
+                "state visibility",
+                receiver.repo.get_state_visibility_for_state(&base).is_err(),
+            ),
+            ("redactions", receiver.repo.list_all_redactions().is_err()),
+            ("briefing", receiver.repo.pending_context_receipt().is_err()),
+            ("partial fetch", receiver.repo.missing_blobs().is_err()),
+            (
+                "checkout manifest",
+                receiver.repo.is_incomplete_checkout().is_err(),
+            ),
+            (
+                "catalog binding",
+                crate::device_catalog::load(&crate::identity::heddle_home_dir(), original).is_err(),
+            ),
+        ]);
+    }
+    let polluted = crate::device_catalog::store::Catalog::read(&crate::identity::heddle_home_dir())
+        .expect("catalog")
+        .expect("registered catalog")
+        .spool(replacement)
+        .expect("lookup")
+        .is_some();
+    assert!(intent.exists(), "persistent failure must retain undo");
+    clear_failure();
+    for (api, blocked) in refused {
+        assert!(
+            blocked,
+            "{api} bypassed persistently failing recovery on a retained Repository"
+        );
+    }
+    assert!(
+        !polluted,
+        "uncommitted spool must never enter the device catalog"
+    );
+    assert_eq!(
+        receiver
+            .repo
+            .native_spool_id()
+            .expect("same handle retries recovery"),
+        original
+    );
+    assert!(!intent.exists(), "successful retry retires undo");
+    let created = receiver
+        .repo
+        .create_native_thread("recovered", base, None, "")
+        .expect("create after retry");
+    assert_eq!(
+        created.genesis().expect("genesis").spool,
+        original.to_string()
+    );
+    assert!(
+        receiver
+            .repo
+            .holds_native_owner_key(&owner_key)
+            .expect("recovered owner key")
+    );
+    receiver
+        .repo
+        .sign_client_metadata(b"metadata")
+        .expect("recovered metadata signer");
+    receiver
+        .repo
+        .get_entry_visibility_bytes(&state.change_id)
+        .expect("recovered entry visibility");
+    receiver
+        .repo
+        .get_state_visibility_for_state(&base)
+        .expect("recovered state visibility");
+    receiver
+        .repo
+        .list_all_redactions()
+        .expect("recovered redactions");
+    receiver
+        .repo
+        .pending_context_receipt()
+        .expect("recovered briefing");
+    receiver
+        .repo
+        .missing_blobs()
+        .expect("recovered partial fetch");
+    receiver
+        .repo
+        .is_incomplete_checkout()
+        .expect("recovered manifest");
+    crate::device_catalog::load(&crate::identity::heddle_home_dir(), original)
+        .expect("recovered catalog binding");
+}
+
 fn landing_receiver() -> (
     HybridReceiver,
     wire::HostedLandingWitnessV1,

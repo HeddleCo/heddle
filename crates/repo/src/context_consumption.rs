@@ -63,6 +63,7 @@ struct SignedContextReceipt {
 
 impl Repository {
     pub fn ensure_context_receipt_signer(&self) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         if self.signing_signer().is_none() {
             return Err(HeddleError::InvalidObject(
                 "a supplied briefing requires a signed capture reference".into(),
@@ -102,6 +103,7 @@ impl Repository {
     }
 
     pub fn write_pending_context_receipt(&self, receipt: &ContextConsumptionReceipt) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         validate(receipt)?;
         if self.current_lane()?.as_deref() != Some(receipt.recipient_lane.as_str())
             || receipt.thread != receipt.recipient_lane
@@ -131,6 +133,7 @@ impl Repository {
     }
 
     pub fn pending_context_receipt(&self) -> Result<Option<ContextConsumptionReceipt>> {
+        let _serialization = self.installation_lock()?;
         let path = self.pending_context_receipt_path();
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -170,6 +173,7 @@ impl Repository {
         state_id: StateId,
         receipt: &ContextConsumptionReceipt,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         validate(receipt)?;
         verify_supply(receipt)?;
         if self.current_lane()?.as_deref() != Some(receipt.recipient_lane.as_str()) {

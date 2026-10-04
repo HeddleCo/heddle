@@ -18,13 +18,14 @@ use objects::{
 };
 use rusqlite::{OptionalExtension as _, params};
 
-use super::{Admission, Error, Result, ThreadReplica};
+use super::{Admission, Error, Result, ThreadReplica, install_artifacts::InstallationLock};
 use crate::Repository;
 
 impl Repository {
     /// Read-only proof that this device still holds the unclaimed owner's key.
     /// Looking at a Thread must never mint a replacement identity.
     pub fn holds_native_owner_key(&self, key: &[u8; 32]) -> Result<bool> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         if let Some(local) = crate::identity::load_local(
             &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
         )? && Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key
@@ -41,7 +42,8 @@ impl Repository {
     }
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let id = self.native_spool_id_locked(None)?;
         crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, id)
             .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -49,7 +51,8 @@ impl Repository {
     }
     /// Clone installs the source identity before creating local Thread records.
     pub fn install_native_spool_id(&self, id: uuid::Uuid) -> Result<()> {
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         self.native_spool_id_locked(Some(id))?;
         crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, id)
             .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -79,7 +82,14 @@ impl Repository {
             Err(error) => Err(error.into()),
         }
     }
-    fn native_identity_lock(&self) -> Result<objects::lock::WriteLockGuard> {
+    // Global order: repo.lock + recovery, then native-identity.lock, then SQL.
+    // Callers retain serialization and the identity guard through all reads,
+    // catalog registration, signing and admission. Capture already owns
+    // repo.lock; its same-thread reentrant acquisition preserves this order.
+    fn native_identity_lock(
+        &self,
+        _serialization: &InstallationLock,
+    ) -> Result<objects::lock::WriteLockGuard> {
         objects::fs_atomic::create_dir_all_durable(self.heddle_dir())?;
         objects::lock::RepoLock::at(self.heddle_dir().join("locks/native-identity.lock"))
             .write()
@@ -92,6 +102,7 @@ impl Repository {
     /// Recover the immutable local owner's retained signer for an explicit
     /// conflict resolution, even while effective ownership is unavailable.
     pub fn native_original_owner_signer(&self, replica: &ThreadReplica) -> Result<Ed25519Signer> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         let objects::object::thread_replication::GenesisOwner::LocalKey(owner) =
             replica.genesis()?.owner
         else {
@@ -124,6 +135,7 @@ impl Repository {
         replica: &ThreadReplica,
         home: &std::path::Path,
     ) -> Result<Ed25519Signer> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         let objects::object::thread_replication::GenesisOwner::LocalKey(owner) =
             replica.effective_owner()?
         else {
@@ -175,6 +187,7 @@ impl Repository {
     }
     /// Lookup never creates a Thread or invents a publisher signature.
     pub fn native_thread(&self, name: &str) -> Result<ThreadReplica> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         let path = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
         if !path.exists() {
             return Err(Error::Invalid(format!(
@@ -201,6 +214,7 @@ impl Repository {
 
     /// Named local replicas. Lookup never creates a Thread or invents a signature.
     pub fn list_native_threads(&self) -> Result<Vec<(String, ThreadReplica)>> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         let path = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
         if !path.exists() {
             return Ok(Vec::new());
@@ -242,7 +256,8 @@ impl Repository {
         parent: Option<&str>,
         intent: &str,
     ) -> Result<ThreadReplica> {
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let spool = self.native_spool_id_locked(None)?;
         crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, spool)
             .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -317,7 +332,8 @@ impl Repository {
         if new.is_empty() {
             return Err(Error::Invalid("Thread name is empty".into()));
         }
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let replica = self.native_thread(old)?;
         let connection = replica.connect()?;
         let exists: bool = connection.query_row(
@@ -341,7 +357,8 @@ impl Repository {
     /// from its creator. It cannot repurpose a different local Thread name.
     pub fn adopt_native_thread(&self, name: &str, signed: &SignedGenesis) -> Result<ThreadReplica> {
         let genesis = signed.verify()?;
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let spool =
             uuid::Uuid::parse_str(&genesis.spool).map_err(|e| Error::Invalid(e.to_string()))?;
         self.native_spool_id_locked(Some(spool))?;
@@ -371,7 +388,8 @@ impl Repository {
     /// Record a locally produced capture once. Causal edges follow that capture's
     /// actual parents; another checkout's frontier never becomes an implicit merge.
     pub fn record_native_capture(&self, name: &str, state_id: StateId) -> Result<ContentHash> {
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let replica = self.native_thread(name)?;
         if let Some(existing) = replica.source_operation_page(state_id, None, 1)?.first() {
             replica.validate_local_source_possession(self.store(), state_id)?;
@@ -433,6 +451,7 @@ impl Repository {
     /// Cross-thread merge snapshots record LocalIntegration, never a Capture
     /// whose parents include another Thread's revision.
     pub fn record_native_source(&self, name: &str, state_id: StateId) -> Result<()> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         if let Err(error) = self.native_thread(name) {
             if !is_missing_native_identity(&error) {
                 return Err(error);
@@ -449,6 +468,7 @@ impl Repository {
     /// already imported the same revisions; they are not new local landings.
     /// Capture admission still verifies every real parent in this Thread.
     pub fn record_native_imported_source(&self, name: &str, state_id: StateId) -> Result<()> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         self.native_thread(name)?;
         self.record_native_source_graph(name, state_id, |_| Ok(AttachedSourceKind::Capture))
     }
@@ -569,6 +589,8 @@ impl Repository {
     /// refusal is the typed [`HeddleError::NativeSourceSignerUnavailable`] so
     /// callers and tests can tell "no signer" from every other capture failure.
     pub fn require_attached_native_source_signer(&self) -> objects::error::Result<()> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
         let refs::Head::Attached { thread } = self.head_ref()? else {
             return Ok(());
         };
@@ -593,6 +615,7 @@ impl Repository {
 
     /// Record a capture on the attached native Thread after a local snapshot.
     pub fn record_attached_native_source(&self, state_id: StateId) -> Result<()> {
+        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
         let name = match self
             .head_ref()
             .map_err(|error| Error::Invalid(error.to_string()))?
@@ -614,7 +637,8 @@ impl Repository {
         source_operation: ContentHash,
         source_revision: StateId,
     ) -> Result<ContentHash> {
-        let _guard = self.native_identity_lock()?;
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
         let replica = self.native_thread(name)?;
         if source_thread == replica.thread_id() {
             return Err(Error::Invalid(
