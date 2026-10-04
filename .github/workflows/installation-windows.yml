@@ -46,6 +46,8 @@ jobs:
         shell: pwsh
         run: |
           $env:HEDDLE_HOME = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          cargo test --locked -p heddle-repo --lib device_operations::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p heddle-repo --lib install_artifacts -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p heddle-repo --lib hosted_trust_tests -- --test-threads=1
