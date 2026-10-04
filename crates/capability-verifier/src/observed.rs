@@ -351,6 +351,9 @@ pub struct VerificationError {
     pub code: VerificationErrorCode,
     /// Human-readable diagnostic, never a dispatch key.
     pub message: String,
+    /// Exact preparation refusal detail; absent for other failures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preparation_refusal_reason: Option<PreparationRefusalReason>,
 }
 
 impl From<Error> for VerificationError {
@@ -380,9 +383,16 @@ impl From<Error> for VerificationError {
             },
             Error::Hybrid(reason) => hybrid_error_code(*reason),
         };
+        let preparation_refusal_reason = match &error {
+            Error::Hybrid(heddle_api::hybrid_codec::Reject::PreparationRefused(reason)) => {
+                Some((*reason).into())
+            }
+            _ => None,
+        };
         Self {
             code,
             message: error.to_string(),
+            preparation_refusal_reason,
         }
     }
 }
@@ -457,6 +467,21 @@ pub enum VerificationErrorCode {
     HybridScope,
     /// Hybrid Prepared Fields.
     HybridPreparedFields,
+    /// Preparation refused with a typed reason.
+    HybridPreparationRefused,
+    /// Observe ref disclosure is missing.
+    HybridRefDisclosure,
+    /// The selected commit is not pinned.
+    HybridRefPinning,
+    /// Provider source selection does not match.
+    HybridSourceSelection,
+    /// The source requires the Commit profile.
+    HybridImportSourceRequiresCommit,
+    /// The operation ID was reused with different bytes.
+    HybridOperationIdReused,
+    /// The created pending operation is absent.
+    HybridPendingOperation,
+
     /// Hybrid Validity Bounds.
     HybridValidityBounds,
     /// Hybrid Genesis Binding.
@@ -500,6 +525,14 @@ fn hybrid_error_code(reason: heddle_api::hybrid_codec::Reject) -> VerificationEr
         R::Expired => C::HybridExpired,
         R::Scope => C::HybridScope,
         R::PreparedFields => C::HybridPreparedFields,
+        R::PreparationRefused(_) => C::HybridPreparationRefused,
+        R::RefDisclosure => C::HybridRefDisclosure,
+        R::RefPinning => C::HybridRefPinning,
+        R::SourceSelection => C::HybridSourceSelection,
+        R::ImportSourceRequiresCommit => C::HybridImportSourceRequiresCommit,
+        R::OperationIdReused => C::HybridOperationIdReused,
+        R::PendingOperation => C::HybridPendingOperation,
+
         R::ValidityBounds => C::HybridValidityBounds,
         R::GenesisBinding => C::HybridGenesisBinding,
         R::ImportPermission => C::HybridImportPermission,
@@ -512,5 +545,84 @@ fn hybrid_error_code(reason: heddle_api::hybrid_codec::Reject) -> VerificationEr
         R::SlotConflict => C::HybridSlotConflict,
         R::BoundaryAcceptance => C::HybridBoundaryAcceptance,
         R::Protocol => C::HybridProtocol,
+    }
+}
+
+/// Exact API preparation refusal, kept distinct from its failure category.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationRefusalReason {
+    /// API Unspecified refusal.
+    Unspecified,
+    /// API InvalidScope refusal.
+    InvalidScope,
+    /// API UnsupportedConverter refusal.
+    UnsupportedConverter,
+    /// API UnsupportedOptions refusal.
+    UnsupportedOptions,
+    /// API BudgetExceeded refusal.
+    BudgetExceeded,
+    /// API DestinationConflict refusal.
+    DestinationConflict,
+    /// API PolicyDenied refusal.
+    PolicyDenied,
+}
+impl From<crate::wire::ImportPreparationRefusalReason> for PreparationRefusalReason {
+    fn from(reason: crate::wire::ImportPreparationRefusalReason) -> Self {
+        use crate::wire::ImportPreparationRefusalReason as R;
+        match reason {
+            R::Unspecified => Self::Unspecified,
+            R::InvalidScope => Self::InvalidScope,
+            R::UnsupportedConverter => Self::UnsupportedConverter,
+            R::UnsupportedOptions => Self::UnsupportedOptions,
+            R::BudgetExceeded => Self::BudgetExceeded,
+            R::DestinationConflict => Self::DestinationConflict,
+            R::PolicyDenied => Self::PolicyDenied,
+        }
+    }
+}
+#[cfg(test)]
+mod hybrid_error_tests {
+    use super::*;
+    use heddle_api::hybrid_codec::Reject as R;
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn new_hybrid_failures_preserve_their_category_and_typed_refusal_detail() {
+        let cases = [
+            (R::RefDisclosure, "hybrid_ref_disclosure"),
+            (R::RefPinning, "hybrid_ref_pinning"),
+            (R::SourceSelection, "hybrid_source_selection"),
+            (
+                R::ImportSourceRequiresCommit,
+                "hybrid_import_source_requires_commit",
+            ),
+            (R::OperationIdReused, "hybrid_operation_id_reused"),
+            (R::PendingOperation, "hybrid_pending_operation"),
+        ];
+        for (reject, code) in cases {
+            let value = serde_json::to_value(VerificationError::from(Error::Hybrid(reject)))
+                .expect("structured error");
+            assert_eq!(value["code"], code);
+            assert!(value.get("preparation_refusal_reason").is_none());
+        }
+        for reason in [
+            crate::wire::ImportPreparationRefusalReason::Unspecified,
+            crate::wire::ImportPreparationRefusalReason::InvalidScope,
+            crate::wire::ImportPreparationRefusalReason::UnsupportedConverter,
+            crate::wire::ImportPreparationRefusalReason::UnsupportedOptions,
+            crate::wire::ImportPreparationRefusalReason::BudgetExceeded,
+            crate::wire::ImportPreparationRefusalReason::DestinationConflict,
+            crate::wire::ImportPreparationRefusalReason::PolicyDenied,
+        ] {
+            let value = serde_json::to_value(VerificationError::from(Error::Hybrid(
+                R::PreparationRefused(reason),
+            )))
+            .expect("typed refusal");
+            assert_eq!(value["code"], "hybrid_preparation_refused");
+            assert_eq!(
+                value["preparation_refusal_reason"],
+                serde_json::to_value(PreparationRefusalReason::from(reason)).expect("reason")
+            );
+        }
     }
 }
