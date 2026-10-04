@@ -20,7 +20,7 @@ access; owner authority uses the separate signed operations below.
 ## Contract
 
 Rust and npm versions follow `[workspace.package] version`; the npm build and
-prepack copy wasm-pack’s resolved Cargo version into the npm manifest.
+prepack copy the resolved Cargo metadata version into the npm manifest.
 
 Version 0.28.8 consumes `heddle-api = "=0.31.0-alpha.21"`. Public proof types come
 from `heddle.api.v1alpha2`; the durable signing formats keep their own versions.
@@ -83,8 +83,9 @@ crate with `wasm-bindgen`; it is not a second verifier implementation. Build
 the publish payload with `npm run build`, call the package's default async
 initializer once, then use `verifyPurgeAuthorization` with canonical protobuf
 bytes and caller-pinned owner context. The binding also exposes
-`verifyOwnerRoot`, `verifyTimelineAcceptance`, and the four fixture adapters. Exact generated TypeScript
-signatures ship in the package.
+production transfer, resource-keyring, self/delegated genesis, policy-chain
+and import-delegation verification. See the [typed binding API](npm/README.md);
+exact generated TypeScript signatures ship in the package.
 
 For timeline acceptance, the caller supplies a previously verified original
 endorsement, the actual logical request digest and position range, the exact
@@ -143,3 +144,28 @@ with the publishable WebAssembly binding on the identical corpus. It requires
 no cross-repository checkout or PAT.
 
 Licensed under either Apache-2.0 or MIT, at your option.
+
+## Production observed evidence
+
+`observed` exposes public native byte APIs for the same alpha.21 protobuf
+inputs used by the [production npm bindings](npm/README.md). `policy` owns
+complete policy-chain replay, the canonical codec, grow-only revocations,
+transfer-aware owner resolution and authority-key exclusion. Part 1's
+single-record provenance check reuses this verifier.
+
+The policy implementation and its eight tests were moved from weft's
+`crates/weft-authz/src/owner_governance.rs` on integration
+(`09c49f6c909bb90e53c9939c4e00bebf215927de`), dropping migration aliases.
+**Weft follow-up:** delete that implementation and call this crate's public
+`policy::verify_signed_spool_policy_record` / `verify_signed_policy_chain`
+APIs (or `verify_resource_policy_chain` with verified ownership). Weft is
+unchanged by this PR; it must migrate so there is one policy verifier.
+
+The production differential corpus covers the API's fixed genesis, owner
+and signed-policy vectors, existing transfer/keyring conformance, delegated
+browser creation, ownership transfer followed by rotation, and explicit
+signature, predecessor, handoff-side, sequence-gap, revocation-drop,
+self-revocation and backdated-transfer failures. JavaScript dispatches bytes
+to public production bindings; native and WASM compare full result objects
+and typed error codes. Policy authority stays within the verified entry/exit
+handoff states for each ownership phase.

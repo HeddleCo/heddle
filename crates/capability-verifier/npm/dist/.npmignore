@@ -1,5 +1,0 @@
-# wasm-pack writes `*` to dist/.gitignore. Override it for npm's packlist while
-# continuing to keep generated artifacts out of git.
-!*
-.gitignore
-.npmignore

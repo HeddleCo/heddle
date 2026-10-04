@@ -168,7 +168,7 @@ fi
 # GitHub environments are the control-plane boundary that a tag's copy of
 # this workflow cannot self-approve. Every job that can sign or publish must
 # wait for the approval-protected release environment.
-for job in build build-macos-cask release publish-manifests; do
+for job in build build-macos-cask release publish-manifests publish-verifier-npm; do
   block=$(
     awk -v wanted="$job" '
       $0 == "  " wanted ":" { in_job=1; next }
@@ -182,6 +182,25 @@ for job in build build-macos-cask release publish-manifests; do
     err "$job must declare environment: release before signing or publishing"
   fi
 done
+
+# The verifier npm package must ship only the validated build after the stable
+# release, with package credentials isolated to the publishing step.
+npm_publish_block=$(awk '
+  /^  publish-verifier-npm:/ { in_job=1; next }
+  in_job && /^  [A-Za-z0-9_-]+:/ { exit }
+  in_job { print }
+' "$WF")
+if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'needs: [validate-tag, build-verifier-npm, release]' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'packages: write' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'name: capability-verifier-npm' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'npm publish "package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts' <<<"$npm_publish_block" >/dev/null \
+   && ! grep -E '^    env:' <<<"$npm_publish_block" >/dev/null; then
+  ok "capability-verifier npm publishes the stable validated artifact with step-scoped package credentials"
+else
+  err "capability-verifier npm must depend on the validated build/release, gate stable-only, and publish the tarball with step-scoped package credentials"
+fi
 
 # External actions execute inside credentialed release jobs. Mutable tags and
 # branches are therefore forbidden even when the repository is trusted.
@@ -554,7 +573,7 @@ else
   errors << "validate-tag must declare 'tag', 'kind', and 'publish_release' outputs" unless outs.key?("tag") && outs.key?("kind") && outs.key?("publish_release")
 end
 
-downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
+downstream = ["build", "build-macos-cask", "release", "publish-manifests", "build-verifier-npm", "publish-verifier-npm"]
 downstream.each do |name|
   job = jobs[name]
   if !job.is_a?(Hash)
@@ -741,7 +760,7 @@ else:
 # explicitly keeps this honest: adding a new downstream job requires
 # updating this list, which forces a conscious decision about whether
 # the new job needs the trust gate.
-downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
+downstream = ["build", "build-macos-cask", "release", "publish-manifests", "build-verifier-npm", "publish-verifier-npm"]
 for name in downstream:
     job = jobs.get(name)
     if not isinstance(job, dict):

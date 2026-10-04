@@ -34,8 +34,11 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.13.1 --locked
+      - name: Install Worker target for the workspace toolchain
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install pinned wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
 
       - name: Build the publishable npm binding
         run: npm run build

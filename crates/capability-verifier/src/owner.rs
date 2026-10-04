@@ -60,6 +60,11 @@ impl VerifiedOwnerState {
             .values()
             .map(|issuer| issuer.key.public_key.clone())
     }
+    /// Authorization key ids of every verified accepted authority, including
+    /// keys retired by rotation or recovery.
+    pub(crate) fn authority_key_ids(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.issuers.values().map(|issuer| key_id(&issuer.key))
+    }
     /// Stable cryptographic owner id derived from the signed root.
     #[must_use]
     pub const fn owner_id(&self) -> [u8; 32] {

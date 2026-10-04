@@ -3,6 +3,9 @@
 /// A fail-closed verification error.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// Complete owner-signed Spool policy rejection.
+    #[error(transparent)]
+    Policy(#[from] crate::policy::OwnerGovernanceError),
     /// API-owned HYBRID signature, scope or time rejection.
     #[error(transparent)]
     Hybrid(#[from] heddle_api::hybrid_codec::Reject),
