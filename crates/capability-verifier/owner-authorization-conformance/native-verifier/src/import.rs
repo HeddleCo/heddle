@@ -202,5 +202,46 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         c,
         Some("invalid owner-authorization object: wrong identifier width"),
     )?;
+    let claimed: Value = serde_json::from_str(include_str!(
+        "../../../conformance/hybrid/claimed-owner-expiry-v1.json"
+    ))
+    .map_err(|e| e.to_string())?;
+    for case in claimed["cases"].as_array().ok_or("claimed-owner cases")? {
+        let c = Inputs {
+            certificate_hex: case["certificate_hex"]
+                .as_str()
+                .ok_or("certificate")?
+                .into(),
+            permission_hex: String::new(),
+            keyring_hex: claimed["keyring_hex"].as_str().ok_or("keyring")?.into(),
+            owner_history_hex: case["owner_history_hex"].as_str().ok_or("history")?.into(),
+            initial_owner_hex: claimed["initial_owner_hex"]
+                .as_str()
+                .ok_or("initial owner")?
+                .into(),
+            spool_genesis_hex: claimed["spool_genesis_hex"]
+                .as_str()
+                .ok_or("genesis")?
+                .into(),
+            forbidden_json: "[]".into(),
+            associations_json: "[]".into(),
+            cancellations_json: "[]".into(),
+            revoked_json: "[]".into(),
+            now: case["now"].as_str().ok_or("now")?.into(),
+            max_ttl: "3600".into(),
+        };
+        add(
+            case["id"].as_str().ok_or("case id")?,
+            c.clone(),
+            case["expected_error"].as_str(),
+        )?;
+        if case["id"] == "claimed-human-after-deadline" {
+            let mut revoked = c;
+            revoked.revoked_json =
+                serde_json::to_string(&[hex::encode(hybrid_codec::key_id(&key(f, "device")?))])
+                    .map_err(|e| e.to_string())?;
+            add("claimed-human-revoked", revoked, Some("witness is revoked"))?;
+        }
+    }
     Ok(Value::Array(out))
 }

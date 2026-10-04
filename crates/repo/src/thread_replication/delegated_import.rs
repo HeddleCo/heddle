@@ -581,7 +581,7 @@ fn install_in(
                 .ok_or(Reject::Canonical)?,
             owner_public_key: &selection.owner.authority_key().public_key,
             owner_chain_digest: &d.scope().body().owner_chain_digest,
-            authority_expires_at_seconds: i64::MAX,
+            authority_expires_at_seconds: selection.owner.authority_expires_at_seconds(),
             now_unix_seconds: s.observed_at_unix_millis / 1000,
             forbidden_job_keys: &forbidden,
             known_job_associations: &job_associations,
