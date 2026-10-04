@@ -37,6 +37,7 @@ pub struct VerifiedOwnerState {
     state_hash: [u8; 32],
     sequence: u64,
     authority_key: AuthorizationVerificationKey,
+    valid_from_unix_seconds: i64,
     recovery_policy: RecoveryPolicy,
     claimable_deferred_human: bool,
     claimable_until_unix_seconds: i64,
@@ -87,6 +88,12 @@ impl VerifiedOwnerState {
     #[must_use]
     pub const fn authority_key(&self) -> &AuthorizationVerificationKey {
         &self.authority_key
+    }
+
+    // Admission cannot use a state folded at a later clock. Retain every
+    // transition's time floor, even if a later signed transition is backdated.
+    pub(crate) const fn valid_from_unix_seconds(&self) -> i64 {
+        self.valid_from_unix_seconds
     }
 
     /// Deferred authority deadline in this effective accepted state, or
@@ -452,6 +459,7 @@ pub fn verify_owner_root(signed: &SignedOwnerRoot) -> Result<VerifiedOwnerState>
         state_hash,
         sequence: 0,
         authority_key: authority.clone(),
+        valid_from_unix_seconds: 0,
         recovery_policy: policy.clone(),
         claimable_deferred_human: root.claimable_deferred_human,
         claimable_until_unix_seconds: root.claimable_until_unix_seconds,
@@ -659,6 +667,9 @@ pub fn apply_transition(
     next.sequence = transition.sequence;
     next.state_hash = next_hash;
     next.authority_key.clone_from(next_authority);
+    next.valid_from_unix_seconds = state
+        .valid_from_unix_seconds
+        .max(transition.valid_from_unix_seconds);
     next.recovery_policy.clone_from(next_policy);
     if kind == OwnerKeyTransitionKind::ClaimDeferredHuman {
         next.claimable_deferred_human = false;

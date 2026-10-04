@@ -193,6 +193,22 @@ fn verify_at(
     now: i64,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportDelegation> {
+    verify_with(signed, member, context, now, is_revoked, |expected| {
+        contract::verify_delegation(signed, member, expected)
+    })
+}
+
+fn verify_with(
+    signed: &SignedImportJobDelegationV1,
+    member: Option<&SignedImportMemberPermissionV1>,
+    context: &CurrentContext<'_>,
+    now: i64,
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+    verify: impl FnOnce(
+        &ImportOwnerExpectation<'_>,
+    )
+        -> std::result::Result<contract::VerifiedImportDelegation, contract::Reject>,
+) -> Result<VerifiedImportDelegation> {
     let delegator = &signed
         .body
         .as_ref()
@@ -225,7 +241,7 @@ fn verify_at(
         forbidden_job_keys: &forbidden,
         known_job_associations: context.known_job_associations,
     };
-    let verified = contract::verify_delegation(signed, member, &expected)?;
+    let verified = verify(&expected)?;
     let body = verified.body();
     let owner_id = heddle_api::hybrid_codec::key_id(expected.owner_public_key);
     let device_id = heddle_api::hybrid_codec::key_id(&body.delegating_public_key);
@@ -262,6 +278,32 @@ fn verify_at(
             .wire()
             .canonical_spool_path_segments
             .join("/"),
+    })
+}
+
+/// Verify Commit admission eligibility against the host-stored preparation and
+/// signed genesis bindings, using owner selection and revocations at actual T.
+/// A child may start within the advertised skew after T; its parent must be
+/// valid at T and contain the child window, without owner or expiry grace.
+///
+/// Success permits admission only. Execution must still call `verify_current`
+/// at its actual start time. Hosts must independently verify native originals,
+/// creator signatures/envelopes and retained renewal genesis contexts, then
+/// enforce current policy, custody and activation gates in their transaction.
+pub fn verify_commit_admission(
+    prepared: &crate::wire::PrepareImportJobResponse,
+    signed: &SignedImportJobDelegationV1,
+    member: Option<&SignedImportMemberPermissionV1>,
+    geneses: &[crate::wire::SignedImportGenesisAuthorityV1],
+    context: &CurrentContext<'_>,
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+) -> Result<VerifiedImportDelegation> {
+    let now = context.now_millis / 1000;
+    if now < context.selection.owner.valid_from_unix_seconds() {
+        return Err(Error::NotYetValid);
+    }
+    verify_with(signed, member, context, now, is_revoked, |expected| {
+        contract::verify_prepared_delegation(prepared, signed, member, geneses, expected)
     })
 }
 
