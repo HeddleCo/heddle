@@ -270,31 +270,31 @@ async fn start_inner(
     let server_addr = server.addr();
     let server_key = server.id().as_bytes().to_vec();
     let root = Ed25519Signer::from_seed(&[7; 32]).expect("independent deployment root");
+    let root_key = root.public_key().try_into().expect("root key");
     let ephemeral = Ed25519Signer::from_seed(&secret.to_bytes()).expect("endpoint signer");
     let direct = server_addr
         .ip_addrs()
         .next()
         .expect("direct address")
         .to_string();
-    let descriptor =
-        https::signed_descriptor(&server_addr.id.to_string(), &direct, &root, &ephemeral);
+    let endpoint_id = server_addr.id.to_string();
     let witness_metadata = Arc::new(Mutex::new(witnessing::witness_set()));
     let generated = Arc::clone(&witness_metadata);
     let https = Arc::new(https::TestHttpsServer::start_with(|authority| {
-        use std::collections::{HashMap, VecDeque};
         let set = witnessing::witness_set_for(&format!("https://{authority}"), "clone-test-key");
         *generated.lock().expect("witness set") = set;
-        let mut routes = HashMap::from([(
-            "/.well-known/heddle/iroh-endpoint".to_owned(),
-            VecDeque::from(vec![descriptor; 256]),
-        )]);
-        move |path: &str| {
-            if path == "/.well-known/heddle/hosted-witnesses" {
+        move |path: &str| match path {
+            "/.well-known/heddle/iroh-endpoint" => Some(https::signed_descriptor(
+                &endpoint_id,
+                &direct,
+                &root,
+                &ephemeral,
+            )),
+            "/.well-known/heddle/hosted-witnesses" => {
                 let mut set = generated.lock().expect("witness set");
                 Some(witnessing::current_witness_set(&mut set).encode_to_vec())
-            } else {
-                routes.get_mut(path).and_then(VecDeque::pop_front)
             }
+            _ => None,
         }
     }));
     let fixture = Fixture {
@@ -355,10 +355,7 @@ async fn start_inner(
         .with_token(wire::AuthToken::new(token, "clone-test"))
         .with_auth_proof_key_pem(signer.to_pem().expect("device PEM"))
         .with_authenticated_principal("clone-test")
-        .with_descriptor_trust(
-            "clone-test-key",
-            root.public_key().try_into().expect("root key"),
-        )
+        .with_descriptor_trust("clone-test-key", root_key)
         .with_tls_ca_certificate_pem(https.certificate_pem.clone());
     let client = HostedClient::connect_server(&https.authority, &configuration)
         .await

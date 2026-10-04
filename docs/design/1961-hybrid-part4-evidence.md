@@ -79,6 +79,8 @@ witness history, consistently in Ready and every operation batch. In-process
 publication serializes its temporary HEDDLE_HOME; clone writers enroll their
 original account source proof. Large hosted round-trip futures use the existing
 explicit-stack test harness.
+Endpoint discovery signs a fresh descriptor for each lookup while retaining its
+60-second lifetime, so a slow round trip cannot replay expired routing metadata.
 
 ## Final gates and guard-removal receipts
 
