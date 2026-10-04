@@ -1926,6 +1926,19 @@ async fn serve_fetch(
                 .expect("published revision"),
         }
     };
+    // Content follows the selected revision. Public evidence retains the
+    // Thread's full first-admission history, including other published heads.
+    let native_authority = fixture
+        .captured
+        .lock()
+        .expect("current Thread witnesses")
+        .published
+        .iter()
+        .rev()
+        .find(|publication| publication.thread == reference)
+        .expect("published Thread")
+        .native_authority
+        .clone();
     let genesis = accepted.thread_genesis.clone();
     let revision = accepted.revision.clone();
     let artifacts = [&accepted.pack_data, &accepted.index_data];
@@ -1941,7 +1954,7 @@ async fn serve_fetch(
         &v2::FetchServerFrame {
             body: Some(v2::fetch_server_frame::Body::Ready(v2::TransferReady {
                 protocol: open.protocol.clone(),
-                native_authority: Some(accepted.native_authority.clone()),
+                native_authority: Some(native_authority.clone()),
                 endpoint: Some(v2::EndpointRef {
                     kind: v2::EndpointKind::Weft as i32,
                     public_key: server_key,
@@ -1964,7 +1977,8 @@ async fn serve_fetch(
         },
     )
     .await;
-    for operations in accepted.operations {
+    for mut operations in accepted.operations {
+        operations.native_authority = Some(native_authority.clone());
         write_message(
             &mut send,
             &v2::FetchServerFrame {

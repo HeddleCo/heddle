@@ -31,39 +31,6 @@ fn commit_file(path: &Path, body: &str, message: &str) {
     git(path, &["commit", "-m", message]);
 }
 
-/// Installs `home` as this process's `HEDDLE_HOME` until dropped.
-///
-/// Publication and clone run in-process, so they resolve that variable from
-/// this process rather than from a child command. The previous value is
-/// restored so a later test in the same process keeps the runner's home.
-static PROCESS_HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-struct ProcessHeddleHome {
-    previous: Option<std::ffi::OsString>,
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-impl ProcessHeddleHome {
-    fn install(home: &Path) -> Self {
-        let guard = PROCESS_HOME.lock().expect("exclusive process home");
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe { std::env::set_var("HEDDLE_HOME", home) };
-        Self {
-            previous,
-            _guard: guard,
-        }
-    }
-}
-
-impl Drop for ProcessHeddleHome {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
-        }
-    }
-}
-
 #[test]
 fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     on_large_stack(adopted_history_round_trip);

@@ -74,6 +74,11 @@ each set keeps the contract's five-minute maximum. Long transport controls retai
 their original admissions when metadata expires, rather than lengthening trust.
 The exact-envelope test also checks the creator binding directly, so an envelope
 commitment regression cannot hide behind the separate witness-payload commitment.
+Multi-head Fetch serves the requested revision's content with the current Thread
+witness history, consistently in Ready and every operation batch. In-process
+publication serializes its temporary HEDDLE_HOME; clone writers enroll their
+original account source proof. Large hosted round-trip futures use the existing
+explicit-stack test harness.
 
 ## Final gates and guard-removal receipts
 
