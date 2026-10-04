@@ -43,7 +43,8 @@ pub struct Selection<'a> {
 /// Signature-integrity verification of an exact retained Spool policy. This
 /// does not select the accepted policy head or infer operation/revocation order.
 /// Current callers select their own head; historical callers use an exact
-/// authenticated witness's policy sequence/hash.
+/// authenticated witness's policy sequence/hash. Successor admission and replay
+/// enforce revocation introduction against authenticated predecessor state.
 pub fn verify_policy_record(
     signed: &crate::wire::SignedSpoolPolicyRecord,
     owners: &[&VerifiedOwnerState],
@@ -60,24 +61,10 @@ pub fn verify_policy_record(
         &body.owner_state_hash,
         owner.issuers_sequence(&body.owner_state_hash)?,
     )?;
-    crate::policy::verify_signed_spool_policy_record(crate::policy::VerifySignedPolicy {
-        signed,
-        spool_uuid: crate::canonical::fixed(&body.spool_uuid, "Spool UUID")?,
-        accepted_head: body
-            .expected_head
-            .as_ref()
-            .ok_or(Error::Hybrid(contract::Reject::Canonical))?,
-        accepted_owner_id: owner.owner_id(),
-        accepted_owner_state_hash: crate::canonical::fixed(
-            &body.owner_state_hash,
-            "owner state hash",
-        )?,
-        required_transfer_sequence: body.ownership_transfer_sequence,
-        authority_key: issuer,
-        owner_authority_key_ids: &owner.authority_key_ids().collect::<Vec<_>>(),
-        accepted_grow_only: &std::collections::BTreeMap::new(),
-        ancestor_ceiling: None,
-    })?;
+    body.expected_head
+        .as_ref()
+        .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
+    crate::policy::verify_signed_spool_policy_record_integrity(signed, issuer)?;
     Ok(())
 }
 

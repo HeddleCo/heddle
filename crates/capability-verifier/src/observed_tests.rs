@@ -829,6 +829,53 @@ fn single_policy_provenance_rejects_malformed_predecessor() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
+fn single_policy_provenance_accepts_inherited_history_key_revocation() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../conformance/fixtures/production-v1.json"))
+            .expect("production fixture");
+    let case = fixture["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .find(|case| case["id"] == "policy-inherited-history-key-revocation")
+        .expect("inherited revocation fixture");
+    let bytes = |field: &str| hex::decode(case[field].as_str().expect("wire hex")).expect("bytes");
+    let records: Vec<_> = case["records_hex"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .map(|record| hex::decode(record.as_str().expect("record hex")).expect("record bytes"))
+        .collect();
+    let now = case["now"]
+        .as_str()
+        .expect("time")
+        .parse()
+        .expect("seconds");
+    let keyring = bytes("keyring_hex");
+    let current_owner = bytes("current_owner_hex");
+    crate::observed::verify_signed_policy_chain_bytes(
+        &records,
+        &keyring,
+        &current_owner,
+        now,
+        3600,
+    )
+    .expect("inherited revocation passes full-chain admission");
+    let (_, owner) = crate::observed::ownership(&keyring, &current_owner, now, limits())
+        .expect("verified owner");
+    let mut tip = SignedSpoolPolicyRecord::decode(records.last().expect("tip").as_slice())
+        .expect("signed policy");
+    crate::import_delegation::verify_policy_record(&tip, &[&owner])
+        .expect("retained tip preserves the predecessor's revocation");
+    tip.owner_signature.as_mut().expect("signature").signature[0] ^= 1;
+    assert!(matches!(
+        crate::import_delegation::verify_policy_record(&tip, &[&owner]),
+        Err(Error::Policy(policy::OwnerGovernanceError::NotOwnerSigned))
+    ));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn policy_rejects_rotated_owner_history_keys_at_introduction() {
     for case in production_cases().into_iter().filter(|c| {
         matches!(
@@ -860,8 +907,19 @@ fn policy_rejects_rotated_owner_history_keys_at_introduction() {
         vec![policy::owner_key_id(&TestKey::new(1).wire()).to_vec()],
     );
     assert!(matches!(
-        crate::import_delegation::verify_policy_record(&signed, &[&owner]),
-        Err(Error::Policy(policy::OwnerGovernanceError::SelfRevocation))
+        policy::verify_signed_spool_policy_record(policy::VerifySignedPolicy {
+            signed: &signed,
+            spool_uuid: SPOOL,
+            accepted_head: &policy::zero_head(),
+            accepted_owner_id: owner.owner_id(),
+            accepted_owner_state_hash: owner.state_hash(),
+            required_transfer_sequence: 0,
+            authority_key: owner.authority_key(),
+            owner_authority_key_ids: &owner.authority_key_ids().collect::<Vec<_>>(),
+            accepted_grow_only: &std::collections::BTreeMap::new(),
+            ancestor_ceiling: None,
+        }),
+        Err(policy::OwnerGovernanceError::SelfRevocation)
     ));
 }
 

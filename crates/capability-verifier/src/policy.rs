@@ -435,6 +435,65 @@ pub fn verify_signed_spool_policy_record(
         accepted_grow_only,
         ancestor_ceiling,
     } = input;
+    let mut verified = verify_signed_spool_policy_record_integrity(signed, authority_key)?;
+    if verified.spool_uuid != spool_uuid {
+        return Err(OwnerGovernanceError::Invalid(
+            "signed policy names another spool".to_string(),
+        ));
+    }
+    let body = signed.body.as_ref().ok_or_else(|| {
+        OwnerGovernanceError::Invalid("signed policy record is missing body".to_string())
+    })?;
+    let expected_head = body.expected_head.clone().unwrap_or_else(zero_head);
+    as_hash32(&accepted_head.state_hash, "accepted_head.state_hash")?;
+    if expected_head.sequence != accepted_head.sequence
+        || expected_head.state_hash != accepted_head.state_hash
+    {
+        return Err(OwnerGovernanceError::BrokenChain(
+            "expected_head does not match the accepted signed-policy head".to_string(),
+        ));
+    }
+    if verified.owner_id != accepted_owner_id
+        || verified.owner_state_hash != accepted_owner_state_hash
+        || verified.ownership_transfer_sequence != required_transfer_sequence
+    {
+        return Err(OwnerGovernanceError::NotOwnerSigned);
+    }
+    let audience = parsed_max_audience(&verified.policy)?;
+    if let (Some(proposed), Some(ceiling)) = (audience, ancestor_ceiling)
+        && (proposed as i32) > (ceiling as i32)
+    {
+        return Err(OwnerGovernanceError::AncestorCeiling);
+    }
+    let authority_id = owner_key_id(authority_key);
+    // F7 applies on introduction. Only authenticated predecessor state can
+    // distinguish new revocations from those retained after an ownership change.
+    if verified.policy.revoked_key_ids.iter().any(|id| {
+        !accepted_grow_only
+            .get("revoked_key_ids")
+            .is_some_and(|set| set.contains(id))
+            && (id.as_slice() == authority_id
+                || owner_authority_key_ids
+                    .iter()
+                    .any(|key| id.as_slice() == key))
+    }) {
+        return Err(OwnerGovernanceError::SelfRevocation);
+    }
+    let mut parent_sets: Vec<&BTreeMap<String, BTreeSet<Vec<u8>>>> = Vec::new();
+    if accepted_head.sequence > 0 {
+        parent_sets.push(accepted_grow_only);
+    }
+    verified.grow_only =
+        merge_grow_only_sets(&parent_sets, &verified.grow_only, &GROW_ONLY_SETTING_KEYS)?;
+    Ok(verified)
+}
+
+/// Verify retained bytes and owner signature without admitting a successor.
+/// The returned set is this record's contribution, never predecessor state.
+pub(crate) fn verify_signed_spool_policy_record_integrity(
+    signed: &SignedSpoolPolicyRecord,
+    authority_key: &AuthorizationVerificationKey,
+) -> Result<VerifiedSignedPolicy, OwnerGovernanceError> {
     let body = signed.body.as_ref().ok_or_else(|| {
         OwnerGovernanceError::Invalid("signed policy record is missing body".to_string())
     })?;
@@ -444,29 +503,16 @@ pub fn verify_signed_spool_policy_record(
         ));
     }
     let submitted_spool = as_uuid16(&body.spool_uuid)?;
-    if submitted_spool != spool_uuid {
-        return Err(OwnerGovernanceError::Invalid(
-            "signed policy names another spool".to_string(),
-        ));
-    }
 
     let expected_head = body.expected_head.clone().unwrap_or_else(zero_head);
     as_hash32(&expected_head.state_hash, "expected_head.state_hash")?;
-    as_hash32(&accepted_head.state_hash, "accepted_head.state_hash")?;
-    if expected_head.sequence != accepted_head.sequence
-        || expected_head.state_hash != accepted_head.state_hash
-    {
-        return Err(OwnerGovernanceError::BrokenChain(
-            "expected_head does not match the accepted signed-policy head".to_string(),
-        ));
-    }
-    if body.sequence <= accepted_head.sequence {
+    if body.sequence <= expected_head.sequence {
         return Err(OwnerGovernanceError::Rollback {
             submitted: body.sequence,
-            accepted: accepted_head.sequence,
+            accepted: expected_head.sequence,
         });
     }
-    if body.sequence != accepted_head.sequence.saturating_add(1) {
+    if body.sequence != expected_head.sequence.saturating_add(1) {
         return Err(OwnerGovernanceError::BrokenChain(
             "signed policy sequence must be exactly accepted_head.sequence + 1".to_string(),
         ));
@@ -488,16 +534,7 @@ pub fn verify_signed_spool_policy_record(
     }
 
     let owner_id = as_hash32(&body.owner_id, "owner_id")?;
-    if owner_id != accepted_owner_id {
-        return Err(OwnerGovernanceError::NotOwnerSigned);
-    }
     let owner_state_hash = as_hash32(&body.owner_state_hash, "owner_state_hash")?;
-    if owner_state_hash != accepted_owner_state_hash {
-        return Err(OwnerGovernanceError::NotOwnerSigned);
-    }
-    if body.ownership_transfer_sequence != required_transfer_sequence {
-        return Err(OwnerGovernanceError::NotOwnerSigned);
-    }
 
     let signature = signed
         .owner_signature
@@ -509,39 +546,12 @@ pub fn verify_signed_spool_policy_record(
     let policy = body.policy.clone().ok_or_else(|| {
         OwnerGovernanceError::Invalid("signed policy body is missing policy".to_string())
     })?;
-    let audience = parsed_max_audience(&policy)?;
-    if let (Some(proposed), Some(ceiling)) = (audience, ancestor_ceiling)
-        && (proposed as i32) > (ceiling as i32)
-    {
-        return Err(OwnerGovernanceError::AncestorCeiling);
-    }
-
+    parsed_max_audience(&policy)?;
     let proposed = proposed_revocations(&policy)?;
-    let authority_id = owner_key_id(authority_key);
-    // F7 applies on introduction. An inherited revocation must remain in the
-    // grow-only set even when a later owner has used that key as an authority.
-    if proposed.iter().any(|id| {
-        !accepted_grow_only
-            .get("revoked_key_ids")
-            .is_some_and(|set| set.contains(id))
-            && (id.as_slice() == authority_id
-                || owner_authority_key_ids
-                    .iter()
-                    .any(|key| id.as_slice() == key))
-    }) {
-        return Err(OwnerGovernanceError::SelfRevocation);
-    }
-
-    let mut proposed_grow_only = BTreeMap::new();
+    let mut grow_only = BTreeMap::new();
     if !proposed.is_empty() {
-        proposed_grow_only.insert("revoked_key_ids".to_string(), proposed);
+        grow_only.insert("revoked_key_ids".to_string(), proposed);
     }
-    let mut parent_sets: Vec<&BTreeMap<String, BTreeSet<Vec<u8>>>> = Vec::new();
-    if accepted_head.sequence > 0 {
-        parent_sets.push(accepted_grow_only);
-    }
-    let grow_only =
-        merge_grow_only_sets(&parent_sets, &proposed_grow_only, &GROW_ONLY_SETTING_KEYS)?;
 
     Ok(VerifiedSignedPolicy {
         spool_uuid: submitted_spool,
