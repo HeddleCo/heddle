@@ -464,7 +464,7 @@ pub(crate) mod tests {
 
     pub(crate) fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
                 .expect("fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
@@ -550,7 +550,7 @@ pub(crate) mod tests {
         };
         use repo::thread_replication::delegated_import::AcceptedAuthority as _;
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
                 .expect("published vectors");
         let decode = |name: &str, signed: bool| {
             hex::decode(
@@ -715,7 +715,7 @@ pub(crate) mod tests {
             }
         }
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
                 .expect("published fixture");
         fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
             let vector = fixture["wire_vectors"]

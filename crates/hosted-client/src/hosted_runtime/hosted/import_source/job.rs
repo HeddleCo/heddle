@@ -56,6 +56,27 @@ impl ImportJobState {
         &self.response
     }
 
+    /// Exact custody retained by the host, including after loss of client state.
+    pub fn retained_source(&self) -> Result<&wire::ImportSourceSelectionV1> {
+        Ok(self
+            .response
+            .retained_source
+            .as_ref()
+            .ok_or(Reject::SourceSelection)?)
+    }
+
+    fn validate_preparation(&self, request: &wire::PrepareImportJobRequest) -> Result<()> {
+        if self.request.destination != request.destination
+            || self.request.logical_job_id != request.renew_logical_job_id
+        {
+            return Err(Reject::StaleContext.into());
+        }
+        if request.source.as_ref() != Some(self.retained_source()?) {
+            return Err(Reject::SourceSelection.into());
+        }
+        Ok(())
+    }
+
     /// An expired predecessor is a CAS handle, never executable permission.
     pub fn predecessor(
         &self,
@@ -197,6 +218,18 @@ impl HostedClient {
             response,
         })
     }
+    /// Recover the logical job from the operation's durable destination/job
+    /// association. Missing metadata is unavailable; an attempt ID is never a job ID.
+    pub async fn get_import_job_state_from_operation(
+        &self,
+        operation: &wire::OperationRecord,
+    ) -> Result<Option<ImportJobState>> {
+        let Some(request) = authority::import_job_state_request_from_operation(operation)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.get_import_job_state(&request).await?))
+    }
+
     /// Check semantic support before provisioning an import destination or
     /// staging an import job. Method discovery alone cannot establish support.
     pub async fn require_import_authority_protocol(&self) -> Result<()> {
@@ -269,11 +302,9 @@ impl HostedClient {
     ) -> Result<PreparedImportJob> {
         let read = retained.map(|(read, _)| read);
         match read {
-            Some(read)
-                if read.request.destination == request.destination
-                    && read.request.logical_job_id == request.renew_logical_job_id => {}
+            Some(read) => read.validate_preparation(request)?,
             None if request.renew_logical_job_id.is_empty() => {}
-            _ => return Err(Reject::StaleContext.into()),
+            None => return Err(Reject::StaleContext.into()),
         }
         let destination = request.destination.as_ref().ok_or(Reject::Canonical)?;
         let identity = request.identity.as_ref().ok_or(Reject::Canonical)?;
@@ -301,6 +332,10 @@ impl HostedClient {
                 Ok::<_, Reject>((
                     predecessor,
                     read.response.state.as_ref().ok_or(Reject::StaleContext)?,
+                    read.response
+                        .retained_source
+                        .as_ref()
+                        .ok_or(Reject::SourceSelection)?,
                 ))
             })
             .transpose()?;
@@ -422,22 +457,15 @@ fn resolved_source(
     request: &wire::ResolveImportSourceRequest,
     response: &wire::ResolveImportSourceResponse,
 ) -> Result<ResolvedImportSource> {
-    if response.encoded_len() > authority::MAX_BUNDLE_BYTES {
-        return Err(Reject::Bounds.into());
-    }
     let selected = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+    authority::validate_resolve_import_source_response(
+        request,
+        response,
+        selected.connection.as_ref().map(|_| "github"),
+    )?;
     let source = response.source.as_ref().ok_or(Reject::SourceSelection)?;
-    if selected.connection != source.connection
-        || selected.clone_url != source.clone_url
-        || selected.installation_id != source.installation_id
-        || (!selected.provider_repository_id.is_empty()
-            && selected.provider_repository_id != source.provider_repository_id)
-    {
-        return Err(Reject::SourceSelection.into());
-    }
     let provider =
         authority::resolve_import_provider(source, source.connection.as_ref().map(|_| "github"))?;
-    authority::validate_repository_hash_algorithm(source, false)?;
     Ok(ResolvedImportSource {
         request: request.clone(),
         source: source.clone(),
@@ -679,7 +707,7 @@ mod tests {
     fn wire<T: Message + Default>(section: &str, name: &str) -> T {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
         )))
         .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
@@ -798,7 +826,7 @@ mod tests {
     fn fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
         )))
         .expect("published alpha.25 vectors")
     }
@@ -915,6 +943,97 @@ mod tests {
     }
 
     #[test]
+    fn operation_job_discovery_preserves_destination_and_never_guesses_from_attempts() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/hybrid-job-selector-v1.json"
+        ))
+        .expect("published operation discovery vectors");
+        for row in fixture["operations"].as_array().expect("operations") {
+            let operation = wire::OperationRecord::decode(
+                hex::decode(row["wire_hex"].as_str().expect("operation bytes"))
+                    .expect("hex")
+                    .as_slice(),
+            )
+            .expect("operation");
+            let result = authority::import_job_state_request_from_operation(&operation);
+            match row["expected"].as_str().expect("expected") {
+                "OK" => {
+                    let request = result.expect("valid selector").expect("available");
+                    assert_eq!(
+                        hex::encode(request.encode_to_vec()),
+                        row["request_wire_hex"],
+                        "{row}"
+                    );
+                }
+                "unavailable" => assert_eq!(result.expect("absent metadata"), None, "{row}"),
+                _ => assert!(result.is_err(), "malformed metadata: {row}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_preserves_exact_selected_identity_and_allows_changed_observations() {
+        for row in fixture()["custody_vectors"]["resolve"]
+            .as_array()
+            .expect("vectors")
+        {
+            let request = wire("wire_vectors", row["request"].as_str().expect("request"));
+            let response = wire("wire_vectors", row["response"].as_str().expect("response"));
+            let result = resolved_source(&request, &response);
+            assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn recovered_renewal_uses_retained_custody_even_with_replacement_grants() {
+        let read = prepared("renewal_preparation")
+            .renewal_read
+            .expect("authenticated read");
+        for row in fixture()["custody_vectors"]["read"]
+            .as_array()
+            .expect("read vectors")
+        {
+            let response = wire("wire_vectors", row["response"].as_str().expect("response"));
+            let result = authority::validate_job_state_response(&read.request, &response);
+            assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
+        }
+        with_context(1350, |expected| {
+            let predecessor = read.predecessor(expected).expect("predecessor");
+            for row in fixture()["custody_vectors"]["prepare"]
+                .as_array()
+                .expect("prepare vectors")
+            {
+                // Revocation of the current grant is checked by the host.
+                if row["revoked"] == true {
+                    continue;
+                }
+                let request = wire("wire_vectors", row["request"].as_str().expect("request"));
+                let current = source(row["source"].as_str().expect("source"));
+                let result = read.validate_preparation(&request);
+                assert_eq!(
+                    result.is_ok(),
+                    row["expected"] == "OK",
+                    "pre-RPC {row}: {result:?}"
+                );
+                let result = authority::prepare_import_source_scope(
+                    &request,
+                    &current.source,
+                    Some("github"),
+                    &configuration().response,
+                    &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
+                        .destination_version,
+                    Some((
+                        &predecessor,
+                        read.response.state.as_ref().expect("state"),
+                        read.retained_source().expect("custody"),
+                    )),
+                );
+                assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
+            }
+        });
+    }
+
+    #[test]
     fn selected_refs_can_prepare_from_one_page_without_inventing_missing_oids() {
         let mut request: wire::PrepareImportJobRequest =
             wire("wire_vectors", "prepare_public_sha256");
@@ -1028,7 +1147,7 @@ mod tests {
             assert!(validate_source_selection(&request, &discovered, None).is_err());
             validate_source_selection(&request, &discovered, Some(&predecessor))
                 .expect("retained commit selection is independent of this ref page");
-            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some((&predecessor, read.response.state.as_ref().expect("state")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
+            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some((&predecessor, read.response.state.as_ref().expect("state"), read.response.retained_source.as_ref().expect("retained source")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
         });
     }
 
@@ -1101,10 +1220,14 @@ mod tests {
                     .map(|name| wire("wire_vectors", name))
                     .unwrap_or_else(|| configuration().response);
                 let changed_state = row["state"].as_str().map(|name| wire("wire_vectors", name));
-                let retained = row["retained"]
-                    .as_bool()
-                    .expect("retained")
-                    .then_some((&predecessor, changed_state.as_ref().unwrap_or(state)));
+                let retained = row["retained"].as_bool().expect("retained").then_some((
+                    &predecessor,
+                    changed_state.as_ref().unwrap_or(state),
+                    read.response
+                        .retained_source
+                        .as_ref()
+                        .expect("retained source"),
+                ));
                 let result = authority::prepare_import_source_scope(
                     &request,
                     &current_source.source,

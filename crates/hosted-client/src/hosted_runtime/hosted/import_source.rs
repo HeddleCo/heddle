@@ -289,6 +289,8 @@ impl HostedClient {
                         "operation stream returned another hosted source import".into(),
                     ));
                 }
+                api::import_authority::import_job_state_request_from_operation(&record)
+                    .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
                 on_progress(&record)?;
                 if matches!(
                     contract::operation_record::State::try_from(record.state),
@@ -405,6 +407,8 @@ impl HostedClient {
                         "operation stream returned another hosted source import".into(),
                     ));
                 }
+                api::import_authority::import_job_state_request_from_operation(&record)
+                    .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
                 on_progress(&record)?;
                 let terminal = is_terminal_state(record.state);
                 latest = Some(record);
@@ -496,7 +500,7 @@ mod tests {
     fn signed_proof() -> contract::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
         )))
         .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
@@ -575,7 +579,7 @@ mod tests {
     fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
         )))
         .expect("vectors");
         let bytes = hex::decode(
@@ -617,7 +621,7 @@ mod tests {
     fn unavailable_oids_require_explicit_signed_observe_disclosure() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
         )))
         .expect("fixture");
         let decode = |name: &str| {

@@ -10,10 +10,12 @@ Dependencies enter this branch only through plain merges of `origin/integration`
 ## Atomic source installation
 
 `ThreadReplica::install_hybrid_import` takes a final
-`before_commit: impl FnOnce(&mut InstallArtifacts) -> Result<()>` callback.
+`before_commit: impl FnOnce(&mut InstallArtifacts<'_>) -> Result<()>` callback.
 It keeps the receiver's trust serialization and SQLite transaction held while
 Part 2 publishes the staged pack, owner pin and Spool identity through the file
-journal. A late clock or disclosure rejection rolls back the files as well as
+core-owned durable journal. Destinations are relative to the selected shared
+`heddle_dir`, and all repository artifacts publish through the borrowed facade.
+Owner-pin preparation is read-only; staging remains outside the destination. A late clock or disclosure rejection rolls back the files as well as
 replicas, accepted evidence, job associations and trust high-water state.
 
 Part 2 supplies an isolated object store. It never writes the destination pack
@@ -49,7 +51,9 @@ unknown identifiers or the wrong cancellation/key namespace fail closed.
 
 ## Wire and rollout
 
-Part 2 pins API alpha.25. Configuration and source resolution are authenticated,
+Part 2 pins API alpha.27. Operation subjects carry the durable destination/logical-job
+association; job-state reads return the exact retained custody selector for renewal.
+Resolve preserves URL, connection, repository, installation and visibility exactly. Configuration and source resolution are authenticated,
 bounded discovery. Connected `github` and unconnected `public-git` are explicit
 custody choices; a URL domain does not choose credentials. Unknown repository
 format blocks Prepare/signing. Commit refreshes current source and support.

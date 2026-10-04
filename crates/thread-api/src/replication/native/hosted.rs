@@ -90,7 +90,7 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
         if self.local.objects.root().canonicalize()? != self.directory.canonicalize()? {
             return Err(api::hybrid_codec::Reject::Root.into());
         }
-        let scratch = tempfile::tempdir_in(&self.directory)?;
+        let scratch = tempfile::tempdir()?;
         let mut staged = FsStore::new(scratch.path());
         staged.set_external_source(Arc::new(ExistingObjects(self.local.objects.clone())));
         staged.init()?;
@@ -101,9 +101,7 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
             records,
             self.authority.as_ref(),
             &staged,
-            |artifacts| {
-                crate::fetch::hosted::publish_store(staged.root(), &self.directory, artifacts)
-            },
+            |artifacts| crate::fetch::hosted::publish_store(staged.root(), artifacts),
         )?;
         self.local.objects.reload_packs()?;
         Ok(())

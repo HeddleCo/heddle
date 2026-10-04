@@ -55,6 +55,15 @@ impl StagedSource {
             return Err(api::hybrid_codec::Reject::Root.into());
         }
         let _write_lock = repository.locker().write().map_err(preparation)?;
+        let next_pin = repository
+            .prepare_owner_observation_pin(
+                owner_genesis,
+                owner,
+                spool,
+                &selected.wire().canonical_spool_path_segments,
+                now_seconds,
+            )
+            .map_err(preparation)?;
         let previous_spool = read_optional(&repository.heddle_dir().join("spool-id"))?;
         if previous_spool.as_ref().is_some_and(|bytes| {
             std::str::from_utf8(bytes)
@@ -68,21 +77,6 @@ impl StagedSource {
         let previous_pin = read_optional(&pin_path)?;
         let staging = tempfile::tempdir_in(self.directory.path())?;
         let staged_repo = Repository::init(staging.path()).map_err(preparation)?;
-        if let Some(bytes) = &previous_pin {
-            std::fs::write(
-                staged_repo.heddle_dir().join("owner-authorization.bin"),
-                bytes,
-            )?;
-        }
-        staged_repo
-            .verify_and_pin_owner_observation(
-                owner_genesis,
-                owner,
-                spool,
-                &selected.wire().canonical_spool_path_segments,
-                now_seconds,
-            )
-            .map_err(preparation)?;
         self.install_source_objects(&staged_repo)?;
         let main = self
             .ready
@@ -141,15 +135,9 @@ impl StagedSource {
                         api::hybrid_codec::Reject::StaleContext,
                     ));
                 }
-                publish_store(staged_repo.heddle_dir(), repository.heddle_dir(), artifacts)?;
-                artifacts.install_file(
-                    &staged_repo.heddle_dir().join("owner-authorization.bin"),
-                    &pin_path,
-                )?;
-                artifacts.write_file(
-                    &repository.heddle_dir().join("spool-id"),
-                    spool.to_string().as_bytes(),
-                )
+                publish_store(staged_repo.heddle_dir(), artifacts)?;
+                artifacts.write_file(Path::new("owner-authorization.bin"), &next_pin)?;
+                artifacts.write_file(Path::new("spool-id"), spool.to_string().as_bytes())
             },
         )
         .map_err(preparation)?;
@@ -166,8 +154,7 @@ impl StagedSource {
         // Account/device lookup uses the committed Spool identity. Registration
         // is local discovery and runs only after successful authority commit.
         drop(_write_lock);
-        repository
-            .install_native_spool_id(spool)
+        repo::device_catalog::register(&repo::identity::heddle_home_dir(), repository, spool)
             .map_err(preparation)?;
         Ok(state)
     }
@@ -186,22 +173,20 @@ fn replica_error(error: impl std::fmt::Display) -> repo::thread_replication::Err
 
 pub(crate) fn publish_store(
     staged: &Path,
-    destination: &Path,
-    artifacts: &mut InstallArtifacts,
+    artifacts: &mut InstallArtifacts<'_>,
 ) -> repo::thread_replication::Result<()> {
     // Only immutable source storage crosses the boundary. Staging's refs,
     // identities, locks, configuration and local metadata never join the clone.
     for name in ["packs", "objects"] {
-        publish_directory(&staged.join(name), &destination.join(name), artifacts)?;
+        publish_directory(&staged.join(name), Path::new(name), artifacts)?;
     }
     Ok(())
 }
 fn publish_directory(
     staged: &Path,
     destination: &Path,
-    artifacts: &mut InstallArtifacts,
+    artifacts: &mut InstallArtifacts<'_>,
 ) -> repo::thread_replication::Result<()> {
-    std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(staged)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
@@ -290,7 +275,7 @@ pub(crate) mod tests {
         heddleco_capability_verifier::VerifiedCloneKeyring,
     ) {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
                 .expect("release fixture");
         let mut bundle = bundle();
         bundle.history_proofs = [
@@ -657,7 +642,7 @@ pub(crate) mod tests {
             .install_hosted(&repo, &trust, authority.as_ref(), 1350)
             .expect("genesis-only receiver");
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
                 .expect("vectors");
         let original = crate::replication::decode_record(record(&fixture, "converted_main"))
             .expect("original conversion");
