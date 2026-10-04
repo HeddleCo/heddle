@@ -64,6 +64,46 @@ fn verify(c: &Value) -> crate::Result<Vec<u8>> {
         3600,
     )
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn native_creator_binding_commits_exact_envelope() {
+    let control = input("start_thread");
+    let bytes =
+        |field: &str| hex::decode(control[field].as_str().expect("hex field")).expect("hex");
+    let limits = crate::VerificationLimits::new(3600).expect("limits");
+    let (keyring, owner) = crate::observed::ownership(
+        &bytes("keyring_hex"),
+        &bytes("current_owner_hex"),
+        1100,
+        limits,
+    )
+    .expect("independently selected ownership");
+    let initial = bytes("initial_owner_hex").try_into().expect("owner id");
+    let genesis = bytes("spool_genesis_hex").try_into().expect("Spool id");
+    let selection = crate::import_delegation::Selection {
+        owner: &owner,
+        keyring: &keyring,
+        initial_owner_id: &initial,
+        spool_genesis_digest: &genesis,
+        limits,
+    };
+    let binding = wire::SignedNativeGenesisAuthorityV1::decode(bytes("binding_hex").as_slice())
+        .expect("binding");
+    let original = wire::SignedRecord::decode(bytes("original_hex").as_slice()).expect("original");
+    let verify = |envelope: &[u8]| {
+        super::native_genesis::verify_binding(&binding, &original, envelope, &selection)
+    };
+    verify(&bytes("envelope_hex")).expect("exact creator envelope");
+    let swapped = input("substituted_envelope");
+    let swapped = hex::decode(swapped["envelope_hex"].as_str().expect("envelope")).expect("hex");
+    assert!(
+        verify(&swapped).is_err(),
+        "substituted envelope must reject"
+    );
+    verify(&bytes("envelope_hex")).expect("unchanged envelope passing control");
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn native_creator_binding_checks_lineage_envelope_time_and_revocation() {

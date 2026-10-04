@@ -4,8 +4,9 @@ use api::{
     hybrid_codec as codec,
 };
 use crypto::{Ed25519Signer, Signer};
-use objects::object::thread_replication::{
-    GenesisOwner, SourceAuthor, ThreadGenesis, ThreadOperation,
+use objects::object::{
+    ContentHash,
+    thread_replication::{GenesisOwner, SourceAuthor, ThreadGenesis, ThreadOperation},
 };
 
 pub(crate) fn ownership(spool: uuid::Uuid) -> (wire::SignedSpoolOwnerGenesis, wire::OwnerState) {
@@ -259,13 +260,24 @@ pub(crate) fn bundle(
         {
             continue;
         }
-        let (kind, envelope, publisher) = match original.format.as_str() {
+        let (kind, envelope, publisher, dependency_ids) = match original.format.as_str() {
             "heddle-thread-operation-v1" => {
                 let operation =
                     ThreadOperation::decode(&original.canonical_record).expect("operation");
                 match operation.source_author().expect("source author") {
                     Some(SourceAuthor::Account { authority, .. }) => {
-                        (1, authority.clone(), operation.publisher.to_vec())
+                        let mut dependencies = operation.parents.clone();
+                        if let Some(integration) =
+                            operation.local_integration().expect("integration")
+                        {
+                            dependencies.insert(integration.source_operation);
+                        }
+                        (
+                            1,
+                            authority.clone(),
+                            operation.publisher.to_vec(),
+                            dependencies,
+                        )
                     }
                     Some(SourceAuthor::LocalKey) => continue,
                     _ => panic!("fixture expects source capture"),
@@ -276,13 +288,24 @@ pub(crate) fn bundle(
                 let SourceAuthor::Account { authority, .. } = claim.acceptance else {
                     panic!("account claim required");
                 };
-                (2, authority, claim.accepting_publisher.to_vec())
+                (
+                    2,
+                    authority,
+                    claim.accepting_publisher.to_vec(),
+                    claim.source_frontier,
+                )
             }
             _ => panic!("fixture does not issue resolution or landing witnesses"),
         };
+        // The carrier references the exact frontier, while the operation batches
+        // transport its complete native causal closure independently of carrier bounds.
         let mut dependencies = all
             .iter()
-            .filter(|r| *r != &original)
+            .filter(|r| {
+                *r != &original
+                    && dependency_ids
+                        .contains(&ContentHash::compute_typed(&r.format, &r.canonical_record))
+            })
             .map(|r| (*r).clone())
             .chain(std::iter::once(original_genesis.clone()))
             .collect::<Vec<_>>();

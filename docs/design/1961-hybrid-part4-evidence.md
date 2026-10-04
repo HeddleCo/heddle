@@ -62,6 +62,13 @@ against native witness-producing transports. Device F4 exercises actual relay
 export, expired-set refresh, both exact retirement paths, missing/neighboring
 proofs, revoked keys and unchanged original content.
 
+The publication fixture carries each operation's direct causal dependencies and
+each claim's signed source frontier in its sidecar. Transport retains the full
+closure separately: the 140/1000-state publication tests verify bounded batches,
+fresh-clone ancestry and a later capture without exceeding witness payload bounds.
+The exact-envelope test also checks the creator binding directly, so an envelope
+commitment regression cannot hide behind the separate witness-payload commitment.
+
 ## Final gates and guard-removal receipts
 
 Final receipts in the PR record the tested SHA, command, exit status, test
