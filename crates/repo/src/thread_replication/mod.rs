@@ -12,7 +12,11 @@ pub mod checkout;
 mod checkout_resolution;
 mod checkout_selection;
 pub use checkout_resolution::source_conflict_version;
+pub mod delegated_import;
 mod genesis_admission;
+pub mod hosted_trust;
+#[cfg(test)]
+mod hosted_trust_tests;
 mod integration;
 pub mod listing;
 mod local;
@@ -62,6 +66,18 @@ const ACCEPTED_PAGE_SQL: &str = "SELECT id,canonical,signature FROM operations W
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Hybrid(#[from] api::hybrid_codec::Reject),
+    #[error(transparent)]
+    HybridEvidence(#[from] crypto::import_authority::Error),
+    #[error(transparent)]
+    ImportAuthority(#[from] heddleco_capability_verifier::Error),
+    #[error(
+        "hosted installation requires fresh root-authenticated witness and original authority evidence"
+    )]
+    WitnessEvidenceRequired,
+    #[error("trusted receiver clock unavailable or rolled back")]
+    HostedClock,
     #[error("Local metadata: {0}")]
     Metadata(#[from] crate::local_metadata::Error),
     #[error("Thread storage: {0}")]
@@ -142,6 +158,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
     connection.execute_batch(collaboration_search::SCHEMA)?;
     connection.execute_batch(source_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
+    connection.execute_batch(hosted_trust::SCHEMA)?;
     connection.execute_batch(listing::SCHEMA)
 }
 
@@ -223,13 +240,27 @@ impl ThreadReplica {
         };
         let mut connection = crate::local_metadata::open(heddle_dir)?;
         let transaction = connection.transaction()?;
+        this.create_with_proof_in(&transaction, signed, creator_authority, admission)?;
+        transaction.commit()?;
+        this.notify_committed()?;
+        Ok(this)
+    }
+
+    fn create_with_proof_in(
+        &self,
+        transaction: &Transaction<'_>,
+        signed: &SignedGenesis,
+        creator_authority: &[u8],
+        admission: Option<&crypto::thread_genesis_admission::SignedGenesisAdmission>,
+    ) -> Result<()> {
+        let genesis = signed.verify()?;
         transaction.execute(
             "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature,creator_authority) VALUES(?1,?2,?3,?4)",
-            params![this.thread.as_bytes(), &signed.canonical, &signed.signature, creator_authority],
+            params![self.thread.as_bytes(), &signed.canonical, &signed.signature, creator_authority],
         )?;
         let stored: (Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
             "SELECT genesis,genesis_signature,creator_authority FROM threads WHERE id=?1",
-            [this.thread.as_bytes()],
+            [self.thread.as_bytes()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         if stored.0 != signed.canonical
@@ -241,14 +272,14 @@ impl ThreadReplica {
         if let Some(admission) = admission {
             let existing: (Option<Vec<u8>>, Option<Vec<u8>>) = transaction.query_row(
                 "SELECT genesis_admission,genesis_admission_signature FROM threads WHERE id=?1",
-                [this.thread.as_bytes()],
+                [self.thread.as_bytes()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             match existing {
                 (None, None) => {
-                    transaction.execute("UPDATE threads SET genesis_admission=?2,genesis_admission_signature=?3 WHERE id=?1",params![this.thread.as_bytes(),admission.canonical,admission.signature])?;
+                    transaction.execute("UPDATE threads SET genesis_admission=?2,genesis_admission_signature=?3 WHERE id=?1",params![self.thread.as_bytes(),admission.canonical,admission.signature])?;
                     boundary_evidence::persist(
-                        &transaction,
+                        transaction,
                         &admission.canonical,
                         admission.boundary_acceptance.as_deref(),
                     )?;
@@ -264,13 +295,11 @@ impl ThreadReplica {
         }
         transaction.execute(
             "INSERT OR IGNORE INTO thread_source_bases(thread,revision) VALUES(?1,?2)",
-            params![this.thread.as_bytes(), genesis.base.as_bytes()],
+            params![self.thread.as_bytes(), genesis.base.as_bytes()],
         )?;
-        listing::initialize(&transaction, &genesis)?;
-        reference_capture::inherit_root(&transaction, &genesis)?;
-        transaction.commit()?;
-        this.notify_committed()?;
-        Ok(this)
+        listing::initialize(transaction, &genesis)?;
+        reference_capture::inherit_root(transaction, &genesis)?;
+        Ok(())
     }
 
     /// Lookup is side-effect free and needs only stable identity, not a key or
@@ -903,6 +932,35 @@ impl ThreadReplica {
     }
     #[allow(clippy::too_many_arguments)]
     fn receive_in(
+        &self,
+        tx: &Transaction<'_>,
+        signed: &SignedOperation,
+        operation: &ThreadOperation,
+        store: &impl ObjectStore,
+        compare_frontier: bool,
+        authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        defer_references: bool,
+    ) -> Result<Admission> {
+        let witnessed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_import_job_keys WHERE public_key=?1) OR EXISTS(SELECT 1 FROM hosted_import_admissions WHERE operation=?2)",
+            params![operation.publisher, operation.id()?.as_bytes()], |r| r.get(0),
+        )?;
+        if witnessed || operation.hosted_execution_binding()?.is_some() {
+            return Err(Error::WitnessEvidenceRequired);
+        }
+        self.receive_verified_in(
+            tx,
+            signed,
+            operation,
+            store,
+            compare_frontier,
+            authority_receipt,
+            defer_references,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receive_verified_in(
         &self,
         tx: &Transaction<'_>,
         signed: &SignedOperation,

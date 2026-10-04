@@ -19,9 +19,15 @@ pub struct VerifiedCloneKeyring {
     owner_state: VerifiedOwnerState,
     owner_genesis: VerifiedSpoolOwnerGenesis,
     current_owner_uuid: [u8; 16],
+    authority_public_keys: Vec<Vec<u8>>,
 }
 
 impl VerifiedCloneKeyring {
+    /// All verified user authority keys across rotations and ownership transfers.
+    /// Import job keys cannot reuse any of these historical identities.
+    pub fn authority_public_keys(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.authority_public_keys.iter()
+    }
     /// Original verified wire object.
     #[must_use]
     pub const fn wire(&self) -> &CloneAuthorizationKeyring {
@@ -168,7 +174,7 @@ pub fn verify_clone_keyring(
         .spool_uuid
         .as_slice()
         .try_into()
-        .expect("checked spool UUID");
+        .map_err(|_| Error::Invalid("Spool UUID must be 16 bytes".into()))?;
     let owner_genesis = verify_spool_owner_genesis(
         keyring
             .owner_genesis
@@ -220,11 +226,11 @@ pub fn verify_clone_keyring(
         .signed_root()
         .root
         .as_ref()
-        .expect("verified owner root")
+        .ok_or_else(|| Error::BrokenChain("verified owner root missing".into()))?
         .account_uuid
         .as_slice()
         .try_into()
-        .expect("verified account UUID");
+        .map_err(|_| Error::BrokenChain("verified account UUID must be 16 bytes".into()))?;
     // Transfer signatures name historical state hashes. Verify the original
     // proofs before selecting the exact state; later rotations do not invalidate
     // earlier accepted ownership handoffs.
@@ -317,11 +323,18 @@ pub fn verify_clone_keyring(
         &keyring.ownership_transfers,
         &owners,
     )?;
+    let authority_public_keys = state
+        .authority_public_keys()
+        .chain(owners.iter().flat_map(|o| o.state.authority_public_keys()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(VerifiedCloneKeyring {
         wire: keyring,
         owner_state: state,
         owner_genesis,
         current_owner_uuid,
+        authority_public_keys,
     })
 }
 

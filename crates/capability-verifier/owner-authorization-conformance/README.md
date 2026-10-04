@@ -1,8 +1,9 @@
 # Owner-authorization differential conformance
 
 This repository owns the executable parity gate for the canonical verifier.
-The harness starts from every checked-in `conformance/fixtures/*` matrix,
-applies deterministic evidence mutations, and sends the identical corpus to:
+The harness starts from every checked-in `conformance/fixtures/*` matrix and
+API alpha.21's verbatim HYBRID fixture. It applies deterministic evidence
+mutations and sends identical inputs to:
 
 1. a native adapter whose dependency is the repository root by path; and
 2. the publishable `@heddleco/capability-verifier-wasm` WebAssembly package.
@@ -20,9 +21,17 @@ OWNER_AUTH_CASE_SEED=38322398 \
 ```
 
 `OWNER_AUTH_FUZZ_CASE_COUNT` changes the number of mutations made per fixture.
+The HYBRID cases invoke the public `verifyImportDelegation` JS byte/JSON/time
+binding and the shared native byte adapter. Controls cover owner→device→job and
+direct owner delegation. Negatives include genuinely owner-signed witness/job
+delegators, distinct child jobs, exact expiry, cancellation, owner/device/job
+revocation, independent Spool selection, missing parent, JSON width and i64 time
+overflow. Compare successful delegation digests and exact rejection reasons.
+
 CI runs all four seeds in `seeds.txt`. Each corpus is retained below
 `target/owner-authorization-conformance/corpus` for exact local replay.
 
 Set `OWNER_AUTH_FORCE_DIVERGENCE=1` only when testing the gate itself. It
-injects a result mismatch after both verifiers run and must make the harness
+injects a result mismatch specifically in the import route after both verifiers
+run and must make the harness
 fail with `OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED`.

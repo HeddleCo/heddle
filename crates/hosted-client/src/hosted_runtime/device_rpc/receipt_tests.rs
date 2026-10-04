@@ -1,5 +1,5 @@
-//! A real authenticated browser stream relays another account's original record
-//! using previously enrolled hosted executor testimony, with no hosted calls.
+//! A real authenticated browser stream rejects a bare executor receipt.
+//! Full HYBRID evidence routing belongs to Part 2; transport authority is separate.
 use std::{sync::Arc, time::Duration};
 
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
@@ -39,7 +39,7 @@ pub(super) async fn roundtrip(
         .expect("selected authenticated remote owner");
     repository
         .pin_thread_hosted_executor(replica, executor.public_key().try_into().expect("key"))
-        .expect("independent executor enrollment");
+        .expect_err("an endpoint key cannot become evergreen witness authority");
     let envelope =
         b"sealed original authority checked by the enrolled host at first durable receipt".to_vec();
     let control = ThreadControl {
@@ -93,6 +93,19 @@ pub(super) async fn roundtrip(
     };
     let receipt =
         thread_api::authority_admission::sign(&statement, &executor).expect("executor receipt");
+    let trust = objects::object::thread_replication::integration::TrustedHostedExecutor {
+        spool,
+        spool_genesis: statement.spool_genesis,
+        executor: statement.executor,
+    };
+    thread_api::authority_admission::verify(&receipt, &original, &trust)
+        .expect("independent valid original and receipt signatures control");
+    let typed_receipt =
+        thread_api::authority_admission::decode(&receipt).expect("exact signed sidecar");
+    assert!(matches!(
+        replica.authority_admission_trust(&typed_receipt),
+        Err(repo::thread_replication::Error::WitnessEvidenceRequired)
+    ));
     let wire_original = SignedRecord {
         format: OPERATION_FORMAT.into(),
         canonical_record: original.canonical.clone(),
@@ -152,68 +165,41 @@ pub(super) async fn roundtrip(
         })
         .await
         .expect("relay exact original plus independent receipt");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let frame = output
-                .next()
-                .await
-                .expect("admission frame")
-                .expect("retained stream");
-            if let Some(replicate_thread_response::Body::Receipt(value)) = frame.body {
-                if value
-                    .accepted_operation_ids
-                    .contains(&id.as_bytes().to_vec())
-                {
-                    break;
+            match output.next().await {
+                Err(error) => break error,
+                Ok(None) => panic!("rejection must carry its reason"),
+                Ok(Some(frame)) => {
+                    if let Some(replicate_thread_response::Body::Receipt(value)) = frame.body {
+                        assert!(
+                            !value
+                                .accepted_operation_ids
+                                .contains(&id.as_bytes().to_vec()),
+                            "bare witness cannot admit foreign authority"
+                        );
+                    }
                 }
-                assert!(
-                    value.rejected.is_empty(),
-                    "valid foreign author receipt admitted"
-                );
             }
         }
     })
     .await
-    .expect("foreign original author accepted over real Iroh");
-    let stored = replica
-        .operation_with_authority_admission(&id)
-        .expect("durable read")
-        .expect("original");
-    assert_eq!(stored.original, original);
-    assert_eq!(
-        stored
-            .authority_admission
-            .as_ref()
-            .map(thread_api::authority_admission::encode)
-            .transpose()
-            .expect("receipt"),
-        Some(receipt.clone())
+    .expect("proof rejection deadline");
+    // This adapter resets rejected streams; typed failure serialization is
+    // separate from core admission and belongs to Part 2.
+    assert!(
+        matches!(
+            error,
+            api::v2::client::ClientError::Transport(thread_api::transport::Error::Io(ref reason))
+                if reason.starts_with("stream reset by peer")
+        ),
+        "{error}"
     );
-    input
-        .send(&ReplicateThreadRequest {
-            body: Some(replicate_thread_request::Body::Need(ReplicationNeed {
-                operation_ids: vec![id.as_bytes().to_vec()],
-            })),
-        })
-        .await
-        .expect("request original and receipt");
-    let exported = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let frame = output
-                .next()
-                .await
-                .expect("export frame")
-                .expect("retained stream");
-            if let Some(replicate_thread_response::Body::Operations(value)) = frame.body {
-                break value;
-            }
-        }
-    })
-    .await
-    .expect("original-author export");
-    assert_eq!(exported.operations, vec![wire_original]);
-    assert_eq!(exported.authority_admissions, vec![receipt]);
-    assert_eq!(repository.head().expect("checkout"), Some(genesis.base));
+    assert!(replica.operation(&id).expect("durable read").is_none());
+    assert_eq!(
+        repository.head().expect("checkout unchanged"),
+        Some(genesis.base)
+    );
     drop(input);
     drop(output);
 }

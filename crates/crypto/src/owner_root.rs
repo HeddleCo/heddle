@@ -7,7 +7,6 @@
 //! pins as spool genesis. Claim advances authority with ClaimDeferredHuman
 //! and must not mint a replacement human sequence-0.
 
-use crate::{Signer, SignerError, verify_payload_signature};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha2::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
@@ -19,6 +18,8 @@ use heddleco_capability_verifier::{
     verify_spool_owner_genesis,
 };
 use sha2::{Digest, Sha256};
+
+use crate::{Signer, SignerError, verify_payload_signature};
 
 /// Protocol-2 self-signature for a newly minted spool owner.
 pub fn sign_spool_owner_genesis(

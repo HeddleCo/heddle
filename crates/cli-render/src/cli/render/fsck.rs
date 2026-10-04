@@ -113,7 +113,9 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial(color_state)]
     fn text_renderer_consumes_the_typed_fsck_report() {
+        style::force_for_test(false);
         let report = FsckReport {
             valid: true,
             errors: Vec::new(),

@@ -3,6 +3,9 @@
 /// A fail-closed verification error.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// API-owned HYBRID signature, scope or time rejection.
+    #[error(transparent)]
+    Hybrid(#[from] heddle_api::hybrid_codec::Reject),
     /// A field, enum, canonical ordering, or fixed-width value is invalid.
     #[error("invalid owner-authorization object: {0}")]
     Invalid(String),
