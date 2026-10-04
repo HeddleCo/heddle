@@ -17,11 +17,10 @@ use objects::object::{
 use prost::Message;
 use uuid::Uuid;
 
-use super::{Admission, Error, ThreadReplica};
+use super::{Error, ThreadReplica};
 
 #[test]
-fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_original_credential()
-{
+fn bare_authority_receipt_is_not_an_evergreen_admission_after_restart() {
     let directory = tempfile::tempdir().expect("repository");
     let repository = crate::Repository::init_default(directory.path()).expect("repository");
     let author = Ed25519Signer::from_seed(&[61; 32]).expect("foreign original author");
@@ -100,152 +99,61 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
     let parent_id = parent.verify().expect("parent").id().expect("ID");
     let (child, child_receipt) = make("child", BTreeSet::from([parent_id]), 3065);
     let child_id = child.verify().expect("child").id().expect("ID");
-    assert!(
-        replica
-            .receive_with_authority_admission(
-                &child,
-                &child_receipt,
-                repository.store(),
-                |_| Ok(())
-            )
-            .expect_err("incoming testimony cannot enroll its executor")
-            .to_string()
-            .contains("independently pinned executor")
-    );
-    assert!(replica.operation(&child_id).expect("lookup").is_none());
-    repository
-        .verify_and_pin_owner_genesis(
-            2,
-            Some(&owner_genesis.encode_to_vec()),
-            &["selected".into(), "shared".into()],
+    parent_receipt
+        .verify(
+            &parent,
+            &objects::object::thread_replication::integration::TrustedHostedExecutor {
+                spool,
+                spool_genesis,
+                executor: executor.public_key().try_into().expect("key"),
+            },
         )
-        .expect("independent selected owner enrollment");
-    repository
-        .pin_thread_hosted_executor(&replica, executor.public_key().try_into().expect("key"))
-        .expect("independent selected endpoint enrollment");
-    assert!(
-        replica
-            .receive_with_authority_admission(&child, &child_receipt, repository.store(), |_| Err(
-                Error::Invalid("current delivery denied".into())
-            ))
-            .expect_err("historical testimony never authorizes current delivery")
-            .to_string()
-            .contains("current delivery denied")
-    );
+        .expect("signature/binding control");
+    assert!(matches!(
+        replica.receive_with_authority_admission(
+            &child,
+            &child_receipt,
+            repository.store(),
+            |_| Ok(())
+        ),
+        Err(Error::WitnessEvidenceRequired)
+    ));
+    replica
+        .connect()
+        .expect("db")
+        .execute(
+            "INSERT INTO hosted_executor_pins VALUES(?1,?2,?3)",
+            rusqlite::params![
+                spool.to_string(),
+                spool_genesis.as_bytes(),
+                executor.public_key()
+            ],
+        )
+        .expect("existing evergreen key");
+    assert!(matches!(
+        replica.receive_with_authority_admission(
+            &child,
+            &child_receipt,
+            repository.store(),
+            |_| Ok(())
+        ),
+        Err(Error::WitnessEvidenceRequired)
+    ));
     assert!(replica.operation(&child_id).expect("lookup").is_none());
-
-    // Fail after immutable bytes, authority marker and receipt have been written,
-    // at the next parent insert in that same transaction. Nothing may survive.
-    replica.connect().expect("connection").execute_batch("CREATE TRIGGER test_receipt_rollback BEFORE INSERT ON parents BEGIN SELECT RAISE(ABORT,'forced receipt transaction rollback'); END;").expect("rollback seam");
-    assert!(
-        replica
-            .receive_with_authority_admission(
-                &child,
-                &child_receipt,
-                repository.store(),
-                |_| Ok(())
-            )
-            .expect_err("transaction rollback")
-            .to_string()
-            .contains("forced receipt transaction rollback")
-    );
-    assert!(
-        replica
-            .operation(&child_id)
-            .expect("rollback lookup")
-            .is_none(),
-        "no original bytes or attached receipt survive aborted transaction"
-    );
+    let reopened =
+        ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("restart");
+    assert!(matches!(
+        reopened.receive_with_authority_admission(
+            &parent,
+            &parent_receipt,
+            repository.store(),
+            |_| Ok(())
+        ),
+        Err(Error::WitnessEvidenceRequired)
+    ));
     assert!(
         !replica
             .original_authority_admitted(&child)
             .expect("no authority marker")
-    );
-    replica
-        .connect()
-        .expect("connection")
-        .execute_batch("DROP TRIGGER test_receipt_rollback;")
-        .expect("remove rollback seam");
-    assert_eq!(
-        replica
-            .receive_with_authority_admission(
-                &child,
-                &child_receipt,
-                repository.store(),
-                |_| Ok(())
-            )
-            .expect("host-admitted pending child"),
-        Admission::Pending
-    );
-    let reopened =
-        ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("restart");
-    let stored = reopened
-        .operation_with_authority_admission(&child_id)
-        .expect("lookup")
-        .expect("pending original");
-    assert_eq!(stored.original, child);
-    assert_eq!(stored.status, Admission::Pending);
-    assert_eq!(
-        stored.authority_admission,
-        Some(child_receipt.clone()),
-        "pending original retains exact authority receipt"
-    );
-    assert!(
-        reopened
-            .original_authority_admitted(&child)
-            .expect("durable original admission")
-    );
-    let mut later = child_receipt.verify_signature().expect("receipt");
-    later.admitted_at_ms += 1000;
-    let later_receipt =
-        SignedAuthorityAdmission::sign(&later, &executor).expect("another valid receipt");
-    assert_eq!(
-        reopened
-            .receive_with_authority_admission(
-                &child,
-                &later_receipt,
-                repository.store(),
-                |_| Ok(())
-            )
-            .expect("replay"),
-        Admission::Pending
-    );
-    assert_eq!(
-        reopened
-            .operation_with_authority_admission(&child_id)
-            .expect("lookup")
-            .expect("original")
-            .authority_admission,
-        Some(child_receipt.clone()),
-        "later courier cannot replace first retained testimony"
-    );
-
-    // No original author Biscuit, live owner association or execution timestamp
-    // is reconstituted while accepted causal parents arrive after a restart.
-    assert_eq!(
-        reopened
-            .receive_with_authority_admission(&parent, &parent_receipt, repository.store(), |_| Ok(
-                ()
-            ))
-            .expect("verified parent"),
-        Admission::Accepted
-    );
-    let accepted = reopened
-        .operation_with_authority_admission(&child_id)
-        .expect("lookup")
-        .expect("child");
-    assert_eq!(accepted.status, Admission::Accepted);
-    assert_eq!(accepted.authority_admission, Some(child_receipt));
-    assert_eq!(
-        reopened
-            .metadata_frontier(&objects::object::thread_replication::metadata::Property::Name)
-            .expect("field frontier")[0]
-            .0,
-        child_id
-    );
-    assert_eq!(
-        repository.head().expect("checkout head"),
-        Some(genesis.base),
-        "authority receipt never mutates checkout files"
     );
 }

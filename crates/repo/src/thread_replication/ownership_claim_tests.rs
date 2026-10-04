@@ -536,7 +536,7 @@ fn receipt_backfill(
             .claim_ownership_with_admission(signed, &receipt)
             .expect_err("retained claim never establishes executor trust")
             .to_string()
-            .contains("independently pinned executor")
+            .contains("root-authenticated witness")
     );
     assert_eq!(replica.generation().expect("rejection quiet"), generation);
     assert!(
@@ -552,41 +552,23 @@ fn receipt_backfill(
             &["selected".into(), "shared".into()],
         )
         .expect("independent Spool trust");
-    repository
-        .pin_thread_hosted_executor(replica, record.executor)
-        .expect("independent executor trust");
-    replica
-        .claim_ownership_with_admission(signed, &receipt)
-        .expect("verified receipt backfill");
-    assert_eq!(
+    assert!(
+        repository
+            .pin_thread_hosted_executor(replica, record.executor)
+            .is_err()
+    );
+    assert!(matches!(
+        replica.claim_ownership_with_admission(signed, &receipt),
+        Err(super::Error::WitnessEvidenceRequired)
+    ));
+    assert!(
         replica
             .ownership_claim_admission(&statement.id().expect("ID"))
-            .expect("retained receipt"),
-        Some(receipt.clone())
+            .expect("no untrusted receipt")
+            .is_none()
     );
-    let generation = replica.generation().expect("published witness");
-    replica
-        .claim_ownership_with_admission(signed, &receipt)
-        .expect("same receipt retry");
     assert_eq!(
-        replica.generation().expect("receipt replay quiet"),
+        replica.generation().expect("unchanged generation"),
         generation
     );
-    let changed = ThreadAuthorityAdmission {
-        admitted_at_ms: 3000,
-        ..record
-    };
-    replica
-        .claim_ownership_with_admission(
-            signed,
-            &SignedAuthorityAdmission::sign(&changed, &executor).expect("later valid testimony"),
-        )
-        .expect("later witness does not replace original");
-    assert_eq!(
-        replica
-            .ownership_claim_admission(&statement.id().expect("ID"))
-            .expect("first witness preserved"),
-        Some(receipt)
-    );
-    assert_eq!(replica.generation().expect("replacement quiet"), generation);
 }

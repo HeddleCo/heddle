@@ -155,6 +155,7 @@ default = [
 # treadle). Non-default: the everyday loop never invokes it, and the
 # default binary should not carry the check runner.
 ci = [
+    "client", # CI includes recording signed evidence on the hosted service.
     "dep:ci-config",
     "dep:ci-engine",
     "heddle-cli-args/ci",
@@ -259,7 +260,7 @@ mount = [
 # directly; the production CLI gets both through `hosted-client`.
 hosted-client = { workspace = true, features = ["client", "test-utils"] }
 biscuit-auth.workspace = true
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.7" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.8" }
 iroh.workspace = true
 criterion = "0.8"
 heddle-cli-render = { workspace = true, features = ["default", "test-utils"] }

@@ -373,3 +373,25 @@ pub(crate) fn transfer_audit_body(record: &ResourceTransferAuditRecord) -> Resul
     encoder.bytes(&record.previous_audit_record_hash)?;
     Ok(encoder.finish())
 }
+
+pub(crate) fn canonical_message<T>(bytes: &[u8], maximum_bytes: usize) -> crate::Result<T>
+where
+    T: prost::Message + Default,
+{
+    if bytes.len() > maximum_bytes {
+        return Err(crate::Error::TooLarge {
+            limit: maximum_bytes,
+        });
+    }
+    let decoded = T::decode(bytes)?;
+    if decoded.encode_to_vec() != bytes {
+        return Err(crate::Error::NonCanonicalProtobuf);
+    }
+    Ok(decoded)
+}
+
+pub(crate) fn fixed<const N: usize>(bytes: &[u8], label: &str) -> crate::Result<[u8; N]> {
+    bytes
+        .try_into()
+        .map_err(|_| crate::Error::Invalid(format!("{label} must be {N} bytes")))
+}

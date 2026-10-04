@@ -1,5 +1,6 @@
 //! Receiving a foreign account's original admission never enrolls that account
-//! or its roots on this device. The caller supplies independent executor trust.
+//! or its roots on this device. HYBRID installation requires a complete witness
+//! set and public authority bundle through `install_hybrid_import`.
 use std::path::Path;
 
 use crypto::{thread_genesis_admission::SignedGenesisAdmission, thread_operation::SignedGenesis};
@@ -14,44 +15,23 @@ impl ThreadReplica {
         admission: &SignedGenesisAdmission,
         trust: &TrustedHostedExecutor,
     ) -> Result<Self> {
-        admission.verify(original, envelope, trust)?;
-        Self::create_with_proof(directory, original, envelope, Some(admission))
+        let _ = (directory, original, envelope, trust);
+        admission.verify_signature()?;
+        Err(super::Error::WitnessEvidenceRequired)
     }
 }
 impl ThreadReplica {
-    /// A direct device may relay a foreign original receipt only when this
-    /// receiver already pinned its hosted executor through an independent path.
+    /// A stored executor pin supplies no authority. Use `install_hybrid_import`
+    /// with selected lineage, a fresh witness set and all original dependencies.
     pub fn create_from_pinned_genesis_admission(
         directory: &Path,
         original: &SignedGenesis,
         envelope: &[u8],
         admission: &SignedGenesisAdmission,
     ) -> Result<Self> {
-        use rusqlite::{OptionalExtension, params};
-        let value = admission.verify_signature()?;
-        let connection = crate::local_metadata::open(directory)?;
-        let genesis: Option<Vec<u8>> = connection
-            .query_row(
-                "SELECT genesis FROM hosted_executor_pins WHERE spool=?1 AND executor=?2",
-                params![value.spool.to_string(), value.executor],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let genesis = genesis.ok_or_else(|| {
-            super::Error::Invalid(
-                "original account genesis requires independently pinned hosted executor".into(),
-            )
-        })?;
-        let trust = TrustedHostedExecutor {
-            spool: value.spool,
-            spool_genesis: objects::object::ContentHash::from_bytes(
-                genesis.as_slice().try_into().map_err(|_| {
-                    super::Error::Invalid("invalid hosted executor genesis pin".into())
-                })?,
-            ),
-            executor: value.executor,
-        };
-        Self::create_from_genesis_admission(directory, original, envelope, admission, &trust)
+        let _ = (directory, original, envelope);
+        admission.verify_signature()?;
+        Err(super::Error::WitnessEvidenceRequired)
     }
 }
 
@@ -66,7 +46,7 @@ mod tests {
 
     use super::*;
     #[test]
-    fn foreign_genesis_receipt_persists_exactly_without_enrolling_account_roots() {
+    fn bare_foreign_genesis_receipt_cannot_enroll_roots_or_install() {
         let directory = tempfile::tempdir().expect("repository");
         let repository = crate::Repository::init_default(directory.path()).expect("repository");
         let creator = Ed25519Signer::from_seed(&[13; 32]).expect("creator");
@@ -118,64 +98,25 @@ mod tests {
             .is_err(),
             "carried executor never creates a pin"
         );
-        let replica = ThreadReplica::create_from_genesis_admission(
-            repository.heddle_dir(),
-            &original,
-            envelope,
-            &signed,
-            &trust,
-        )
-        .expect("independent admission");
-        let record = replica.genesis_record().expect("retained original proof");
-        assert_eq!(record.creator_authority, envelope);
-        assert_eq!(
-            record
-                .admission
-                .as_ref()
-                .expect("retained receipt")
-                .canonical_record,
-            signed.canonical
-        );
-        let replay = ThreadReplica::create_from_genesis_admission(
-            repository.heddle_dir(),
-            &original,
-            envelope,
-            &signed,
-            &trust,
-        )
-        .expect("exact replay");
-        assert_eq!(replay.genesis_record().expect("replay proof"), record);
-        let mut conflicting = receipt.clone();
-        conflicting.admitted_at_ms += 1;
-        let conflicting = SignedGenesisAdmission::sign(&conflicting, &executor)
-            .expect("different first admission");
-        assert!(
+        signed
+            .verify(&original, envelope, &trust)
+            .expect("valid surrounding original signatures");
+        assert!(matches!(
             ThreadReplica::create_from_genesis_admission(
                 repository.heddle_dir(),
                 &original,
                 envelope,
-                &conflicting,
+                &signed,
                 &trust
-            )
-            .is_err(),
-            "first admission cannot change on replay"
-        );
-        assert_eq!(
-            ThreadReplica::open(repository.heddle_dir(), replica.thread_id())
-                .expect("reopen")
-                .genesis_record()
-                .expect("proof after rejected replay"),
-            record
-        );
-        let connection = crate::local_metadata::open(repository.heddle_dir()).expect("metadata");
-        let pins: i64 = connection
-            .query_row("SELECT count(*) FROM hosted_executor_pins", [], |r| {
-                r.get(0)
-            })
-            .expect("pin count");
-        assert_eq!(
-            pins, 0,
-            "genesis delivery does not create global executor pins"
+            ),
+            Err(super::super::Error::WitnessEvidenceRequired)
+        ));
+        assert!(ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("id")).is_err());
+        assert!(
+            !repository
+                .heddle_dir()
+                .join("owner-authorization.bin")
+                .exists()
         );
     }
 }

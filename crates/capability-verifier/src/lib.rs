@@ -12,6 +12,7 @@ pub mod creation;
 mod crypto;
 mod decision;
 mod error;
+pub mod import_delegation;
 mod keyring;
 mod limits;
 mod operation;
@@ -57,7 +58,7 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.8";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.21";
 
 #[cfg(test)]
 mod tests;

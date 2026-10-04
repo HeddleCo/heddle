@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use prost::Message;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -33,26 +32,43 @@ fn json<T: Serialize>(value: &T) -> Result<String, JsError> {
     serde_json::to_string(value).map_err(js_error)
 }
 
-fn canonical_message<T>(bytes: &[u8], maximum_bytes: usize) -> crate::Result<T>
-where
-    T: Message + Default,
-{
-    if bytes.len() > maximum_bytes {
-        return Err(crate::Error::TooLarge {
-            limit: maximum_bytes,
-        });
-    }
-    let decoded = T::decode(bytes)?;
-    if decoded.encode_to_vec() != bytes {
-        return Err(crate::Error::NonCanonicalProtobuf);
-    }
-    Ok(decoded)
-}
+use crate::canonical::{canonical_message, fixed};
 
-fn fixed<const N: usize>(bytes: &[u8], label: &str) -> crate::Result<[u8; N]> {
-    bytes
-        .try_into()
-        .map_err(|_| crate::Error::Invalid(format!("{label} must be {N} bytes")))
+/// Verify typed import delegation against independently selected owner/Spool
+/// pins and actual current time. No incoming keyring enrolls its carried root.
+/// Key-role exclusions and job associations use bounded canonical JSON arrays
+/// of hex keys and [key, logical-job] pairs respectively.
+#[wasm_bindgen(js_name = verifyImportDelegation)]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_import_delegation_binding(
+    certificate: &[u8],
+    permission: &[u8],
+    keyring: &[u8],
+    accepted_owner_history: &[u8],
+    selected_initial_owner_id: &[u8],
+    selected_spool_genesis_digest: &[u8],
+    forbidden_job_keys_json: &str,
+    known_job_associations_json: &str,
+    cancelled_ids_json: &str,
+    revoked_key_ids_json: &str,
+    now_unix_seconds: i64,
+    max_capability_ttl_seconds: i64,
+) -> Result<Vec<u8>, JsError> {
+    crate::import_delegation::verify_bytes(
+        certificate,
+        permission,
+        keyring,
+        accepted_owner_history,
+        selected_initial_owner_id,
+        selected_spool_genesis_digest,
+        forbidden_job_keys_json,
+        known_job_associations_json,
+        cancelled_ids_json,
+        revoked_key_ids_json,
+        now_unix_seconds,
+        max_capability_ttl_seconds,
+    )
+    .map_err(js_error)
 }
 
 /// Exact crate version backing this generated package.

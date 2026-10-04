@@ -1,6 +1,9 @@
 //! Hosted landing is an executor attestation, never a human signature or a
 //! transferable grant. Trust comes from the receiver's selected remote and
 //! verified immutable Spool genesis, independently of incoming operation bytes.
+//! HYBRID receivers resolve a purpose-4 witness through crypto/repo's trust
+//! layer before using these unchanged source, executor and ancestry bindings.
+//! Delegated import content has its own typed model and supplies no executor.
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};

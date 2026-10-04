@@ -807,11 +807,7 @@ fn hosted_integration_requires_independent_persistent_executor_trust_and_never_w
         let error = replica
             .receive(&signed, repo.store(), |_| Ok(()))
             .expect_err("an ordinary delivery grant never establishes executor trust");
-        assert!(
-            error
-                .to_string()
-                .contains("independently pinned executor trust")
-        );
+        assert!(error.to_string().contains("root-authenticated witness"));
         assert!(
             replica
                 .operation(&operation.id().expect("ID"))
@@ -835,84 +831,32 @@ fn hosted_integration_requires_independent_persistent_executor_trust_and_never_w
         &["selected".into(), "spool".into()],
     )
     .expect("selected remote owner genesis");
-    repo.pin_thread_hosted_executor(&replica, receipt.executor)
-        .expect("independent selected endpoint");
-    repo.pin_thread_hosted_executor(&replica, receipt.executor)
-        .expect("idempotent pin");
     assert!(
-        matches!(replica.receive(&signed,repo.store(), |_|Err(Error::Invalid("active delivery denied".into()))),Err(Error::Invalid(reason)) if reason=="active delivery denied"),
-        "historical endpoint trust does not grant active writes"
+        repo.pin_thread_hosted_executor(&replica, receipt.executor)
+            .is_err()
     );
-    assert_eq!(
-        replica
-            .receive(&signed, repo.store(), |_| Ok(()))
-            .expect("trusted receipt"),
-        Admission::Accepted
-    );
+    replica
+        .connect()
+        .expect("db")
+        .execute(
+            "INSERT INTO hosted_executor_pins VALUES(?1,?2,?3)",
+            rusqlite::params![
+                spool.to_string(),
+                receipt.spool_genesis.as_bytes(),
+                receipt.executor
+            ],
+        )
+        .expect("previously stored endpoint");
     let reopened = ThreadReplica::open(repo.heddle_dir(), replica.thread_id()).expect("reopen");
+    assert!(matches!(
+        reopened.receive(&signed, repo.store(), |_| Ok(())),
+        Err(Error::WitnessEvidenceRequired)
+    ));
     assert_eq!(
-        reopened
-            .receive(&signed, repo.store(), |_| Ok(()))
-            .expect("persistent trust and original replay"),
-        Admission::Accepted
+        reopened.view().expect("source frontier").source_heads,
+        BTreeSet::from([state_id(&parent)])
     );
-    assert_eq!(
-        reopened.view().expect("source projection").source_heads,
-        BTreeSet::from([result.id()])
-    );
-    assert_eq!(
-        reopened
-            .accepted_source_revision(result.id())
-            .expect("membership")
-            .expect("accepted result")
-            .id(),
-        result.id()
-    );
-    assert_eq!(
-        repo.head().expect("integration is metadata only"),
-        head_before
-    );
-    let after = capture(&genesis, &signer, &[&signed], vec![result.id()]);
-    reopened
-        .receive(&after, repo.store(), |_| Ok(()))
-        .expect("later native capture");
-    assert_eq!(
-        reopened.view().expect("next source head").source_heads,
-        BTreeSet::from([state_id(&after)])
-    );
-    assert_eq!(
-        repo.head().expect("receive never checks out remote state"),
-        head_before
-    );
-    let mut foreign_receipt = receipt.clone();
-    foreign_receipt.spool_genesis = ContentHash::from_bytes([99; 32]);
-    let mut foreign = operation.clone();
-    foreign.body =
-        ThreadOperationBody::Integration(foreign_receipt.encode().expect("foreign receipt"));
-    let foreign =
-        SignedOperation::sign(&foreign, &executor).expect("valid signature is insufficient");
-    assert!(
-        reopened
-            .receive(&foreign, repo.store(), |_| Ok(()))
-            .is_err(),
-        "executor cannot swap immutable genesis"
-    );
-    let other = Ed25519Signer::from_seed(&[24; 32]).expect("unselected endpoint");
-    foreign_receipt = receipt;
-    foreign_receipt.executor = other.public_key().try_into().expect("endpoint");
-    let mut foreign = operation;
-    foreign.publisher = foreign_receipt.executor;
-    foreign.body = ThreadOperationBody::Integration(foreign_receipt.encode().expect("receipt"));
-    assert!(
-        reopened
-            .receive(
-                &SignedOperation::sign(&foreign, &other).expect("other valid signer"),
-                repo.store(),
-                |_| Ok(())
-            )
-            .is_err(),
-        "self-signed executor never enrolls itself"
-    );
+    assert_eq!(repo.head().expect("unchanged checkout"), head_before);
 }
 
 #[test]

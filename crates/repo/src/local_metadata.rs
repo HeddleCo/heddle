@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -74,7 +74,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         }
         return Ok(connection);
     }
-    if !(0..=3).contains(&version) {
+    if !(0..=4).contains(&version) {
         return Err(Error::Schema(version));
     }
     // WAL activation itself can return SQLITE_BUSY without honoring the busy
@@ -89,6 +89,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    tx.execute_batch(crate::thread_replication::hosted_trust::SCHEMA)?;
     match version {
         0 => {
             crate::thread_replication::initialize_schema(&tx)?;
@@ -121,6 +122,9 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_run_outbox::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        4 => {
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         SCHEMA_VERSION => {}
         other => return Err(Error::Schema(other)),
     }
@@ -138,7 +142,7 @@ pub fn open_existing(heddle_dir: &Path) -> Result<Option<Connection>, Error> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure(&connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 1 || version == 2 || version == 3 {
+    if version == 1 || version == 2 || version == 3 || version == 4 {
         drop(connection);
         return open(heddle_dir).map(Some);
     }

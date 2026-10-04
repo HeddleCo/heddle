@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+mod import;
+
 use std::{env, fs, process::ExitCode};
 
 use heddleco_capability_verifier::conformance::{
@@ -27,6 +29,7 @@ enum FixtureKind {
     Transfer,
     Keyring,
     Timeline,
+    Import,
 }
 
 #[derive(Serialize)]
@@ -43,7 +46,9 @@ fn main() -> ExitCode {
         .and_then(|outcomes| serde_json::to_string(&outcomes).map_err(|error| error.to_string()))
     {
         Ok(serialized) => {
-            println!("{serialized}");
+            if env::args().nth(1).as_deref() != Some("--import-corpus") {
+                println!("{serialized}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -54,6 +59,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<Vec<Outcome>, String> {
+    if env::args().nth(1).as_deref() == Some("--import-corpus") {
+        let path = env::args_os().nth(2).ok_or("missing fixture path")?;
+        let fixture: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        println!("{}", import::cases(&fixture)?);
+        return Ok(Vec::new());
+    }
     let path = env::args_os()
         .nth(1)
         .ok_or_else(|| "missing corpus path".to_owned())?;
@@ -82,6 +94,7 @@ fn run() -> Result<Vec<Outcome>, String> {
 
 fn evaluate(kind: FixtureKind, fixture_json: &str) -> Result<Value, String> {
     match kind {
+        FixtureKind::Import => return import::evaluate(fixture_json),
         FixtureKind::Purge => {
             serde_json::to_value(run_fixture(fixture_json).map_err(|error| error.to_string())?)
         }
