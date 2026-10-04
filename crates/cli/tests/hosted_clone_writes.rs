@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(feature = "client")]
 
-#[path = "support/native_hosted_https.rs"]
-mod native_hosted_https;
 #[path = "support/native_hosted_server.rs"]
 mod native_hosted_server;
 mod support;
 
-use std::{
-    collections::{HashMap, VecDeque},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crypto::{Ed25519Signer, Signer};
 use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
@@ -20,7 +15,7 @@ use support::*;
 
 struct Fixture {
     _temp: TempDir,
-    https: native_hosted_https::TestHttpsServer,
+    https: std::sync::Arc<native_hosted_server::https::TestHttpsServer>,
     server: tokio::task::JoinHandle<()>,
     client: hosted_client::hosted_runtime::hosted::HostedClient,
     captured: std::sync::Arc<std::sync::Mutex<native_hosted_server::PublicationCapture>>,
@@ -74,38 +69,27 @@ impl Fixture {
             .parse()
             .expect("spool");
         let thread_id = native.thread_id();
-        let (mut client, server, captured, addr, secret) =
+        let (mut client, server, captured, addr, _secret, https) =
             native_hosted_server::start_routed(spool, "main", *thread_id.as_bytes()).await;
+        native_hosted_server::enroll_device(spool, &repo::identity::heddle_home_dir());
         assert!(
             client
                 .push_profiled(&repo, "spool/acme", state, "main", false, "seed".into())
                 .await
-                .expect("seed hosted source")
+                .unwrap_or_else(|error| panic!(
+                    "seed hosted source: {error:?}; calls: {:?}",
+                    captured.lock().expect("captured calls").calls
+                ))
                 .0
                 .success
         );
-        let root = Ed25519Signer::generate().expect("descriptor root");
-        let ephemeral = Ed25519Signer::from_seed(&secret.to_bytes()).expect("endpoint signer");
-        let direct = addr.ip_addrs().next().expect("direct address").to_string();
-        let descriptor = native_hosted_https::signed_descriptor(
-            &addr.id.to_string(),
-            &direct,
-            &root,
-            &ephemeral,
-        );
-        let https = native_hosted_https::TestHttpsServer::start(HashMap::from([(
-            "/.well-known/heddle/iroh-endpoint".into(),
-            VecDeque::from(vec![descriptor; 64]),
-        )]));
+        let root = Ed25519Signer::from_seed(&[7; 32]).expect("descriptor root");
         let ca = temp.path().join("ca.pem");
         std::fs::write(&ca, &https.certificate_pem).expect("test CA");
         let home = temp.path().join("clone-home");
         std::fs::create_dir(&home).expect("clone home");
-        // This unclaimed native fixture belongs to one device. Retain that
-        // device's key in a disjoint home; clone must carry no private keys.
-        let signer = repo
-            .native_thread_signer(&native)
-            .expect("source owner key");
+        native_hosted_server::enroll_device(spool, &home);
+        let signer = Ed25519Signer::from_seed(&[71; 32]).expect("accepted account device");
         let device = repo::identity::DeviceIdentity {
             public_key: hex::encode(signer.public_key()),
             private_key_pem: signer.to_pem().expect("device PEM"),
@@ -196,6 +180,7 @@ impl Fixture {
             Some(path),
             &[
                 ("HEDDLE_HOME", self.home.to_str().expect("home")),
+                ("HTTPS_PROXY", &self.https.proxy_uri),
                 ("HEDDLE_REMOTE_TLS_CA_CERT", self.ca.to_str().expect("CA")),
                 ("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "clone-test-key"),
                 ("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY", &self.root_key),

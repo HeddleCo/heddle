@@ -151,6 +151,12 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         &self,
         creation: &ThreadCreation,
     ) -> Result<ThreadMutationResponse, ClientError<Error>> {
+        if creation.request().native_genesis_authority.is_some() {
+            api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())
+                .map_err(|_| {
+                    ClientError::Transport(Error::Protocol("native genesis requires a HYBRID peer"))
+                })?;
+        }
         if !self
             .description
             .understood_signed_record_formats

@@ -918,30 +918,36 @@ pub fn verify_landing_payload(
     {
         return Err(Reject::Scope.into());
     }
-    let ThreadOperationBody::Capture(capture) = &source.body else {
-        return Err(Reject::ImportPermission.into());
-    };
-    let SourceAuthor::Account {
-        actor,
-        authority,
-        spool,
-        ..
-    } = &capture.author
-    else {
-        return Err(Reject::ImportPermission.into());
-    };
-    if spool != &context.spool_uuid {
-        return Err(Reject::Root.into());
+    if matches!(context.original_geneses, OriginalGeneses::Import(_)) {
+        let ThreadOperationBody::Capture(capture) = &source.body else {
+            return Err(Reject::ImportPermission.into());
+        };
+        let SourceAuthor::Account {
+            actor,
+            authority,
+            spool,
+            ..
+        } = &capture.author
+        else {
+            return Err(Reject::ImportPermission.into());
+        };
+        if spool != &context.spool_uuid {
+            return Err(Reject::Root.into());
+        }
+        native_authority(
+            authority,
+            &source.publisher,
+            actor,
+            heddle_object_model::object::thread_replication::SOURCE_AUTHORIZATION_METHOD,
+            evidence,
+            context,
+            &revoked,
+        )?;
     }
-    native_authority(
-        authority,
-        &source.publisher,
-        actor,
-        heddle_object_model::object::thread_replication::SOURCE_AUTHORIZATION_METHOD,
-        evidence,
-        context,
-        &revoked,
-    )?;
+    // Native source closure resolves each original at its own admission:
+    // account work has purpose 2, hosted execution purpose 4, and LocalKey
+    // work its native proof plus the witnessed claim and signed cutoff. The
+    // atomic native installer verifies those roles before admitting a landing.
     let request = payload.request.as_ref().ok_or(Reject::Canonical)?;
     let body: wire::LandThreadRequest = hybrid_decode(&request.request_body)?;
     let signature = request.signature.as_ref().ok_or(Reject::Signature)?;
@@ -1096,9 +1102,9 @@ pub fn verify_authority_payload(
             if closure.operation(&op.id()?)? != &op {
                 return Err(Reject::Scope.into());
             }
-            match op.body {
+            match &op.body {
                 ThreadOperationBody::Metadata(bytes) => {
-                    let c = ThreadControl::decode(&bytes)?;
+                    let c = ThreadControl::decode(bytes)?;
                     if c.spool != context.spool_uuid {
                         return Err(Reject::Root.into());
                     }
@@ -1111,13 +1117,13 @@ pub fn verify_authority_payload(
                         c.authority_envelope,
                     )
                 }
-                ThreadOperationBody::Capture(c) => {
-                    let SourceAuthor::Account {
+                ThreadOperationBody::Capture(_) | ThreadOperationBody::LocalIntegration(_) => {
+                    let Some(SourceAuthor::Account {
                         spool,
                         actor,
                         authority,
                         ..
-                    } = c.author
+                    }) = op.source_author()?
                     else {
                         return Err(Reject::ImportPermission.into());
                     };

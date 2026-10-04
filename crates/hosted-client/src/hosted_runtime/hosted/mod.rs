@@ -536,9 +536,11 @@ impl HostedClient {
             return Err(HostedError::MissingClientOperationId);
         }
         let mut signed = context.unary(method, encoded, client_operation_id)?;
-        signed.context.protocol =
-            thread_api::hybrid::call_protocol(method, !descriptor.mandatory_features.is_empty());
-        if !descriptor.mandatory_features.is_empty() {
+        let requires_hybrid = !descriptor.mandatory_features.is_empty()
+            || thread_api::hybrid::native_start_thread(method, encoded)
+                .map_err(|reason| HostedError::Framing(reason.into()))?;
+        signed.context.protocol = thread_api::hybrid::call_protocol(method, requires_hybrid);
+        if requires_hybrid {
             self.require_import_authority_protocol().await?;
             import_source::require_request_authority(method, encoded)?;
         }

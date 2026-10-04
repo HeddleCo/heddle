@@ -310,7 +310,13 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             native_authority = Some(bundle);
         }
         crate::hybrid::bundles(import_authority, native_authority).map_err(Error::Invalid)?;
-        let protocol = if import_authority.is_some() || native_authority.is_some() {
+        let protocol = if import_authority.is_some()
+            || native_authority.is_some()
+            || originals
+                .geneses
+                .iter()
+                .any(|g| g.native_genesis_authority.is_some())
+        {
             api::import_authority::require_hybrid_peer(self.remote.description.protocol.as_ref())
                 .map_err(|_| {
                 Error::Invalid(

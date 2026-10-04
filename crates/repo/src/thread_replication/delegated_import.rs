@@ -1112,6 +1112,9 @@ pub(super) fn native_subject(
                 dependencies.push(landing.source_operation);
                 dependencies.extend(landing.review_evidence);
             }
+            if let Some(integration) = operation.local_integration()? {
+                dependencies.push(integration.source_operation);
+            }
             (operation.id()?, operation.thread, dependencies)
         }
         native::ownership_claim::FORMAT => {

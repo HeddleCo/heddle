@@ -183,6 +183,7 @@ fn install_in(
     let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
     let mut geneses = BTreeMap::new();
     let mut admissions = BTreeMap::new();
+    let mut first_admissions = BTreeMap::new();
     let forbidden = context.forbidden_job_keys();
     for signed in &bundle.statements {
         let s = signed.body.as_ref().ok_or(Reject::Canonical)?;
@@ -306,6 +307,12 @@ fn install_in(
             _ => return Err(Reject::Version.into()),
         };
         let id = delegated_import::native_subject(record)?.0;
+        if first_admissions
+            .insert((id, s.purpose), signed)
+            .is_some_and(|previous| previous != signed)
+        {
+            return Err(Reject::SlotConflict.into());
+        }
         if let Some((prior, _)) = admissions.insert(id, (record.clone(), evidence))
             && prior != *record
         {
@@ -325,54 +332,92 @@ fn install_in(
             }
         }
     }
-    let mut claimed_local_work = std::collections::BTreeSet::new();
-    let mut pending = Vec::new();
+    let mut claims =
+        BTreeMap::<_, BTreeMap<_, native::ownership_claim::ThreadOwnershipClaim>>::new();
+    let mut resolutions =
+        BTreeMap::<_, native::ownership_resolution::ThreadOwnershipResolution>::new();
     for payload in &bundle.authority_witnesses {
-        if payload.kind == 2 {
-            let claim = native::ownership_claim::ThreadOwnershipClaim::decode(
-                &payload
-                    .original
-                    .as_ref()
-                    .ok_or(Reject::Canonical)?
-                    .canonical_record,
-            )?;
-            pending.extend(claim.source_frontier);
-        } else if payload.kind == 3 {
-            let resolution = native::ownership_resolution::ThreadOwnershipResolution::decode(
-                &payload
-                    .original
-                    .as_ref()
-                    .ok_or(Reject::Canonical)?
-                    .canonical_record,
-            )?;
-            pending.extend(resolution.frontier);
+        let record = payload.original.as_ref().ok_or(Reject::Canonical)?;
+        match payload.kind {
+            2 => {
+                let claim = native::ownership_claim::ThreadOwnershipClaim::decode(
+                    &record.canonical_record,
+                )?;
+                claims
+                    .entry(claim.thread)
+                    .or_default()
+                    .insert(claim.id()?, claim);
+            }
+            3 => {
+                let resolution = native::ownership_resolution::ThreadOwnershipResolution::decode(
+                    &record.canonical_record,
+                )?;
+                if let Some(previous) = resolutions.insert(resolution.thread, resolution.clone())
+                    && previous != resolution
+                {
+                    return Err(Reject::SlotConflict.into());
+                }
+            }
+            _ => {}
         }
     }
-    while let Some(id) = pending.pop() {
-        if claimed_local_work.insert(id) {
-            pending.extend(closure.operation(&id)?.parents.iter().copied());
+    if resolutions
+        .keys()
+        .any(|thread| !claims.contains_key(thread))
+    {
+        return Err(Reject::Scope.into());
+    }
+    let mut claimed_local_work = BTreeMap::<_, std::collections::BTreeSet<_>>::new();
+    for (thread, claims) in &claims {
+        let mut pending = match resolutions.get(thread) {
+            Some(resolution) => {
+                if resolution.conflicting_claims != claims.keys().copied().collect()
+                    || !claims.contains_key(&resolution.winning_claim)
+                {
+                    return Err(Reject::Scope.into());
+                }
+                resolution.frontier.iter().copied().collect::<Vec<_>>()
+            }
+            None if claims.len() == 1 => claims
+                .values()
+                .next()
+                .ok_or(Reject::Scope)?
+                .source_frontier
+                .iter()
+                .copied()
+                .collect(),
+            None => return Err(Reject::Scope.into()),
+        };
+        let covered = claimed_local_work.entry(*thread).or_default();
+        while let Some(id) = pending.pop() {
+            let operation = closure.operation(&id)?;
+            // Cross-Thread source work is authorized by its own claim and
+            // cutoff, never by walking another Thread's accepted frontier.
+            if operation.thread == *thread && covered.insert(id) {
+                pending.extend(operation.parents.iter().copied());
+            }
         }
     }
     for (id, record) in &selected {
-        if admissions
+        if record.format == native::OPERATION_FORMAT {
+            let (_, op) = verification::verify_native_operation(record)?;
+            if dependency_role(&op)? == NativeRole::LocalWork {
+                let genesis = closure.genesis(&op.thread)?;
+                if genesis.owner != GenesisOwner::LocalKey(op.publisher) {
+                    return Err(Reject::Scope.into());
+                }
+                if !claimed_local_work
+                    .get(&op.thread)
+                    .is_some_and(|covered| covered.contains(id))
+                {
+                    return Err(Reject::Scope.into());
+                }
+                continue;
+            }
+        }
+        if !admissions
             .get(id)
             .is_some_and(|(original, _)| original == record)
-        {
-            continue;
-        }
-        let (_, op) = verification::verify_native_operation(record)?;
-        if dependency_role(&op)? != NativeRole::LocalWork || !claimed_local_work.contains(id) {
-            return Err(Reject::Scope.into());
-        }
-        let genesis = closure.genesis(&op.thread)?;
-        if !matches!(&genesis.owner, GenesisOwner::LocalKey(key) if key == &genesis.creator && key == &op.publisher)
-            || !bundle.authority_witnesses.iter().any(|p| {
-                p.kind == 2
-                    && p.original.as_ref().is_some_and(|c| {
-                        delegated_import::native_subject(c)
-                            .is_ok_and(|(_, thread, _)| thread == op.thread)
-                    })
-            })
         {
             return Err(Reject::Scope.into());
         }

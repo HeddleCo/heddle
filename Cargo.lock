@@ -2156,8 +2156,8 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.31.0-alpha.28"
-source = "git+https://github.com/HeddleCo/api.git?rev=9c92b0cb4db0d6d0424554ecad9473bebf0a7585#9c92b0cb4db0d6d0424554ecad9473bebf0a7585"
+version = "0.31.0-alpha.30"
+source = "git+https://github.com/HeddleCo/api.git?rev=09827252a76d2b3b8509836a32e6fc8723d5ff49#09827252a76d2b3b8509836a32e6fc8723d5ff49"
 dependencies = [
  "blake3",
  "bytes",
@@ -2268,6 +2268,7 @@ dependencies = [
  "heddle-thread-api",
  "heddle-verbs",
  "heddle-wire",
+ "heddleco-capability-verifier",
  "heddleco-iroh",
  "hex",
  "hyper-util",

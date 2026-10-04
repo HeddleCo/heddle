@@ -2477,12 +2477,37 @@ mod tests {
         Uuid,
         Vec<u8>,
     ) {
+        hosted_like_replica_with_binding(true)
+    }
+
+    fn hosted_like_replica_with_binding(
+        retain_binding: bool,
+    ) -> (
+        tempfile::TempDir,
+        Repository,
+        ThreadReplica,
+        Ed25519Signer,
+        Uuid,
+        Uuid,
+        Vec<u8>,
+    ) {
         let dir = tempfile::tempdir().expect("workspace");
         let repo = Repository::init(dir.path()).expect("repo");
         let signer = Ed25519Signer::from_seed(&[71; 32]).expect("signer");
         let spool = Uuid::from_u128(1);
         let owner = Uuid::from_u128(2);
-        let authority = vec![7; 32];
+        let (_, observed) = super::super::native_exchange_test_server::witnessing::ownership(spool);
+        let root =
+            crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32]).expect("creator root");
+        let public_key = biscuit_auth::PublicKey::from_bytes(
+            signer.public_key(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("root key");
+        let token = biscuit_verifier::signature_v1::verify_base64(&root.token, public_key)
+            .expect("creator capability");
+        let authority =
+            super::super::native_exchange_test_server::witnessing::envelope(&observed, &token);
         let base = synthetic_initial_base().expect("seed");
         repo.store().put_tree(&Tree::new()).expect("empty tree");
         repo.store().put_state(&base).expect("seed state");
@@ -2503,7 +2528,155 @@ mod tests {
             &authority,
         )
         .expect("hosted replica");
+        let (owner_genesis, observed) =
+            super::super::native_exchange_test_server::witnessing::ownership(spool);
+        let now = chrono::Utc::now().timestamp();
+        repo.verify_and_pin_owner_observation(
+            &owner_genesis,
+            &observed,
+            spool,
+            &["acme".into(), "widgets".into()],
+            now,
+        )
+        .expect("selected owner");
+        let (observed, keyring) = repo.pinned_owner_observation(now).expect("independent pin");
+        let selected_owner = repo::verify_account_owner_observation(&observed, now).expect("owner");
+        let digest = heddleco_capability_verifier::creation::spool_genesis_digest(
+            keyring
+                .owner_genesis()
+                .signed()
+                .genesis
+                .as_ref()
+                .expect("owner genesis"),
+        )
+        .expect("digest");
+        let initial = keyring.owner_state().owner_id();
+        let selection = heddleco_capability_verifier::import_delegation::Selection {
+            owner: &selected_owner,
+            keyring: &keyring,
+            spool_genesis_digest: &digest,
+            initial_owner_id: &initial,
+            limits: heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                .expect("limits"),
+        };
+        let original = replica
+            .genesis_record()
+            .expect("wrapper")
+            .genesis
+            .expect("original");
+        let binding = crypto::native_witness::sign_genesis_authority(
+            &original, &authority, &selection, now, &signer,
+        )
+        .expect("creator binding");
+        if retain_binding {
+            replica
+                .retain_native_genesis_binding(&binding)
+                .expect("frozen creator binding");
+        }
         (dir, repo, replica, signer, spool, owner, authority)
+    }
+
+    #[tokio::test]
+    async fn account_start_thread_publish_and_fresh_clone_have_native_witnesses() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _isolated_home = native_repo();
+        crate::on_large_stack(account_start_thread_round_trip);
+    }
+
+    async fn account_start_thread_round_trip() {
+        let (_dir, repo, replica, signer, spool, owner, authority) =
+            hosted_like_replica_with_binding(false);
+        replica.bind_local_name("main").expect("main binding");
+        assert!(
+            replica
+                .genesis_record()
+                .expect("original")
+                .native_genesis_authority
+                .is_none()
+        );
+        let state = snapshot(
+            &repo,
+            vec![replica.genesis().expect("genesis").base],
+            "account work",
+        );
+        record_hosted_capture(
+            &repo,
+            &replica,
+            state.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect("account capture");
+        let (mut client, server, captured) = super::super::native_exchange_test_server::start(
+            spool,
+            "main",
+            *replica.thread_id().as_bytes(),
+        )
+        .await;
+        let pushed = client
+            .push_profiled(
+                &repo,
+                "acme/widgets",
+                state.id(),
+                "main",
+                false,
+                "account-first-push".into(),
+            )
+            .await
+            .expect("account first publication")
+            .0;
+        assert!(pushed.success);
+        let accepted = captured.lock().expect("accepted publication").clone();
+        let original = accepted.thread_genesis.expect("StartThread original");
+        let binding = original
+            .native_genesis_authority
+            .as_ref()
+            .expect("client creator binding");
+        api::native_witness::verify_genesis_authority(
+            binding,
+            original.genesis.as_ref().expect("genesis"),
+            &authority,
+        )
+        .expect("exact client envelope binding");
+        let witnessed = accepted.native_authority.expect("native receipt");
+        assert_eq!(
+            witnessed.genesis_witnesses[0].binding.as_ref(),
+            Some(binding)
+        );
+        let clone = tempfile::tempdir().expect("fresh clone");
+        let (complete, cloned) = client
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                None,
+                super::super::PullMaterialization::Full,
+                |_| Repository::init(clone.path()).map_err(ProtocolError::from),
+            )
+            .await
+            .expect("witnessed account clone");
+        assert!(complete.success);
+        let received = cloned.native_thread("main").expect("received Thread");
+        assert_eq!(
+            received.genesis_record().expect("retained original"),
+            original
+        );
+        assert_eq!(
+            received
+                .accepted_source_originals_for_revisions(&[state.id()])
+                .expect("received capture"),
+            replica
+                .accepted_source_originals_for_revisions(&[state.id()])
+                .expect("published capture")
+        );
+        assert_eq!(
+            received.hybrid_native_bundle().expect("retained proof"),
+            Some(witnessed)
+        );
+        client.close().await;
+        server.await.expect("server shutdown");
     }
 
     fn snapshot(repo: &Repository, parents: Vec<StateId>, intent: &str) -> State {

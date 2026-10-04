@@ -108,6 +108,7 @@ async fn adopted_history_round_trip() {
 
     let (mut hosted, server, captured) =
         native_hosted_server::start(spool, "main", thread_id).await;
+    native_hosted_server::enroll_device(spool, &repo::identity::heddle_home_dir());
     let pushed = hosted
         .push_profiled(
             &adopted,
@@ -440,6 +441,7 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         .as_bytes();
     let (mut hosted, server, captured) =
         native_hosted_server::start(spool, "main", thread_id).await;
+    native_hosted_server::enroll_device(spool, &repo::identity::heddle_home_dir());
     let pushed = hosted
         .push_profiled(
             &adopted,

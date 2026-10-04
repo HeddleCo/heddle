@@ -41,6 +41,29 @@ pub fn call_protocol(method_path: &str, requires_hybrid: bool) -> Option<Protoco
     requires_hybrid.then(protocol)
 }
 
+/// A creator binding opts StartThread into HYBRID before request PoP and I/O.
+pub fn native_start_thread(method_path: &str, encoded: &[u8]) -> Result<bool, Rejection> {
+    if method_path.trim_start_matches('/') != "heddle.api.v1alpha2.ThreadService/StartThread" {
+        return Ok(false);
+    }
+    use prost::Message;
+    let request = crate::contract::StartThreadRequest::decode(encoded)
+        .map_err(|_| "invalid StartThread request")?;
+    let Some(binding) = request.native_genesis_authority.as_ref() else {
+        return Ok(false);
+    };
+    api::native_witness::verify_genesis_authority(
+        binding,
+        request
+            .thread_genesis
+            .as_ref()
+            .ok_or("native genesis absent")?,
+        &request.creator_authority,
+    )
+    .map_err(|_| "invalid native creator binding")?;
+    Ok(true)
+}
+
 pub fn protocol() -> ProtocolCompatibility {
     ProtocolCompatibility {
         protocol_version: 2,

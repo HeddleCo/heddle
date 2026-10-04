@@ -19,7 +19,11 @@ use api::{
 };
 use base64::Engine as _;
 use crypto::{Ed25519Signer, Signer};
-use hosted_client::hosted_runtime::hosted::{CallContextFactory, HostedClient};
+use hosted_client::hosted_runtime::hosted::HostedClient;
+#[path = "native_hosted_https.rs"]
+pub mod https;
+#[path = "../../../thread-api/tests/support/native_witness.rs"]
+pub mod witnessing;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
 use tokio::task::JoinHandle;
@@ -38,6 +42,7 @@ pub struct PublicationCapture {
     pub enforce_scope: bool,
     pub revision: Option<v2::RevisionRef>,
     pub thread_genesis: Option<v2::ThreadGenesisRecord>,
+    pub native_authority: Option<v2::NativePublicProofBundleV1>,
     pub operations: Vec<v2::ReplicationOperations>,
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
@@ -82,6 +87,7 @@ pub struct PublishedSource {
     pub thread: v2::ThreadRef,
     pub revision: v2::RevisionRef,
     pub thread_genesis: v2::ThreadGenesisRecord,
+    pub native_authority: v2::NativePublicProofBundleV1,
     pub operations: Vec<v2::ReplicationOperations>,
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
@@ -147,7 +153,25 @@ struct Fixture {
     thread_id: Vec<u8>,
     owner_genesis: v2::SignedSpoolOwnerGenesis,
     owner: v2::OwnerState,
+    witness_set: api::heddle::api::common::SignedHostedWitnessSetV1,
+    _https: Arc<https::TestHttpsServer>,
     captured: Arc<Mutex<PublicationCapture>>,
+}
+
+pub fn enroll_device(spool: uuid::Uuid, home: &std::path::Path) {
+    let (_, owner) = witnessing::ownership(spool);
+    repo::device_authority::publish(
+        home,
+        &repo::device_authority::DeviceAuthority {
+            owner,
+            mint_roots: vec![],
+            revoked_ids: vec![],
+            revoked_mint_roots: vec![],
+            revoked_publishers: vec![],
+        },
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("independent test account enrollment");
 }
 
 pub async fn start(
@@ -155,7 +179,7 @@ pub async fn start(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
-    let (client, task, captured, _, _) = start_inner(spool, thread_name, thread_id, false).await;
+    let (client, task, captured, _, _, _) = start_inner(spool, thread_name, thread_id, false).await;
     (client, task, captured)
 }
 
@@ -169,6 +193,7 @@ pub async fn start_routed(
     Arc<Mutex<PublicationCapture>>,
     iroh::EndpointAddr,
     iroh::SecretKey,
+    Arc<https::TestHttpsServer>,
 ) {
     start_inner(spool, thread_name, thread_id, true).await
 }
@@ -184,57 +209,15 @@ async fn start_inner(
     Arc<Mutex<PublicationCapture>>,
     iroh::EndpointAddr,
     iroh::SecretKey,
+    Arc<https::TestHttpsServer>,
 ) {
     let captured = Arc::new(Mutex::new(PublicationCapture::default()));
-    let owner_signer = Ed25519Signer::generate().expect("hosted test owner");
-    let recovery = Ed25519Signer::generate().expect("hosted test recovery owner");
-    let account = uuid::Uuid::from_bytes([9; 16]);
-    let root =
-        repo::sign_custodial_owner_root(&owner_signer, &recovery, *account.as_bytes(), [98; 32])
-            .expect("hosted test owner root");
-    let binding = repo::sign_custodial_owner_binding(&owner_signer, &root, [99; 32])
-        .expect("hosted test owner binding");
-    let state_hash = binding.root_state_hash.clone();
-    let owner_id = root
-        .root
-        .as_ref()
-        .expect("hosted test owner root body")
-        .owner_id
-        .clone();
-    let owner_genesis = repo::sign_spool_owner_genesis(&owner_signer, *spool.as_bytes())
-        .expect("hosted test owner genesis");
-    let owner = v2::OwnerState {
-        owner: Some(v2::PrincipalRef {
-            id: account.to_string(),
-        }),
-        root: Some(root.clone()),
-        binding: Some(binding),
-        version: state_hash.clone(),
-        resource_keyring: Some(v2::CloneAuthorizationKeyring {
-            format_version: 1,
-            spool_uuid: spool.as_bytes().to_vec(),
-            canonical_spool_path_segments: vec!["acme".into(), "widgets".into()],
-            pin: Some(v2::CloneOwnerPin {
-                kind: v2::CloneOwnerPinKind::CloneTofu as i32,
-                expected_owner_id: owner_id,
-                first_seen_unix_seconds: 1,
-            }),
-            owner_root: Some(root),
-            accepted_state_hash: state_hash,
-            owner_genesis: Some(owner_genesis.clone()),
-            ..Default::default()
-        }),
-        ..Default::default()
+    let canonical_path: Vec<String> = if routed {
+        vec!["spool".into(), "acme".into()]
+    } else {
+        vec!["acme".into(), "widgets".into()]
     };
-    let fixture = Fixture {
-        spool,
-        thread_name: thread_name.into(),
-        thread_id: thread_id.to_vec(),
-        owner_genesis,
-        owner,
-        captured: Arc::clone(&captured),
-    };
-
+    let (owner_genesis, owner) = witnessing::ownership_for(spool, &canonical_path);
     let mut secret_bytes = [0; 32];
     getrandom::fill(&mut secret_bytes).expect("fixture endpoint key");
     let secret = iroh::SecretKey::from_bytes(&secret_bytes);
@@ -249,6 +232,47 @@ async fn start_inner(
         .expect("hosted test endpoint");
     let server_addr = server.addr();
     let server_key = server.id().as_bytes().to_vec();
+    let root = Ed25519Signer::from_seed(&[7; 32]).expect("independent deployment root");
+    let ephemeral = Ed25519Signer::from_seed(&secret.to_bytes()).expect("endpoint signer");
+    let direct = server_addr
+        .ip_addrs()
+        .next()
+        .expect("direct address")
+        .to_string();
+    let descriptor =
+        https::signed_descriptor(&server_addr.id.to_string(), &direct, &root, &ephemeral);
+    let witness_metadata = Arc::new(Mutex::new(None));
+    let generated = Arc::clone(&witness_metadata);
+    let https = Arc::new(https::TestHttpsServer::start_with(|authority| {
+        use std::collections::{HashMap, VecDeque};
+        let set = witnessing::witness_set_for(&format!("https://{authority}"), "clone-test-key");
+        *generated.lock().expect("witness set") = Some(set.clone());
+        HashMap::from([
+            (
+                "/.well-known/heddle/iroh-endpoint".into(),
+                VecDeque::from(vec![descriptor; 256]),
+            ),
+            (
+                "/.well-known/heddle/hosted-witnesses".into(),
+                VecDeque::from(vec![set.encode_to_vec(); 256]),
+            ),
+        ])
+    }));
+    let witness_set = witness_metadata
+        .lock()
+        .expect("witness set")
+        .clone()
+        .expect("generated set");
+    let fixture = Fixture {
+        spool,
+        thread_name: thread_name.into(),
+        thread_id: thread_id.to_vec(),
+        owner_genesis,
+        owner,
+        witness_set,
+        _https: Arc::clone(&https),
+        captured: Arc::clone(&captured),
+    };
     let server_task = tokio::spawn(async move {
         while let Some(incoming) = server.accept().await {
             let connection = incoming.await.expect("hosted test handshake");
@@ -268,24 +292,44 @@ async fn start_inner(
             }
         }
     });
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .expect("hosted client bind address")
-        .bind()
-        .await
-        .expect("hosted client endpoint");
-    let client_signer = Ed25519Signer::generate().expect("hosted test client signer");
-    let context = CallContextFactory::default()
-        .with_signing_key_pem(
-            &client_signer.to_pem().expect("hosted test client key"),
-            "principal:test",
+    use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
+    let signer = Ed25519Signer::from_seed(&[71; 32]).expect("client device");
+    let mint = biscuit_auth::KeyPair::from(
+        &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
+            .expect("owner mint"),
+    );
+    let token = biscuit_auth::Biscuit::builder()
+        .fact(r#"user("clone-test")"#)
+        .expect("subject")
+        .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+        .expect("proof")
+        .fact(r#"session("native-fixture")"#)
+        .expect("session")
+        .fact(
+            format!(
+                "expires_at({})",
+                (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339()
+            )
+            .as_str(),
         )
-        .expect("hosted test call context");
-    let client = HostedClient::connect_addr_with_context(endpoint, server_addr.clone(), context)
+        .expect("expiry")
+        .build_v1(&mint)
+        .expect("client credential")
+        .to_base64()
+        .expect("token");
+    let configuration = config::ClientConfig::default()
+        .with_token(wire::AuthToken::new(token, "clone-test"))
+        .with_auth_proof_key_pem(signer.to_pem().expect("device PEM"))
+        .with_authenticated_principal("clone-test")
+        .with_descriptor_trust(
+            "clone-test-key",
+            root.public_key().try_into().expect("root key"),
+        )
+        .with_tls_ca_certificate_pem(https.certificate_pem.clone());
+    let client = HostedClient::connect_server(&https.authority, &configuration)
         .await
-        .expect("connect hosted test client");
-    (client, server_task, captured, server_addr, secret)
+        .expect("trusted hosted fixture");
+    (client, server_task, captured, server_addr, secret, https)
 }
 
 async fn serve_call(
@@ -332,7 +376,15 @@ async fn serve_call(
         // The fixture serves one canonical spool. Like Weft, caller identity
         // and account ownership carry no spool resource fact.
         let resource = match operation {
-            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" | "ObserveOwnership" => None,
+            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" => None,
+            "ObserveOwnership" => {
+                read_request_body(&mut recv, &mut request).await;
+                let request = v2::ObserveOwnershipRequest::decode(
+                    decode_request_frame(&request).expect("owner frame").body,
+                )
+                .expect("owner request");
+                request.spool.map(|_| ("spool", "spool/acme"))
+            }
             _ => Some(("spool", "spool/acme")),
         };
         let token = base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability);
@@ -395,6 +447,12 @@ async fn serve_call(
                         max_snapshot_bytes: 1024 * 1024,
                     }),
                     max_pending_batch_bytes: 1024 * 1024,
+                    protocol: Some(thread_api::hybrid::protocol()),
+                    understood_signed_record_formats: vec![
+                        objects::object::thread_replication::GENESIS_FORMAT.into(),
+                        objects::object::thread_replication::OPERATION_FORMAT.into(),
+                        objects::object::thread_replication::ownership_claim::FORMAT.into(),
+                    ],
                     ..Default::default()
                 };
                 write_unary(&mut send, &response).await;
@@ -499,6 +557,14 @@ async fn serve_call(
                 )
                 .expect("start request");
                 let record = body.thread_genesis.expect("original genesis");
+                api::native_witness::verify_genesis_authority(
+                    body.native_genesis_authority
+                        .as_ref()
+                        .expect("client binding"),
+                    &record,
+                    &body.creator_authority,
+                )
+                .expect("client binding before request PoP");
                 let original = record;
                 let signed = crypto::thread_operation::SignedGenesis {
                     canonical: original.canonical_record,
@@ -536,23 +602,35 @@ async fn serve_call(
             "/heddle.api.v1alpha2.IdentityService/GetIdentity" => {
                 read_request_body(&mut recv, &mut request).await;
                 let frame = decode_request_frame(&request).expect("identity frame");
-                let _context = frame.context;
+                let root = biscuit_auth::KeyPair::from(
+                    &biscuit_auth::PrivateKey::from_bytes(
+                        &[71; 32],
+                        biscuit_auth::Algorithm::Ed25519,
+                    )
+                    .expect("root"),
+                );
+                let token = heddle_biscuit_verifier::signature_v1::verify(
+                    &frame.context.bearer_capability,
+                    root.public(),
+                )
+                .expect("client capability");
+                let credential =
+                    heddle_biscuit_verifier::inspect_verified_credential(&token, &root.public())
+                        .expect("caller identity");
                 write_unary(
                     &mut send,
                     &v2::GetIdentityResponse {
                         identity: Some(v2::PrincipalRecord {
                             id: "principal-test".into(),
-                            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                            account_id: uuid::Uuid::from_u128(2).to_string(),
                             ..Default::default()
                         }),
                         current_credential: Some(v2::CurrentCredentialRecord {
                             kind: v2::CredentialKind::Device as i32,
                             subject: "clone-test".into(),
-                            proof_public_key: crypto::Ed25519Signer::from_seed(&[71; 32])
-                                .expect("fixture credential signer")
-                                .public_key()
-                                .to_vec(),
-                            thread_control_authority: vec![6; 32],
+                            proof_public_key: credential.proof_public_key,
+                            acting_agent_id: credential.agent_id.unwrap_or_default(),
+                            thread_control_authority: witnessing::envelope(&fixture.owner, &token),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -659,148 +737,197 @@ async fn serve_call(
             }
             other => panic!("unexpected hosted unary method: {other}"),
         },
-        StreamingShape::ServerStreaming => match method.as_str() {
-            "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => {
-                serve_observe_threads(&mut send, server_key, &fixture).await
-            }
-            "/heddle.api.v1alpha2.ThreadService/ObserveThread" => {
-                // Share the review fixture's weft admission check and pagination.
-                hosted_client::hosted_runtime::hosted::test_server::serve_native_thread_review(
-                    &mut send,
-                    &mut recv,
-                    &mut request,
-                    server_key,
-                )
-                .await;
-            }
-            "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
-                for frame in snapshot_frames(server_key) {
-                    let payload =
-                        matches!(frame.body, Some(v2::stream_frame::Body::Data(_))).then(|| {
-                            v2::spool_event::Payload::Spool(v2::SpoolOverview {
-                                r#ref: Some(v2::SpoolRef {
-                                    id: fixture.spool.to_string(),
-                                }),
-                                version: vec![7; 32],
-                                ..Default::default()
-                            })
-                        });
-                    write_message(
-                        &mut send,
-                        &v2::SpoolEvent {
-                            frame: Some(frame),
-                            payload,
-                        },
-                    )
-                    .await;
+        StreamingShape::ServerStreaming => {
+            match method.as_str() {
+                "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => {
+                    serve_observe_threads(&mut send, server_key, &fixture).await
                 }
-            }
-            "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" => {
-                for frame in snapshot_frames(server_key) {
-                    let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
-                        .then(|| v2::ownership_event::Payload::Owner(fixture.owner.clone()));
-                    write_message(
-                        &mut send,
-                        &v2::OwnershipEvent {
-                            frame: Some(frame),
-                            payload,
-                        },
+                "/heddle.api.v1alpha2.ThreadService/ObserveThread" => {
+                    read_request_body(&mut recv, &mut request).await;
+                    let body = v2::ObserveThreadRequest::decode(
+                        decode_request_frame(&request).expect("thread frame").body,
                     )
-                    .await;
+                    .expect("thread request");
+                    if body.sections.contains(&(v2::ThreadSection::Review as i32)) {
+                        hosted_client::hosted_runtime::hosted::test_server::serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
+                    } else {
+                        let capture = fixture.captured.lock().expect("source view").clone();
+                        for frame in snapshot_frames(server_key) {
+                            let payload = matches!(
+                                frame.body,
+                                Some(v2::stream_frame::Body::Data(_))
+                            )
+                            .then(|| {
+                                v2::thread_event::Payload::Overview(v2::ThreadOverview {
+                                    r#ref: body.thread.clone(),
+                                    name: fixture.thread_name.clone(),
+                                    source_heads: capture.source_heads_for(body.thread.as_ref()),
+                                    ..Default::default()
+                                })
+                            });
+                            write_message(
+                                &mut send,
+                                &v2::ThreadEvent {
+                                    frame: Some(frame),
+                                    payload,
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 }
-            }
-            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" => {
-                let mut sequence = 1;
-                for mut frame in snapshot_frames(server_key) {
-                    let data = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)));
-                    if data {
+                "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
+                    for frame in snapshot_frames(server_key) {
+                        let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
+                            .then(|| {
+                                v2::spool_event::Payload::Spool(v2::SpoolOverview {
+                                    r#ref: Some(v2::SpoolRef {
+                                        id: fixture.spool.to_string(),
+                                    }),
+                                    version: vec![7; 32],
+                                    owner_genesis: Some(fixture.owner_genesis.clone()),
+                                    path_segments: fixture
+                                        .owner
+                                        .resource_keyring
+                                        .as_ref()
+                                        .expect("keyring")
+                                        .canonical_spool_path_segments
+                                        .clone(),
+                                    ..Default::default()
+                                })
+                            });
                         write_message(
                             &mut send,
-                            &v2::IdentityEvent {
-                                frame: Some(v2::StreamFrame {
-                                    sequence,
-                                    body: frame.body.clone(),
-                                }),
-                                payload: Some(v2::identity_event::Payload::Identity(
-                                    v2::PrincipalRecord {
-                                        id: "principal-test".into(),
-                                        account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
-                                        personal_spool: Some(v2::SpoolAddress {
-                                            r#ref: Some(v2::SpoolRef {
-                                                id: fixture.spool.to_string(),
-                                            }),
-                                            path_segments: vec!["personal".into()],
-                                        }),
-                                        ..Default::default()
-                                    },
-                                )),
+                            &v2::SpoolEvent {
+                                frame: Some(frame),
+                                payload,
                             },
                         )
                         .await;
-                        sequence += 1;
                     }
-                    frame.sequence = sequence;
-                    sequence += 1;
-                    let payload = data.then(|| {
-                        v2::identity_event::Payload::CurrentCredential(
-                            v2::CurrentCredentialRecord {
-                                kind: v2::CredentialKind::Device as i32,
-                                subject: "clone-test".into(),
-                                thread_control_authority: vec![6; 32],
-                                ..Default::default()
+                }
+                "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" => {
+                    for frame in snapshot_frames(server_key) {
+                        let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
+                            .then(|| v2::ownership_event::Payload::Owner(fixture.owner.clone()));
+                        write_message(
+                            &mut send,
+                            &v2::OwnershipEvent {
+                                frame: Some(frame),
+                                payload,
                             },
                         )
-                    });
-                    write_message(
-                        &mut send,
-                        &v2::IdentityEvent {
-                            frame: Some(frame),
-                            payload,
-                        },
-                    )
-                    .await;
+                        .await;
+                    }
                 }
-            }
-            "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration" => {
-                read_request_body(&mut recv, &mut request).await;
-                let body = v2::ObserveCollaborationRequest::decode(
-                    decode_request_frame(&request)
-                        .expect("observe collaboration frame")
-                        .body,
-                )
-                .expect("observe collaboration request");
-                let payloads = collaboration_payloads(&fixture, &body);
-                let mut sequence = 1;
-                for mut frame in snapshot_frames(server_key) {
-                    if matches!(frame.body, Some(v2::stream_frame::Body::Data(_))) {
-                        for payload in &payloads {
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" => {
+                    let root = biscuit_auth::KeyPair::from(
+                        &biscuit_auth::PrivateKey::from_bytes(
+                            &[71; 32],
+                            biscuit_auth::Algorithm::Ed25519,
+                        )
+                        .expect("root"),
+                    );
+                    let token = heddle_biscuit_verifier::signature_v1::verify(
+                        &context.bearer_capability,
+                        root.public(),
+                    )
+                    .expect("caller capability");
+                    let mut sequence = 1;
+                    for mut frame in snapshot_frames(server_key) {
+                        let data = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)));
+                        if data {
+                            write_message(
+                                &mut send,
+                                &v2::IdentityEvent {
+                                    frame: Some(v2::StreamFrame {
+                                        sequence,
+                                        body: frame.body.clone(),
+                                    }),
+                                    payload: Some(v2::identity_event::Payload::Identity(
+                                        v2::PrincipalRecord {
+                                            id: "principal-test".into(),
+                                            account_id: uuid::Uuid::from_u128(2).to_string(),
+                                            personal_spool: Some(v2::SpoolAddress {
+                                                r#ref: Some(v2::SpoolRef {
+                                                    id: fixture.spool.to_string(),
+                                                }),
+                                                path_segments: vec!["personal".into()],
+                                            }),
+                                            ..Default::default()
+                                        },
+                                    )),
+                                },
+                            )
+                            .await;
+                            sequence += 1;
+                        }
+                        frame.sequence = sequence;
+                        sequence += 1;
+                        let payload = data.then(|| {
+                            v2::identity_event::Payload::CurrentCredential(
+                                v2::CurrentCredentialRecord {
+                                    kind: v2::CredentialKind::Device as i32,
+                                    subject: "clone-test".into(),
+                                    thread_control_authority: witnessing::envelope(
+                                        &fixture.owner,
+                                        &token,
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                        write_message(
+                            &mut send,
+                            &v2::IdentityEvent {
+                                frame: Some(frame),
+                                payload,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration" => {
+                    read_request_body(&mut recv, &mut request).await;
+                    let body = v2::ObserveCollaborationRequest::decode(
+                        decode_request_frame(&request)
+                            .expect("observe collaboration frame")
+                            .body,
+                    )
+                    .expect("observe collaboration request");
+                    let payloads = collaboration_payloads(&fixture, &body);
+                    let mut sequence = 1;
+                    for mut frame in snapshot_frames(server_key) {
+                        if matches!(frame.body, Some(v2::stream_frame::Body::Data(_))) {
+                            for payload in &payloads {
+                                frame.sequence = sequence;
+                                sequence += 1;
+                                write_message(
+                                    &mut send,
+                                    &v2::CollaborationEvent {
+                                        frame: Some(frame.clone()),
+                                        payload: Some(payload.clone()),
+                                    },
+                                )
+                                .await;
+                            }
+                        } else {
                             frame.sequence = sequence;
                             sequence += 1;
                             write_message(
                                 &mut send,
                                 &v2::CollaborationEvent {
-                                    frame: Some(frame.clone()),
-                                    payload: Some(payload.clone()),
+                                    frame: Some(frame),
+                                    ..Default::default()
                                 },
                             )
                             .await;
                         }
-                    } else {
-                        frame.sequence = sequence;
-                        sequence += 1;
-                        write_message(
-                            &mut send,
-                            &v2::CollaborationEvent {
-                                frame: Some(frame),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
                     }
                 }
+                other => panic!("unexpected hosted observation: {other}"),
             }
-            other => panic!("unexpected hosted observation: {other}"),
-        },
+        }
         StreamingShape::Bidirectional => {
             let buffered = request.split_off(prelude_len);
             match method.as_str() {
@@ -1297,6 +1424,10 @@ fn snapshot_frames(server_key: Vec<u8>) -> Vec<v2::StreamFrame> {
                 public_key: server_key,
             }),
             binding_digest: vec![8; 32],
+            authority_valid_until: Some(prost_types::Timestamp {
+                seconds: chrono::Utc::now().timestamp() + 240,
+                nanos: 0,
+            }),
             accepted_budget: Some(v2::ReadBudget {
                 max_items: 64,
                 max_frame_bytes: 65536,
@@ -1366,15 +1497,11 @@ async fn serve_observe_threads(
             .source_heads_for(Some(&thread_ref(fixture))),
         ..Default::default()
     };
-    let mut overviews = vec![overview];
-    overviews.extend(
-        fixture
-            .captured
-            .lock()
-            .expect("started listing")
-            .started
-            .clone(),
-    );
+    let capture = fixture.captured.lock().expect("started listing").clone();
+    let mut overviews = capture.started.clone();
+    if capture.thread_genesis.is_some() && !overviews.iter().any(|v| v.r#ref == overview.r#ref) {
+        overviews.push(overview);
+    }
     for overview in &mut overviews {
         overview.source_heads = fixture
             .captured
@@ -1382,6 +1509,11 @@ async fn serve_observe_threads(
             .expect("sources")
             .source_heads_for(overview.r#ref.as_ref());
     }
+    let first = if overviews.is_empty() {
+        None
+    } else {
+        Some(overviews.remove(0))
+    };
     let events = [
         v2::ThreadListEvent {
             frame: Some(v2::StreamFrame {
@@ -1406,7 +1538,7 @@ async fn serve_observe_threads(
                     kind: v2::StreamDataKind::Snapshot as i32,
                 })),
             }),
-            payload: Some(v2::thread_list_event::Payload::Thread(overviews.remove(0))),
+            payload: first.map(v2::thread_list_event::Payload::Thread),
         },
         v2::ThreadListEvent {
             frame: Some(v2::StreamFrame {
@@ -1435,6 +1567,14 @@ async fn serve_observe_threads(
     ];
     let mut sequence = 1;
     for mut event in events {
+        if event.payload.is_none()
+            && matches!(
+                event.frame.as_ref().and_then(|f| f.body.as_ref()),
+                Some(v2::stream_frame::Body::Data(_))
+            )
+        {
+            continue;
+        }
         if matches!(
             event.frame.as_ref().and_then(|f| f.body.as_ref()),
             Some(v2::stream_frame::Body::Checkpoint(_))
@@ -1513,6 +1653,7 @@ async fn serve_publication(
         &v2::PublishContentServerFrame {
             body: Some(v2::publish_content_server_frame::Body::Ready(
                 v2::TransferReady {
+                    protocol: open.protocol.clone(),
                     endpoint: open.destination.clone(),
                     thread: open.thread.clone(),
                     current: open.revision.clone(),
@@ -1607,6 +1748,27 @@ async fn serve_publication(
                 assert_eq!(accepted.index_data.len() as u64, open.packs[1].length);
                 assert!(accepted.thread_genesis.is_some());
                 assert!(!accepted.operations.is_empty());
+                let previous = fixture
+                    .captured
+                    .lock()
+                    .expect("previous publication")
+                    .published
+                    .iter()
+                    .rev()
+                    .find(|p| Some(&p.thread) == open.thread.as_ref())
+                    .map(|p| p.native_authority.clone());
+                let proof = witnessing::bundle(
+                    &fixture.owner_genesis,
+                    &fixture.owner,
+                    accepted.thread_genesis.as_ref().expect("client original"),
+                    &accepted.operations,
+                    &fixture.witness_set,
+                    previous,
+                );
+                accepted.native_authority = Some(proof.clone());
+                for batch in &mut accepted.operations {
+                    batch.native_authority = Some(proof.clone());
+                }
                 let inventory = inventory_digest(&open.packs);
                 {
                     let mut capture = fixture.captured.lock().expect("accepted publication");
@@ -1634,6 +1796,7 @@ async fn serve_publication(
                         thread: open.thread.clone().expect("published Thread"),
                         revision: open.revision.clone().expect("published revision"),
                         thread_genesis: accepted.thread_genesis.clone().expect("published genesis"),
+                        native_authority: proof.clone(),
                         operations: accepted.operations.clone(),
                         pack_data: accepted.pack_data.clone(),
                         index_data: accepted.index_data.clone(),
@@ -1646,7 +1809,7 @@ async fn serve_publication(
                     &v2::PublishContentServerFrame {
                         body: Some(v2::publish_content_server_frame::Body::Receipt(
                             v2::PublicationReceipt {
-                                native_authority: None,
+                                native_authority: Some(proof),
                                 import_authority: None,
                                 client_operation_id: opening.client_operation_id,
                                 destination: open.destination,
@@ -1740,6 +1903,8 @@ async fn serve_fetch(
         &mut send,
         &v2::FetchServerFrame {
             body: Some(v2::fetch_server_frame::Body::Ready(v2::TransferReady {
+                protocol: open.protocol.clone(),
+                native_authority: Some(accepted.native_authority.clone()),
                 endpoint: Some(v2::EndpointRef {
                     kind: v2::EndpointKind::Weft as i32,
                     public_key: server_key,
