@@ -95,12 +95,24 @@ fn native_creator_binding_commits_exact_envelope() {
         super::native_genesis::verify_binding(&binding, &original, envelope, &selection)
     };
     verify(&bytes("envelope_hex")).expect("exact creator envelope");
-    let swapped = input("substituted_envelope");
-    let swapped = hex::decode(swapped["envelope_hex"].as_str().expect("envelope")).expect("hex");
-    assert!(
-        verify(&swapped).is_err(),
-        "substituted envelope must reject"
-    );
+    let alternative: wire::NativePublicProofBundleV1 = record(&fixture(), "distinct_owner_chains");
+    heddle_api::native_witness::validate_public_bundle(&alternative)
+        .expect("another valid creator-bound history");
+    let original_envelope = bytes("envelope_hex");
+    let swapped = &alternative
+        .genesis_witnesses
+        .iter()
+        .find(|p| {
+            !p.creator_authority_envelope.is_empty()
+                && p.creator_authority_envelope != original_envelope
+        })
+        .expect("different envelope from a passing native vector")
+        .creator_authority_envelope;
+    let envelope: wire::ThreadControlAuthority =
+        hybrid_codec::strict_decode(swapped, heddle_api::import_authority::MAX_RECORD_BYTES)
+            .expect("canonical alternative envelope");
+    assert_eq!(envelope.format, 1);
+    assert!(verify(swapped).is_err(), "substituted envelope must reject");
     verify(&bytes("envelope_hex")).expect("unchanged envelope passing control");
 }
 

@@ -174,6 +174,43 @@ pub fn enroll_device(spool: uuid::Uuid, home: &std::path::Path) {
     .expect("independent test account enrollment");
 }
 
+pub fn enroll_source_author(home: &std::path::Path, publisher: &[u8; 32]) {
+    use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
+
+    let now = chrono::Utc::now();
+    let authority = repo::device_authority::load(home, now.timestamp()).expect("enrolled owner");
+    let mint = biscuit_auth::KeyPair::from(
+        &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
+            .expect("owner mint"),
+    );
+    let token = biscuit_auth::Biscuit::builder()
+        .fact(format!("user(\"{}\")", uuid::Uuid::from_u128(2)).as_str())
+        .expect("account")
+        .fact(format!("device_pop_key(\"{}\")", hex::encode(publisher)).as_str())
+        .expect("source proof key")
+        .fact("session(\"offline-source-fixture\")")
+        .expect("session")
+        .fact(
+            format!(
+                "expires_at({})",
+                (now + chrono::Duration::days(30)).to_rfc3339()
+            )
+            .as_str(),
+        )
+        .expect("expiry")
+        .build_v1(&mint)
+        .expect("device credential");
+    repo::identity::source_author::publish(
+        home,
+        &authority,
+        &mint.public().to_bytes().try_into().expect("mint key"),
+        publisher,
+        &token,
+        now.timestamp(),
+    )
+    .expect("retain original account source proof");
+}
+
 pub async fn start(
     spool: uuid::Uuid,
     thread_name: impl Into<String>,

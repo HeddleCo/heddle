@@ -36,15 +36,22 @@ fn commit_file(path: &Path, body: &str, message: &str) {
 /// Publication and clone run in-process, so they resolve that variable from
 /// this process rather than from a child command. The previous value is
 /// restored so a later test in the same process keeps the runner's home.
+static PROCESS_HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct ProcessHeddleHome {
     previous: Option<std::ffi::OsString>,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ProcessHeddleHome {
     fn install(home: &Path) -> Self {
+        let guard = PROCESS_HOME.lock().expect("exclusive process home");
         let previous = std::env::var_os("HEDDLE_HOME");
         unsafe { std::env::set_var("HEDDLE_HOME", home) };
-        Self { previous }
+        Self {
+            previous,
+            _guard: guard,
+        }
     }
 }
 
@@ -527,7 +534,15 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         }
     }
     if capture_again {
+        use crypto::Signer;
         use objects::object::{Blob, State, Tree, TreeEntry};
+        let signer = adopted
+            .native_thread_signer(&adopted.native_thread("main").expect("claimed Thread"))
+            .expect("account source signer");
+        native_hosted_server::enroll_source_author(
+            &home,
+            &signer.public_key().try_into().expect("source key"),
+        );
         let blob = Blob::new(b"later capture\n".to_vec());
         adopted.store().put_blob(&blob).expect("later blob");
         let tree = Tree::from_entries(vec![
