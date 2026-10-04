@@ -91,6 +91,7 @@ pub(crate) struct Fixture {
     pub repository: repo::Repository,
     pub source: repo::Repository,
     pub bundle: ImportPublicProofBundleV1,
+    pub native_bundle: Option<NativePublicProofBundleV1>,
     pub root: RootSelection,
     pub original: crypto::thread_operation::SignedOperation,
     pub genesis: ThreadGenesisRecord,
@@ -99,6 +100,12 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        Self::build(false)
+    }
+    pub fn native() -> Self {
+        Self::build(true)
+    }
+    fn build(native: bool) -> Self {
         let home = tempfile::tempdir().expect("home");
         let previous_home = std::env::var_os("HEDDLE_HOME");
         unsafe {
@@ -118,6 +125,32 @@ impl Fixture {
         .map(record)
         .to_vec();
         bundle.witness_set = Some(fresh_set());
+        let native_bundle = native.then(|| {
+            let f: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../thread-api/tests/fixtures/native-host-witness-v1.json"
+            ))
+            .expect("native vectors");
+            let mut b = NativePublicProofBundleV1::decode(
+                hex::decode(
+                    f["wire_vectors"]["account_source"]["wire_hex"]
+                        .as_str()
+                        .expect("wire"),
+                )
+                .expect("hex")
+                .as_slice(),
+            )
+            .expect("native bundle");
+            let set = b.witness_set.as_mut().expect("native set");
+            let body = set.body.as_mut().expect("body");
+            let now = chrono::Utc::now().timestamp_millis();
+            body.issued_at_unix_millis = now - 1000;
+            body.valid_until_unix_millis = now + 240_000;
+            for entry in &mut body.entries {
+                entry.active_until_unix_millis = now + 300_000;
+            }
+            sign_set(set, 7);
+            b
+        });
         let history = &bundle.owner_histories[0];
         let signed_root = history.root.as_ref().expect("owner root");
         let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
@@ -192,12 +225,20 @@ impl Fixture {
                 chrono::Utc::now().timestamp(),
             )
             .expect("independent Spool pin");
-        let accepted = AcceptedHistory::from_selected_spool(
-            &bundle,
-            &pinned,
-            chrono::Utc::now().timestamp(),
-            limits,
-        )
+        let accepted = match &native_bundle {
+            Some(b) => AcceptedHistory::from_native_spool(
+                b,
+                &pinned,
+                chrono::Utc::now().timestamp(),
+                limits,
+            ),
+            None => AcceptedHistory::from_selected_spool(
+                &bundle,
+                &pinned,
+                chrono::Utc::now().timestamp(),
+                limits,
+            ),
+        }
         .expect("accepted history");
         let root = RootSelection {
             authority: "https://weft.example.test".into(),
@@ -222,28 +263,51 @@ impl Fixture {
             *accepted.initial_owner(),
         )
         .expect("Spool selection");
-        let original = thread_api::replication::decode_record(record("converted_main"))
-            .expect("converted original");
-        let op = original.verify().expect("native signature");
-        let original_genesis = bundle
-            .original_geneses
-            .iter()
-            .find(|r| {
-                objects::object::thread_replication::ThreadGenesis::decode(&r.canonical_record)
-                    .is_ok_and(|g| g.id().expect("ID") == op.thread)
-            })
-            .expect("original genesis")
-            .clone();
-        let witness = bundle
-            .genesis_witnesses
-            .iter()
-            .find(|w| w.original_genesis.as_ref() == Some(&original_genesis))
-            .expect("creator authority");
-        let genesis = ThreadGenesisRecord {
-            genesis: Some(original_genesis.clone()),
-            creator_authority: witness.creator_authority_envelope.clone(),
-            ..Default::default()
+        let operation_record = match &native_bundle {
+            Some(b) => b.authority_witnesses[0]
+                .original
+                .clone()
+                .expect("native source"),
+            None => record("converted_main"),
         };
+        let original =
+            thread_api::replication::decode_record(operation_record.clone()).expect("original");
+        let op = original.verify().expect("native signature");
+        let genesis = match &native_bundle {
+            Some(b) => {
+                let p = &b.genesis_witnesses[0];
+                ThreadGenesisRecord {
+                    genesis: p.original_genesis.clone(),
+                    creator_authority: p.creator_authority_envelope.clone(),
+                    native_genesis_authority: p.binding.clone(),
+                    ..Default::default()
+                }
+            }
+            None => {
+                let original = bundle
+                    .original_geneses
+                    .iter()
+                    .find(|r| {
+                        objects::object::thread_replication::ThreadGenesis::decode(
+                            &r.canonical_record,
+                        )
+                        .is_ok_and(|g| g.id().expect("ID") == op.thread)
+                    })
+                    .expect("original genesis")
+                    .clone();
+                let p = bundle
+                    .genesis_witnesses
+                    .iter()
+                    .find(|w| w.original_genesis.as_ref() == Some(&original))
+                    .expect("creator authority");
+                ThreadGenesisRecord {
+                    genesis: Some(original),
+                    creator_authority: p.creator_authority_envelope.clone(),
+                    ..Default::default()
+                }
+            }
+        };
+        let original_genesis = genesis.genesis.clone().expect("genesis");
         let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
             .expect("seed");
         for repo in [&repository, &source_repo] {
@@ -261,21 +325,43 @@ impl Fixture {
             .expect("source objects");
         let trust = HostedTrust::open(repository.heddle_dir(), &root.authority, SystemClock)
             .expect("selected trust");
-        let authority = SelectedAuthority::new(
-            accepted,
-            bundle.clone(),
-            |_: &ImportPublicProofBundleV1, _: i64, _: &hosted_trust::TrustTransaction<'_>| Ok(()),
-        );
-        ThreadReplica::install_hybrid_import(
-            repository.heddle_dir(),
-            &trust,
-            &bundle.encode_to_vec(),
-            &[original_genesis],
-            &authority,
-            source_repo.store(),
-            |_| Ok(()),
-        )
-        .expect("witnessed genesis enrollment");
+        if let Some(b) = &native_bundle {
+            let authority = SelectedAuthority::new_native(
+                accepted,
+                b.clone(),
+                |_: &NativePublicProofBundleV1, _: i64, _: &hosted_trust::TrustTransaction<'_>| {
+                    Ok(())
+                },
+            );
+            ThreadReplica::install_hybrid_native(
+                repository.heddle_dir(),
+                &trust,
+                &b.encode_to_vec(),
+                &[original_genesis, operation_record],
+                &authority,
+                source_repo.store(),
+                |_| Ok(()),
+            )
+            .expect("witnessed native enrollment");
+        } else {
+            let authority = SelectedAuthority::new(
+                accepted,
+                bundle.clone(),
+                |_: &ImportPublicProofBundleV1, _: i64, _: &hosted_trust::TrustTransaction<'_>| {
+                    Ok(())
+                },
+            );
+            ThreadReplica::install_hybrid_import(
+                repository.heddle_dir(),
+                &trust,
+                &bundle.encode_to_vec(),
+                &[original_genesis],
+                &authority,
+                source_repo.store(),
+                |_| Ok(()),
+            )
+            .expect("witnessed genesis enrollment");
+        }
         let replica =
             ThreadReplica::open(repository.heddle_dir(), op.thread).expect("enrolled Thread");
         let signer = Ed25519Signer::from_seed(&[1; 32]).expect("current owner signer");
@@ -295,6 +381,7 @@ impl Fixture {
             repository,
             source: source_repo,
             bundle,
+            native_bundle,
             root,
             original,
             genesis,
@@ -468,6 +555,7 @@ async fn security_f3_signed_device_backend_checks_current_authority_without_reen
     assert_eq!(
         backend
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(f.bundle.clone()))
@@ -554,6 +642,7 @@ async fn security_f3_final_device_revocation_and_expiry_restore_everything() {
             .expect("real backend");
         let error = backend
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(f.bundle.clone())),
@@ -613,6 +702,7 @@ impl Fixture {
         thread_api::publication::PublicationOriginals {
             geneses: vec![self.genesis.clone()],
             operations: vec![ReplicationOperations {
+                native_authority: None,
                 operations: vec![SignedRecord {
                     format: objects::object::thread_replication::OPERATION_FORMAT.into(),
                     canonical_record: self.original.canonical.clone(),
@@ -790,6 +880,222 @@ fn lookup(
     *device.test_witness_responses.lock().expect("lookup") =
         Some(crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses { set, proofs });
 }
+
+#[tokio::test]
+async fn native_f4_device_relay_refreshes_expired_metadata_without_replacing_originals() {
+    let _guard = crate::test_process_env::exclusive().await;
+    let f = Fixture::native();
+    let device = f.device();
+    let session = Arc::new(f.session().await);
+    let mut expired = f.native_bundle.clone().expect("native control");
+    let set = expired.witness_set.as_mut().expect("set");
+    set.body.as_mut().expect("body").generation += 1;
+    set.body.as_mut().expect("body").valid_until_unix_millis =
+        chrono::Utc::now().timestamp_millis() + 1800;
+    sign_set(set, 7);
+    let backend = device
+        .hosted_backend(f.local(), session.clone(), expired.clone())
+        .expect("native backend");
+    backend
+        .recheck_native_selected(
+            &expired,
+            &[f.genesis.genesis.clone().expect("original genesis")],
+        )
+        .expect("fresh native metadata");
+    let expiry = expired
+        .witness_set
+        .as_ref()
+        .expect("set")
+        .body
+        .as_ref()
+        .expect("body")
+        .valid_until_unix_millis;
+    while chrono::Utc::now().timestamp_millis() < expiry {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let id = f.original.verify().expect("original").id().expect("ID");
+    assert!(
+        backend.operation(id).await.is_err(),
+        "expired control fails closed"
+    );
+    let mut successor = expired.witness_set.clone().expect("set");
+    let body = successor.body.as_mut().expect("body");
+    body.generation += 1;
+    body.issued_at_unix_millis = chrono::Utc::now().timestamp_millis() - 1;
+    body.valid_until_unix_millis = body.issued_at_unix_millis + 240_000;
+    let mut leaves = expired
+        .statements
+        .iter()
+        .map(|s| {
+            let request = thread_api::hybrid::history::request(s).expect("exact leaf selector");
+            (request.statement_leaf_digest.clone(), s)
+        })
+        .collect::<Vec<_>>();
+    leaves.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(leaves.len(), 2, "genesis and account source witnesses");
+    let retired = &mut body.entries[0];
+    retired.state = 2;
+    retired.active_until_unix_millis = expiry;
+    retired.archive_leaf_count = 2;
+    retired.archive_root = api::witness_trust::merkle_root(
+        &leaves
+            .iter()
+            .map(|(leaf, _)| leaf.clone())
+            .collect::<Vec<_>>(),
+    )
+    .expect("sealed exact history");
+    let next_key = Ed25519Signer::from_seed(&[6; 32])
+        .expect("next witness")
+        .public_key()
+        .to_vec();
+    body.current_executor_id = api::witness_trust::witness_id(&next_key);
+    body.entries.push(host::HostedWitnessEntryV1 {
+        executor_id: body.current_executor_id.clone(),
+        public_key: next_key,
+        role: 1,
+        state: 1,
+        purposes: vec![1, 2, 3, 4],
+        active_from_unix_millis: expiry,
+        active_until_unix_millis: body.valid_until_unix_millis + 60_000,
+        ..Default::default()
+    });
+    body.entries
+        .sort_by(|a, b| a.executor_id.cmp(&b.executor_id));
+    let proofs = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, (_, statement))| {
+            let request = thread_api::hybrid::history::request(statement).expect("request");
+            (
+                request.clone(),
+                GetHostedWitnessHistoryProofResponse {
+                    proof: Some(host::HostedWitnessHistoryProofV1 {
+                        executor_id: request.executor_id,
+                        purpose: statement.body.as_ref().expect("statement").purpose,
+                        leaf_index: index as u64,
+                        leaf_count: 2,
+                        siblings: vec![leaves[1 - index].0.clone()],
+                    }),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    sign_set(&mut successor, 7);
+    *device.test_witness_responses.lock().expect("lookup") = Some(
+        crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses {
+            set: Some(successor.clone()),
+            proofs: proofs.clone(),
+        },
+    );
+    let mut refreshed = expired.clone();
+    device
+        .refresh_native_export_bundle(&session, &mut refreshed)
+        .await
+        .expect("proof-only native refresh");
+    assert_eq!(
+        refreshed.history_proofs.len(),
+        2,
+        "both exact retirement paths were recovered"
+    );
+    for negative in ["missing", "neighboring"] {
+        let mut candidate = expired.clone();
+        let mut incorrect = proofs.clone();
+        if negative == "missing" {
+            incorrect.clear();
+        } else {
+            incorrect[0].1 = incorrect[1].1.clone();
+        }
+        *device.test_witness_responses.lock().expect("lookup") = Some(
+            crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses {
+                set: Some(successor.clone()),
+                proofs: incorrect,
+            },
+        );
+        let before = f.snapshot();
+        assert!(
+            device
+                .refresh_native_export_bundle(&session, &mut candidate)
+                .await
+                .is_err(),
+            "{negative} retirement proof rejects"
+        );
+        assert_eq!(candidate, expired, "failed preparation preserves originals");
+        assert_eq!(
+            before,
+            f.snapshot(),
+            "failed preparation preserves durable trust"
+        );
+        *device.test_witness_responses.lock().expect("lookup") = Some(
+            crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses {
+                set: Some(successor.clone()),
+                proofs: proofs.clone(),
+            },
+        );
+        device
+            .refresh_native_export_bundle(&session, &mut candidate)
+            .await
+            .expect("nearby exact retirement proof control");
+    }
+    let mut comparison = expired;
+    thread_api::hybrid::history::replace_native_receiver_metadata(
+        &mut comparison,
+        refreshed.clone(),
+    )
+    .expect("every original byte unchanged");
+    let files = f.snapshot().files;
+    let (exported, _) = device
+        .relay(f.replica.clone(), f.local(), session.clone())
+        .operation(id)
+        .await
+        .expect("refreshed device export")
+        .expect("original");
+    assert_eq!(exported.original, f.original);
+    assert_eq!(exported.native_authority.as_deref(), Some(&refreshed));
+    assert!(exported.import_authority.is_none());
+    assert_eq!(
+        files,
+        f.snapshot().files,
+        "refresh needs no replacement content"
+    );
+    let mut revoked = refreshed.clone();
+    let set = revoked.witness_set.as_mut().expect("set");
+    let body = set.body.as_mut().expect("body");
+    body.generation += 1;
+    let issuer = body
+        .entries
+        .iter_mut()
+        .find(|e| e.state == 2)
+        .expect("original witness");
+    issuer.state = 3;
+    issuer.revoked_at_unix_millis = expiry;
+    sign_set(set, 7);
+    let before = f.snapshot();
+    *device.test_witness_responses.lock().expect("lookup") = Some(
+        crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses {
+            set: revoked.witness_set.clone(),
+            proofs: vec![],
+        },
+    );
+    assert!(
+        device
+            .refresh_native_export_bundle(&session, &mut revoked)
+            .await
+            .is_err(),
+        "revoked original issuer cannot be refreshed"
+    );
+    assert_eq!(before, f.snapshot(), "failed refresh has no durable effect");
+    *device.test_witness_responses.lock().expect("lookup") = Some(
+        crate::hosted_runtime::hosted::descriptor_trust::TestWitnessResponses {
+            set: Some(successor),
+            proofs,
+        },
+    );
+    device
+        .relay(f.replica.clone(), f.local(), session)
+        .operation(id)
+        .await
+        .expect("nearby unrevoked refreshed control");
+}
 #[tokio::test]
 async fn security_f4_device_export_refreshes_expired_metadata_and_completes_retirement_proofs() {
     let _guard = crate::test_process_env::exclusive().await;
@@ -801,6 +1107,7 @@ async fn security_f4_device_export_refreshes_expired_metadata_and_completes_reti
         .expect("initial backend");
     backend
         .receive(ReceivedOperation {
+            native_authority: None,
             original: f.original.clone(),
             authority_admission: None,
             import_authority: Some(Arc::new(f.bundle.clone())),
@@ -974,6 +1281,7 @@ async fn security_f4_export_refresh_negatives_have_valid_controls_and_do_not_mut
             .expect("valid selected authority");
         backend
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(candidate)),
@@ -1265,6 +1573,7 @@ async fn security_f4_refresh_preparation_cannot_override_concurrent_durable_trus
     let before = f.snapshot();
     let error = backend
         .receive(ReceivedOperation {
+            native_authority: None,
             original: f.original.clone(),
             authority_admission: None,
             import_authority: Some(Arc::new(prepared.clone())),
@@ -1290,6 +1599,7 @@ async fn security_f4_refresh_preparation_cannot_override_concurrent_durable_trus
         .expect("fresh selection");
     backend
         .receive(ReceivedOperation {
+            native_authority: None,
             original: f.original.clone(),
             authority_admission: None,
             import_authority: Some(Arc::new(prepared)),

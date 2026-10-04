@@ -87,6 +87,7 @@ async fn structural_authority_sidecars_never_authorize_native_receive() {
     let receipt = SignedAuthorityAdmission::sign(&statement, &executor).expect("receipt signature");
     let batch = crate::authority_admission::batches(
         [ReceivedOperation {
+            native_authority: None,
             original: original.clone(),
             authority_admission: Some(receipt.clone()),
             import_authority: None,

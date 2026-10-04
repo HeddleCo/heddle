@@ -95,7 +95,9 @@ pub fn validate_source_artifacts(
     let mut operations = Vec::new();
     let mut receipts = Vec::new();
     for batch in originals.operations {
-        if batch.import_authority != opening.import_authority {
+        if batch.import_authority != opening.import_authority
+            || batch.native_authority != opening.native_authority
+        {
             return Err(Error::Invalid("publication proof differs from opening"));
         }
         for received in crate::authority_admission::match_batch(&batch)? {
@@ -113,6 +115,7 @@ pub fn validate_source_artifacts(
         receipts,
     )?;
     validated.import_authority = opening.import_authority.clone();
+    validated.native_authority = opening.native_authority.clone();
     Ok(validated)
 }
 fn preparation(error: impl std::fmt::Display) -> Error {

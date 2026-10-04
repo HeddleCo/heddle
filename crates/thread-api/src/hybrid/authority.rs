@@ -9,11 +9,267 @@ use api::{
 use heddleco_capability_verifier::{
     self as permission, VerificationLimits, VerifiedCloneKeyring, VerifiedOwnerState,
 };
+/// Typed native and import bundles share verified lineage selection, while
+/// retaining their separate validators and disclosure contracts.
+pub trait PublicEvidence {
+    fn validate(&self) -> Result<(), Reject>;
+    fn public_history(&self) -> repo::thread_replication::delegated_import::PublicHistory<'_>;
+    fn policies(&self) -> &[wire::SignedSpoolPolicyRecord];
+    fn statements(&self) -> &[host::SignedHostedWitnessStatementV1];
+    fn binding_selectors(&self) -> Vec<(Vec<u8>, u64)> {
+        Vec::new()
+    }
+    fn imported(&self) -> Option<&wire::ImportPublicProofBundleV1> {
+        None
+    }
+    fn native(&self) -> Option<&wire::NativePublicProofBundleV1> {
+        None
+    }
+    fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
+        &[]
+    }
+    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
+        &[]
+    }
+    fn native_envelope(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> Option<(&[u8], Vec<Vec<u8>>)>;
+}
+fn authority_envelope<'a>(
+    statement: &host::HostedWitnessStatementV1,
+    authorities: &'a [wire::ImportAuthorityWitnessV1],
+    landings: &'a [wire::HostedLandingWitnessV1],
+) -> Option<(&'a [u8], Vec<Vec<u8>>)> {
+    if statement.purpose == 2 {
+        let p = authorities.iter().find(|p| {
+            api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
+        })?;
+        Some((
+            &p.authority_envelope,
+            p.original
+                .as_ref()?
+                .signatures
+                .iter()
+                .map(|s| s.public_key.clone())
+                .collect(),
+        ))
+    } else if statement.purpose == 4 {
+        let p = landings.iter().find(|p| {
+            api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
+        })?;
+        Some((
+            &p.authority_envelope,
+            vec![p.request.as_ref()?.signature.as_ref()?.public_key.clone()],
+        ))
+    } else {
+        None
+    }
+}
+impl PublicEvidence for wire::ImportPublicProofBundleV1 {
+    fn validate(&self) -> Result<(), Reject> {
+        api::import_authority::validate_public_bundle(self)
+    }
+    fn public_history(&self) -> repo::thread_replication::delegated_import::PublicHistory<'_> {
+        self.into()
+    }
+    fn policies(&self) -> &[wire::SignedSpoolPolicyRecord] {
+        &self.policies
+    }
+    fn statements(&self) -> &[host::SignedHostedWitnessStatementV1] {
+        &self.statements
+    }
+    fn imported(&self) -> Option<&wire::ImportPublicProofBundleV1> {
+        Some(self)
+    }
+    fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
+        &self.delegations
+    }
+    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
+        &self.member_permissions
+    }
+    fn native_envelope(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> Option<(&[u8], Vec<Vec<u8>>)> {
+        if statement.purpose != 1 {
+            return authority_envelope(
+                statement,
+                &self.authority_witnesses,
+                &self.landing_witnesses,
+            );
+        }
+        let p = self.genesis_witnesses.iter().find(|p| {
+            api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
+        })?;
+        Some((
+            &p.creator_authority_envelope,
+            p.original_genesis
+                .as_ref()?
+                .signatures
+                .iter()
+                .map(|s| s.public_key.clone())
+                .collect(),
+        ))
+    }
+}
+impl PublicEvidence for wire::NativePublicProofBundleV1 {
+    fn validate(&self) -> Result<(), Reject> {
+        api::native_witness::validate_public_bundle(self)
+    }
+    fn public_history(&self) -> repo::thread_replication::delegated_import::PublicHistory<'_> {
+        self.into()
+    }
+    fn policies(&self) -> &[wire::SignedSpoolPolicyRecord] {
+        &self.policies
+    }
+    fn statements(&self) -> &[host::SignedHostedWitnessStatementV1] {
+        &self.statements
+    }
+    fn native(&self) -> Option<&wire::NativePublicProofBundleV1> {
+        Some(self)
+    }
+    fn binding_selectors(&self) -> Vec<(Vec<u8>, u64)> {
+        self.genesis_witnesses
+            .iter()
+            .filter_map(|p| p.binding.as_ref()?.body.as_ref()?.identity.as_ref())
+            .map(|id| (id.owner_state_hash.clone(), id.ownership_transfer_sequence))
+            .collect()
+    }
+    fn native_envelope(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> Option<(&[u8], Vec<Vec<u8>>)> {
+        if statement.purpose != 1 {
+            return authority_envelope(
+                statement,
+                &self.authority_witnesses,
+                &self.landing_witnesses,
+            );
+        }
+        let p = self.genesis_witnesses.iter().find(|p| {
+            api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
+        })?;
+        Some((
+            &p.creator_authority_envelope,
+            p.original_genesis
+                .as_ref()?
+                .signatures
+                .iter()
+                .map(|s| s.public_key.clone())
+                .collect(),
+        ))
+    }
+}
+
+/// Explicit transport dispatch; an import failure never becomes native history.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PublicProof {
+    Import(Box<wire::ImportPublicProofBundleV1>),
+    Native(Box<wire::NativePublicProofBundleV1>),
+}
+impl From<wire::ImportPublicProofBundleV1> for PublicProof {
+    fn from(b: wire::ImportPublicProofBundleV1) -> Self {
+        Self::Import(Box::new(b))
+    }
+}
+impl From<wire::NativePublicProofBundleV1> for PublicProof {
+    fn from(b: wire::NativePublicProofBundleV1) -> Self {
+        Self::Native(Box::new(b))
+    }
+}
+impl PublicProof {
+    pub fn witness_set(&self) -> Option<&host::SignedHostedWitnessSetV1> {
+        match self {
+            Self::Import(b) => b.witness_set.as_ref(),
+            Self::Native(b) => b.witness_set.as_ref(),
+        }
+    }
+    pub fn replace_receiver_metadata(&mut self, refreshed: Self) -> Result<(), Reject> {
+        match (self, refreshed) {
+            (Self::Import(b), Self::Import(r)) => super::history::replace_receiver_metadata(b, *r),
+            (Self::Native(b), Self::Native(r)) => {
+                super::history::replace_native_receiver_metadata(b, *r)
+            }
+            _ => Err(Reject::Protocol),
+        }
+    }
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        use prost::Message;
+        match self {
+            Self::Import(b) => b.encode_to_vec(),
+            Self::Native(b) => b.encode_to_vec(),
+        }
+    }
+}
+impl PublicEvidence for PublicProof {
+    fn validate(&self) -> Result<(), Reject> {
+        match self {
+            Self::Import(b) => b.validate(),
+            Self::Native(b) => b.validate(),
+        }
+    }
+    fn public_history(&self) -> repo::thread_replication::delegated_import::PublicHistory<'_> {
+        match self {
+            Self::Import(b) => b.as_ref().into(),
+            Self::Native(b) => b.as_ref().into(),
+        }
+    }
+    fn policies(&self) -> &[wire::SignedSpoolPolicyRecord] {
+        match self {
+            Self::Import(b) => &b.policies,
+            Self::Native(b) => &b.policies,
+        }
+    }
+    fn statements(&self) -> &[host::SignedHostedWitnessStatementV1] {
+        match self {
+            Self::Import(b) => &b.statements,
+            Self::Native(b) => &b.statements,
+        }
+    }
+    fn binding_selectors(&self) -> Vec<(Vec<u8>, u64)> {
+        match self {
+            Self::Import(b) => b.binding_selectors(),
+            Self::Native(b) => b.binding_selectors(),
+        }
+    }
+    fn imported(&self) -> Option<&wire::ImportPublicProofBundleV1> {
+        match self {
+            Self::Import(b) => Some(b),
+            _ => None,
+        }
+    }
+    fn native(&self) -> Option<&wire::NativePublicProofBundleV1> {
+        match self {
+            Self::Native(b) => Some(b),
+            _ => None,
+        }
+    }
+    fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
+        match self {
+            Self::Import(b) => &b.delegations,
+            _ => &[],
+        }
+    }
+    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
+        match self {
+            Self::Import(b) => &b.member_permissions,
+            _ => &[],
+        }
+    }
+    fn native_envelope(&self, s: &host::HostedWitnessStatementV1) -> Option<(&[u8], Vec<Vec<u8>>)> {
+        match self {
+            Self::Import(b) => b.native_envelope(s),
+            Self::Native(b) => b.native_envelope(s),
+        }
+    }
+}
+
 /// Historical permission is bound to exact authenticated witness order. The
 /// caller supplies today's disclosure check, which runs again at commit.
-pub struct SelectedAuthority<F> {
+pub struct SelectedAuthority<F, B = wire::ImportPublicProofBundleV1> {
     history: AcceptedHistory,
-    bundle: wire::ImportPublicProofBundleV1,
+    bundle: B,
     authorize: F,
 }
 impl<F> SelectedAuthority<F> {
@@ -28,6 +284,30 @@ impl<F> SelectedAuthority<F> {
             authorize,
         }
     }
+}
+impl<F> SelectedAuthority<F, wire::NativePublicProofBundleV1> {
+    pub fn new_native(
+        history: AcceptedHistory,
+        bundle: wire::NativePublicProofBundleV1,
+        authorize: F,
+    ) -> Self {
+        Self {
+            history,
+            bundle,
+            authorize,
+        }
+    }
+}
+impl<F> SelectedAuthority<F, PublicProof> {
+    pub fn from_proof(history: AcceptedHistory, bundle: PublicProof, authorize: F) -> Self {
+        Self {
+            history,
+            bundle,
+            authorize,
+        }
+    }
+}
+impl<F, B: PublicEvidence> SelectedAuthority<F, B> {
     fn selection<'a>(
         &'a self,
         selected: &'a HistoricalSelection,
@@ -45,7 +325,7 @@ impl<F> SelectedAuthority<F> {
         statement: &host::HostedWitnessStatementV1,
     ) -> Option<&wire::SignedSpoolPolicy> {
         // The native verifier independently authenticates this exact policy.
-        self.bundle.policies.iter().find_map(|signed| {
+        self.bundle.policies().iter().find_map(|signed| {
             let body = signed.body.as_ref()?;
             (body.spool_uuid == statement.spool_uuid
                 && body.sequence == statement.policy_sequence
@@ -58,64 +338,7 @@ impl<F> SelectedAuthority<F> {
         &self,
         statement: &host::HostedWitnessStatementV1,
     ) -> Option<(wire::ThreadControlAuthority, Vec<Vec<u8>>)> {
-        let matches =
-            |bytes: Result<Vec<u8>, Reject>| bytes.is_ok_and(|b| b == statement.canonical_payload);
-        let (bytes, keys) = match statement.purpose {
-            1 => {
-                let payload = self
-                    .bundle
-                    .genesis_witnesses
-                    .iter()
-                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
-                (
-                    &payload.creator_authority_envelope,
-                    payload
-                        .original_genesis
-                        .as_ref()?
-                        .signatures
-                        .iter()
-                        .map(|s| s.public_key.clone())
-                        .collect(),
-                )
-            }
-            2 => {
-                let payload = self
-                    .bundle
-                    .authority_witnesses
-                    .iter()
-                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
-                (
-                    &payload.authority_envelope,
-                    payload
-                        .original
-                        .as_ref()?
-                        .signatures
-                        .iter()
-                        .map(|s| s.public_key.clone())
-                        .collect(),
-                )
-            }
-            4 => {
-                let payload = self
-                    .bundle
-                    .landing_witnesses
-                    .iter()
-                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
-                (
-                    &payload.authority_envelope,
-                    vec![
-                        payload
-                            .request
-                            .as_ref()?
-                            .signature
-                            .as_ref()?
-                            .public_key
-                            .clone(),
-                    ],
-                )
-            }
-            _ => return None,
-        };
+        let (bytes, keys) = self.bundle.native_envelope(statement)?;
         let envelope =
             api::mint_root_association::decode_thread_control_authority_for_verification(bytes)
                 .ok()?;
@@ -123,12 +346,13 @@ impl<F> SelectedAuthority<F> {
     }
 }
 impl<
+    B: PublicEvidence,
     F: Fn(
-        &wire::ImportPublicProofBundleV1,
+        &B,
         i64,
         &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
     ) -> repo::thread_replication::Result<()>,
-> repo::thread_replication::delegated_import::AcceptedAuthority for SelectedAuthority<F>
+> repo::thread_replication::delegated_import::AcceptedAuthority for SelectedAuthority<F, B>
 {
     fn authorize_import(
         &self,
@@ -136,10 +360,21 @@ impl<
         now: i64,
         context: &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
     ) -> repo::thread_replication::Result<()> {
-        if bundle != &self.bundle {
+        if self.bundle.imported() != Some(bundle) {
             return Err(Reject::StaleContext.into());
         }
-        (self.authorize)(bundle, now, context)
+        (self.authorize)(&self.bundle, now, context)
+    }
+    fn authorize_native(
+        &self,
+        bundle: &wire::NativePublicProofBundleV1,
+        now: i64,
+        context: &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
+    ) -> repo::thread_replication::Result<()> {
+        if self.bundle.native() != Some(bundle) {
+            return Err(Reject::StaleContext.into());
+        }
+        (self.authorize)(&self.bundle, now, context)
     }
     fn for_witness(
         &self,
@@ -149,6 +384,22 @@ impl<
             .history
             .for_witness(statement)
             .map_err(authority_error)?;
+        Ok(self.selection(selected))
+    }
+    fn for_native_binding(
+        &self,
+        binding: &wire::NativeGenesisAuthorityV1,
+    ) -> repo::thread_replication::Result<permission::import_delegation::Selection<'_>> {
+        let id = binding.identity.as_ref().ok_or(Reject::GenesisBinding)?;
+        let selected = self
+            .history
+            .bindings
+            .get(&(
+                id.owner_state_hash.clone(),
+                id.ownership_transfer_sequence,
+                binding.owner_chain_digest.clone(),
+            ))
+            .ok_or(Reject::Root)?;
         Ok(self.selection(selected))
     }
     fn for_policy(
@@ -176,7 +427,7 @@ impl<
                     .chain(selected.keyring.authority_public_keys().cloned())
                     .chain(
                         self.bundle
-                            .delegations
+                            .delegations()
                             .iter()
                             .filter_map(|d| d.body.as_ref())
                             .flat_map(|d| {
@@ -193,13 +444,13 @@ impl<
                 namespace != api::import_authority::CANCELLATION_NAMESPACE
                     || !self
                         .bundle
-                        .delegations
+                        .delegations()
                         .iter()
                         .filter_map(|d| d.body.as_ref())
                         .any(|d| d.cancellation_id == id)
                         && !self
                             .bundle
-                            .member_permissions
+                            .member_permissions()
                             .iter()
                             .filter_map(|p| p.body.as_ref())
                             .any(|p| p.cancellation_id == id)
@@ -273,6 +524,7 @@ pub struct AcceptedHistory {
     initial_owner: [u8; 32],
     limits: VerificationLimits,
     states: BTreeMap<(Vec<u8>, u64), HistoricalSelection>,
+    bindings: BTreeMap<(Vec<u8>, u64, Vec<u8>), HistoricalSelection>,
 }
 
 impl AcceptedHistory {
@@ -282,12 +534,29 @@ impl AcceptedHistory {
         now_seconds: i64,
         limits: VerificationLimits,
     ) -> Result<Self, Error> {
-        api::import_authority::validate_public_bundle(bundle)?;
+        Self::from_public(bundle, selected, now_seconds, limits)
+    }
+    pub fn from_native_spool(
+        bundle: &wire::NativePublicProofBundleV1,
+        selected: &VerifiedCloneKeyring,
+        now_seconds: i64,
+        limits: VerificationLimits,
+    ) -> Result<Self, Error> {
+        Self::from_public(bundle, selected, now_seconds, limits)
+    }
+    pub fn from_public(
+        bundle: &impl PublicEvidence,
+        selected: &VerifiedCloneKeyring,
+        now_seconds: i64,
+        limits: VerificationLimits,
+    ) -> Result<Self, Error> {
+        bundle.validate()?;
+        let public = bundle.public_history();
         let pinned = selected.wire();
-        if bundle.owner_genesis.as_ref() != Some(selected.owner_genesis().signed())
+        if public.owner_genesis != Some(selected.owner_genesis().signed())
             || !pinned
                 .ownership_transfers
-                .starts_with(&bundle.ownership_transfers)
+                .starts_with(public.ownership_transfers)
         {
             return Err(Reject::Root.into());
         }
@@ -304,9 +573,10 @@ impl AcceptedHistory {
             initial_owner: selected.owner_state().owner_id(),
             limits,
             states: BTreeMap::new(),
+            bindings: BTreeMap::new(),
         };
         let selectors = bundle
-            .statements
+            .statements()
             .iter()
             .map(|signed| {
                 let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
@@ -315,21 +585,22 @@ impl AcceptedHistory {
                     body.ownership_transfer_sequence,
                 ))
             })
-            .chain(bundle.policies.iter().map(|signed| {
+            .chain(bundle.policies().iter().map(|signed| {
                 let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
                 Ok((
                     body.owner_state_hash.clone(),
                     body.ownership_transfer_sequence,
                 ))
             }))
+            .chain(bundle.binding_selectors().into_iter().map(Ok))
             .collect::<Result<std::collections::BTreeSet<_>, Reject>>()?;
         for (hash, sequence) in selectors {
             let count = usize::try_from(sequence).map_err(|_| Reject::Bounds)?;
-            let transfers = bundle
+            let transfers = public
                 .ownership_transfers
                 .get(..count)
                 .ok_or(Reject::Root)?;
-            let history = bundle
+            let history = public
                 .owner_histories
                 .iter()
                 .find(|h| h.state_hash == hash)
@@ -373,7 +644,7 @@ impl AcceptedHistory {
                     .and_then(|a| a.signed_handoff.as_ref())
                     .and_then(|s| s.handoff.as_ref())
                     .ok_or(Reject::Root)?;
-                bundle
+                public
                     .owner_histories
                     .iter()
                     .find(|h| h.state_hash == handoff.source_owner_key_state_hash)
@@ -401,7 +672,7 @@ impl AcceptedHistory {
                 party_states.insert(&handoff.source_owner_key_state_hash);
                 party_states.insert(&handoff.destination_owner_key_state_hash);
             }
-            wire.transfer_owner_histories = bundle
+            wire.transfer_owner_histories = public
                 .owner_histories
                 .iter()
                 .filter(|h| party_states.contains(&h.state_hash))
@@ -411,6 +682,68 @@ impl AcceptedHistory {
             keyring.verify_current_owner(&owner, now_seconds, limits)?;
             this.states
                 .insert((hash, sequence), HistoricalSelection { owner, keyring });
+        }
+        if let Some(native) = bundle.native() {
+            for p in &native.genesis_witnesses {
+                let body = p
+                    .binding
+                    .as_ref()
+                    .and_then(|b| b.body.as_ref())
+                    .ok_or(Reject::GenesisBinding)?;
+                let id = body.identity.as_ref().ok_or(Reject::GenesisBinding)?;
+                let witnessed = this
+                    .states
+                    .get(&(id.owner_state_hash.clone(), id.ownership_transfer_sequence))
+                    .ok_or(Reject::Root)?;
+                // The binding retains its original keyring endpoint even when
+                // accepted authority or other genesis chains have advanced.
+                // Every candidate is independently authenticated against the
+                // selected immutable root and complete signed transfer prefix.
+                let mut resolved = None;
+                for history in public
+                    .owner_histories
+                    .iter()
+                    .filter(|h| h.root == witnessed.keyring.wire().owner_root)
+                {
+                    let mut wire = witnessed.keyring.wire().clone();
+                    wire.accepted_transitions = history.accepted_transitions.clone();
+                    wire.accepted_state_hash = history.state_hash.clone();
+                    let Ok(keyring) =
+                        permission::verify_clone_keyring(wire, now_seconds, limits, &[])
+                    else {
+                        continue;
+                    };
+                    let selection = permission::import_delegation::Selection {
+                        owner: &witnessed.owner,
+                        keyring: &keyring,
+                        spool_genesis_digest: &this.genesis,
+                        initial_owner_id: &this.initial_owner,
+                        limits,
+                    };
+                    if permission::import_delegation::native_lineage(&selection).is_ok_and(
+                        |(identity, chain, _)| {
+                            body.identity.as_ref() == Some(&identity)
+                                && chain == body.owner_chain_digest
+                        },
+                    ) {
+                        if resolved.is_some() {
+                            return Err(Reject::Canonical.into());
+                        }
+                        resolved = Some(HistoricalSelection {
+                            owner: witnessed.owner.clone(),
+                            keyring,
+                        });
+                    }
+                }
+                this.bindings.insert(
+                    (
+                        id.owner_state_hash.clone(),
+                        id.ownership_transfer_sequence,
+                        body.owner_chain_digest.clone(),
+                    ),
+                    resolved.ok_or(Reject::Root)?,
+                );
+            }
         }
         Ok(this)
     }

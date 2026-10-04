@@ -51,6 +51,21 @@ impl StagedSource {
     pub fn import_authority(&self) -> Option<&crate::contract::ImportPublicProofBundleV1> {
         self.ready.import_authority.as_ref()
     }
+    pub fn native_authority(&self) -> Option<&NativePublicProofBundleV1> {
+        self.ready.native_authority.as_ref()
+    }
+    pub fn refresh_native_authority(
+        &mut self,
+        refreshed: NativePublicProofBundleV1,
+    ) -> Result<(), Error> {
+        let original = self
+            .ready
+            .native_authority
+            .as_mut()
+            .ok_or(Error::HostedTrustRequired)?;
+        crate::hybrid::history::replace_native_receiver_metadata(original, refreshed)?;
+        Ok(())
+    }
     /// Refresh witness-set/proof metadata after retirement or freshness renewal
     /// while keeping the downloaded pack and every original signed byte.
     pub fn refresh_import_authority(
@@ -218,6 +233,7 @@ pub(super) fn validate_with_receipts(
 /// Structurally verified original source and actual artifact closure. This is
 /// not an author, audience, executor, or sharing-policy admission decision.
 pub struct ValidatedSourceArtifacts {
+    pub(crate) native_authority: Option<NativePublicProofBundleV1>,
     pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
@@ -229,6 +245,9 @@ pub struct ValidatedSourceArtifacts {
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
 impl ValidatedSourceArtifacts {
+    pub fn native_authority(&self) -> Option<&NativePublicProofBundleV1> {
+        self.native_authority.as_ref()
+    }
     pub fn import_authority(&self) -> Option<&ImportPublicProofBundleV1> {
         self.import_authority.as_ref()
     }
@@ -236,7 +255,10 @@ impl ValidatedSourceArtifacts {
     /// Retain the publication's exact originals and source as a hosted staged
     /// install. The receiver supplies independently verified owner observation.
     pub fn into_hosted_source(self, mut ready: TransferReady) -> Result<StagedSource, Error> {
-        if ready.import_authority != self.import_authority || self.import_authority.is_none() {
+        if ready.import_authority != self.import_authority
+            || ready.native_authority != self.native_authority
+            || (self.import_authority.is_none() && self.native_authority.is_none())
+        {
             return Err(Error::HostedTrustRequired);
         }
         let reference = ready
@@ -415,6 +437,7 @@ fn validate_disclosure_artifacts(
         .map_err(preparation)?;
         return Ok(ValidatedSourceArtifacts {
             import_authority: None,
+            native_authority: None,
             directory,
             operations,
             genesis: original.clone(),
@@ -753,6 +776,7 @@ fn validate_disclosure_artifacts(
     }
     Ok(ValidatedSourceArtifacts {
         import_authority: None,
+        native_authority: None,
         directory,
         genesis: original.clone(),
         operations: ordered,

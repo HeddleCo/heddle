@@ -381,6 +381,13 @@ impl Validation {
             }
             fetch_server_frame::Body::Operations(batch) => {
                 crate::hybrid::operations(&batch).map_err(Error::Invalid)?;
+                if batch.native_authority.is_some()
+                    && batch.native_authority != self.ready.native_authority
+                {
+                    return Err(Error::Invalid(
+                        "native authority differs from transfer Ready",
+                    ));
+                }
                 if batch.import_authority.is_some()
                     && batch.import_authority != self.ready.import_authority
                 {

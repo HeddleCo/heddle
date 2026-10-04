@@ -5,20 +5,20 @@ use objects::{
     object::{Blob, State, StateId, Tree},
     store::{ExternalObjectSource, FsStore},
 };
-use prost::Message;
 use repo::thread_replication::{
     delegated_import::AcceptedAuthority,
     hosted_trust::{Clock, HostedTrust},
 };
 
 use super::*;
+use crate::hybrid::authority::{PublicEvidence, PublicProof};
 
 pub struct HostedReplica<C, A> {
     local: LocalReplica<FsStore>,
     directory: PathBuf,
     trust: Arc<HostedTrust<C>>,
     authority: Arc<A>,
-    export_bundle: Option<Arc<crate::contract::ImportPublicProofBundleV1>>,
+    export_bundle: Option<PublicProof>,
 }
 impl<C, A> Clone for HostedReplica<C, A> {
     fn clone(&self) -> Self {
@@ -71,21 +71,27 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
         mut self,
         bundle: crate::contract::ImportPublicProofBundleV1,
     ) -> Self {
-        self.export_bundle = Some(Arc::new(bundle));
+        self.export_bundle = Some(PublicProof::from(bundle));
         self
     }
-    fn export_bundle(
-        &self,
-        mut bundle: crate::contract::ImportPublicProofBundleV1,
-    ) -> Result<Arc<crate::contract::ImportPublicProofBundleV1>, Error> {
+    pub fn with_native_export_bundle(
+        mut self,
+        bundle: crate::contract::NativePublicProofBundleV1,
+    ) -> Self {
+        self.export_bundle = Some(PublicProof::from(bundle));
+        self
+    }
+    pub fn with_export_proof(mut self, bundle: PublicProof) -> Self {
+        self.export_bundle = Some(bundle);
+        self
+    }
+    fn export_bundle(&self, mut bundle: PublicProof) -> Result<PublicProof, Error> {
         if let Some(prepared) = &self.export_bundle {
-            crate::hybrid::history::replace_receiver_metadata(
-                &mut bundle,
-                prepared.as_ref().clone(),
-            )
-            .map_err(|error| Error::Store(error.into()))?;
+            bundle
+                .replace_receiver_metadata(prepared.clone())
+                .map_err(|e| Error::Store(e.into()))?;
         }
-        Ok(Arc::new(bundle))
+        Ok(bundle)
     }
     pub fn publish_source(
         &self,
@@ -117,6 +123,20 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
         bundle: &crate::contract::ImportPublicProofBundleV1,
         records: &[crate::contract::SignedRecord],
     ) -> repo::thread_replication::Result<()> {
+        self.recheck_proof(&PublicProof::from(bundle.clone()), records)
+    }
+    pub fn recheck_native_selected(
+        &self,
+        bundle: &crate::contract::NativePublicProofBundleV1,
+        records: &[crate::contract::SignedRecord],
+    ) -> repo::thread_replication::Result<()> {
+        self.recheck_proof(&PublicProof::from(bundle.clone()), records)
+    }
+    pub fn recheck_proof(
+        &self,
+        bundle: &PublicProof,
+        records: &[crate::contract::SignedRecord],
+    ) -> repo::thread_replication::Result<()> {
         if self.local.objects.root().canonicalize()? != self.directory.canonicalize()? {
             return Err(api::hybrid_codec::Reject::Root.into());
         }
@@ -124,22 +144,34 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
         let mut staged = FsStore::new(scratch.path());
         staged.set_external_source(Arc::new(ExistingObjects(self.local.objects.clone())));
         staged.init()?;
-        ThreadReplica::install_hybrid_import(
-            &self.directory,
-            &self.trust,
-            &bundle.encode_to_vec(),
-            records,
-            self.authority.as_ref(),
-            &staged,
-            |artifacts| crate::fetch::hosted::publish_store(staged.root(), artifacts),
-        )?;
+        if matches!(bundle, PublicProof::Native(_)) {
+            ThreadReplica::install_hybrid_native(
+                &self.directory,
+                &self.trust,
+                &bundle.encode_to_vec(),
+                records,
+                self.authority.as_ref(),
+                &staged,
+                |artifacts| crate::fetch::hosted::publish_store(staged.root(), artifacts),
+            )
+        } else {
+            ThreadReplica::install_hybrid_import(
+                &self.directory,
+                &self.trust,
+                &bundle.encode_to_vec(),
+                records,
+                self.authority.as_ref(),
+                &staged,
+                |artifacts| crate::fetch::hosted::publish_store(staged.root(), artifacts),
+            )
+        }?;
         self.local.objects.reload_packs()?;
         Ok(())
     }
     async fn admit(
         &self,
         original: SignedOperation,
-        bundle: Arc<crate::contract::ImportPublicProofBundleV1>,
+        bundle: PublicProof,
     ) -> Result<Admission, Error> {
         let receiver = self.clone();
         Ok(tokio::task::spawn_blocking(move || {
@@ -191,7 +223,7 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
                     }],
                 });
             }
-            receiver.recheck_selected(&bundle, &records)?;
+            receiver.recheck_proof(&bundle, &records)?;
             receiver
                 .local
                 .replica
@@ -233,14 +265,18 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> ReplicaSt
                 Ok((
                     replica.operation_with_authority_admission(&id)?,
                     replica.hybrid_import_bundle()?,
+                    replica.hybrid_native_bundle()?,
                 ))
             })
             .await?;
-        let (Some(stored), bundle) = stored else {
+        let (Some(stored), imported, native) = stored else {
             return Ok(None);
         };
-        let Some(bundle) = bundle else {
-            return self.local.operation(id).await;
+        let bundle = match (imported, native) {
+            (Some(b), None) => PublicProof::from(b),
+            (None, Some(b)) => PublicProof::from(b),
+            (None, None) => return Err(Error::HostedTrustRequired),
+            _ => return Err(Error::HostedTrustRequired),
         };
         if stored.authority_admission.is_some() {
             return Err(Error::HostedTrustRequired);
@@ -249,9 +285,10 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> ReplicaSt
         let status = self.admit(stored.original.clone(), bundle.clone()).await?;
         Ok(Some((
             ReceivedOperation {
+                native_authority: bundle.native().cloned().map(Arc::new),
                 original: stored.original,
                 authority_admission: None,
-                import_authority: Some(bundle),
+                import_authority: bundle.imported().cloned().map(Arc::new),
             },
             status,
         )))
@@ -260,14 +297,15 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> ReplicaSt
         if received.authority_admission.is_some() {
             return Err(Error::HostedTrustRequired);
         }
-        if let Some(bundle) = received.import_authority {
-            let bundle = self.export_bundle(bundle.as_ref().clone())?;
-            self.admit(received.original, bundle).await
-        } else {
-            // A cached admission cannot replace fresh evidence on this path.
-            Err(Error::HostedTrustRequired)
-        }
+        let bundle = match (received.import_authority, received.native_authority) {
+            (Some(b), None) => PublicProof::from(b.as_ref().clone()),
+            (None, Some(b)) => PublicProof::from(b.as_ref().clone()),
+            _ => return Err(Error::HostedTrustRequired),
+        };
+        let bundle = self.export_bundle(bundle)?;
+        self.admit(received.original, bundle).await
     }
+
     async fn remember_peer_heads(
         &self,
         peer: [u8; 32],

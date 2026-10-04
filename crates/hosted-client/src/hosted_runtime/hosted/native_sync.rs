@@ -167,53 +167,96 @@ fn publication_ancestry(
     ),
     ProtocolError,
 > {
-    let (operations, states) = replica
-        .source_ancestry_counts(selected)
-        .map_err(replica_err)?;
-    if operations > max_operations {
-        return Err(publication_limit(
-            name,
-            states,
-            operations,
-            "operation count",
-            max_operations,
-            operations,
-        ));
+    // A LocalKey hosting claim freezes every source head. Include each cutoff
+    // branch, even when publication selected only one of those revisions.
+    let mut roots = BTreeSet::from([selected]);
+    for claim in replica.ownership_claims().map_err(replica_err)? {
+        roots.extend(claim.verify().map_err(native_error)?.source_frontier);
     }
-    if states > max_states {
-        return Err(publication_limit(
-            name,
-            states,
-            operations,
-            "State lineage",
-            max_states,
-            states,
-        ));
+    if let Some(resolution) = replica.ownership_resolution().map_err(replica_err)? {
+        roots.extend(objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.canonical).map_err(native_error)?.frontier);
     }
-    let stored = replica
-        .source_ancestry(selected, ANCESTRY_RECORDS, ANCESTRY_BYTES)
-        .map_err(|error| match error {
-            repo::thread_replication::Error::SourceAncestryBudgetExceeded {
-                bytes,
-                max_bytes,
-                ..
-            } => publication_limit(
+    let mut stored = BTreeMap::new();
+    let mut source_states = BTreeSet::new();
+    let mut bytes = 0usize;
+    for root in roots {
+        let (operations, states) = replica.source_ancestry_counts(root).map_err(replica_err)?;
+        if operations > max_operations {
+            return Err(publication_limit(
                 name,
                 states,
                 operations,
-                "ancestry metadata bytes",
-                max_bytes,
-                bytes,
-            ),
-            other => replica_err(other),
-        })?;
+                "operation count",
+                max_operations,
+                operations,
+            ));
+        }
+        if states > max_states {
+            return Err(publication_limit(
+                name,
+                states,
+                operations,
+                "State lineage",
+                max_states,
+                states,
+            ));
+        }
+        let ancestry = replica
+            .source_ancestry(root, ANCESTRY_RECORDS, ANCESTRY_BYTES)
+            .map_err(|error| match error {
+                repo::thread_replication::Error::SourceAncestryBudgetExceeded {
+                    bytes,
+                    max_bytes,
+                    ..
+                } => publication_limit(
+                    name,
+                    states,
+                    operations,
+                    "ancestry metadata bytes",
+                    max_bytes,
+                    bytes,
+                ),
+                other => replica_err(other),
+            })?;
+        for item in ancestry {
+            let operation = item.original.verify().map_err(native_error)?;
+            let id = operation.id().map_err(native_error)?;
+            if stored.contains_key(&id) {
+                continue;
+            }
+            if let Some(state) = operation.source_state().map_err(native_error)? {
+                source_states.insert(state.id());
+            }
+            bytes = bytes
+                .saturating_add(item.original.canonical.len())
+                .saturating_add(item.original.signature.len());
+            stored.insert(id, item);
+            for (label, limit, actual) in [
+                ("operation count", max_operations, stored.len()),
+                ("State lineage", max_states, source_states.len()),
+                ("ancestry metadata bytes", ANCESTRY_BYTES, bytes),
+            ] {
+                if actual > limit {
+                    return Err(publication_limit(
+                        name,
+                        source_states.len(),
+                        stored.len(),
+                        label,
+                        limit,
+                        actual,
+                    ));
+                }
+            }
+        }
+    }
+    let states = source_states.len();
     // The indexed ancestry query walks backwards. A topological order also
     // handles merges whose branches reach the same ancestor at different depths.
     let mut records = BTreeMap::new();
     let mut children: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
     let mut remaining = BTreeMap::new();
     let mut ready = BTreeSet::new();
-    for item in stored {
+    for item in stored.into_values() {
         let operation = item.original.verify().map_err(native_error)?;
         let id = operation.id().map_err(native_error)?;
         remaining.insert(id, operation.parents.len());
@@ -285,6 +328,33 @@ impl HostedClient {
         .await
     }
 
+    pub async fn refresh_native_proofs(
+        &self,
+        bundle: &mut contract::NativePublicProofBundleV1,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let root = self.hosted_root().ok_or(api::hybrid_codec::Reject::Root)?;
+        let lookup = self.witness_lookup()?;
+        super::descriptor_trust::refresh_native_proofs(
+            lookup,
+            bundle,
+            api::witness_trust::SetExpectation {
+                authority: root.authority(),
+                root_id: root.root_id(),
+                root_public_key: root.public_key(),
+                root_epoch,
+                now_unix_millis: chrono::Utc::now().timestamp_millis(),
+                clock_floor_unix_millis: clock_floor_millis,
+                known_job_keys,
+            },
+            previous,
+        )
+        .await
+    }
+
     /// Revalidate retained proof metadata without redownloading staged content.
     /// Installation must independently recheck the latest durable context.
     pub async fn refresh_staged_import_proofs(
@@ -310,6 +380,38 @@ impl HostedClient {
             .await?;
         staged
             .refresh_import_authority(bundle)
+            .map_err(|error| match error {
+                thread_api::fetch::Error::Hybrid(reject) => super::HostedError::Hybrid(reject),
+                thread_api::fetch::Error::HostedTrustRequired => {
+                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Root)
+                }
+                error => super::HostedError::framing(error),
+            })?;
+        Ok(verified)
+    }
+    pub async fn refresh_staged_native_proofs(
+        &self,
+        staged: &mut thread_api::fetch::StagedSource,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let mut bundle = staged
+            .native_authority()
+            .ok_or(api::hybrid_codec::Reject::Scope)?
+            .clone();
+        let verified = self
+            .refresh_native_proofs(
+                &mut bundle,
+                previous,
+                root_epoch,
+                clock_floor_millis,
+                known_job_keys,
+            )
+            .await?;
+        staged
+            .refresh_native_authority(bundle)
             .map_err(|error| match error {
                 thread_api::fetch::Error::Hybrid(reject) => super::HostedError::Hybrid(reject),
                 thread_api::fetch::Error::HostedTrustRequired => {
@@ -461,12 +563,76 @@ impl HostedClient {
                 .map(|(_, authority, _)| authority)
         })
         .await?;
-        let creation = start_request_from_native_replica(
+        let mut creation = start_request_from_native_replica(
             &replica,
             &spool,
             client_operation_id,
             creator_authority.clone(),
         )?;
+        if creation.request().native_genesis_authority.is_none() {
+            let now = chrono::Utc::now().timestamp();
+            let (observed, keyring) = repo.pinned_owner_observation(now).map_err(native_error)?;
+            let owner =
+                repo::verify_account_owner_observation(&observed, now).map_err(native_error)?;
+            let digest = heddleco_capability_verifier::creation::spool_genesis_digest(
+                keyring
+                    .owner_genesis()
+                    .signed()
+                    .genesis
+                    .as_ref()
+                    .ok_or_else(|| native_error("Spool genesis absent"))?,
+            )
+            .map_err(native_error)?;
+            let initial = keyring.owner_state().owner_id();
+            let selection = heddleco_capability_verifier::import_delegation::Selection {
+                owner: &owner,
+                keyring: &keyring,
+                spool_genesis_digest: &digest,
+                initial_owner_id: &initial,
+                limits: heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                    .map_err(native_error)?,
+            };
+            let original = creation
+                .request()
+                .thread_genesis
+                .as_ref()
+                .ok_or_else(|| native_error("native genesis absent"))?;
+            let binding = match replica.genesis().map_err(replica_err)?.owner {
+                GenesisOwner::LocalKey(_) => {
+                    let signer = repo::identity::load_local_signer(
+                        &repo.heddle_dir().join(repo::identity::LOCAL_IDENTITY_FILE),
+                    )
+                    .ok_or_else(|| native_error("original local creator key unavailable"))?;
+                    crypto::native_witness::sign_genesis_authority(
+                        original,
+                        &creator_authority,
+                        &selection,
+                        now,
+                        signer.as_ref(),
+                    )
+                    .map_err(native_error)?
+                }
+                GenesisOwner::Account(_) => {
+                    let signer = self
+                        .claim_proof_signer()
+                        .ok_or_else(|| native_error("original creator key unavailable"))?;
+                    crypto::native_witness::sign_genesis_authority(
+                        original,
+                        &creator_authority,
+                        &selection,
+                        now,
+                        signer,
+                    )
+                    .map_err(native_error)?
+                }
+            };
+            replica
+                .retain_native_genesis_binding(&binding)
+                .map_err(replica_err)?;
+            creation = creation
+                .with_native_authority(binding)
+                .map_err(native_error)?;
+        }
         let remote = self.native().await.map_err(native_error)?;
         let started = remote
             .api
@@ -495,6 +661,75 @@ impl HostedClient {
             ));
         }
         Ok((reference, creator_authority))
+    }
+
+    async fn ensure_native_hosting_claim(
+        &self,
+        repo: &Repository,
+        replica: &ThreadReplica,
+    ) -> Result<(), ProtocolError> {
+        let genesis = replica.genesis().map_err(replica_err)?;
+        let GenesisOwner::LocalKey(prior_local_key) = genesis.owner else {
+            return Ok(());
+        };
+        if !replica.ownership_claims().map_err(replica_err)?.is_empty() {
+            return Ok(());
+        }
+        let (account, envelope, agent_id) = self.current_creator_authority().await?;
+        let acceptor = self
+            .claim_proof_signer()
+            .ok_or_else(|| native_error("hosting claim requires the accepting publisher key"))?;
+        let local = repo::identity::load_local_signer(
+            &repo.heddle_dir().join(repo::identity::LOCAL_IDENTITY_FILE),
+        )
+        .ok_or_else(|| native_error("hosting claim requires the original local creator key"))?;
+        let now = chrono::Utc::now().timestamp();
+        let (_, pinned) = repo.pinned_owner_observation(now).map_err(native_error)?;
+        let authority = repo::device_authority::load(&repo::identity::heddle_home_dir(), now)
+            .map_err(native_error)?;
+        let frontier = replica
+            .frontier_page(
+                objects::object::thread_replication::ThreadFacet::Source,
+                None,
+                129,
+            )
+            .map_err(replica_err)?;
+        if frontier.len() > 128 {
+            return Err(native_error(
+                "ownership claim source frontier exceeds 128 heads",
+            ));
+        }
+        let claim = objects::object::thread_replication::ownership_claim::ThreadOwnershipClaim {
+            version: 1,
+            thread: replica.thread_id(),
+            prior_local_key,
+            accepting_publisher: acceptor.public_key().try_into().map_err(native_error)?,
+            acceptance: objects::object::thread_replication::SourceAuthor::account(
+                genesis.spool.parse().map_err(native_error)?,
+                CollaborationActor {
+                    principal_id: account,
+                    agent_id,
+                },
+                envelope,
+            )
+            .map_err(native_error)?,
+            source_frontier: frontier.into_iter().collect(),
+        };
+        let signed = crypto::thread_ownership_claim::SignedOwnershipClaim::sign(
+            &claim,
+            local.as_ref(),
+            acceptor,
+        )
+        .map_err(native_error)?;
+        replica
+            .claim_ownership(
+                &signed,
+                &authority,
+                &pinned.wire().canonical_spool_path_segments.join("/"),
+                now,
+            )
+            .map_err(replica_err)?;
+        Ok(())
     }
 
     async fn ensure_hosted_thread(
@@ -565,10 +800,37 @@ impl HostedClient {
             });
         }
         let started = Instant::now();
+        // Select ownership from the authenticated resource view before any
+        // creator binding or carrier is produced. Incoming proof histories
+        // cannot supply this pin.
+        let overview = self.native_spool_overview(repo_path).await?;
+        let spool = overview
+            .r#ref
+            .as_ref()
+            .ok_or_else(|| native_error("Spool absent"))?;
+        if native.genesis().map_err(replica_err)?.spool != spool.id {
+            return Err(native_error(
+                "local Thread Spool differs from selected publication Spool",
+            ));
+        }
+        let owner = self.observed_owner_state(Some(spool.clone())).await?;
+        repo.verify_and_pin_owner_observation(
+            overview
+                .owner_genesis
+                .as_ref()
+                .ok_or_else(|| native_error("Spool owner genesis absent"))?,
+            &owner,
+            spool.id.parse().map_err(native_error)?,
+            &overview.path_segments,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(native_error)?;
         let start_set = hosted_start_replicas(repo, target_thread)?;
         let mut receipt = None;
         for name in &start_set.names {
             let state = named_replica_state(repo, name, target_thread, local_state)?;
+            self.ensure_native_hosting_claim(repo, &repo.native_thread(name).map_err(replica_err)?)
+                .await?;
             let start_id = operation_id(START, String::new());
             let (reference, creator_authority) = self
                 .ensure_hosted_thread(repo, repo_path, name, state, start_id)
@@ -814,11 +1076,40 @@ impl HostedClient {
             .await
             .map_err(native_error)?;
         }
+        let mut native_authority = replica.hybrid_native_bundle().map_err(replica_err)?;
+        if import_authority.is_some() && native_authority.is_some() {
+            return Err(native_error(api::hybrid_codec::Reject::Protocol));
+        }
+        if let Some(bundle) = &mut native_authority {
+            use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+            let root = self
+                .hosted_root()
+                .ok_or_else(|| native_error(api::hybrid_codec::Reject::Root))?;
+            let trust = HostedTrust::open(repo.heddle_dir(), root.authority(), SystemClock)
+                .map_err(replica_err)?;
+            let snapshot = trust.snapshot().map_err(replica_err)?;
+            let jobs = snapshot
+                .known_job_associations
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            self.refresh_native_proofs(
+                bundle,
+                snapshot.previous.as_ref(),
+                snapshot.root_epoch,
+                snapshot.clock_floor_millis,
+                &jobs,
+            )
+            .await
+            .map_err(native_error)?;
+        }
+        let native_authority = native_authority.map(std::sync::Arc::new);
         let import_authority = import_authority.map(std::sync::Arc::new);
         let operations = thread_api::authority_admission::batches(
             stored
                 .into_iter()
                 .map(|item| thread_api::replication::store::ReceivedOperation {
+                    native_authority: native_authority.clone(),
                     import_authority: import_authority.clone(),
                     original: item.original,
                     authority_admission: item.authority_admission,
@@ -851,7 +1142,7 @@ impl HostedClient {
             kind: EndpointKind::Device as i32,
             public_key: self.connection.endpoint_id().as_bytes().to_vec(),
         };
-        remote
+        let receipt = remote
             .thread(reference.clone())
             .publish_source(
                 &pack,
@@ -891,7 +1182,144 @@ impl HostedClient {
                     frame_limit,
                 },
                 other => native_error(other),
-            })
+            })?;
+        if matches!(
+            receipt.outcome,
+            Some(contract::publication_receipt::Outcome::Accepted(_))
+        ) {
+            self.retain_publication_proof(repo, &replica, &originals, &receipt)
+                .await?;
+        }
+        Ok(receipt)
+    }
+
+    async fn retain_publication_proof(
+        &self,
+        repo: &Repository,
+        replica: &ThreadReplica,
+        originals: &PublicationOriginals,
+        receipt: &contract::PublicationReceipt,
+    ) -> Result<(), ProtocolError> {
+        use repo::thread_replication::hosted_trust::{
+            HostedTrust, RootSelection, SystemClock, select_root, select_spool,
+        };
+        use thread_api::hybrid::authority::{AcceptedHistory, PublicProof, SelectedAuthority};
+        let mut proof = match (&receipt.import_authority, &receipt.native_authority) {
+            (Some(b), None) => PublicProof::from(b.clone()),
+            (None, Some(b)) => PublicProof::from(b.clone()),
+            _ => return Err(native_error(thread_api::fetch::Error::HostedTrustRequired)),
+        };
+        let reference = receipt
+            .thread
+            .as_ref()
+            .ok_or_else(|| native_error("publication Thread absent"))?;
+        if overview_thread_id_from_ref(reference)? != replica.thread_id() {
+            return Err(native_error("publication receipt selects another Thread"));
+        }
+        let revision = receipt
+            .revision
+            .as_ref()
+            .ok_or_else(|| native_error("publication revision absent"))?;
+        let descriptor = self
+            .hosted_root()
+            .ok_or_else(|| native_error(api::hybrid_codec::Reject::Root))?
+            .clone();
+        let root = RootSelection {
+            authority: descriptor.authority().into(),
+            root_id: descriptor.root_id().into(),
+            public_key: *descriptor.public_key(),
+        };
+        let now = chrono::Utc::now().timestamp();
+        let (_, pinned) = repo.pinned_owner_observation(now).map_err(native_error)?;
+        let history = AcceptedHistory::from_public(
+            &proof,
+            &pinned,
+            now,
+            heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                .map_err(native_error)?,
+        )
+        .map_err(native_error)?;
+        select_root(repo.heddle_dir(), &root).map_err(replica_err)?;
+        select_spool(
+            repo.heddle_dir(),
+            pinned.owner_genesis().spool_uuid(),
+            *history.genesis(),
+            *history.initial_owner(),
+        )
+        .map_err(replica_err)?;
+        let trust = std::sync::Arc::new(
+            HostedTrust::open(repo.heddle_dir(), &root.authority, SystemClock)
+                .map_err(replica_err)?,
+        );
+        let snapshot = trust.snapshot().map_err(replica_err)?;
+        let jobs = snapshot
+            .known_job_associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        match &mut proof {
+            PublicProof::Import(b) => self
+                .refresh_import_proofs(
+                    b,
+                    snapshot.previous.as_ref(),
+                    snapshot.root_epoch,
+                    snapshot.clock_floor_millis,
+                    &jobs,
+                )
+                .await
+                .map_err(native_error)?,
+            PublicProof::Native(b) => self
+                .refresh_native_proofs(
+                    b,
+                    snapshot.previous.as_ref(),
+                    snapshot.root_epoch,
+                    snapshot.clock_floor_millis,
+                    &jobs,
+                )
+                .await
+                .map_err(native_error)?,
+        };
+        let deadline = self
+            .current_source_disclosure_deadline(reference, revision)
+            .await?;
+        let authority = SelectedAuthority::from_proof(
+            history,
+            proof.clone(),
+            move |_: &PublicProof,
+                  now: i64,
+                  _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
+                descriptor
+                    .require_current()
+                    .map_err(|e| repo::thread_replication::Error::Invalid(e.to_string()))?;
+                if now >= deadline {
+                    return Err(repo::thread_replication::Error::Hybrid(
+                        api::hybrid_codec::Reject::Expired,
+                    ));
+                }
+                Ok(())
+            },
+        );
+        let records = originals
+            .geneses
+            .iter()
+            .filter_map(|g| g.genesis.clone())
+            .chain(
+                originals
+                    .operations
+                    .iter()
+                    .flat_map(|b| b.operations.clone()),
+            )
+            .collect::<Vec<_>>();
+        let backend = thread_api::replication::native::LocalReplica::new(
+            replica.clone(),
+            std::sync::Arc::new(repo.store().clone()),
+        )
+        .with_hosted_authority(
+            repo.heddle_dir().to_owned(),
+            trust,
+            std::sync::Arc::new(authority),
+        );
+        backend.recheck_proof(&proof, &records).map_err(replica_err)
     }
 
     pub async fn pull_profiled(
@@ -1210,10 +1638,10 @@ impl HostedClient {
         use repo::thread_replication::hosted_trust::{
             HostedTrust, RootSelection, SystemClock, select_root, select_spool,
         };
-        use thread_api::hybrid::authority::{AcceptedHistory, SelectedAuthority};
+        use thread_api::hybrid::authority::{AcceptedHistory, PublicProof, SelectedAuthority};
         let now = chrono::Utc::now().timestamp();
-        if staged.import_authority().is_none() {
-            return staged.install(repo, now).map_err(native_error);
+        if staged.import_authority().is_none() && staged.native_authority().is_none() {
+            return Err(native_error(thread_api::fetch::Error::HostedTrustRequired));
         }
         let ready = staged.ready();
         let reference = ready
@@ -1253,13 +1681,15 @@ impl HostedClient {
             root_id: descriptor.root_id().into(),
             public_key: *descriptor.public_key(),
         };
-        let bundle = staged
-            .import_authority()
-            .ok_or_else(|| native_error("import authority absent"))?;
+        let bundle = match (staged.import_authority(), staged.native_authority()) {
+            (Some(b), None) => PublicProof::from(b.clone()),
+            (None, Some(b)) => PublicProof::from(b.clone()),
+            _ => return Err(native_error(api::hybrid_codec::Reject::Protocol)),
+        };
         let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
             .map_err(native_error)?;
-        let history = AcceptedHistory::from_selected_spool(bundle, &pinned, now, limits)
-            .map_err(native_error)?;
+        let history =
+            AcceptedHistory::from_public(&bundle, &pinned, now, limits).map_err(native_error)?;
         select_root(repo.heddle_dir(), &root).map_err(replica_err)?;
         select_spool(
             repo.heddle_dir(),
@@ -1276,59 +1706,40 @@ impl HostedClient {
             .iter()
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        self.refresh_staged_import_proofs(
-            &mut staged,
-            snapshot.previous.as_ref(),
-            snapshot.root_epoch,
-            snapshot.clock_floor_millis,
-            &job_keys,
-        )
-        .await
-        .map_err(native_error)?;
-        // Observe the exact selected revision with this connection's current
-        // credential after asynchronous proof preparation. Its signed caller
-        // scope and deadline remain distinct from historical import permission.
-        let remote = self.native().await.map_err(native_error)?;
-        let mut observation = remote
-            .observe::<rpc::ThreadServiceObserveThread>(
-                contract::ObserveThreadRequest {
-                    thread: Some(reference.clone()),
-                    source: Some(revision),
-                    sections: vec![contract::ThreadSection::Overview as i32],
-                    observe: Some(once_observe()),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await
-            .map_err(native_error)?;
-        let batch = observation
-            .next_commit()
-            .await
-            .map_err(native_error)?
-            .ok_or_else(|| native_error("disclosure checkpoint absent"))?;
-        if !batch.changes.iter().any(|event| matches!(event, contract::thread_event::Payload::Overview(overview) if overview.r#ref.as_ref() == Some(&reference))) {
-            return Err(native_error("current disclosure did not select this Thread"));
-        }
-        let deadline = observation
-            .authority_valid_until()
-            .ok_or_else(|| native_error("current disclosure deadline absent"))?;
-        if !(0..1_000_000_000).contains(&deadline.nanos) {
-            return Err(native_error("invalid disclosure deadline"));
-        }
-        let deadline_millis = deadline
-            .seconds
-            .checked_mul(1000)
-            .and_then(|n| n.checked_add(i64::from(deadline.nanos) / 1_000_000))
-            .ok_or_else(|| native_error("disclosure deadline overflow"))?;
-        let bundle = staged
-            .import_authority()
-            .ok_or_else(|| native_error("import authority absent"))?
-            .clone();
-        let authority = SelectedAuthority::new(
+        match bundle {
+            PublicProof::Import(_) => self
+                .refresh_staged_import_proofs(
+                    &mut staged,
+                    snapshot.previous.as_ref(),
+                    snapshot.root_epoch,
+                    snapshot.clock_floor_millis,
+                    &job_keys,
+                )
+                .await
+                .map_err(native_error)?,
+            PublicProof::Native(_) => self
+                .refresh_staged_native_proofs(
+                    &mut staged,
+                    snapshot.previous.as_ref(),
+                    snapshot.root_epoch,
+                    snapshot.clock_floor_millis,
+                    &job_keys,
+                )
+                .await
+                .map_err(native_error)?,
+        };
+        let deadline_millis = self
+            .current_source_disclosure_deadline(&reference, &revision)
+            .await?;
+        let bundle = match (staged.import_authority(), staged.native_authority()) {
+            (Some(b), None) => PublicProof::from(b.clone()),
+            (None, Some(b)) => PublicProof::from(b.clone()),
+            _ => return Err(native_error(api::hybrid_codec::Reject::Protocol)),
+        };
+        let authority = SelectedAuthority::from_proof(
             history,
             bundle,
-            move |_: &contract::ImportPublicProofBundleV1,
+            move |_: &PublicProof,
                   now: i64,
                   _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
                 descriptor
@@ -1345,6 +1756,49 @@ impl HostedClient {
         staged
             .install_hosted(repo, &trust, &authority, chrono::Utc::now().timestamp())
             .map_err(native_error)
+    }
+
+    async fn current_source_disclosure_deadline(
+        &self,
+        reference: &ThreadRef,
+        revision: &RevisionRef,
+    ) -> Result<i64, ProtocolError> {
+        // Observe the exact selected revision with this connection's current
+        // credential after asynchronous proof preparation. Its signed caller
+        // scope and deadline remain distinct from historical import permission.
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::ThreadServiceObserveThread>(
+                contract::ObserveThreadRequest {
+                    thread: Some(reference.clone()),
+                    source: Some(revision.clone()),
+                    sections: vec![contract::ThreadSection::Overview as i32],
+                    observe: Some(once_observe()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_error)?
+            .ok_or_else(|| native_error("disclosure checkpoint absent"))?;
+        if !batch.changes.iter().any(|event| matches!(event, contract::thread_event::Payload::Overview(overview) if overview.r#ref.as_ref() == Some(reference))) {
+            return Err(native_error("current disclosure did not select this Thread"));
+        }
+        let deadline = observation
+            .authority_valid_until()
+            .ok_or_else(|| native_error("current disclosure deadline absent"))?;
+        if !(0..1_000_000_000).contains(&deadline.nanos) {
+            return Err(native_error("invalid disclosure deadline"));
+        }
+        deadline
+            .seconds
+            .checked_mul(1000)
+            .and_then(|n| n.checked_add(i64::from(deadline.nanos) / 1_000_000))
+            .ok_or_else(|| native_error("disclosure deadline overflow"))
     }
 
     pub async fn get_thread_metadata(
@@ -1663,16 +2117,18 @@ fn start_request_from_native_replica(
             "stored genesis differs from local Thread identity".into(),
         ));
     }
-    let record = replica
-        .genesis_record()
-        .map_err(replica_err)?
-        .genesis
-        .ok_or_else(|| {
-            ProtocolError::InvalidState("local Thread genesis record is missing".into())
-        })?;
-    let creation =
+    let retained = replica.genesis_record().map_err(replica_err)?;
+    let record = retained.genesis.clone().ok_or_else(|| {
+        ProtocolError::InvalidState("local Thread genesis record is missing".into())
+    })?;
+    let mut creation =
         ThreadCreation::from_signed_with_authority(client_operation_id, record, creator_authority)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    if let Some(binding) = retained.native_genesis_authority {
+        creation = creation
+            .with_native_authority(binding)
+            .map_err(native_error)?;
+    }
     let submitted =
         creation.request().thread_genesis.as_ref().ok_or_else(|| {
             ProtocolError::InvalidState("StartThread request has no genesis".into())
@@ -1714,7 +2170,14 @@ where
 {
     match replica.genesis().map_err(replica_err)?.owner {
         GenesisOwner::LocalKey(_) => Ok(Vec::new()),
-        GenesisOwner::Account(_) => account_authority().await,
+        GenesisOwner::Account(_) => {
+            let original = replica.genesis_record().map_err(replica_err)?;
+            if !original.creator_authority.is_empty() {
+                Ok(original.creator_authority)
+            } else {
+                account_authority().await
+            }
+        }
     }
 }
 

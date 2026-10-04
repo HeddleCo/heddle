@@ -193,6 +193,7 @@ for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
 }
 
 const productionFixture = JSON.parse(readFileSync(path.join(repositoryRoot, "conformance", "fixtures", "production-v1.json"), "utf8"));
+productionFixture.cases.push(...JSON.parse(readFileSync(path.join(repositoryRoot, "conformance", "fixtures", "native-genesis-v1.json"), "utf8")).cases);
 const productionCases: CorpusCase[] = productionFixture.cases.map((c: JsonRecord) => ({
   id: `production-${String(c.id)}`, fixture_kind: "production", fixture_json: JSON.stringify(c),
 }));
@@ -269,6 +270,7 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
     try {
       let value: unknown;
       switch (c.api) {
+        case "native-genesis": value = wasm.verifyNativeGenesisAuthority(bytes("binding_hex"), bytes("original_hex"), bytes("envelope_hex"), bytes("keyring_hex"), bytes("current_owner_hex"), bytes("initial_owner_hex"), bytes("spool_genesis_hex"), String(c.revoked_keys_json), String(c.revoked_credentials_json), now, ttl); break;
         case "owner-root": value = wasm.verifyOwnerRoot(bytes("root_hex")); break;
         case "resource-keyring": value = wasm.verifyResourceKeyring(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
         case "transfer-chain": value = wasm.verifyOwnershipTransferChain(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;

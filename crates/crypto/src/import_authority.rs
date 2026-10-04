@@ -466,6 +466,30 @@ fn record_signature(record: &wire::SignedRecord, key: &[u8]) -> Result<Vec<u8>> 
 
 /// Accepted native owner context. Policy and disclosure are independently
 /// selected caller gates; witness observation authorizes only exact history.
+pub enum OriginalGeneses<'a> {
+    Import(&'a [wire::ImportGenesisWitnessV1]),
+    Native(&'a [wire::NativeGenesisWitnessV1]),
+}
+impl OriginalGeneses<'_> {
+    fn envelope(&self, id: &heddle_object_model::object::ContentHash) -> Result<&[u8]> {
+        let matches = |original: &Option<wire::SignedRecord>| {
+            original.as_ref().is_some_and(|g| {
+                verify_native_genesis(g).is_ok_and(|(_, g)| g.id().is_ok_and(|g| &g == id))
+            })
+        };
+        match self {
+            Self::Import(payloads) => payloads
+                .iter()
+                .find(|p| matches(&p.original_genesis))
+                .map(|p| p.creator_authority_envelope.as_slice()),
+            Self::Native(payloads) => payloads
+                .iter()
+                .find(|p| matches(&p.original_genesis))
+                .map(|p| p.creator_authority_envelope.as_slice()),
+        }
+        .ok_or(Reject::BoundaryAcceptance.into())
+    }
+}
 pub struct NativeAuthorityContext<'a> {
     pub owner: &'a heddleco_capability_verifier::VerifiedOwnerState,
     pub spool_uuid: uuid::Uuid,
@@ -473,7 +497,7 @@ pub struct NativeAuthorityContext<'a> {
     pub transfer_sequence: u64,
     pub spool_path: &'a str,
     pub witness_set: &'a VerifiedWitnessSet,
-    pub original_geneses: &'a [wire::ImportGenesisWitnessV1],
+    pub original_geneses: OriginalGeneses<'a>,
     pub known_job_associations: &'a [(Vec<u8>, Vec<u8>)],
     pub forbidden_authority_keys: &'a [Vec<u8>],
 }
@@ -624,16 +648,7 @@ fn verify_boundary_selection(
             let (descriptor, kind, method) = match &subject {
                 ManifestSubject::Genesis(id) => {
                     let genesis = closure.genesis(id)?;
-                    let payload = context
-                        .original_geneses
-                        .iter()
-                        .find(|p| {
-                            p.original_genesis.as_ref().is_some_and(|g| {
-                                verify_native_genesis(g)
-                                    .is_ok_and(|(_, g)| g.id().is_ok_and(|g| &g == id))
-                            })
-                        })
-                        .ok_or(Reject::BoundaryAcceptance)?;
+                    let envelope = context.original_geneses.envelope(id)?;
                     let receipt_body = crate::thread_genesis_admission::SignedGenesisAdmission {
                         canonical: receipt.canonical_record.clone(),
                         signature: receipt.signatures[0].signature.clone(),
@@ -642,15 +657,12 @@ fn verify_boundary_selection(
                     .verify_signature()?;
                     receipt_body.authorize_with_acceptance(
                         genesis,
-                        &payload.creator_authority_envelope,
+                        envelope,
                         &trust,
                         Some(&acceptance),
                     )?;
                     (
-                        OriginalManifestEntry::from_genesis(
-                            genesis,
-                            &payload.creator_authority_envelope,
-                        )?,
+                        OriginalManifestEntry::from_genesis(genesis, envelope)?,
                         BoundarySubjectKind::AccountGenesis,
                         "/heddle.api.v1alpha2.ThreadService/StartThread",
                     )
@@ -790,6 +802,36 @@ pub fn verify_genesis_payload_at_boundary(
         false
     };
     verify_genesis_payload_inner(payload, evidence, delegation, boundary, revoked)
+}
+
+/// Native genesis boundary acceptance retains every exact original and receipt.
+pub(crate) fn verify_native_genesis_boundary(
+    payload: &wire::NativeGenesisWitnessV1,
+    evidence: &WitnessEvidence,
+    closure: &NativeClosure,
+    context: &NativeAuthorityContext<'_>,
+    revoked: &impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
+) -> Result<()> {
+    let statement = evidence.signed().body.as_ref().ok_or(Reject::Canonical)?;
+    let boundaries: Vec<_> = payload.boundary_acceptance.iter().cloned().collect();
+    let covered = verify_boundary_selection(&boundaries, statement, closure, context, revoked)?;
+    let binding = statement
+        .boundary_acceptance
+        .as_ref()
+        .ok_or(Reject::BoundaryAcceptance)?;
+    let (_, genesis) =
+        verify_native_genesis(payload.original_genesis.as_ref().ok_or(Reject::Canonical)?)?;
+    let id = genesis.id()?;
+    if !covered.get(&binding.acceptance_id).is_some_and(|subjects| {
+        subjects.contains(
+            &heddle_object_model::object::original_boundary_acceptance::ManifestSubject::Genesis(
+                id,
+            ),
+        )
+    }) {
+        return Err(Reject::BoundaryAcceptance.into());
+    }
+    Ok(())
 }
 
 fn native_authority(

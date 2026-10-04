@@ -22,6 +22,7 @@ mod integration;
 pub mod listing;
 mod local;
 pub mod metadata;
+pub mod native_witness;
 pub mod ownership_claim;
 #[cfg(test)]
 mod ownership_claim_tests;
@@ -454,6 +455,11 @@ impl ThreadReplica {
                 });
             }
         }
+        for record in &mut ownership_claims {
+            record
+                .signatures
+                .sort_by(|a, b| a.public_key.cmp(&b.public_key));
+        }
         let mut ownership_resolution_admissions = Vec::new();
         if let Some(receipt) = self.ownership_resolution_admission()? {
             let statement = receipt.verify_signature()?;
@@ -471,19 +477,22 @@ impl ThreadReplica {
             });
         }
         Ok(wire::ThreadGenesisRecord {
+            native_genesis_authority: self.connect()?.query_row("SELECT binding FROM hosted_native_genesis_bindings WHERE thread=?1", [self.thread.as_bytes()], |r| r.get::<_, Vec<u8>>(0)).optional()?.map(|bytes| api::hybrid_codec::strict_decode(&bytes, 65536)).transpose()?,
             boundary_acceptances: boundary_acceptances.into_values().collect(),
             ownership_claims,
             ownership_claim_admissions,
             ownership_resolutions: self.ownership_resolution()?.into_iter().map(|resolution| {
                 let value = objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.canonical)?;
-                Ok(wire::SignedRecord {
+                let mut record = wire::SignedRecord {
                     format: objects::object::thread_replication::ownership_resolution::FORMAT.into(),
                     canonical_record: resolution.canonical,
                     signatures: vec![
                         wire::RecordSignature { public_key: value.local_owner.to_vec(), signature: resolution.local_signature },
                         wire::RecordSignature { public_key: value.accepting_publisher.to_vec(), signature: resolution.acceptance_signature },
                     ],
-                })
+                };
+                record.signatures.sort_by(|a, b| a.public_key.cmp(&b.public_key));
+                Ok(record)
             }).collect::<Result<Vec<_>>>()?,
             ownership_resolution_admissions,
             genesis: Some(wire::SignedRecord {

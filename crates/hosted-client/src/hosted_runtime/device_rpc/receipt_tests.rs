@@ -106,6 +106,7 @@ pub(super) async fn roundtrip(
     assert!(matches!(
         local
             .receive(thread_api::replication::store::ReceivedOperation {
+                native_authority: None,
                 original: original.clone(),
                 authority_admission: Some(
                     thread_api::authority_admission::decode(&receipt).expect("receipt")
@@ -169,6 +170,7 @@ pub(super) async fn roundtrip(
         .send(&ReplicateThreadRequest {
             body: Some(replicate_thread_request::Body::Operations(
                 ReplicationOperations {
+                    native_authority: None,
                     import_authority: None,
                     boundary_acceptances: Vec::new(),
                     operations: vec![wire_original.clone()],

@@ -56,7 +56,7 @@ impl SignedOwnershipAcceptance {
 impl SignedOwnershipClaim {
     pub fn sign(
         value: &ThreadOwnershipClaim,
-        local: &impl Signer,
+        local: &(impl Signer + ?Sized),
         acceptor: &impl Signer,
     ) -> Result<Self, Error> {
         if local.public_key() != value.prior_local_key

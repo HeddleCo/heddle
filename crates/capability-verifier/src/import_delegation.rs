@@ -126,7 +126,21 @@ impl VerifiedImportDelegation {
     }
 }
 
-fn expectation(selection: &Selection<'_>, now: i64) -> Result<(ImportIdentityV1, Vec<u8>, i64)> {
+/// Select the exact job-independent Spool and owner lineage from verified public history.
+pub fn native_identity(
+    selection: &Selection<'_>,
+    now: i64,
+) -> Result<(ImportIdentityV1, Vec<u8>, i64)> {
+    selection
+        .keyring
+        .verify_current_owner(selection.owner, now, selection.limits)?;
+    selection
+        .owner
+        .issuer_at(&selection.owner.state_hash(), now)?;
+    native_lineage(selection)
+}
+/// Recompute retained lineage commitments without authorizing current work.
+pub fn native_lineage(selection: &Selection<'_>) -> Result<(ImportIdentityV1, Vec<u8>, i64)> {
     let keyring = selection.keyring;
     let genesis = keyring
         .owner_genesis()
@@ -140,16 +154,12 @@ fn expectation(selection: &Selection<'_>, now: i64) -> Result<(ImportIdentityV1,
     {
         return Err(Error::Hybrid(contract::Reject::Root));
     }
-    keyring.verify_current_owner(selection.owner, now, selection.limits)?;
     let owner = selection.owner;
     let root = owner
         .signed_root()
         .root
         .as_ref()
         .ok_or_else(|| Error::BrokenChain("verified owner root missing".into()))?;
-    // This requires the active owner issuer. Historical callers supply the
-    // exact accepted state, rather than reviving an old issuer in today's state.
-    owner.issuer_at(&owner.state_hash(), now)?;
     let mut hashes = BTreeSet::from([
         keyring.owner_state().state_hash().to_vec(),
         owner.state_hash().to_vec(),
@@ -213,7 +223,7 @@ fn verify_at(
             return Err(Error::Hybrid(contract::Reject::KeyRole));
         }
     }
-    let (identity, digest, expiry) = expectation(&context.selection, now)?;
+    let (identity, digest, expiry) = native_identity(&context.selection, now)?;
     let mut forbidden = context.forbidden_job_keys.to_vec();
     forbidden.extend(context.selection.owner.authority_public_keys());
     forbidden.extend(context.selection.keyring.authority_public_keys().cloned());
@@ -311,7 +321,7 @@ pub fn verify_historical(
         return Err(Error::Hybrid(contract::Reject::Scope));
     }
     let (identity, _, _) =
-        expectation(&context.selection, statement.observed_at_unix_millis / 1000)?;
+        native_identity(&context.selection, statement.observed_at_unix_millis / 1000)?;
     if statement.spool_uuid != identity.spool_uuid
         || statement.spool_genesis_digest != identity.spool_genesis_digest
         || statement.owner_id != identity.owner_id

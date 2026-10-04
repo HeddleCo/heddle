@@ -1646,6 +1646,7 @@ async fn serve_publication(
                     &v2::PublishContentServerFrame {
                         body: Some(v2::publish_content_server_frame::Body::Receipt(
                             v2::PublicationReceipt {
+                                native_authority: None,
                                 import_authority: None,
                                 client_operation_id: opening.client_operation_id,
                                 destination: open.destination,

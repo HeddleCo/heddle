@@ -315,6 +315,7 @@ async fn boundary_native_receive_requires_selected_witness_binding() {
     ));
     batch = crate::authority_admission::batches(
         [ReceivedOperation {
+            native_authority: None,
             original: signed,
             authority_admission: Some(receipt),
             import_authority: None,

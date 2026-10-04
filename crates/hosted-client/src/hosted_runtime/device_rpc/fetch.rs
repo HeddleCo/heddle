@@ -131,7 +131,17 @@ impl DeviceRpc {
         if let Some(bundle) = &mut import_authority {
             self.refresh_export_bundle(&session, bundle).await?;
         }
-        let hosted = if let Some(bundle) = &import_authority {
+        let mut native_authority = selected.hybrid_native_bundle()?;
+        if let Some(bundle) = &mut native_authority {
+            self.refresh_native_export_bundle(&session, bundle).await?;
+        }
+        let proof = match (&import_authority, &native_authority) {
+            (Some(b), None) => Some(thread_api::hybrid::authority::PublicProof::from(b.clone())),
+            (None, Some(b)) => Some(thread_api::hybrid::authority::PublicProof::from(b.clone())),
+            (None, None) => None,
+            _ => bail!("conflicting hosted authority carriers"),
+        };
+        let hosted = if let Some(bundle) = &proof {
             api::import_authority::require_hybrid_peer(open.protocol.as_ref())?;
             Some(self.hosted_backend(
                 thread_api::replication::native::LocalReplica::new(
@@ -144,7 +154,7 @@ impl DeviceRpc {
         } else {
             None
         };
-        let ownership = if import_authority.is_some() {
+        let ownership = if proof.is_some() {
             Some(
                 repo::Repository::open(&session.spool.root)?
                     .pinned_owner_observation(chrono::Utc::now().timestamp())?,
@@ -155,7 +165,7 @@ impl DeviceRpc {
         let slot = self.content_work.clone().acquire_owned().await?;
         let home = self.home.clone();
         let admitted = session.clone();
-        let worker_import_authority = import_authority.clone();
+        let worker_proof = proof;
         let mut prepared = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             admitted.check_current(&home)?;
@@ -182,10 +192,10 @@ impl DeviceRpc {
                 }
                 // The worker owns preparation; this rechecks receiver time and
                 // the latest durable high-water before any public source frame.
-                hosted.recheck_selected(
-                    worker_import_authority
+                hosted.recheck_proof(
+                    worker_proof
                         .as_ref()
-                        .context("public import history absent")?,
+                        .context("public hosted history absent")?,
                     &records,
                 )?;
             }
@@ -206,6 +216,7 @@ impl DeviceRpc {
             packs: prepared.pack.artifacts().to_vec(),
             protocol: open.protocol,
             import_authority,
+            native_authority,
             owner_genesis: ownership
                 .as_ref()
                 .map(|(_, ring)| ring.owner_genesis().signed().clone()),
@@ -225,6 +236,7 @@ impl DeviceRpc {
         };
         ready.checkpoint = Some(checkpoint.clone());
         let ready_import_authority = ready.import_authority.clone();
+        let ready_native_authority = ready.native_authority.clone();
         let mut charged = 0u64;
         send_frame(
             &self.home,
@@ -264,6 +276,7 @@ impl DeviceRpc {
                 &session,
                 writer,
                 fetch_server_frame::Body::Operations(ReplicationOperations {
+                    native_authority: ready_native_authority.clone(),
                     boundary_acceptances: thread_api::boundary_acceptance::authority_evidence(
                         stored.authority_admission.as_ref(),
                     )?,

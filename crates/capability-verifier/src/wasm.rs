@@ -243,6 +243,43 @@ pub fn verify_import_delegation_binding(
     })
 }
 
+/// Verify the frozen creator binding and original StartThread capability.
+#[wasm_bindgen(js_name = verifyNativeGenesisAuthority, unchecked_return_type = "ImportSummary")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_native_genesis_authority_binding(
+    binding: &[u8],
+    original: &[u8],
+    envelope: &[u8],
+    keyring: &[u8],
+    current_owner: &[u8],
+    selected_initial_owner_id: &[u8],
+    selected_spool_genesis_digest: &[u8],
+    revoked_key_ids_json: &str,
+    revoked_credential_ids_json: &str,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
+) -> Result<JsValue, JsValue> {
+    let now: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let ttl: i64 = checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
+    let digest = crate::native_genesis::verify_bytes(
+        binding,
+        original,
+        envelope,
+        keyring,
+        current_owner,
+        selected_initial_owner_id,
+        selected_spool_genesis_digest,
+        revoked_key_ids_json,
+        revoked_credential_ids_json,
+        now,
+        ttl,
+    )
+    .map_err(verification_error)?;
+    object(&ImportSummary {
+        certificate_digest_hex: hex::encode(digest),
+    })
+}
+
 /// Exact crate version backing this generated package.
 #[wasm_bindgen(js_name = verifierVersion)]
 #[must_use]

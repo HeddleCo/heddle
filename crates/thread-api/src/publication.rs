@@ -178,7 +178,9 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 .map_err(|_| Error::Invalid("peer does not support HYBRID publication"))?;
         }
         if originals.operations.iter().any(|batch| {
-            batch.import_authority.is_some() && batch.import_authority != open.import_authority
+            (batch.import_authority.is_some() && batch.import_authority != open.import_authority)
+                || (batch.native_authority.is_some()
+                    && batch.native_authority != open.native_authority)
         }) {
             return Err(Error::Invalid(
                 "publication proof differs from negotiated opening",
@@ -355,7 +357,7 @@ fn validate_receipt(
         return Err(Error::Invalid("Open required"));
     };
     crate::hybrid::publication_receipt(&receipt).map_err(Error::Invalid)?;
-    if receipt.import_authority.is_some() {
+    if receipt.import_authority.is_some() || receipt.native_authority.is_some() {
         api::import_authority::require_hybrid_peer(open.protocol.as_ref())
             .map_err(|_| Error::Invalid("HYBRID receipt requires negotiated publication"))?;
     }
@@ -617,6 +619,7 @@ mod tests {
                                     .expect("inventory");
                             }
                             let mut receipt = PublicationReceipt {
+                                native_authority: None,
                                 client_operation_id: opening.client_operation_id.clone(),
                                 destination: open.destination.clone(),
                                 thread: open.thread.clone(),
@@ -728,6 +731,7 @@ mod tests {
                 ..Default::default()
             }],
             operations: vec![ReplicationOperations {
+                native_authority: None,
                 boundary_acceptances: Vec::new(),
                 operations: vec![record],
                 authority_admissions: vec![],
@@ -836,6 +840,7 @@ mod tests {
         let operations = crate::authority_admission::batches(
             staged.operations().iter().cloned().map(|original| {
                 crate::replication::store::ReceivedOperation {
+                    native_authority: None,
                     original,
                     authority_admission: None,
                     import_authority: Some(std::sync::Arc::new(bundle.clone())),
@@ -986,6 +991,7 @@ mod tests {
             panic!("opening")
         };
         let receipt = PublicationReceipt {
+            native_authority: None,
             client_operation_id: opening.client_operation_id.clone(),
             destination: open.destination.clone(),
             thread: open.thread.clone(),

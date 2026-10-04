@@ -69,10 +69,17 @@ impl DeviceRpc {
         let replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
         let revision = selected_revision(&session, &open)?;
         ensure!(
-            open.import_authority.is_some() || replica.hybrid_import_bundle()?.is_none(),
+            (open.import_authority.is_some() || replica.hybrid_import_bundle()?.is_none())
+                && (open.native_authority.is_some() || replica.hybrid_native_bundle()?.is_none()),
             "hosted publication requires its complete retained authority"
         );
-        let hosted = if let Some(bundle) = &open.import_authority {
+        let proof = match (&open.import_authority, &open.native_authority) {
+            (Some(b), None) => Some(thread_api::hybrid::authority::PublicProof::from(b.clone())),
+            (None, Some(b)) => Some(thread_api::hybrid::authority::PublicProof::from(b.clone())),
+            (None, None) => None,
+            _ => bail!("conflicting hosted authority carriers"),
+        };
+        let hosted = if let Some(bundle) = proof {
             Some(self.hosted_backend(
                 thread_api::replication::native::LocalReplica::new(
                     replica.clone(),
@@ -153,6 +160,7 @@ impl DeviceRpc {
                         checkpoint: Some(checkpoint.clone()),
                         protocol: open.protocol.clone(),
                         import_authority: open.import_authority.clone(),
+                        native_authority: open.native_authority.clone(),
                         budget: Some(ReadBudget {
                             max_items: 12_048,
                             max_frame_bytes: FRAME as u32,
@@ -318,6 +326,7 @@ impl DeviceRpc {
                     current: opening.revision.clone(),
                     protocol: opening.protocol.clone(),
                     import_authority: opening.import_authority.clone(),
+                    native_authority: opening.native_authority.clone(),
                     owner_genesis: Some(keyring.owner_genesis().signed().clone()),
                     ownership: Some(owner),
                     full_closure_available: true,
@@ -358,6 +367,7 @@ impl DeviceRpc {
                             ));
                         }
                         Ok(PublicationReceipt {
+                            native_authority: opening.native_authority.clone(),
                             client_operation_id: command_id,
                             destination: opening.destination.clone(),
                             thread: opening.thread.clone(),
@@ -390,6 +400,7 @@ impl DeviceRpc {
             }
             let policy_version = check_policy(&admitted, &replica, &opening)?;
             let receipt = PublicationReceipt {
+                native_authority: opening.native_authority.clone(),
                 client_operation_id: command_id,
                 destination: opening.destination.clone(),
                 thread: opening.thread.clone(),

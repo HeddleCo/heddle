@@ -188,10 +188,18 @@ impl HostedClient {
     }
 
     pub(super) async fn current_owner_state(&self) -> Result<contract::OwnerState, ProtocolError> {
+        self.observed_owner_state(None).await
+    }
+
+    pub(super) async fn observed_owner_state(
+        &self,
+        spool: Option<contract::SpoolRef>,
+    ) -> Result<contract::OwnerState, ProtocolError> {
         let remote = self.native().await.map_err(native_error)?;
         let mut observation = remote
             .observe::<rpc::OwnerAuthorizationServiceObserveOwnership>(
                 contract::ObserveOwnershipRequest {
+                    spool,
                     observe: Some(contract::ObserveOptions {
                         mode: contract::ObservationMode::Once as i32,
                         ..Default::default()

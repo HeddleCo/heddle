@@ -50,6 +50,7 @@ async fn security_f1_replacement_command_preserves_checkpoint_and_invalidates_re
     assert!(
         retained
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(f.bundle.clone()))
@@ -79,6 +80,7 @@ async fn security_f1_replacement_command_preserves_checkpoint_and_invalidates_re
     assert!(
         retained
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(f.bundle.clone()))
@@ -100,6 +102,7 @@ async fn security_f1_replacement_command_preserves_checkpoint_and_invalidates_re
         .expect("fresh B continuation");
     backend
         .receive(ReceivedOperation {
+            native_authority: None,
             original: f.original.clone(),
             authority_admission: None,
             import_authority: Some(Arc::new(bundle.clone())),
@@ -123,6 +126,7 @@ async fn security_f1_replacement_command_preserves_checkpoint_and_invalidates_re
     assert!(
         backend
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(changed))
@@ -148,6 +152,7 @@ async fn security_f1_replacement_command_preserves_checkpoint_and_invalidates_re
     assert!(
         backend
             .receive(ReceivedOperation {
+                native_authority: None,
                 original: f.original.clone(),
                 authority_admission: None,
                 import_authority: Some(Arc::new(resurrected))

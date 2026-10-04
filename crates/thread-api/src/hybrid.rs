@@ -3,8 +3,9 @@
 use api::heddle::api::common::ProtocolCompatibility;
 
 use crate::contract::{
-    FetchOpen, ImportPublicProofBundleV1, PublicationReceipt, PublishContentOpen, ReplicationOpen,
-    ReplicationOperations, ReplicationReady, StreamOpen, TransferReady,
+    FetchOpen, ImportPublicProofBundleV1, NativePublicProofBundleV1, PublicationReceipt,
+    PublishContentOpen, ReplicationOpen, ReplicationOperations, ReplicationReady, StreamOpen,
+    TransferReady,
 };
 
 #[cfg(feature = "native")]
@@ -12,6 +13,8 @@ pub mod authority;
 pub mod history;
 #[cfg(test)]
 mod history_tests;
+#[cfg(all(test, feature = "native"))]
+mod native_tests;
 #[cfg(test)]
 mod protocol_tests;
 pub type Rejection = &'static str;
@@ -59,17 +62,30 @@ pub fn bundle(value: Option<&ImportPublicProofBundleV1>) -> Result<(), Rejection
     }
     Ok(())
 }
+pub fn bundles(
+    imported: Option<&ImportPublicProofBundleV1>,
+    native: Option<&NativePublicProofBundleV1>,
+) -> Result<(), Rejection> {
+    api::native_witness::validate_carriers(imported, native).map_err(|_| {
+        if native.is_some() {
+            "incomplete or conflicting HYBRID native authority (api#307 cutover)"
+        } else {
+            "incomplete HYBRID import authority (api#307 cutover)"
+        }
+    })
+}
 fn carrier(
     protocol: Option<&ProtocolCompatibility>,
     value: Option<&ImportPublicProofBundleV1>,
+    native: Option<&NativePublicProofBundleV1>,
 ) -> Result<(), Rejection> {
     check_protocol(protocol)?;
-    if value.is_some() {
+    if value.is_some() || native.is_some() {
         api::import_authority::require_hybrid_peer(protocol).map_err(
             |_| "import authority requires negotiated HYBRID protocol (api#307 cutover)",
         )?;
     }
-    bundle(value)
+    bundles(value, native)
 }
 /// Bind support to both ends of this exact stream, including its first Ready.
 pub fn negotiated(
@@ -84,25 +100,47 @@ pub fn negotiated(
     Ok(())
 }
 pub fn operations(batch: &ReplicationOperations) -> Result<(), Rejection> {
-    bundle(batch.import_authority.as_ref())
+    bundles(
+        batch.import_authority.as_ref(),
+        batch.native_authority.as_ref(),
+    )
 }
 pub fn replication_open(open: &ReplicationOpen) -> Result<(), Rejection> {
-    carrier(open.protocol.as_ref(), open.import_authority.as_ref())
+    carrier(
+        open.protocol.as_ref(),
+        open.import_authority.as_ref(),
+        open.native_authority.as_ref(),
+    )
 }
 pub fn replication_ready(ready: &ReplicationReady) -> Result<(), Rejection> {
-    carrier(ready.protocol.as_ref(), ready.import_authority.as_ref())
+    carrier(
+        ready.protocol.as_ref(),
+        ready.import_authority.as_ref(),
+        ready.native_authority.as_ref(),
+    )
 }
 pub fn fetch_open(open: &FetchOpen) -> Result<(), Rejection> {
     check_protocol(open.protocol.as_ref())
 }
 pub fn transfer_ready(ready: &TransferReady) -> Result<(), Rejection> {
-    carrier(ready.protocol.as_ref(), ready.import_authority.as_ref())
+    carrier(
+        ready.protocol.as_ref(),
+        ready.import_authority.as_ref(),
+        ready.native_authority.as_ref(),
+    )
 }
 pub fn publish_open(open: &PublishContentOpen) -> Result<(), Rejection> {
-    carrier(open.protocol.as_ref(), open.import_authority.as_ref())
+    carrier(
+        open.protocol.as_ref(),
+        open.import_authority.as_ref(),
+        open.native_authority.as_ref(),
+    )
 }
 pub fn publication_receipt(receipt: &PublicationReceipt) -> Result<(), Rejection> {
-    bundle(receipt.import_authority.as_ref())
+    bundles(
+        receipt.import_authority.as_ref(),
+        receipt.native_authority.as_ref(),
+    )
 }
 pub fn stream_open(open: &StreamOpen) -> Result<(), Rejection> {
     check_protocol(open.protocol.as_ref())?;

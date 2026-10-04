@@ -296,7 +296,21 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             crate::hybrid::bundle(Some(bundle)).map_err(Error::Invalid)?;
             import_authority = Some(bundle);
         }
-        let protocol = if import_authority.is_some() {
+        let mut native_authority = None;
+        for bundle in originals
+            .operations
+            .iter()
+            .filter_map(|batch| batch.native_authority.as_ref())
+        {
+            if native_authority.is_some_and(|previous| previous != bundle) {
+                return Err(Error::Invalid(
+                    "publication originals have different native histories",
+                ));
+            }
+            native_authority = Some(bundle);
+        }
+        crate::hybrid::bundles(import_authority, native_authority).map_err(Error::Invalid)?;
+        let protocol = if import_authority.is_some() || native_authority.is_some() {
             api::import_authority::require_hybrid_peer(self.remote.description.protocol.as_ref())
                 .map_err(|_| {
                 Error::Invalid(
@@ -311,6 +325,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             client_operation_id: options.client_operation_id,
             body: Some(publish_content_client_frame::Body::Open(
                 PublishContentOpen {
+                    native_authority: native_authority.cloned(),
                     thread: Some(self.reference.clone()),
                     revision: Some(RevisionRef {
                         spool: self.reference.spool.clone(),

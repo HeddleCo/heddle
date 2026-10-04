@@ -168,6 +168,32 @@ pub(crate) async fn refresh_import_proofs(
     Ok(verified)
 }
 
+pub(crate) async fn refresh_native_proofs(
+    lookup: &HostedWitnessLookup,
+    bundle: &mut api::heddle::api::v1alpha2::NativePublicProofBundleV1,
+    selected: api::witness_trust::SetExpectation<'_>,
+    previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+    let signed = lookup.fetch_set().await?;
+    let now = selected.now_unix_millis;
+    let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
+    let mut prepared = bundle.clone();
+    thread_api::hybrid::history::complete_native_bundle(lookup, &verified, &mut prepared, now)
+        .await
+        .map_err(|error| match error {
+            thread_api::hybrid::history::Error::Rejected(error) => {
+                super::HostedError::Hybrid(error)
+            }
+            thread_api::hybrid::history::Error::Lookup(error) => error,
+            thread_api::hybrid::history::Error::NotFound => {
+                super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
+            }
+        })?;
+    prepared.witness_set = Some(signed);
+    thread_api::hybrid::history::replace_native_receiver_metadata(bundle, prepared)?;
+    Ok(verified)
+}
+
 impl thread_api::hybrid::history::HistoryProofLookup for HostedWitnessLookup {
     type Error = super::HostedError;
 

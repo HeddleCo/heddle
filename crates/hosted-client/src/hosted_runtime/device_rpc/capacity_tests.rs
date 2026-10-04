@@ -136,6 +136,7 @@ pub(super) async fn roundtrip(
             remote
                 .api
                 .call::<thread_api::rpc::ThreadServiceStartThread>(&StartThreadRequest {
+                    native_genesis_authority: None,
                     creator_authority: proof.clone(),
                     client_operation_id: uuid::Uuid::now_v7().to_string(),
                     spool: Some(spool.clone()),

@@ -392,22 +392,15 @@ fn verify_before_install_rejects_without_partial_repository_mutation() {
             .is_none(),
         "rejection must precede pack installation"
     );
-    // Passing control uses the same closure with the actual local owner.
-    let (directory, ready, operations, state) = installation_fixture(scratch.path());
-    let staged = validate(directory, ready, operations, vec![]).expect("valid structural source");
-    assert_eq!(
-        staged
-            .install(&repository, 1100)
-            .expect("authorized local source"),
-        state.id()
-    );
-    assert!(
-        repository
-            .store()
-            .get_state(&state.id())
-            .expect("source lookup")
-            .is_some()
-    );
+    // A local signature also needs witnessed hosting ownership on Weft.
+    let (directory, ready, operations, _) = installation_fixture(scratch.path());
+    let staged =
+        validate(directory, ready, operations, vec![]).expect("valid structural local source");
+    assert!(matches!(
+        staged.install(&repository, 1100),
+        Err(Error::HostedTrustRequired)
+    ));
+    // Witnessed passing controls exercise install_hosted in hybrid::native_tests.
 }
 
 #[cfg(feature = "native")]
@@ -450,7 +443,7 @@ fn structural_staging_never_authorizes_an_account_genesis() {
     validate(directory, ready, operations, vec![])
         .expect("local originals")
         .install(&repository, 1100)
-        .expect("local conversion remains available");
+        .expect_err("local originals on Weft still require hosted witness trust");
 }
 #[test]
 fn source_staging_keeps_original_proofs_and_releases_artifacts_twice() {
@@ -628,6 +621,7 @@ fn integrated_fixture(
             SignedOperation::sign(&source_op, &signer).expect("source signature"),
         ],
         vec![ThreadGenesisRecord {
+            native_genesis_authority: None,
             boundary_acceptances: Vec::new(),
             ownership_claims: vec![],
             ownership_claim_admissions: vec![],
@@ -711,6 +705,7 @@ fn publication_fixture(
     let originals = crate::publication::PublicationOriginals {
         geneses: vec![ready.thread_genesis.expect("original genesis")],
         operations: vec![ReplicationOperations {
+            native_authority: None,
             boundary_acceptances: Vec::new(),
             authority_admissions: vec![],
             import_authority: None,

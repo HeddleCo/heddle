@@ -18,6 +18,7 @@ pub struct ReceivedOperation {
     pub authority_admission: Option<SignedAuthorityAdmission>,
     /// Complete public evidence stays attached through staging, admission and
     /// relay. Its presence is not authority; the store verifies it at mutation.
+    pub native_authority: Option<Arc<crate::contract::NativePublicProofBundleV1>>,
     pub import_authority: Option<Arc<crate::contract::ImportPublicProofBundleV1>>,
 }
 impl From<SignedOperation> for ReceivedOperation {
@@ -26,6 +27,7 @@ impl From<SignedOperation> for ReceivedOperation {
             original,
             authority_admission: None,
             import_authority: None,
+            native_authority: None,
         }
     }
 }

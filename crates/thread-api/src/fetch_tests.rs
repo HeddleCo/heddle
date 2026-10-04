@@ -122,6 +122,7 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
         ),
         ownership: Some(OwnerState::default()),
         thread_genesis: Some(ThreadGenesisRecord {
+            native_genesis_authority: None,
             boundary_acceptances: Vec::new(),
             ownership_claims: vec![],
             ownership_claim_admissions: vec![],

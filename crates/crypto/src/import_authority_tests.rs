@@ -487,7 +487,7 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         transfer_sequence: 0,
         spool_path: "example",
         witness_set: &set,
-        original_geneses: &b.genesis_witnesses,
+        original_geneses: OriginalGeneses::Import(&b.genesis_witnesses),
         known_job_associations: &[],
         forbidden_authority_keys: &[key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")],
     };
@@ -708,7 +708,7 @@ fn boundary_vector(
         transfer_sequence: 0,
         spool_path: "example",
         witness_set: &set,
-        original_geneses: &genesis_payloads,
+        original_geneses: OriginalGeneses::Import(&genesis_payloads),
         known_job_associations: &[],
         forbidden_authority_keys: &[key(f, "root"), key(f, "witness"), key(f, "next_witness")],
     };

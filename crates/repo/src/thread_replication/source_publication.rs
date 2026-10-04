@@ -51,6 +51,45 @@ impl ThreadReplica {
             &mut super::install_artifacts::InstallArtifacts<'_>,
         ) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
+        self.publish_witnessed_source(
+            trust, bundle, records, authority, store, prepared, command, publish, false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_native_source(
+        &self,
+        trust: &super::hosted_trust::HostedTrust<impl super::hosted_trust::Clock>,
+        bundle: &[u8],
+        records: &[api::heddle::api::v1alpha2::SignedRecord],
+        authority: &impl super::delegated_import::AcceptedAuthority,
+        store: &impl ObjectStore,
+        prepared: PreparedPublication<'_>,
+        command: Command<'_>,
+        publish: impl FnOnce(
+            &super::hosted_trust::TrustTransaction<'_>,
+            &mut super::install_artifacts::InstallArtifacts<'_>,
+        ) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        self.publish_witnessed_source(
+            trust, bundle, records, authority, store, prepared, command, publish, true,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn publish_witnessed_source(
+        &self,
+        trust: &super::hosted_trust::HostedTrust<impl super::hosted_trust::Clock>,
+        bundle: &[u8],
+        records: &[api::heddle::api::v1alpha2::SignedRecord],
+        authority: &impl super::delegated_import::AcceptedAuthority,
+        store: &impl ObjectStore,
+        prepared: PreparedPublication<'_>,
+        command: Command<'_>,
+        publish: impl FnOnce(
+            &super::hosted_trust::TrustTransaction<'_>,
+            &mut super::install_artifacts::InstallArtifacts<'_>,
+        ) -> Result<Vec<u8>>,
+        native: bool,
+    ) -> Result<Vec<u8>> {
         if command.namespace.is_empty()
             || command.namespace.len() > 1024
             || command.namespace.contains('\0')
@@ -64,23 +103,20 @@ impl ThreadReplica {
             ));
         }
         let result = std::cell::RefCell::new(None);
-        Self::install_hybrid_import_with(
-            self.path
-                .parent()
-                .ok_or_else(|| Error::Invalid("metadata has no parent".into()))?,
-            trust,
-            bundle,
-            records,
-            authority,
-            store,
-            |context| {
-                let prior = command_replay(context.sql(), &command)?;
-                if prior.is_none() {
-                    check_guards(context.sql(), prepared.guards, &self.path)?;
-                }
-                Ok(())
-            },
-            |context, artifacts| {
+        let directory = self
+            .path
+            .parent()
+            .ok_or_else(|| Error::Invalid("metadata has no parent".into()))?;
+        let before = |context: &super::hosted_trust::TrustTransaction<'_>| {
+            let prior = command_replay(context.sql(), &command)?;
+            if prior.is_none() {
+                check_guards(context.sql(), prepared.guards, &self.path)?;
+            }
+            Ok(())
+        };
+        let publish =
+            |context: &super::hosted_trust::TrustTransaction<'_>,
+             artifacts: &mut super::install_artifacts::InstallArtifacts<'_>| {
                 // Check exact signed bytes and their fresh witnessed admission in
                 // this transaction, after install_in verified the whole bundle.
                 for signed in prepared.operations {
@@ -99,7 +135,7 @@ impl ThreadReplica {
                             "witnessed publication original absent".into(),
                         ));
                     }
-                    let accepted: bool = context.sql().query_row("SELECT EXISTS(SELECT 1 FROM operations o JOIN hosted_import_admissions a ON a.operation=o.id WHERE o.id=?1 AND o.thread=?2 AND o.canonical=?3 AND o.signature=?4 AND o.status=1)", params![id.as_bytes(),op.thread.as_bytes(),signed.canonical,signed.signature], |r| r.get(0))?;
+                    let accepted: bool = context.sql().query_row("SELECT EXISTS(SELECT 1 FROM operations o LEFT JOIN hosted_import_admissions a ON a.operation=o.id WHERE o.id=?1 AND o.thread=?2 AND o.canonical=?3 AND o.signature=?4 AND o.status=1 AND (a.operation IS NOT NULL OR EXISTS(SELECT 1 FROM hosted_native_proofs p WHERE p.thread=o.thread)))", params![id.as_bytes(),op.thread.as_bytes(),signed.canonical,signed.signature], |r| r.get(0))?;
                     if !accepted {
                         return Err(Error::Invalid(
                             "witnessed publication source did not settle".into(),
@@ -117,8 +153,16 @@ impl ThreadReplica {
                 };
                 *result.borrow_mut() = Some(bytes);
                 Ok(())
-            },
-        )?;
+            };
+        if native {
+            Self::install_hybrid_native_with(
+                directory, trust, bundle, records, authority, store, before, publish,
+            )
+        } else {
+            Self::install_hybrid_import_with(
+                directory, trust, bundle, records, authority, store, before, publish,
+            )
+        }?;
         result
             .into_inner()
             .ok_or_else(|| Error::Invalid("publication receipt absent".into()))
