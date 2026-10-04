@@ -89,6 +89,19 @@ impl VerifiedOwnerState {
         &self.authority_key
     }
 
+    /// Deferred authority deadline in this effective accepted state, or
+    /// `i64::MAX` once deferral is cleared. Historical callers must select the
+    /// state accepted at their observation time. Issuer retirement and
+    /// revocation remain separate authorization checks.
+    #[must_use]
+    pub const fn authority_expires_at_seconds(&self) -> i64 {
+        if self.claimable_deferred_human && self.claimable_until_unix_seconds > 0 {
+            self.claimable_until_unix_seconds
+        } else {
+            i64::MAX
+        }
+    }
+
     /// Establish historical genesis provenance, without authorizing issuance.
     /// Current capabilities still pass `issuer_at` and its retirement checks.
     pub(crate) fn contains_authority_key(&self, key: &AuthorizationVerificationKey) -> bool {
