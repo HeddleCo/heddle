@@ -34,6 +34,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install Worker target for the workspace toolchain
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Install pinned wasm-bindgen
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
 

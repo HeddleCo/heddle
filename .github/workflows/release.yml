@@ -10,6 +10,7 @@ name: Release binaries
 #                                                    ├─► sign + checksum
 #                                                    ├─► release (aggregates, publishes, posts SHA256SUMS)
 #                                                    └─► publish-manifests (stable only)
+#   validate-tag ──► build-verifier-npm ──► publish-verifier-npm (stable, after release)
 #
 # validate-tag is the single trust gate for the pipeline. The job is a
 # reusable workflow pinned to a SHA on default-branch main
@@ -93,6 +94,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      - name: Install Worker target for the workspace toolchain
+        run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-verifier-npm
