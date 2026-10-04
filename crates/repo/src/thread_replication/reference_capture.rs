@@ -156,7 +156,7 @@ impl ThreadReplica {
         operation: &ThreadOperation,
         store: &impl ObjectStore,
     ) -> Result<()> {
-        self.validate_reference_capture_in(&self.connect()?, &self.genesis()?, operation, store)
+        self.validate_reference_capture_in(&*self.connect()?, &self.genesis()?, operation, store)
     }
     pub(super) fn validate_reference_capture_in(
         &self,

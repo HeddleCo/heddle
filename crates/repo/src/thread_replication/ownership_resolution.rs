@@ -80,7 +80,7 @@ impl ThreadReplica {
             Some((Some(canonical), Some(signature))) => Ok(Some(
                 crypto::thread_authority_admission::SignedAuthorityAdmission {
                     boundary_acceptance: super::boundary_evidence::load(
-                        &self.connect()?, &canonical,
+                        &*self.connect()?, &canonical,
                         &objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis,
                     )?,
                     canonical,

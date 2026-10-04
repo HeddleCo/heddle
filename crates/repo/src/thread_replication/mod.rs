@@ -397,7 +397,7 @@ impl ThreadReplica {
                 // Receipt trust was independently established at insertion. This
                 // checks stored bindings; transport receivers must pin it anew.
                 signed.boundary_acceptance =
-                    boundary_evidence::load(&self.connect()?, &signed.canonical, &value.basis)?;
+                    boundary_evidence::load(&*self.connect()?, &signed.canonical, &value.basis)?;
                 signed.verify(&original_genesis, &creator_authority, &trust)?;
                 boundary_evidence::add_wire(
                     &mut boundary_acceptances,
@@ -499,11 +499,18 @@ impl ThreadReplica {
         })
     }
 
-    fn connect(&self) -> Result<Connection> {
+    fn connect(&self) -> Result<install_artifacts::InstallationConnection> {
         self.connect_with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
     }
-    fn connect_with_flags(&self, flags: rusqlite::OpenFlags) -> Result<Connection> {
-        let connection = Connection::open_with_flags(&self.path, flags)?;
+    fn connect_with_flags(
+        &self,
+        flags: rusqlite::OpenFlags,
+    ) -> Result<install_artifacts::InstallationConnection> {
+        let directory = self
+            .path
+            .parent()
+            .ok_or_else(|| Error::Invalid("metadata has no parent".into()))?;
+        let connection = install_artifacts::InstallationConnection::open(directory, flags)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         Ok(connection)

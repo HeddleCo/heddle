@@ -3670,6 +3670,9 @@ mod tests {
         git(&["commit", "-m", "initial"]);
 
         let repo = Repository::bootstrap_git_overlay(temp.path()).expect("bootstrap overlay");
+        // Open-time installation recovery must precede holding the land lock.
+        let contender = Repository::open(temp.path()).expect("open contender");
+        let contender_locker = contender.locker();
         let first_lock = repo.locker().write().expect("lock first land");
         let mut first_thread = thread_with_execution_path(temp.path().join("first"));
         first_thread.id = "first-land".to_string();
@@ -3686,11 +3689,8 @@ mod tests {
             .expect("read first marker")
             .expect("first marker");
 
-        let contender_root = temp.path().to_path_buf();
         let contender_blocked = std::thread::spawn(move || {
-            let contender = Repository::open(contender_root).expect("open contender");
-            contender
-                .locker()
+            contender_locker
                 .try_write()
                 .expect("try contender lock")
                 .is_none()

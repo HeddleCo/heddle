@@ -23,9 +23,13 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 
-use super::{Error, Result, install_artifacts::InstallArtifacts};
+use super::{
+    Error, Result,
+    install_artifacts::{InstallArtifacts, Installation, InstallationLock, checkpoint},
+};
 
 pub(crate) const SCHEMA:&str="
+CREATE TABLE IF NOT EXISTS hosted_installation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hosted_witness_trust(
  authority TEXT PRIMARY KEY,root_id TEXT NOT NULL,root_key BLOB NOT NULL CHECK(length(root_key)=32),
  root_epoch INTEGER NOT NULL CHECK(root_epoch>0),history_root_id TEXT NOT NULL,history_root_key BLOB NOT NULL CHECK(length(history_root_key)=32),
@@ -155,6 +159,7 @@ impl<C: Clock> HostedTrust<C> {
     }
 
     pub fn snapshot(&self) -> Result<TrustSnapshot> {
+        let _serialization = InstallationLock::acquire(&self.directory)?;
         let mut anchor = self.anchor.lock().map_err(|_| Error::HostedClock)?;
         let mut connection = Connection::open_with_flags(
             self.directory.join(crate::local_metadata::DATABASE_NAME),
@@ -239,11 +244,11 @@ impl<C: Clock> HostedTrust<C> {
         signed: &SignedHostedWitnessSetV1,
         mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
         validate_install: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
-        before_commit: impl FnOnce(&mut InstallArtifacts) -> Result<()>,
+        before_commit: impl FnOnce(&mut InstallArtifacts<'_>) -> Result<()>,
         validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
     ) -> Result<T> {
+        let serialization = InstallationLock::acquire(&self.directory)?;
         let mut anchor = self.anchor.lock().map_err(|_| Error::HostedClock)?;
-        let mut artifacts = InstallArtifacts::default();
         let mut connection = crate::local_metadata::open(&self.directory)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row:TrustRow=tx.query_row("SELECT root_id,root_key,root_epoch,history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1",[&self.authority],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
@@ -300,8 +305,12 @@ impl<C: Clock> HostedTrust<C> {
             return Err(Error::Hybrid(Reject::Expired));
         }
         validate_install(&context, install_now)?;
-        let committed = (|| {
-            before_commit(&mut artifacts)?;
+        let mut artifacts = Installation::begin(&serialization)?;
+        let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            before_commit(&mut artifacts.writer())?;
+            // Finish filesystem binding checks and stage the SQL marker before
+            // sampling final authority freshness; these checks can involve I/O.
+            artifacts.mark(&tx)?;
             // Expiry and receiver-clock changes during verification cannot leave
             // an earlier opaque context authorizing the eventual durable commit.
             let commit_now = self.clock.now_millis()?;
@@ -328,19 +337,45 @@ impl<C: Clock> HostedTrust<C> {
             tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),final_now])?;
             validate_commit(&context, final_now)?;
             Ok((final_now, final_elapsed))
-        })();
+        }));
         let (final_now, final_elapsed) = match committed {
-            Ok(time) => time,
-            Err(error) => {
-                artifacts.rollback()?;
-                return Err(error);
+            Ok(Ok(time)) => time,
+            rejection => {
+                // Destroy SQL before filesystem undo, while cross-process
+                // serialization remains held. Cleanup never replaces rejection.
+                if let Err(error) = tx.rollback() {
+                    tracing::error!(%error, "installation SQL rollback failed");
+                }
+                drop(connection);
+                if let Err(error) = artifacts.rollback() {
+                    tracing::error!(%error, "installation undo retained for recovery; repository unavailable");
+                }
+                match rejection {
+                    Ok(Err(error)) => return Err(error),
+                    Err(panic) => {
+                        drop(artifacts);
+                        drop(anchor);
+                        drop(serialization);
+                        std::panic::resume_unwind(panic);
+                    }
+                    Ok(Ok(_)) => return Err(Error::Invalid("invalid installation outcome".into())),
+                }
             }
         };
+        checkpoint("before-commit");
         if let Err(error) = tx.commit() {
-            artifacts.rollback()?;
+            // Transaction::commit consumes and rolls back on failure. Closing
+            // the connection also orders destruction before marker-based undo.
+            drop(connection);
+            drop(artifacts);
+            if let Err(recovery) = serialization.recover() {
+                tracing::error!(%recovery, "installation commit recovery retained; repository unavailable");
+            }
             return Err(error.into());
         }
+        checkpoint("commit");
         *anchor = Some((final_now, final_elapsed));
+        artifacts.finish()?;
         Ok(result)
     }
 }

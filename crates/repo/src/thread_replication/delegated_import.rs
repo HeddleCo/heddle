@@ -242,7 +242,7 @@ impl ThreadReplica {
         native_records: &[wire::SignedRecord],
         authority: &impl AcceptedAuthority,
         store: &impl ObjectStore,
-        before_commit: impl FnOnce(&mut InstallArtifacts) -> Result<()>,
+        before_commit: impl FnOnce(&mut InstallArtifacts<'_>) -> Result<()>,
     ) -> Result<Vec<Self>> {
         if directory.canonicalize()? != trust.directory().canonicalize()? {
             return Err(Error::Hybrid(Reject::Root));
@@ -743,17 +743,8 @@ fn install_in(
             verification::verify_landing_payload(p, &evidence, &closure, &native, |r| {
                 authority.native_revoked(s, r)
             })?;
-            for record in p
-                .execution
-                .iter()
-                .chain(p.source_operation.iter())
-                .chain(p.review_evidence.iter())
-            {
-                admissions.insert(
-                    native_subject(record)?.0,
-                    (record.clone(), evidence.clone()),
-                );
-            }
+            let record = p.execution.as_ref().ok_or(Reject::Canonical)?;
+            admissions.insert(native_subject(record)?.0, (record.clone(), evidence));
         }
     }
     // Index already verified originals once. Complete public histories can

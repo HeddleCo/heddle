@@ -221,7 +221,7 @@ impl ThreadReplica {
             params![self.thread.as_bytes(),id.as_bytes()], |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
         match row {
-            Some((Some(canonical),Some(signature))) => Ok(Some(crypto::thread_authority_admission::SignedAuthorityAdmission { boundary_acceptance: super::boundary_evidence::load(&self.connect()?,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
+            Some((Some(canonical),Some(signature))) => Ok(Some(crypto::thread_authority_admission::SignedAuthorityAdmission { boundary_acceptance: super::boundary_evidence::load(&*self.connect()?,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
  canonical,signature })),
             None | Some((None,None)) => Ok(None),
             _ => Err(Error::Invalid("incomplete ownership claim admission".into())),

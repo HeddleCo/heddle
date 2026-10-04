@@ -351,29 +351,11 @@ pub fn stage_temp_files_durable(files: &[(PathBuf, Vec<u8>)]) -> io::Result<()> 
     Ok(())
 }
 
-/// fsync the directory inode so a preceding `rename` is durable across
-/// crashes. POSIX-only — on Windows this is a no-op.
-///
-/// On Linux/macOS, after an `fsync(file)` + `rename(tmp, dest)` the
-/// rename itself still needs to be made durable, which requires
-/// `fsync(parent_dir)` (open parent for read, `sync_all`). Without it
-/// a crash between the rename and the next directory writeback can
-/// leave the destination dirent missing even though the file's data is
-/// on disk.
-///
-/// Windows directories don't support this pattern. `CreateFileW` with
-/// `GENERIC_READ` against a directory returns `ERROR_ACCESS_DENIED`
-/// unless the caller passes `FILE_FLAG_BACKUP_SEMANTICS`, and even
-/// then `FlushFileBuffers` on a directory handle is undefined — NTFS
-/// reports access-denied. Directory metadata durability on Windows is
-/// handled by the NTFS log; there is no userspace knob equivalent to
-/// `fsync(dirfd)`, and standard ecosystem crates (`tempfile`,
-/// `atomicwrites`) treat the directory sync as a Unix-only concern.
-///
-/// Returning `Ok(())` on Windows matches that consensus and fixes
-/// heddle#105 (`Repository::init_default` panicking with
-/// `PermissionDenied` on every `write_file_atomic` of an oplog or
-/// state file under a Windows tempdir).
+/// Unix directory barrier. Windows cannot flush a directory handle without
+/// privileges: this compatibility helper has no durability guarantee there.
+/// Durable file publication must use `durable_rename`, which uses a non-privileged
+/// write-through move on Windows. Installation journals must never use this
+/// helper as a Windows durability barrier.
 #[cfg(windows)]
 pub fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
@@ -387,6 +369,56 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
     }
     let dir = OpenOptions::new().read(true).open(path)?;
     dir.sync_all()
+}
+
+/// Publish flushed file data and durably update the source/destination entries.
+/// Windows uses MoveFileExW write-through; Unix syncs both rename directories.
+/// Existing reconstructible clone scopes can defer Unix barriers; installation
+/// uses `Directory::durable_rename` to bypass that explicit deferral.
+pub fn durable_rename(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+        fn wide(path: &Path) -> io::Result<Vec<u16>> {
+            let value: Vec<_> = std::path::absolute(path)?
+                .as_os_str()
+                .encode_wide()
+                .collect();
+            if value.contains(&0) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"));
+            }
+            Ok(value.into_iter().chain(std::iter::once(0)).collect())
+        }
+        let source = wide(source)?;
+        let destination = wide(destination)?;
+        // SAFETY: live NUL-terminated UTF-16 paths; no delayed or cross-volume move.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, destination)?;
+        let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        sync_directory(destination_parent)?;
+        let source_parent = source.parent().unwrap_or_else(|| Path::new("."));
+        if source_parent != destination_parent {
+            sync_directory(source_parent)?;
+        }
+        Ok(())
+    }
 }
 
 /// Sync one file unless it belongs to an active clone durability batch.
@@ -674,18 +706,16 @@ impl std::error::Error for EnrichedFsError {
 
 pub struct StagedAtomicWrite {
     path: PathBuf,
-    parent: PathBuf,
     tmp: PathBuf,
     pending: bool,
 }
 
 impl StagedAtomicWrite {
     pub fn publish(mut self) -> io::Result<()> {
-        fs::rename(&self.tmp, &self.path)
+        durable_rename(&self.tmp, &self.path)
             .map_err(|error| enrich_rename_error(&self.tmp, &self.path, error))?;
         self.pending = false;
-        sync_directory(&self.parent)
-            .map_err(|error| enrich_fs_error(&self.parent, "syncing", error))
+        Ok(())
     }
 }
 
@@ -726,7 +756,6 @@ fn stage_file_atomic_impl(
 
     Ok(StagedAtomicWrite {
         path: path.to_path_buf(),
-        parent: parent.to_path_buf(),
         tmp,
         pending: true,
     })
@@ -861,7 +890,7 @@ pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
     // crash after rename can lose the published object.
     fsync_file_data(src)?;
 
-    match fs::rename(src, dst) {
+    match durable_rename(src, dst) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             // Content-addressed install: destination already present.
@@ -873,7 +902,7 @@ pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
         Err(e) => return Err(enrich_rename_error(src, dst, e)),
     }
 
-    sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+    Ok(())
 }
 
 /// Cross-device publish path: copy to a same-dir temp, fsync, rename over
@@ -887,7 +916,7 @@ fn publish_file_via_copy_durable(src: &Path, dst: &Path) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         fs::copy(src, &tmp).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
         fsync_file_data(&tmp)?;
-        fs::rename(&tmp, dst).map_err(|e| enrich_rename_error(&tmp, dst, e))?;
+        durable_rename(&tmp, dst).map_err(|e| enrich_rename_error(&tmp, dst, e))?;
         let _ = fs::remove_file(src);
         Ok(())
     })();

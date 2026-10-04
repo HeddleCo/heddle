@@ -183,8 +183,8 @@ impl Repository {
         }
         // WAL databases cannot be opened SQLITE_OPEN_READ_ONLY; lookup still
         // refuses to create a missing database (the exists() check above).
-        let connection = rusqlite::Connection::open_with_flags(
-            path,
+        let connection = super::install_artifacts::InstallationConnection::open(
+            self.heddle_dir(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         let id: Option<Vec<u8>> = connection
@@ -205,8 +205,8 @@ impl Repository {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let connection = rusqlite::Connection::open_with_flags(
-            path,
+        let connection = super::install_artifacts::InstallationConnection::open(
+            self.heddle_dir(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         let table_exists: bool = connection.query_row(

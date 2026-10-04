@@ -280,6 +280,11 @@ impl Repository {
 
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
         objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
+        // Establish recovery serialization during initialization, so later
+        // observation never has to create the repository lock file.
+        let _installation =
+            crate::thread_replication::install_artifacts::InstallationLock::acquire(&heddle_dir)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
         let store = FsStore::new(&heddle_dir);
         store.init()?;
         let refs = RefManager::new(&heddle_dir);
@@ -341,6 +346,11 @@ impl Repository {
         // Owner-only `.heddle` tree: holds keys, credentials, and object store.
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
         objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
+        // Establish recovery serialization during initialization, so later
+        // observation never has to create the repository lock file.
+        let _installation =
+            crate::thread_replication::install_artifacts::InstallationLock::acquire(&heddle_dir)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
 
         let store = FsStore::new(&heddle_dir);
         #[cfg(feature = "git-overlay")]
