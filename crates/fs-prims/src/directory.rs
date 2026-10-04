@@ -248,7 +248,7 @@ mod platform {
             Storage::FileSystem::{
                 DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
                 FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO,
-                FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_TRAVERSE, FileIdInfo,
+                FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileIdInfo,
                 GetFileInformationByHandleEx, SYNCHRONIZE,
             },
             System::IO::IO_STATUS_BLOCK,
@@ -257,10 +257,12 @@ mod platform {
 
     use super::*;
     fn directory_file(path: &Path) -> io::Result<File> {
-        // Only the volume root is opened by path. Deny delete sharing (rename).
+        // Only the volume root is opened by path. Child renames open their
+        // destination directory with FILE_ADD_FILE, so allow write sharing.
+        // Deny delete sharing to keep the directory's own name pinned.
         let file = std::fs::OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
-            .share_mode(FILE_SHARE_READ)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
         validate_directory(&file)?;
@@ -327,7 +329,14 @@ mod platform {
                 &mut status_block,
                 std::ptr::null(),
                 0,
-                FILE_SHARE_READ,
+                // MS-FSA 2.1.5.15.12 opens the rename destination directory with
+                // FILE_ADD_FILE. Share writes there, but not deletion of its
+                // own name. The pin file must still deny writes and deletion.
+                if directory {
+                    FILE_SHARE_READ | FILE_SHARE_WRITE
+                } else {
+                    FILE_SHARE_READ
+                },
                 if pin { FILE_CREATE } else { FILE_OPEN },
                 options,
                 std::ptr::null(),
@@ -499,6 +508,7 @@ mod tests {
             let mut file = directory.create_file(OsStr::new(name)).expect("create");
             file.write_all(bytes).expect("write");
             file.sync_all().expect("file flush");
+            drop(file);
         }
         directory
             .durable_rename(OsStr::new("new"), OsStr::new("pin"))
@@ -517,12 +527,19 @@ mod tests {
     #[test]
     fn held_windows_ancestors_prevent_parent_replacement() {
         let root = tempfile::tempdir().expect("root");
-        std::fs::create_dir(root.path().join("parent")).expect("parent");
+        std::fs::create_dir_all(root.path().join("ancestor/parent")).expect("parent");
         let directory = Directory::open(root.path()).expect("root capability");
-        let parent = directory
+        let ancestor = directory
+            .child(OsStr::new("ancestor"))
+            .expect("ancestor capability");
+        let parent = ancestor
             .child(OsStr::new("parent"))
             .expect("parent capability");
-        assert!(std::fs::rename(root.path().join("parent"), root.path().join("moved")).is_err());
+        drop(ancestor);
+        drop(directory);
+        let parent_path = root.path().join("ancestor/parent");
+        assert!(std::fs::rename(&parent_path, root.path().join("moved-parent")).is_err());
+        assert!(std::fs::rename(root.path().join("ancestor"), root.path().join("moved")).is_err());
         let mut file = parent.create_file(OsStr::new("new")).expect("held create");
         file.write_all(b"data").expect("write");
         file.sync_all().expect("non-privileged file flush");
@@ -531,12 +548,15 @@ mod tests {
             .durable_rename(OsStr::new("new"), OsStr::new("pin"))
             .expect("non-privileged write-through move");
         assert_eq!(
-            std::fs::read(root.path().join("parent/pin")).expect("pin"),
+            std::fs::read(parent_path.join("pin")).expect("pin"),
             b"data"
         );
+        assert!(std::fs::rename(&parent_path, root.path().join("moved-parent")).is_err());
+        assert!(std::fs::rename(root.path().join("ancestor"), root.path().join("moved")).is_err());
         drop(parent);
-        drop(directory);
-        std::fs::rename(root.path().join("parent"), root.path().join("moved"))
+        std::fs::rename(&parent_path, root.path().join("moved-parent"))
+            .expect("released leaf handle");
+        std::fs::rename(root.path().join("ancestor"), root.path().join("moved"))
             .expect("released handles");
     }
     #[cfg(windows)]
