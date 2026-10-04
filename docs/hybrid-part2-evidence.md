@@ -27,6 +27,14 @@ These recorded alpha.24 repair runs precede the final alpha.25 gate. Logs are
 The permission attenuation test regenerates its signature after adding the
 required observe disclosure; it continues to exercise parent-scope attenuation.
 
+Alpha.25 pagination controls were also exercised in an isolated checkout with
+Part 1b's PR source. Restoring the previous complete-page requirement produced
+15 passing and two failing job tests; restoring bounded selected-ref admission
+passed all 29 import lifecycle tests. These controls cover both known selected
+OIDs on a non-final page and independently verified retained pins. Missing refs
+on partial or later pages cannot establish an unavailable OID.
+Logs: `/tmp/hybrid-p2-v25-page-{red,green}-final.log`.
+
 ## Behavior covered
 
 - Selected hosted capture and genesis-only installation retain complete public
@@ -42,7 +50,9 @@ required observe disclosure; it continues to exercise parent-scope attenuation.
 - Job-state read fences renewal Prepare; the candidate occurs only in top-level
   Renew. Frozen complete request bytes reject changed replay inputs.
 - Authenticated alpha.25 discovery preserves custody and independent SHA-256
-  format; unknown format and partial ref coverage cannot reach signing.
+  format. Known selected OIDs work from one bounded page; missing refs in partial
+  coverage cannot be treated as unavailable OIDs. Verified retained pins remain
+  independent of current ref pages. Unknown format blocks signing.
 - Explicit converter markers choose the advertised default; no marker means an
   explicit choice. Commit refreshes source grants, format and advertised support.
 - Verified retained renewal pins survive head movement. Replacement pins,

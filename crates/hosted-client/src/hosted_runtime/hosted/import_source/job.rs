@@ -291,7 +291,11 @@ impl HostedClient {
         }
         authority::initial_operation_id(&request.retry_lineage_id, false)?;
         let proposed = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
-        validate_source_selection(request, source)?;
+        validate_source_selection(
+            request,
+            source,
+            retained.map(|(_, predecessor)| predecessor),
+        )?;
         let retained_state = retained
             .map(|(read, predecessor)| {
                 Ok::<_, Reject>((
@@ -444,6 +448,7 @@ fn resolved_source(
 fn validate_source_selection(
     request: &wire::PrepareImportJobRequest,
     source: &ResolvedImportSource,
+    retained: Option<&authority::VerifiedImportRenewalPredecessor>,
 ) -> Result<()> {
     let selector = request.source.as_ref().ok_or(Reject::SourceSelection)?;
     let scope = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
@@ -458,17 +463,33 @@ fn validate_source_selection(
         return Err(Reject::SourceSelection.into());
     }
     authority::validate_repository_hash_algorithm(&source.source, true)?;
-    // A partial page cannot prove that a selected ref's OID is unavailable.
-    if source.request.include_refs
-        && source.source.refs_status.as_ref().is_none_or(|s| {
-            s.section != "provider_refs"
-                || s.coverage != wire::Coverage::Complete as i32
-                || s.page.as_ref().is_none_or(|p| !p.exhausted)
-        })
-    {
+    if !source.request.include_refs {
         return Err(Reject::SourceSelection.into());
     }
-    if !source.request.include_refs {
+    // Known selected OIDs need only their page. Missing refs require complete
+    // coverage; an authenticated retained pin selects its original commit.
+    let complete = source
+        .request
+        .page
+        .as_ref()
+        .is_none_or(|p| p.after_page.is_empty())
+        && source.source.refs_status.as_ref().is_some_and(|s| {
+            s.section == "provider_refs"
+                && s.coverage == wire::Coverage::Complete as i32
+                && s.page
+                    .as_ref()
+                    .is_some_and(|p| p.exhausted && p.next_page.is_empty())
+        });
+    if !complete
+        && !scope.branches.iter().all(|branch| {
+            (retained.is_some() && branch.ref_mode == 1)
+                || source
+                    .source
+                    .refs
+                    .iter()
+                    .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
+        })
+    {
         return Err(Reject::SourceSelection.into());
     }
     Ok(())
@@ -869,16 +890,16 @@ mod tests {
             resolved_source(&request, &response).expect("authenticated public discovery");
         assert_eq!(resolved.provider(), "public-git");
         let prepare: wire::PrepareImportJobRequest = wire("wire_vectors", "prepare_public_sha256");
-        validate_source_selection(&prepare, &resolved).expect("independent SHA-256 format");
+        validate_source_selection(&prepare, &resolved, None).expect("independent SHA-256 format");
         let unknown = wire("wire_vectors", "resolve_unknown_response");
         let unknown = resolved_source(&request, &unknown).expect("unknown is valid discovery");
         assert!(matches!(
-            validate_source_selection(&prepare, &unknown),
+            validate_source_selection(&prepare, &unknown, None),
             Err(super::super::super::HostedError::Hybrid(Reject::Version))
         ));
         let mut changed = resolved.clone();
         changed.source.connection = source("source_connected").source.connection;
-        assert!(validate_source_selection(&prepare, &changed).is_err());
+        assert!(validate_source_selection(&prepare, &changed, None).is_err());
         let mut partial = resolved.clone();
         partial
             .source
@@ -889,8 +910,126 @@ mod tests {
             .as_mut()
             .expect("page")
             .exhausted = false;
-        assert!(validate_source_selection(&prepare, &partial).is_err());
-        validate_source_selection(&prepare, &resolved).expect("unchanged complete discovery");
+        assert!(validate_source_selection(&prepare, &partial, None).is_err());
+        validate_source_selection(&prepare, &resolved, None).expect("unchanged complete discovery");
+    }
+
+    #[test]
+    fn selected_refs_can_prepare_from_one_page_without_inventing_missing_oids() {
+        let mut request: wire::PrepareImportJobRequest =
+            wire("wire_vectors", "prepare_public_sha256");
+        let mut discovered = source("source_sha256_known");
+        request
+            .proposed_scope
+            .as_mut()
+            .expect("scope")
+            .branches
+            .retain(|branch| {
+                discovered
+                    .source
+                    .refs
+                    .iter()
+                    .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
+            });
+        assert!(
+            !request
+                .proposed_scope
+                .as_ref()
+                .expect("scope")
+                .branches
+                .is_empty()
+        );
+        for branch in &mut request.proposed_scope.as_mut().expect("scope").branches {
+            let known = discovered
+                .source
+                .refs
+                .iter()
+                .find(|r| r.name == branch.ref_name)
+                .expect("selected known ref");
+            branch.ref_mode = 1;
+            branch.ref_disclosure = 0;
+            branch.pinned_commit_oid = hex::decode(&known.head_oid).expect("known OID");
+            assert!(!branch.pinned_commit_oid.is_empty());
+        }
+        let status = discovered.source.refs_status.as_mut().expect("page status");
+        status.page.as_mut().expect("page").exhausted = false;
+        authority::validate_discovered_import_scope(
+            request.proposed_scope.as_ref().expect("scope"),
+            &discovered.source,
+        )
+        .expect("every discovered selected OID remains exactly pinned");
+        validate_source_selection(&request, &discovered, None)
+            .expect("selected refs and their OIDs are already on this page");
+
+        let mut unknown = request.clone();
+        let branch = unknown
+            .proposed_scope
+            .as_mut()
+            .expect("scope")
+            .branches
+            .first_mut()
+            .expect("branch");
+        discovered.source.refs.retain(|r| r.name != branch.ref_name);
+        branch.ref_mode = 2;
+        branch.pinned_commit_oid.clear();
+        branch.ref_disclosure = 1;
+        assert!(
+            validate_source_selection(&unknown, &discovered, None).is_err(),
+            "an omitted ref is not evidence that its OID is unavailable"
+        );
+        discovered
+            .source
+            .refs_status
+            .as_mut()
+            .expect("status")
+            .page
+            .as_mut()
+            .expect("page")
+            .exhausted = true;
+        validate_source_selection(&unknown, &discovered, None)
+            .expect("complete coverage can establish an unavailable OID");
+        authority::validate_discovered_import_scope(
+            unknown.proposed_scope.as_ref().expect("scope"),
+            &discovered.source,
+        )
+        .expect("observe mode only when the complete discovery has no OID");
+        discovered.request.page = Some(wire::PageRequest {
+            size: 512,
+            after_page: b"later-page".to_vec(),
+        });
+        assert!(
+            validate_source_selection(&unknown, &discovered, None).is_err(),
+            "the final page does not establish absence from earlier pages"
+        );
+    }
+
+    #[test]
+    fn a_verified_retained_pin_does_not_require_an_unrelated_ref_page() {
+        let read = prepared("renewal_preparation")
+            .renewal_read
+            .expect("authenticated read");
+        with_context(1350, |expected| {
+            let predecessor = read
+                .predecessor(expected)
+                .expect("authenticated predecessor");
+            let request: wire::PrepareImportJobRequest =
+                wire("wire_vectors", "renew_prepare_request");
+            let mut discovered = source("renew_source_moved_head");
+            discovered.source.refs.clear();
+            discovered
+                .source
+                .refs_status
+                .as_mut()
+                .expect("status")
+                .page
+                .as_mut()
+                .expect("page")
+                .exhausted = false;
+            assert!(validate_source_selection(&request, &discovered, None).is_err());
+            validate_source_selection(&request, &discovered, Some(&predecessor))
+                .expect("retained commit selection is independent of this ref page");
+            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some((&predecessor, read.response.state.as_ref().expect("state")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
+        });
     }
 
     #[test]
