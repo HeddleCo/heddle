@@ -415,7 +415,10 @@ async fn serve_call(
                         ..Default::default()
                     });
                 }
-                let response = v2::ResolveResourcesResponse { results };
+                let response = v2::ResolveResourcesResponse {
+                    results,
+                    ..Default::default()
+                };
                 send.write_chunk(Bytes::from(
                     encode_success_response(&response.encode_to_vec()).unwrap(),
                 ))

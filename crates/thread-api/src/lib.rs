@@ -90,7 +90,10 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
                 "endpoint identity/package mismatch",
             )));
         }
-        let api = Client::new(transport, description.implemented_methods.clone());
+        let mut api = Client::new(transport, description.implemented_methods.clone());
+        if let Some(protocol) = &description.protocol {
+            api = api.with_protocol(protocol.clone());
+        }
         Ok(Self { api, description })
     }
 
@@ -106,8 +109,9 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         M::Request: observation::ObservationRequest,
         M::Response: observation::ObservedEvent,
     {
-        use crate::reopen::ReopenRetryable as _;
         use observation::ObservationRequest as _;
+
+        use crate::reopen::ReopenRetryable as _;
         let budget = observation::budget(&self.description)?;
         let options = request.options_mut();
         options.budget = Some(budget);

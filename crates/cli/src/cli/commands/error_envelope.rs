@@ -577,6 +577,10 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     "import_source_invalid_branch",
                     serde_json::json!({ "source_ref": ref_name }),
                 ),
+                ImportSourceRefError::ConflictingBranch { ref_name } => (
+                    "import_source_conflicting_branch",
+                    serde_json::json!({ "source_ref": ref_name }),
+                ),
                 ImportSourceRefError::AdvertisementOverBudget(over) => (
                     "import_source_advertisement_limit",
                     serde_json::json!({
@@ -599,6 +603,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 }
                 ImportSourceRefError::InvalidBranch { .. } => {
                     "Choose source branch names that are valid Thread names."
+                }
+                ImportSourceRefError::ConflictingBranch { .. } => {
+                    "Retry after the source advertises one object ID per branch."
                 }
                 ImportSourceRefError::AdvertisementOverBudget(_) => {
                     "Choose a source that advertises at most 512 branches and tags."

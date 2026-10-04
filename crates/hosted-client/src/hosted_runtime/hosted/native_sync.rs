@@ -254,6 +254,71 @@ fn operation_id(method: &str, caller: String) -> String {
 }
 
 impl HostedClient {
+    /// Refresh public witness metadata and fill exact retirement paths without
+    /// downloading content or changing any original signature. The caller's
+    /// durable trust transaction must authenticate this set again at install;
+    /// a successful refresh is preparation, never an admission marker.
+    pub async fn refresh_import_proofs(
+        &self,
+        bundle: &mut contract::ImportPublicProofBundleV1,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let root = self.hosted_root().ok_or(api::hybrid_codec::Reject::Root)?;
+        let lookup = self.witness_lookup()?;
+        super::descriptor_trust::refresh_import_proofs(
+            lookup,
+            bundle,
+            api::witness_trust::SetExpectation {
+                authority: root.authority(),
+                root_id: root.root_id(),
+                root_public_key: root.public_key(),
+                root_epoch,
+                now_unix_millis: chrono::Utc::now().timestamp_millis(),
+                clock_floor_unix_millis: clock_floor_millis,
+                known_job_keys,
+            },
+            previous,
+        )
+        .await
+    }
+
+    /// Revalidate retained proof metadata without redownloading staged content.
+    /// Installation must independently recheck the latest durable context.
+    pub async fn refresh_staged_import_proofs(
+        &self,
+        staged: &mut thread_api::fetch::StagedSource,
+        previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+        root_epoch: u64,
+        clock_floor_millis: i64,
+        known_job_keys: &[Vec<u8>],
+    ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+        let mut bundle = staged
+            .import_authority()
+            .ok_or(api::hybrid_codec::Reject::Scope)?
+            .clone();
+        let verified = self
+            .refresh_import_proofs(
+                &mut bundle,
+                previous,
+                root_epoch,
+                clock_floor_millis,
+                known_job_keys,
+            )
+            .await?;
+        staged
+            .refresh_import_authority(bundle)
+            .map_err(|error| match error {
+                thread_api::fetch::Error::Hybrid(reject) => super::HostedError::Hybrid(reject),
+                thread_api::fetch::Error::HostedTrustRequired => {
+                    super::HostedError::Hybrid(api::hybrid_codec::Reject::Root)
+                }
+                error => super::HostedError::framing(error),
+            })?;
+        Ok(verified)
+    }
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
         Ok(self
             .list_refs_with_revision_addresses(repo_path)
@@ -710,24 +775,51 @@ impl HostedClient {
                 proofs.push(proof);
             }
         }
-        let scratch = repo.heddle_dir().join("source-transfers");
-        objects::fs_atomic::create_private_dir_all(&scratch)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let scratch = tempfile::Builder::new()
+            .prefix("heddle-source-transfer-")
+            .tempdir()
+            .map_err(native_error)?;
         let pack = SourcePack::prepare_with_references(
             repo.store(),
             &state,
             &proofs,
-            &scratch,
+            scratch.path(),
             SourceBudget {
                 max_objects: SOURCE_OBJECTS,
                 max_decoded_bytes: SOURCE_BYTES,
             },
         )
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let mut import_authority = replica.hybrid_import_bundle().map_err(replica_err)?;
+        if let Some(bundle) = &mut import_authority {
+            use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+            let root = self
+                .hosted_root()
+                .ok_or_else(|| native_error(api::hybrid_codec::Reject::Root))?;
+            let trust = HostedTrust::open(repo.heddle_dir(), root.authority(), SystemClock)
+                .map_err(replica_err)?;
+            let snapshot = trust.snapshot().map_err(replica_err)?;
+            let job_keys = snapshot
+                .known_job_associations
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            self.refresh_import_proofs(
+                bundle,
+                snapshot.previous.as_ref(),
+                snapshot.root_epoch,
+                snapshot.clock_floor_millis,
+                &job_keys,
+            )
+            .await
+            .map_err(native_error)?;
+        }
+        let import_authority = import_authority.map(std::sync::Arc::new);
         let operations = thread_api::authority_admission::batches(
             stored
                 .into_iter()
                 .map(|item| thread_api::replication::store::ReceivedOperation {
+                    import_authority: import_authority.clone(),
                     original: item.original,
                     authority_admission: item.authority_admission,
                 }),
@@ -1061,10 +1153,21 @@ impl HostedClient {
         // hints against configured shards; DescribeEndpoint and ThreadOverview
         // currently do not advertise them, so clone stays on direct Fetch until
         // a caller supplies usable routes here.
+        let remote = self.native().await.map_err(native_error)?;
+        let protocol = if self.hosted_root().is_some() && remote.description.protocol.is_some() {
+            api::import_authority::require_hybrid_peer(remote.description.protocol.as_ref())
+                .map_err(native_error)?;
+            Some(thread_api::hybrid::protocol())
+        } else {
+            thread_api::hybrid::sync_protocol()
+        };
         let open = preferred_fetch_open(
             FetchOpen {
                 thread: Some(reference.clone()),
                 revision: Some(revision),
+                // Optional HYBRID needs both receiver-selected trust and the
+                // peer's explicit support. Ordinary Sync keeps its rollout gate.
+                protocol,
                 selection: Some(TransferSelection {
                     facets: vec![contract::SharedFacet::Source as i32],
                     ..Default::default()
@@ -1073,26 +1176,175 @@ impl HostedClient {
             },
             Vec::new(),
         );
-        let scratch = repo.heddle_dir().join("source-transfers");
-        objects::fs_atomic::create_private_dir_all(&scratch)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let scratch = tempfile::Builder::new()
+            .prefix("heddle-source-transfer-")
+            .tempdir()
+            .map_err(native_error)?;
         let staged = self
-            .fetch_native_source(open, thread_api::fetch::Limits::default(), &scratch)
+            .fetch_native_source(open, thread_api::fetch::Limits::default(), scratch.path())
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let now = chrono::Utc::now().timestamp();
-        let final_state = staged
-            .install(repo, now)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let imported = staged.import_authority().is_some();
+        let final_state = self.install_staged_source(repo, staged).await?;
         if final_state != selected {
             return Err(ProtocolError::InvalidState(format!(
                 "Fetch installed {final_state} instead of selected revision {selected}"
             )));
         }
-        let seed = synthetic_initial_base().map_err(native_error)?;
-        repo.store().put_tree(&objects::object::Tree::new())?;
-        repo.store().put_state(&seed)?;
+        if !imported {
+            let seed = synthetic_initial_base().map_err(native_error)?;
+            repo.store().put_tree(&objects::object::Tree::new())?;
+            repo.store().put_state(&seed)?;
+        }
         Ok(final_state)
+    }
+
+    /// Install an exact completed Fetch. Hosted originals use independently
+    /// selected descriptor/Spool trust, fresh proof metadata, and a current
+    /// authenticated disclosure deadline checked again inside commit.
+    pub async fn install_staged_source(
+        &self,
+        repo: &Repository,
+        mut staged: thread_api::fetch::StagedSource,
+    ) -> Result<StateId, ProtocolError> {
+        use repo::thread_replication::hosted_trust::{
+            HostedTrust, RootSelection, SystemClock, select_root, select_spool,
+        };
+        use thread_api::hybrid::authority::{AcceptedHistory, SelectedAuthority};
+        let now = chrono::Utc::now().timestamp();
+        if staged.import_authority().is_none() {
+            return staged.install(repo, now).map_err(native_error);
+        }
+        let ready = staged.ready();
+        let reference = ready
+            .thread
+            .clone()
+            .ok_or_else(|| native_error("Thread absent"))?;
+        let revision = ready
+            .current
+            .clone()
+            .ok_or_else(|| native_error("selected source absent"))?;
+        let spool = reference
+            .spool
+            .as_ref()
+            .ok_or_else(|| native_error("Spool absent"))?
+            .id
+            .parse::<Uuid>()
+            .map_err(native_error)?;
+        let pinned = repo::verify_spool_owner_observation(
+            ready
+                .owner_genesis
+                .as_ref()
+                .ok_or_else(|| native_error("owner genesis absent"))?,
+            ready
+                .ownership
+                .as_ref()
+                .ok_or_else(|| native_error("owner history absent"))?,
+            spool,
+            now,
+        )
+        .map_err(native_error)?;
+        let descriptor = self
+            .hosted_root()
+            .ok_or_else(|| native_error(api::hybrid_codec::Reject::Root))?;
+        let descriptor = descriptor.clone();
+        let root = RootSelection {
+            authority: descriptor.authority().into(),
+            root_id: descriptor.root_id().into(),
+            public_key: *descriptor.public_key(),
+        };
+        let bundle = staged
+            .import_authority()
+            .ok_or_else(|| native_error("import authority absent"))?;
+        let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+            .map_err(native_error)?;
+        let history = AcceptedHistory::from_selected_spool(bundle, &pinned, now, limits)
+            .map_err(native_error)?;
+        select_root(repo.heddle_dir(), &root).map_err(replica_err)?;
+        select_spool(
+            repo.heddle_dir(),
+            pinned.owner_genesis().spool_uuid(),
+            *history.genesis(),
+            *history.initial_owner(),
+        )
+        .map_err(replica_err)?;
+        let trust = HostedTrust::open(repo.heddle_dir(), &root.authority, SystemClock)
+            .map_err(replica_err)?;
+        let snapshot = trust.snapshot().map_err(replica_err)?;
+        let job_keys = snapshot
+            .known_job_associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        self.refresh_staged_import_proofs(
+            &mut staged,
+            snapshot.previous.as_ref(),
+            snapshot.root_epoch,
+            snapshot.clock_floor_millis,
+            &job_keys,
+        )
+        .await
+        .map_err(native_error)?;
+        // Observe the exact selected revision with this connection's current
+        // credential after asynchronous proof preparation. Its signed caller
+        // scope and deadline remain distinct from historical import permission.
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::ThreadServiceObserveThread>(
+                contract::ObserveThreadRequest {
+                    thread: Some(reference.clone()),
+                    source: Some(revision),
+                    sections: vec![contract::ThreadSection::Overview as i32],
+                    observe: Some(once_observe()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_error)?
+            .ok_or_else(|| native_error("disclosure checkpoint absent"))?;
+        if !batch.changes.iter().any(|event| matches!(event, contract::thread_event::Payload::Overview(overview) if overview.r#ref.as_ref() == Some(&reference))) {
+            return Err(native_error("current disclosure did not select this Thread"));
+        }
+        let deadline = observation
+            .authority_valid_until()
+            .ok_or_else(|| native_error("current disclosure deadline absent"))?;
+        if !(0..1_000_000_000).contains(&deadline.nanos) {
+            return Err(native_error("invalid disclosure deadline"));
+        }
+        let deadline_millis = deadline
+            .seconds
+            .checked_mul(1000)
+            .and_then(|n| n.checked_add(i64::from(deadline.nanos) / 1_000_000))
+            .ok_or_else(|| native_error("disclosure deadline overflow"))?;
+        let bundle = staged
+            .import_authority()
+            .ok_or_else(|| native_error("import authority absent"))?
+            .clone();
+        let authority = SelectedAuthority::new(
+            history,
+            bundle,
+            move |_: &contract::ImportPublicProofBundleV1,
+                  now: i64,
+                  _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
+                descriptor
+                    .require_current()
+                    .map_err(|e| repo::thread_replication::Error::Invalid(e.to_string()))?;
+                if now >= deadline_millis {
+                    return Err(repo::thread_replication::Error::Hybrid(
+                        api::hybrid_codec::Reject::Expired,
+                    ));
+                }
+                Ok(())
+            },
+        );
+        staged
+            .install_hosted(repo, &trust, &authority, chrono::Utc::now().timestamp())
+            .map_err(native_error)
     }
 
     pub async fn get_thread_metadata(

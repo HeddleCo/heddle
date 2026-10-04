@@ -350,6 +350,9 @@ impl DeviceRpc {
                         // are not queued behind every observer on this worker.
                         tokio::task::yield_now().await;
                         session.check_current(&self.home)?;
+                        // Version reads are another synchronous phase; leave a
+                        // turn for ready command responses before starting it.
+                        tokio::task::yield_now().await;
                         let can_skip = method == "/heddle.api.v1alpha2.ThreadService/ObserveThread"
                             && api::heddle::api::v1alpha2::ObserveThreadRequest::decode(normalized_query)?
                                 .sections.iter().all(|section| *section == api::heddle::api::v1alpha2::ThreadSection::Overview as i32);

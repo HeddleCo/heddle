@@ -92,7 +92,13 @@ impl ThreadReplica {
     }
     /// Retained immutable result, including both original signatures.
     pub fn ownership_resolution(&self) -> Result<Option<SignedOwnershipResolution>> {
-        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self.connect()?.query_row(
+        self.ownership_resolution_in(&*self.connect()?)
+    }
+    pub(super) fn ownership_resolution_in(
+        &self,
+        connection: &rusqlite::Connection,
+    ) -> Result<Option<SignedOwnershipResolution>> {
+        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = connection.query_row(
             "SELECT canonical,local_signature,acceptance_signature FROM thread_owner_resolutions WHERE thread=?1",
             [self.thread.as_bytes()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

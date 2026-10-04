@@ -3,6 +3,8 @@ use api::heddle::api::common::{CallFailure, ErrorDetail};
 /// Failure returned by the native hosted-call module.
 #[derive(Debug, thiserror::Error)]
 pub enum HostedError {
+    #[error("HYBRID authority rejected: {0}")]
+    Hybrid(#[from] api::hybrid_codec::Reject),
     #[error("server does not publish descriptor trust")]
     DescriptorTrustUnavailable,
     #[error("server does not advertise an Iroh endpoint at /.well-known/heddle/iroh-endpoint")]

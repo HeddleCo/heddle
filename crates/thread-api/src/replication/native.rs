@@ -10,12 +10,17 @@ use repo::thread_replication::ThreadReplica;
 
 use super::store::{ReceivedOperation, ReplicaStore};
 
+mod hosted;
+pub use hosted::HostedReplica;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     Store(#[from] repo::thread_replication::Error),
     #[error("local replica worker: {0}")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("HYBRID original requires independently selected hosted trust")]
+    HostedTrustRequired,
 }
 pub struct LocalReplica<S> {
     replica: ThreadReplica,
@@ -83,28 +88,36 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         &self,
         id: ContentHash,
     ) -> Result<Option<(ReceivedOperation, Admission)>, Error> {
-        self.execute(move |replica, _| {
-            Ok(replica
-                .operation_with_authority_admission(&id)?
-                .map(|stored| {
-                    (
-                        ReceivedOperation {
-                            original: stored.original,
-                            authority_admission: stored.authority_admission,
-                        },
-                        stored.status,
-                    )
-                }))
-        })
-        .await
+        let stored = self
+            .execute(move |replica, _| replica.operation_with_authority_admission(&id))
+            .await?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        if stored.authority_admission.is_some()
+            || self
+                .execute(|replica, _| replica.hybrid_import_bundle())
+                .await?
+                .is_some()
+        {
+            return Err(Error::HostedTrustRequired);
+        }
+        Ok(Some((
+            ReceivedOperation {
+                original: stored.original,
+                authority_admission: None,
+                import_authority: None,
+            },
+            stored.status,
+        )))
     }
     async fn receive(&self, received: ReceivedOperation) -> Result<Admission, Error> {
+        if received.import_authority.is_some() || received.authority_admission.is_some() {
+            return Err(Error::HostedTrustRequired);
+        }
         let authority_home = self.authority_home.clone();
         self.execute(move |replica, objects| {
             let operation = received.original;
-            if let Some(receipt) = received.authority_admission {
-                return replica.receive_with_authority_admission(&operation, &receipt, objects, |_| Ok(()));
-            }
             replica.receive(&operation, objects, |native| {
                 use heddle_object_model::object::thread_replication::ThreadOperationBody;
                 if !matches!(native.body, ThreadOperationBody::Metadata(_)) && native.source_author()?.is_none() {

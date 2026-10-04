@@ -156,8 +156,24 @@ impl ThreadReplica {
         in_spool_audience: bool,
         owned_local_key: Option<&[u8; 32]>,
     ) -> Result<bool> {
+        self.audience_allows_in(
+            &*self.connect()?,
+            principal,
+            agent_id,
+            in_spool_audience,
+            owned_local_key,
+        )
+    }
+    pub(super) fn audience_allows_in(
+        &self,
+        connection: &rusqlite::Connection,
+        principal: uuid::Uuid,
+        agent_id: Option<&str>,
+        in_spool_audience: bool,
+        owned_local_key: Option<&[u8; 32]>,
+    ) -> Result<bool> {
         use objects::object::thread_replication::{GenesisOwner, metadata::Control};
-        let owner = self.effective_owner()?;
+        let owner = self.effective_owner_in(connection)?;
         let is_owner = match owner {
             GenesisOwner::Account(owner) => owner == principal && !principal.is_nil(),
             GenesisOwner::LocalKey(key) => owned_local_key == Some(&key),
@@ -165,7 +181,7 @@ impl ThreadReplica {
         if is_owner {
             return Ok(true);
         }
-        let candidates = self.metadata_frontier(&Property::Audience)?;
+        let candidates = self.metadata_frontier_in(connection, &Property::Audience)?;
         if candidates.is_empty() {
             return Ok(false);
         }
@@ -223,7 +239,13 @@ impl ThreadReplica {
         &self,
         property: &Property,
     ) -> Result<Vec<(ContentHash, SignedOperation)>> {
-        let connection = self.connect()?;
+        self.metadata_frontier_in(&*self.connect()?, property)
+    }
+    pub(super) fn metadata_frontier_in(
+        &self,
+        connection: &rusqlite::Connection,
+        property: &Property,
+    ) -> Result<Vec<(ContentHash, SignedOperation)>> {
         let mut query=connection.prepare("SELECT o.id,o.canonical,o.signature FROM thread_control_heads h JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.property=?2 AND o.status=1 ORDER BY o.id LIMIT 129")?;
         let rows = query
             .query_map(params![self.thread.as_bytes(), key(property)], |row| {

@@ -195,6 +195,29 @@ impl Repository {
         now_unix_seconds: i64,
     ) -> Result<()> {
         let _serialization = self.installation_lock()?;
+        let _lock = self.locker().write()?;
+        let bytes = self.prepare_owner_observation_pin(
+            genesis,
+            observed,
+            spool_uuid,
+            canonical_path,
+            now_unix_seconds,
+        )?;
+        write_file_atomic(&self.owner_genesis_pin_path(), &bytes)
+            .context("persist verified owner observation")
+    }
+
+    /// Prepare a verified extension of the independent owner pin without
+    /// publishing it. Hosted installation writes these bytes through its journal.
+    pub fn prepare_owner_observation_pin(
+        &self,
+        genesis: &SignedSpoolOwnerGenesis,
+        observed: &OwnerState,
+        spool_uuid: uuid::Uuid,
+        canonical_path: &[String],
+        now_unix_seconds: i64,
+    ) -> Result<Vec<u8>> {
+        let _serialization = self.installation_lock()?;
         let limits = verifier_limits()?;
         if observed.encoded_len() > limits.max_bundle_bytes() {
             anyhow::bail!("owner observation exceeds proof bound");
@@ -272,8 +295,35 @@ impl Repository {
             }
         }
         candidate.owner_observation = Some(observed.encode_to_vec());
-        write_file_atomic(&path, &rmp_serde::to_vec_named(&candidate)?)
-            .context("persist verified owner observation")
+        Ok(rmp_serde::to_vec_named(&candidate)?)
+    }
+
+    /// Recover independently pinned Spool ownership for hosted relay. Incoming
+    /// public evidence cannot create or replace this pin.
+    pub fn pinned_owner_observation(
+        &self,
+        now_unix_seconds: i64,
+    ) -> Result<(
+        OwnerState,
+        heddleco_capability_verifier::VerifiedCloneKeyring,
+    )> {
+        let pin = self.read_owner_genesis_pin()?;
+        let genesis = decode_canonical_genesis(&pin.signed_genesis)?;
+        let observed = OwnerState::decode(
+            pin.owner_observation
+                .as_deref()
+                .context("hosted relay requires an independently pinned owner observation")?,
+        )?;
+        let verified = crate::verify_spool_owner_observation(
+            &genesis,
+            &observed,
+            uuid::Uuid::from_bytes(pin.spool_uuid),
+            now_unix_seconds,
+        )?;
+        if verified.wire().canonical_spool_path_segments != pin.canonical_spool_path_segments {
+            anyhow::bail!("pinned owner observation differs from canonical Spool path");
+        }
+        Ok((observed, verified))
     }
 
     /// Verify a purge authorization against the clone-pinned genesis and the

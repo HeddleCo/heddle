@@ -17,7 +17,7 @@ mod artifact;
 pub(crate) mod artifact_retention;
 #[cfg(test)]
 mod artifact_tests;
-mod auth;
+pub(crate) mod auth;
 mod authority_clock;
 #[cfg(test)]
 mod capacity_tests;
@@ -38,6 +38,8 @@ mod evidence_tests;
 mod fetch;
 #[cfg(test)]
 mod fetch_tests;
+#[cfg(test)]
+pub(crate) mod hybrid_security_tests;
 #[cfg(test)]
 mod inventory_tests;
 mod land;
@@ -161,6 +163,9 @@ pub(crate) struct DeviceRpc {
     #[cfg(test)]
     thread_snapshots: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
+    test_witness_responses:
+        Arc<Mutex<Option<super::hosted::descriptor_trust::TestWitnessResponses>>>,
+    #[cfg(test)]
     content_rechecks: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     content_send_gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
@@ -177,6 +182,8 @@ impl DeviceRpc {
             authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
             #[cfg(test)]
             thread_snapshots: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            test_witness_responses: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             content_rechecks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]

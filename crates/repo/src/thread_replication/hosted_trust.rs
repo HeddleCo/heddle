@@ -236,7 +236,13 @@ impl<C: Clock> HostedTrust<C> {
         mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
         validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
     ) -> Result<T> {
-        self.mutate_with_artifacts(signed, mutation, |_, _| Ok(()), |_| Ok(()), validate_commit)
+        self.mutate_with_artifacts(
+            signed,
+            mutation,
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+            validate_commit,
+        )
     }
 
     pub(super) fn mutate_with_artifacts<T>(
@@ -244,7 +250,7 @@ impl<C: Clock> HostedTrust<C> {
         signed: &SignedHostedWitnessSetV1,
         mutation: impl FnOnce(&TrustTransaction<'_>) -> Result<T>,
         validate_install: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
-        before_commit: impl FnOnce(&mut InstallArtifacts<'_>) -> Result<()>,
+        before_commit: impl FnOnce(&TrustTransaction<'_>, &mut InstallArtifacts<'_>) -> Result<()>,
         validate_commit: impl FnOnce(&TrustTransaction<'_>, i64) -> Result<()>,
     ) -> Result<T> {
         let serialization = InstallationLock::acquire(&self.directory)?;
@@ -290,6 +296,7 @@ impl<C: Clock> HostedTrust<C> {
         let set = witness_trust::verify_set(signed, &expected, previous.as_ref())?;
         let context = TrustTransaction {
             tx: &tx,
+            serialization: &serialization,
             set: &set,
             root_public_key: &row.1,
             now,
@@ -307,7 +314,7 @@ impl<C: Clock> HostedTrust<C> {
         validate_install(&context, install_now)?;
         let mut artifacts = Installation::begin(&serialization)?;
         let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            before_commit(&mut artifacts.writer())?;
+            before_commit(&context, &mut artifacts.writer())?;
             // Finish filesystem binding checks and stage the SQL marker before
             // sampling final authority freshness; these checks can involve I/O.
             artifacts.mark(&tx)?;
@@ -383,12 +390,79 @@ impl<C: Clock> HostedTrust<C> {
 /// One active trust/mutation transaction. Do not retain references beyond it.
 pub struct TrustTransaction<'a> {
     tx: &'a Transaction<'a>,
+    serialization: &'a InstallationLock,
     set: &'a VerifiedWitnessSet,
     root_public_key: &'a [u8],
     now: i64,
     associations: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl TrustTransaction<'_> {
+    /// Current catalog and source access checks borrow the held installation
+    /// serialization and SQL snapshot instead of reentering repository readers.
+    pub fn device_spool(
+        &self,
+        home: &Path,
+        id: uuid::Uuid,
+    ) -> anyhow::Result<crate::device_catalog::DeviceSpool> {
+        crate::device_catalog::load_serialized(home, id, self.serialization)
+    }
+    pub fn device_thread_visible(
+        &self,
+        thread: super::ContentHash,
+        spool: uuid::Uuid,
+        principal: uuid::Uuid,
+        agent: Option<&str>,
+    ) -> Result<bool> {
+        let replica = super::ThreadReplica {
+            path: self
+                .serialization
+                .directory()
+                .join(crate::local_metadata::DATABASE_NAME),
+            thread,
+        };
+        if replica.ownership_claims_with_admission_in(self.tx)?.len() > 1
+            && replica.ownership_resolution_in(self.tx)?.is_none()
+        {
+            return Ok(false);
+        }
+        let genesis = replica.genesis_in(self.tx)?;
+        if genesis.spool != spool.to_string() {
+            return Err(Error::Hybrid(Reject::Scope));
+        }
+        let local = if let objects::object::thread_replication::GenesisOwner::LocalKey(key) =
+            genesis.owner
+        {
+            super::local::holds_native_owner_key_serialized(&key, self.serialization)?
+                .then_some(key)
+        } else {
+            None
+        };
+        replica.audience_allows_in(self.tx, principal, agent, true, local.as_ref())
+    }
+
+    pub fn property_version(
+        &self,
+        thread: super::ContentHash,
+        property: &objects::object::thread_replication::metadata::Property,
+    ) -> Result<super::ContentHash> {
+        let replica = super::ThreadReplica {
+            path: self
+                .serialization
+                .directory()
+                .join(crate::local_metadata::DATABASE_NAME),
+            thread,
+        };
+        let heads = replica
+            .metadata_frontier_in(self.tx, property)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        Ok(
+            objects::object::thread_replication::metadata::property_version(
+                thread, property, &heads,
+            )?,
+        )
+    }
     /// Compare every accepted owner context with independently selected local
     /// Spool lineage. Neither a witness nor a proof can enroll a foreign root.
     pub fn require_spool_selection(
@@ -563,6 +637,7 @@ pub fn replace_root(
     if replacement.root_id.is_empty() || replacement.root_id.len() > 256 {
         return Err(Error::Hybrid(Reject::Bounds));
     }
+    let _serialization = InstallationLock::acquire(directory)?;
     let mut connection = crate::local_metadata::open(directory)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_root_role(&tx, &replacement.public_key)?;

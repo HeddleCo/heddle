@@ -18,7 +18,7 @@ use api::{
 use iroh::endpoint::{RecvStream, SendStream};
 use objects::{
     object::{ContentHash, StateId, thread_replication::OPERATION_FORMAT},
-    store::ObjectStore,
+    store::{FsStore, ObjectStore},
 };
 use prost::Message;
 use repo::thread_replication::ThreadReplica;
@@ -126,14 +126,69 @@ impl DeviceRpc {
         };
         let feed = self.feed(&session)?;
         let mut changes = feed.changes.subscribe();
+        let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
+        let mut import_authority = selected.hybrid_import_bundle()?;
+        if let Some(bundle) = &mut import_authority {
+            self.refresh_export_bundle(&session, bundle).await?;
+        }
+        let hosted = if let Some(bundle) = &import_authority {
+            api::import_authority::require_hybrid_peer(open.protocol.as_ref())?;
+            Some(self.hosted_backend(
+                thread_api::replication::native::LocalReplica::new(
+                    selected.clone(),
+                    Arc::new(FsStore::new(&session.spool.heddle_dir)),
+                ),
+                session.clone(),
+                bundle.clone(),
+            )?)
+        } else {
+            None
+        };
+        let ownership = if import_authority.is_some() {
+            Some(
+                repo::Repository::open(&session.spool.root)?
+                    .pinned_owner_observation(chrono::Utc::now().timestamp())?,
+            )
+        } else {
+            None
+        };
         let slot = self.content_work.clone().acquire_owned().await?;
         let home = self.home.clone();
         let admitted = session.clone();
+        let worker_import_authority = import_authority.clone();
         let mut prepared = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             admitted.check_current(&home)?;
             let value = prepare(&admitted, thread, revision, allow_partial)
                 .map_err(|_| SourceSelectionUnavailable)?;
+            if let Some(hosted) = hosted {
+                let mut records = Vec::new();
+                for genesis in value.geneses.values() {
+                    records.push(genesis.genesis.clone().context("original genesis absent")?);
+                    records.extend(genesis.ownership_claims.clone());
+                    records.extend(genesis.ownership_resolutions.clone());
+                }
+                for stored in &value.operations {
+                    let original = &stored.original;
+                    let operation = original.verify()?;
+                    records.push(SignedRecord {
+                        format: OPERATION_FORMAT.into(),
+                        canonical_record: original.canonical.clone(),
+                        signatures: vec![RecordSignature {
+                            public_key: operation.publisher.to_vec(),
+                            signature: original.signature.clone(),
+                        }],
+                    });
+                }
+                // The worker owns preparation; this rechecks receiver time and
+                // the latest durable high-water before any public source frame.
+                hosted.recheck_selected(
+                    worker_import_authority
+                        .as_ref()
+                        .context("public import history absent")?,
+                    &records,
+                )?;
+            }
             admitted.check_current(&home)?;
             Ok::<_, anyhow::Error>(value)
         })
@@ -149,6 +204,12 @@ impl DeviceRpc {
                     .context("selected original genesis missing")?,
             ),
             packs: prepared.pack.artifacts().to_vec(),
+            protocol: open.protocol,
+            import_authority,
+            owner_genesis: ownership
+                .as_ref()
+                .map(|(_, ring)| ring.owner_genesis().signed().clone()),
+            ownership: ownership.map(|(owner, _)| owner),
             full_closure_available: prepared.pack.is_complete(),
             budget: Some(ReadBudget {
                 max_items: RECORDS as u32 + 2048,
@@ -163,6 +224,7 @@ impl DeviceRpc {
             ..Default::default()
         };
         ready.checkpoint = Some(checkpoint.clone());
+        let ready_import_authority = ready.import_authority.clone();
         let mut charged = 0u64;
         send_frame(
             &self.home,
@@ -213,8 +275,7 @@ impl DeviceRpc {
                         .transpose()?
                         .into_iter()
                         .collect(),
-                    // Native replication carries no import-authority proof bundle.
-                    import_authority: None,
+                    import_authority: ready_import_authority.clone(),
                 }),
                 &mut charged,
                 &mut changes,

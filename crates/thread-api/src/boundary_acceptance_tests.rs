@@ -259,41 +259,94 @@ fn boundary_receipt_cannot_relabel_original_scope_or_use_old_authorize_path() {
 }
 
 #[cfg(feature = "native")]
-#[test]
-fn boundary_native_receivers_fail_closed_pending_api318() {
-    let (batch, trust) = fixture(1);
-    let received = crate::authority_admission::match_batch(&batch)
-        .expect("exact original/acceptance/receipt control")
-        .remove(0);
-    let receipt = received.authority_admission.expect("boundary receipt");
-    receipt
-        .verify(&received.original, &trust)
-        .expect("original scope, acceptance and independent executor comparisons remain");
-    for _ in 0..2 {
-        let directory = tempfile::tempdir().expect("receiver");
-        let repository = repo::Repository::init_default(directory.path()).expect("repository");
-        let replica = repository.native_thread("main").expect("receiver Thread");
-        assert!(matches!(
-            replica.authority_admission_trust(&receipt),
-            Err(repo::thread_replication::Error::WitnessEvidenceRequired)
-        ));
-        let id = received
-            .original
-            .verify()
-            .expect("original")
-            .id()
-            .expect("id");
-        assert!(replica.operation(&id).expect("no installation").is_none());
-        let reopened = repo::thread_replication::ThreadReplica::open(
-            repository.heddle_dir(),
-            replica.thread_id(),
-        )
-        .expect("restart");
-        assert!(matches!(
-            reopened.authority_admission_trust(&receipt),
-            Err(repo::thread_replication::Error::WitnessEvidenceRequired)
-        ));
+#[tokio::test]
+async fn boundary_native_receive_requires_selected_witness_binding() {
+    use std::sync::Arc;
+
+    use crypto::thread_operation::SignedGenesis;
+    use objects::object::thread_replication::{GenesisOwner, ThreadGenesis};
+
+    use crate::replication::{
+        native::{Error as NativeError, LocalReplica},
+        store::{ReceivedOperation, ReplicaStore},
+    };
+    let directory = tempfile::tempdir().expect("receiver");
+    let repository = repo::Repository::init_default(directory.path()).expect("repository");
+    let (mut batch, trust) = fixture(1);
+    let genesis = ThreadGenesis {
+        version: 1,
+        spool: trust.spool.to_string(),
+        parent: None,
+        base: repository.head().expect("head").expect("base"),
+        name: "closed boundary".into(),
+        intent: String::new(),
+        creator: key(51).public_key().try_into().expect("key"),
+        owner: GenesisOwner::LocalKey(key(51).public_key().try_into().expect("key")),
+        nonce: vec![1],
+    };
+    let replica = repo::thread_replication::ThreadReplica::create(
+        repository.heddle_dir(),
+        &SignedGenesis::sign(&genesis, &key(51)).expect("genesis"),
+    )
+    .expect("replica");
+    let mut original = crate::replication::decode_record(batch.operations.remove(0))
+        .expect("original")
+        .verify()
+        .expect("signature");
+    original.thread = replica.thread_id();
+    let state = State::new_snapshot(
+        Tree::new().hash(),
+        vec![genesis.base],
+        Attribution::human(Principal::new("local control", "")),
+    );
+    if let ThreadOperationBody::Capture(capture) = &mut original.body {
+        capture.result.state = state.encode_current_msgpack().expect("state");
     }
+    let signed = SignedOperation::sign(&original, &key(51)).expect("original signature");
+    let id = original.id().expect("ID");
+    let mut statement =
+        crate::authority_admission::verify_signature(&batch.authority_admissions[0])
+            .expect("receipt signature");
+    statement.thread = original.thread;
+    statement.subject = OriginalAuthoritySubject::Operation(id);
+    let mut receipt = SignedAuthorityAdmission::sign(&statement, &key(53)).expect("receipt");
+    receipt.boundary_acceptance = Some(Arc::new(
+        decode(&batch.boundary_acceptances[0]).expect("original acceptance"),
+    ));
+    batch = crate::authority_admission::batches(
+        [ReceivedOperation {
+            original: signed,
+            authority_admission: Some(receipt),
+            import_authority: None,
+        }],
+        1024 * 1024,
+        128,
+    )
+    .expect("batch bounds")
+    .next()
+    .expect("one batch")
+    .expect("exact boundary evidence");
+    let matched = crate::authority_admission::match_batch(&batch)
+        .expect("exact structural boundary evidence");
+    let local = LocalReplica::new(replica.clone(), Arc::new(repository.store().clone()));
+    let generation = replica.generation().expect("generation");
+    assert!(matches!(
+        local.receive(matched[0].clone()).await,
+        Err(NativeError::HostedTrustRequired)
+    ));
+    assert!(replica.operation(&id).expect("unchanged").is_none());
+    assert_eq!(replica.generation().expect("generation"), generation);
+    original.body = ThreadOperationBody::Capture(AuthoredCapture::local(
+        state.encode_current_msgpack().expect("state").into(),
+    ));
+    let local_source = SignedOperation::sign(&original, &key(51)).expect("local source");
+    assert_eq!(
+        local
+            .receive(ReceivedOperation::from(local_source))
+            .await
+            .expect("independently owned source control"),
+        objects::object::thread_replication::Admission::Accepted
+    );
 }
 
 #[test]

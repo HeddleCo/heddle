@@ -45,6 +45,31 @@ pub(crate) fn init_test_repository(path: impl AsRef<std::path::Path>) -> StoreRe
     Repository::open(path)
 }
 
+/// Run home-sensitive tests in their own process so parallel tests never see
+/// a temporary process-wide HEDDLE_HOME or a catalog removed during SQLite I/O.
+#[cfg(test)]
+pub(crate) fn run_with_isolated_test_home(test: &str) -> bool {
+    const CASE: &str = "CLI_ISOLATED_TEST_CASE";
+    if std::env::var(CASE).as_deref() == Ok(test) {
+        return false;
+    }
+    let home = tempfile::tempdir().expect("isolated Heddle home");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test, "--test-threads", "8", "--nocapture"])
+        .env(CASE, test)
+        .env("HEDDLE_HOME", home.path())
+        .output()
+        .expect("isolated test process");
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+        "isolated test {test}:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
 /// The hosted client stack itself lives in `hosted-client`.
 #[cfg(feature = "client")]

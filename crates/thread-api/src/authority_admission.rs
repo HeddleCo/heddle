@@ -87,6 +87,8 @@ pub fn match_batch(
     use std::collections::{BTreeMap, BTreeSet};
 
     use prost::Message;
+    crate::hybrid::operations(batch).map_err(Error::Protocol)?;
+    let import_authority = batch.import_authority.clone().map(std::sync::Arc::new);
     if batch.operations.is_empty()
         || batch.operations.len() > 128
         || batch.authority_admissions.len() > 128
@@ -144,6 +146,7 @@ pub fn match_batch(
         output.push(crate::replication::store::ReceivedOperation {
             original,
             authority_admission: receipt,
+            import_authority: import_authority.clone(),
         });
     }
     if !receipts.is_empty() {

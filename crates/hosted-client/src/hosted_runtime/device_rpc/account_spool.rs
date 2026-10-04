@@ -110,15 +110,51 @@ impl DeviceRpc {
                     |tx| {
                         let id = scope_id(request.spool.as_ref())?;
                         self.require_catalog_scope(session, tx, id)?;
+                        let current = spool_in(tx, id)?.context("local Spool unavailable")?;
+                        let mut settings =
+                            current.overview.settings.context("Spool settings absent")?;
+                        let patch = request.settings.clone().unwrap_or_default();
+                        let mut selected = std::collections::BTreeSet::new();
+                        for path in request.settings_mask.iter().flat_map(|mask| &mask.paths) {
+                            ensure!(selected.insert(path), "duplicate settings mask path");
+                            match path.as_str() {
+                                "audience" => settings.audience = patch.audience,
+                                "default_state_audience" => {
+                                    settings.default_state_audience = patch.default_state_audience
+                                }
+                                "description" => {
+                                    settings.description.clone_from(&patch.description)
+                                }
+                                "allow_child_creation" => {
+                                    settings.allow_child_creation = patch.allow_child_creation
+                                }
+                                "require_review_to_land" => {
+                                    settings.require_review_to_land = patch.require_review_to_land
+                                }
+                                "abandoned_thread_retention" => {
+                                    settings.abandoned_thread_retention =
+                                        patch.abandoned_thread_retention
+                                }
+                                "default_review_policy" => settings
+                                    .default_review_policy
+                                    .clone_from(&patch.default_review_policy),
+                                "hold_lifecycle" => settings.hold_lifecycle = patch.hold_lifecycle,
+                                "blocking_discussion_resolve_rule" => {
+                                    settings.blocking_discussion_resolve_rule =
+                                        patch.blocking_discussion_resolve_rule
+                                }
+                                "default_thread" => {
+                                    settings.default_thread.clone_from(&patch.default_thread)
+                                }
+                                _ => bail!("invalid settings mask path"),
+                            }
+                        }
                         let overview = mutations::revise(
                             tx,
                             id,
                             &request.expected_version,
                             &request.name,
-                            request
-                                .settings
-                                .as_ref()
-                                .context("complete settings required")?,
+                            &settings,
                         )?;
                         session.check_current(&self.home)?;
                         Ok(SpoolMutationResponse {

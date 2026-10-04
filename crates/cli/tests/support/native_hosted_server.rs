@@ -454,6 +454,7 @@ async fn serve_call(
                             coverage: v2::Coverage::Complete as i32,
                             ..Default::default()
                         }],
+                        ..Default::default()
                     },
                 )
                 .await;

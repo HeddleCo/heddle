@@ -1,5 +1,5 @@
-//! A real authenticated browser stream rejects a bare executor receipt.
-//! Full HYBRID evidence routing belongs to Part 2; transport authority is separate.
+//! Genuine original/receipt signatures are structural evidence. A real
+//! authenticated browser stream cannot use them as hosted witness authority.
 use std::{sync::Arc, time::Duration};
 
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
@@ -8,7 +8,7 @@ use objects::object::{
     thread_authority_admission::ThreadAuthorityAdmission,
     thread_replication::{
         OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
-        integration::SPOOL_GENESIS_TRUST_FORMAT,
+        integration::{SPOOL_GENESIS_TRUST_FORMAT, TrustedHostedExecutor},
         metadata::{AUTHORITY_FORMAT, Control, Intent, ThreadControl},
     },
 };
@@ -26,7 +26,7 @@ pub(super) async fn roundtrip(
     let genesis = replica.genesis().expect("Thread");
     let spool: uuid::Uuid = genesis.spool.parse().expect("Spool");
     let owner = Ed25519Signer::from_seed(&[71; 32]).expect("owning root");
-    let executor = Ed25519Signer::from_seed(&[91; 32]).expect("independently enrolled executor");
+    let executor = Ed25519Signer::from_seed(&[91; 32]).expect("structural executor signature");
     let foreign = Ed25519Signer::from_seed(&[92; 32]).expect("another account's original agent");
     let owner_genesis =
         repo::sign_spool_owner_genesis(&owner, *spool.as_bytes()).expect("owner genesis");
@@ -37,9 +37,6 @@ pub(super) async fn roundtrip(
             &["selected".into(), "hosted-spool".into()],
         )
         .expect("selected authenticated remote owner");
-    repository
-        .pin_thread_hosted_executor(replica, executor.public_key().try_into().expect("key"))
-        .expect_err("an endpoint key cannot become evergreen witness authority");
     let envelope =
         b"sealed original authority checked by the enrolled host at first durable receipt".to_vec();
     let control = ThreadControl {
@@ -93,19 +90,35 @@ pub(super) async fn roundtrip(
     };
     let receipt =
         thread_api::authority_admission::sign(&statement, &executor).expect("executor receipt");
-    let trust = objects::object::thread_replication::integration::TrustedHostedExecutor {
+    let structural = TrustedHostedExecutor {
         spool,
         spool_genesis: statement.spool_genesis,
-        executor: statement.executor,
+        executor: executor.public_key().try_into().expect("key"),
     };
-    thread_api::authority_admission::verify(&receipt, &original, &trust)
-        .expect("independent valid original and receipt signatures control");
-    let typed_receipt =
-        thread_api::authority_admission::decode(&receipt).expect("exact signed sidecar");
+    thread_api::authority_admission::verify(&receipt, &original, &structural)
+        .expect("genuine original and matching executor signature control");
+    let generation = replica.generation().expect("generation");
+    let local = thread_api::replication::native::LocalReplica::new(
+        replica.clone(),
+        Arc::new(objects::store::FsStore::new(repository.heddle_dir())),
+    );
+    use thread_api::replication::store::ReplicaStore;
     assert!(matches!(
-        replica.authority_admission_trust(&typed_receipt),
-        Err(repo::thread_replication::Error::WitnessEvidenceRequired)
+        local
+            .receive(thread_api::replication::store::ReceivedOperation {
+                original: original.clone(),
+                authority_admission: Some(
+                    thread_api::authority_admission::decode(&receipt).expect("receipt")
+                ),
+                import_authority: None,
+            })
+            .await,
+        Err(thread_api::replication::native::Error::HostedTrustRequired)
     ));
+    assert_eq!(
+        replica.generation().expect("no durable admission"),
+        generation
+    );
     let wire_original = SignedRecord {
         format: OPERATION_FORMAT.into(),
         canonical_record: original.canonical.clone(),
@@ -165,41 +178,39 @@ pub(super) async fn roundtrip(
         })
         .await
         .expect("relay exact original plus independent receipt");
-    let error = tokio::time::timeout(Duration::from_secs(5), async {
+    let refused = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            match output.next().await {
+            let frame = match output.next().await {
                 Err(error) => break error,
-                Ok(None) => panic!("rejection must carry its reason"),
-                Ok(Some(frame)) => {
-                    if let Some(replicate_thread_response::Body::Receipt(value)) = frame.body {
-                        assert!(
-                            !value
-                                .accepted_operation_ids
-                                .contains(&id.as_bytes().to_vec()),
-                            "bare witness cannot admit foreign authority"
-                        );
-                    }
-                }
+                Ok(Some(frame)) => frame,
+                Ok(None) => panic!("rejected authority must terminate with a transport error"),
+            };
+            if let Some(replicate_thread_response::Body::Receipt(value)) = frame.body {
+                assert!(
+                    !value
+                        .accepted_operation_ids
+                        .contains(&id.as_bytes().to_vec()),
+                    "structural executor signature must never admit a foreign original"
+                );
             }
         }
     })
     .await
-    .expect("proof rejection deadline");
-    // This adapter resets rejected streams; typed failure serialization is
-    // separate from core admission and belongs to Part 2.
+    .expect("authority rejection deadline");
     assert!(
         matches!(
-            error,
+            refused,
             api::v2::client::ClientError::Transport(thread_api::transport::Error::Io(ref reason))
                 if reason.starts_with("stream reset by peer")
         ),
-        "{error}"
+        "{refused}"
     );
     assert!(replica.operation(&id).expect("durable read").is_none());
     assert_eq!(
-        repository.head().expect("checkout unchanged"),
-        Some(genesis.base)
+        replica.generation().expect("no durable admission"),
+        generation
     );
+    assert_eq!(repository.head().expect("checkout"), Some(genesis.base));
     drop(input);
     drop(output);
 }

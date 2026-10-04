@@ -19,8 +19,8 @@ const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const SOURCE_OBJECTS: usize = 100_000;
 
-/// Verified source artifacts and their original proofs. Dropping this value
-/// removes its temporary files. Native callers can install it on a disk worker.
+/// Structurally checked source artifacts and original proofs. These bytes grant
+/// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
@@ -46,6 +46,24 @@ impl StagedSource {
     }
     pub fn ready(&self) -> &TransferReady {
         &self.ready
+    }
+    /// Retained bytes are structural evidence, never installation authority.
+    pub fn import_authority(&self) -> Option<&crate::contract::ImportPublicProofBundleV1> {
+        self.ready.import_authority.as_ref()
+    }
+    /// Refresh witness-set/proof metadata after retirement or freshness renewal
+    /// while keeping the downloaded pack and every original signed byte.
+    pub fn refresh_import_authority(
+        &mut self,
+        refreshed: crate::contract::ImportPublicProofBundleV1,
+    ) -> Result<(), Error> {
+        let original = self
+            .ready
+            .import_authority
+            .as_mut()
+            .ok_or(Error::HostedTrustRequired)?;
+        crate::hybrid::history::replace_receiver_metadata(original, refreshed)?;
+        Ok(())
     }
     pub fn state(&self) -> &State {
         &self.state
@@ -200,6 +218,7 @@ pub(super) fn validate_with_receipts(
 /// Structurally verified original source and actual artifact closure. This is
 /// not an author, audience, executor, or sharing-policy admission decision.
 pub struct ValidatedSourceArtifacts {
+    pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
     genesis: ThreadGenesisRecord,
@@ -210,6 +229,50 @@ pub struct ValidatedSourceArtifacts {
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
 impl ValidatedSourceArtifacts {
+    pub fn import_authority(&self) -> Option<&ImportPublicProofBundleV1> {
+        self.import_authority.as_ref()
+    }
+
+    /// Retain the publication's exact originals and source as a hosted staged
+    /// install. The receiver supplies independently verified owner observation.
+    pub fn into_hosted_source(self, mut ready: TransferReady) -> Result<StagedSource, Error> {
+        if ready.import_authority != self.import_authority || self.import_authority.is_none() {
+            return Err(Error::HostedTrustRequired);
+        }
+        let reference = ready
+            .thread
+            .as_ref()
+            .ok_or(Error::Invalid("Thread absent"))?;
+        super::verify_origin(&self.genesis, reference)?;
+        let revision = ready
+            .current
+            .as_ref()
+            .ok_or(Error::Invalid("revision absent"))?;
+        if revision.spool != reference.spool
+            || revision.revision
+                != Some(revision_ref::Revision::State(
+                    api::heddle::api::common::StateId {
+                        value: self.state.id().as_bytes().to_vec(),
+                    },
+                ))
+            || !ready.full_closure_available
+        {
+            return Err(Error::Invalid(
+                "publication source differs from hosted install selection",
+            ));
+        }
+        ready.thread_genesis = Some(self.genesis);
+        Ok(StagedSource {
+            directory: self.directory,
+            ready,
+            operations: self.operations,
+            dependencies: self.dependencies,
+            state: self.state,
+            partial_trees: self.partial_trees,
+            authority_admissions: self.authority_admissions,
+        })
+    }
+
     pub fn artifact_paths(&self) -> [std::path::PathBuf; 2] {
         [
             self.directory.path().join("source.pack"),
@@ -351,6 +414,7 @@ fn validate_disclosure_artifacts(
         .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
         .map_err(preparation)?;
         return Ok(ValidatedSourceArtifacts {
+            import_authority: None,
             directory,
             operations,
             genesis: original.clone(),
@@ -688,6 +752,7 @@ fn validate_disclosure_artifacts(
         return Err(Error::Invalid("source dependency cycle"));
     }
     Ok(ValidatedSourceArtifacts {
+        import_authority: None,
         directory,
         genesis: original.clone(),
         operations: ordered,

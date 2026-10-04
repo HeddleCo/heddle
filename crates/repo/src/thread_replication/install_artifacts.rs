@@ -79,6 +79,9 @@ impl InstallationLock {
             key,
         })
     }
+    pub(crate) fn directory(&self) -> &Path {
+        &self.key
+    }
     pub(super) fn recover(&self) -> Result<()> {
         if Directory::open(&self.key)?.identity()? != self.root.identity()? {
             return Err(Error::Invalid(

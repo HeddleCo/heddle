@@ -10,8 +10,8 @@ use config::ClientConfig;
 use super::{
     HostedError, Result, VerifiedEndpointDescriptor,
     descriptor_trust::{
-        PinInsertOutcome, canonical_server_authority, insert_verified_pin, load_automatic_pin,
-        validate_descriptor_pair,
+        HostedRootSelection, PinInsertOutcome, canonical_server_authority, insert_verified_pin,
+        load_automatic_pin, validate_descriptor_pair,
     },
     fetch_descriptor_key_document, fetch_ephemeral_descriptor_set,
 };
@@ -55,8 +55,16 @@ async fn resolve_endpoint(
         config.descriptor_key_id.as_deref(),
         config.descriptor_public_key.as_ref(),
     ) {
-        (Some(_key_id), Some(public_key)) => {
-            verify_live_set_against_root(&canonical_server, public_key, config, endpoint_id).await
+        (Some(key_id), Some(public_key)) => {
+            let descriptor =
+                verify_live_set_against_root(&canonical_server, public_key, config, endpoint_id)
+                    .await?;
+            Ok(descriptor.with_hosted_root(HostedRootSelection {
+                authority: canonical_server,
+                root_id: key_id.into(),
+                public_key: *public_key,
+                automatic_store: None,
+            }))
         }
         (Some(_), None) | (None, Some(_)) => Err(HostedError::DescriptorTrust(
             "ambiguous security posture: both descriptor trust fields are required".to_string(),
@@ -80,7 +88,14 @@ async fn resolve_automatic_descriptor_trust(
             .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
         // The pin is the root. A served set cannot rotate it; unattested
         // entries fail closed without touching the store.
-        return verify_live_set_against_root(canonical_server, &root, config, endpoint_id).await;
+        let descriptor =
+            verify_live_set_against_root(canonical_server, &root, config, endpoint_id).await?;
+        return Ok(descriptor.with_hosted_root(HostedRootSelection {
+            authority: canonical_server.into(),
+            root_id: pin.key_id,
+            public_key: root,
+            automatic_store: Some(super::descriptor_trust::descriptor_trust_path()),
+        }));
     }
 
     let document =
@@ -113,7 +128,12 @@ async fn resolve_automatic_descriptor_trust(
             "pinned descriptor root"
         );
     }
-    Ok(verified)
+    Ok(verified.with_hosted_root(HostedRootSelection {
+        authority: canonical_server.into(),
+        root_id: document.key_id,
+        public_key,
+        automatic_store: Some(super::descriptor_trust::descriptor_trust_path()),
+    }))
 }
 
 async fn verify_live_set_against_root(

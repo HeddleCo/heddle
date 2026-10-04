@@ -374,6 +374,10 @@ pub struct AuthTrustShowArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct AuthTrustReplaceArgs {
+    /// Also replace this enrolled repository root, preserving witnessed history.
+    /// Repeat for every affected repository; stale selections fail closed.
+    #[arg(long, value_name = "PATH")]
+    pub repository: Option<std::path::PathBuf>,
     /// Heddle server authority
     #[arg(long)]
     pub server: String,

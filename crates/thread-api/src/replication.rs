@@ -121,6 +121,7 @@ pub struct Session<B: ReplicaStore> {
     announce_facet: usize,
     after: Option<ContentHash>,
     pending_input_bookkeeping: Option<(ThreadFacet, ContentHash)>,
+    protocol: Option<api::heddle::api::common::ProtocolCompatibility>,
 }
 impl<B: ReplicaStore> Session<B> {
     /// `facets` is the intersection of authenticated admission scope and the
@@ -145,7 +146,26 @@ impl<B: ReplicaStore> Session<B> {
             announce_facet: 0,
             after: None,
             pending_input_bookkeeping: None,
+            protocol: None,
         })
+    }
+    /// Bind optional HYBRID capability to the authenticated Open/Ready pair.
+    /// Ordinary Sync sessions leave this unset until api#307's cutover.
+    pub fn with_protocol(
+        mut self,
+        open: Option<&api::heddle::api::common::ProtocolCompatibility>,
+        ready: Option<&api::heddle::api::common::ProtocolCompatibility>,
+    ) -> Result<Self> {
+        crate::hybrid::negotiated(open, ready).map_err(Error::Protocol)?;
+        self.protocol = open.cloned();
+        Ok(self)
+    }
+    fn require_bundle_protocol(&self, batch: &ReplicationOperations) -> Result<()> {
+        if batch.import_authority.is_some() {
+            api::import_authority::require_hybrid_peer(self.protocol.as_ref())
+                .map_err(|_| Error::Protocol("HYBRID operations require negotiated protocol"))?;
+        }
+        Ok(())
     }
     pub async fn export_facets(&self) -> StoreResult<BTreeSet<ThreadFacet>, B::Error> {
         let sharing = self
@@ -213,6 +233,7 @@ impl<B: ReplicaStore> Session<B> {
         let Frame::Operations(batch) = frame else {
             return Ok(vec![InputUnit::Frame(frame)]);
         };
+        self.require_bundle_protocol(&batch)?;
         self.check_count(batch.operations.len())?;
         self.check_count(batch.authority_admissions.len())?;
         self.check_count(batch.boundary_acceptances.len())?;
@@ -370,6 +391,7 @@ impl<B: ReplicaStore> Session<B> {
                 }
             }
             Frame::Operations(batch) => {
+                self.require_bundle_protocol(&batch)?;
                 if self.pending_input_bookkeeping.is_some() {
                     return Err(Error::Protocol("prior input bookkeeping not completed").into());
                 }
@@ -498,6 +520,10 @@ impl<B: ReplicaStore> Session<B> {
         else {
             return Err(Error::Protocol("requested operation unavailable").into());
         };
+        if record.import_authority.is_some() {
+            api::import_authority::require_hybrid_peer(self.protocol.as_ref())
+                .map_err(|_| Error::Protocol("HYBRID relay requires negotiated protocol"))?;
+        }
         let operation = record.original.verify().map_err(Error::from)?;
         if !self.export_facets().await?.contains(&operation.facet()) {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
@@ -523,8 +549,7 @@ impl<B: ReplicaStore> Session<B> {
                     signature: record.original.signature,
                 }],
             }],
-            // Native replication carries no import-authority proof bundle.
-            import_authority: None,
+            import_authority: record.import_authority.as_deref().cloned(),
         }))
     }
 

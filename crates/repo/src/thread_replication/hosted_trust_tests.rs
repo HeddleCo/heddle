@@ -312,7 +312,12 @@ impl Authority {
     }
 }
 impl super::delegated_import::AcceptedAuthority for Authority {
-    fn authorize_import(&self, _: &wire::ImportPublicProofBundleV1, now_millis: i64) -> Result<()> {
+    fn authorize_import(
+        &self,
+        _: &wire::ImportPublicProofBundleV1,
+        now_millis: i64,
+        _: &TrustTransaction<'_>,
+    ) -> Result<()> {
         assert_eq!(
             now_millis, 1350000,
             "receiver time, not claimed author time"
@@ -847,7 +852,12 @@ struct ExpiringDisclosure {
     calls: AtomicU64,
 }
 impl super::delegated_import::AcceptedAuthority for ExpiringDisclosure {
-    fn authorize_import(&self, _: &wire::ImportPublicProofBundleV1, now: i64) -> Result<()> {
+    fn authorize_import(
+        &self,
+        _: &wire::ImportPublicProofBundleV1,
+        now: i64,
+        _: &TrustTransaction<'_>,
+    ) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if now >= 1351000 {
             return Err(Error::Hybrid(hybrid_codec::Reject::Expired));
@@ -1105,7 +1115,12 @@ impl TransferredAuthority {
     }
 }
 impl super::delegated_import::AcceptedAuthority for TransferredAuthority {
-    fn authorize_import(&self, _: &wire::ImportPublicProofBundleV1, now: i64) -> Result<()> {
+    fn authorize_import(
+        &self,
+        _: &wire::ImportPublicProofBundleV1,
+        now: i64,
+        _: &TrustTransaction<'_>,
+    ) -> Result<()> {
         self.ring.verify_current_owner(
             &self.owner,
             now / 1000,
@@ -2043,7 +2058,7 @@ fn hybrid_callback_and_post_callback_panics_restore_before_unwinding() {
                     Ok(())
                 },
                 |_, _| Ok(()),
-                |writer| {
+                |_, writer| {
                     writer.write_file(std::path::Path::new("panic-pin"), b"new")?;
                     writer.write_file(std::path::Path::new("panic-pack"), b"pack")?;
                     if !hook {
@@ -2157,8 +2172,9 @@ fn hybrid_rollback_io_preserves_original_rejection_and_blocks_trusted_use() {
 
 #[test]
 fn hybrid_failed_install_blocks_retained_repository_native_identity_until_retry() {
-    use super::install_artifacts::tests::{clear_failure, fail_rollback};
     use objects::store::ObjectStore as _;
+
+    use super::install_artifacts::tests::{clear_failure, fail_rollback};
     let receiver = HybridReceiver::new();
     let original = receiver.repo.native_spool_id().expect("original spool");
     let replacement = uuid::Uuid::now_v7();
@@ -2572,7 +2588,7 @@ fn hybrid_failed_sql_commit_restores_artifacts_from_uncommitted_marker() {
             Ok(())
         },
         |_, _| Ok(()),
-        |writer| {
+        |_, writer| {
             writer.write_file(std::path::Path::new("commit-pin"), b"new")?;
             writer.write_file(std::path::Path::new("commit-pack"), b"pack")
         },
