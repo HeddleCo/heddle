@@ -1,0 +1,53 @@
+name: Windows installation recovery
+
+on:
+  pull_request:
+    branches: [main, integration]
+    paths:
+      - '.github/workflows/installation-windows.yml'
+      - 'crates/fs-prims/**'
+      - 'crates/repo/src/discovery.rs'
+      - 'crates/repo/src/repository_open.rs'
+      - 'crates/repo/src/local_metadata.rs'
+      - 'crates/repo/src/thread_replication/install_artifacts/**'
+      - 'crates/repo/src/thread_replication/install_artifacts.rs'
+      - 'crates/repo/src/thread_replication/hosted_trust.rs'
+      - 'crates/repo/src/thread_replication/hosted_trust_tests.rs'
+  push:
+    branches: [integration]
+    paths:
+      - '.github/workflows/installation-windows.yml'
+      - 'crates/fs-prims/**'
+      - 'crates/repo/src/discovery.rs'
+      - 'crates/repo/src/repository_open.rs'
+      - 'crates/repo/src/thread_replication/install_artifacts/**'
+      - 'crates/repo/src/thread_replication/install_artifacts.rs'
+
+concurrency:
+  group: windows-installation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installation:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.98.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-installation
+      - name: Non-privileged publication and directory handles
+        shell: pwsh
+        run: cargo test --locked -p heddle-fs-prims --lib directory::tests
+      - name: Journal crash and rollback recovery
+        shell: pwsh
+        run: |
+          $env:HEDDLE_HOME = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          cargo test --locked -p heddle-repo --lib device_operations::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p heddle-repo --lib install_artifacts -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p heddle-repo --lib hosted_trust_tests -- --test-threads=1

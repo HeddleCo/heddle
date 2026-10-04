@@ -128,8 +128,10 @@ pub fn page(
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = super::install_artifacts::InstallationConnection::open(
+        heddle_dir,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
     let default = Cursor {
         name: String::new(),
         updated: i64::MAX,
@@ -185,8 +187,10 @@ pub fn epoch(heddle_dir: &Path) -> Result<i64> {
     if !path.exists() {
         return Ok(0);
     }
-    let db =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let db = super::install_artifacts::InstallationConnection::open(
+        heddle_dir,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
     Ok(db.query_row(
         "SELECT version FROM thread_list_epoch WHERE id=1",
         [],

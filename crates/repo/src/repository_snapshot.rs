@@ -1417,6 +1417,7 @@ impl Repository {
     /// indexed-by-root marker lookup, independent of cached trees and sibling
     /// checkouts. Only completing a full materialization clears the guard.
     pub fn is_incomplete_checkout(&self) -> Result<bool> {
+        let _serialization = self.installation_lock()?;
         Ok(crate::thread_manifest::is_withheld_checkout(
             self.heddle_dir(),
             &std::fs::canonicalize(self.root())?,

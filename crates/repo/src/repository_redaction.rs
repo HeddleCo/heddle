@@ -118,6 +118,7 @@ impl Repository {
     /// exists on the blob, no second entry is written and the existing
     /// id is returned.
     pub fn put_redaction(&self, redaction: Redaction) -> Result<ContentHash> {
+        let _serialization = self.installation_lock()?;
         let blob = redaction.redacted_blob;
         let mut existing = self.get_redactions_for_blob(&blob)?;
 
@@ -150,6 +151,7 @@ impl Repository {
     /// `RedactionsBlob` (not an error) when none exist — callers can
     /// treat the result uniformly.
     pub fn get_redactions_for_blob(&self, blob: &ContentHash) -> Result<RedactionsBlob> {
+        let _serialization = self.installation_lock()?;
         let path = self.redaction_path_for_blob(blob);
         if !path.exists() {
             return Ok(RedactionsBlob::empty());
@@ -162,6 +164,7 @@ impl Repository {
     /// and the GC's "never collect a redaction" guard. Returns
     /// `(blob_hash, blob)` pairs so callers can correlate.
     pub fn list_all_redactions(&self) -> Result<Vec<(ContentHash, RedactionsBlob)>> {
+        let _serialization = self.installation_lock()?;
         let dir = self.redactions_dir();
         if !dir.exists() {
             return Ok(Vec::new());
@@ -248,6 +251,7 @@ impl Repository {
         path: &str,
         redaction_id: &ContentHash,
     ) -> Result<RemoveRedactionOutcome> {
+        let _serialization = self.installation_lock()?;
         let mut redactions_blob = self.get_redactions_for_blob(blob)?;
         let mut found_index: Option<usize> = None;
         for (i, r) in redactions_blob.redactions.iter().enumerate() {
@@ -320,6 +324,7 @@ impl Repository {
     /// surrounding transaction later fails, so a rolled-back undo never
     /// re-exposes a still-redacted blob.
     pub fn capture_redaction_sidecar(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        let _serialization = self.installation_lock()?;
         let path = self.redaction_path_for_blob(blob);
         if !path.exists() {
             return Ok(None);
@@ -339,6 +344,7 @@ impl Repository {
         blob: &ContentHash,
         snapshot: Option<Vec<u8>>,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let path = self.redaction_path_for_blob(blob);
         match snapshot {
             Some(bytes) => {
@@ -392,6 +398,7 @@ impl Repository {
     /// Local purge still requires a protected signing identity. Hosted purge
     /// acceptance is independently gated by owner authorization v2.
     pub fn purge_blob(&self, blob: &ContentHash) -> Result<PurgeOutcome> {
+        let _serialization = self.installation_lock()?;
         let _lock = self.locker().write()?;
         let mut redactions_blob = self.get_redactions_for_blob(blob)?;
         if redactions_blob.redactions.is_empty() {
@@ -477,6 +484,7 @@ impl Repository {
         blob: ContentHash,
         bytes: &[u8],
     ) -> Result<WireAcceptOutcome> {
+        let _serialization = self.installation_lock()?;
         let _lock = self.locker().write()?;
         let mut incoming = RedactionsBlob::decode(bytes)
             .with_context(|| format!("decode incoming redactions for blob {}", blob.short()))?;
@@ -541,6 +549,7 @@ impl Repository {
         authorization: Option<&SidecarAuthorization>,
         now_unix_seconds: i64,
     ) -> Result<WireAcceptOutcome> {
+        let _serialization = self.installation_lock()?;
         self.verify_owner_purge_authorization(
             &blob.to_hex(),
             bytes,
@@ -591,6 +600,7 @@ impl Repository {
         &self,
         blob: &ContentHash,
     ) -> Result<Option<Vec<u8>>> {
+        let _serialization = self.installation_lock()?;
         let Some(bytes) = self.store().get_redactions_bytes_for_blob(blob)? else {
             return Ok(None);
         };
