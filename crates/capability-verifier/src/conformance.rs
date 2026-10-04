@@ -18,6 +18,9 @@ use crate::{
 /// Maximum JSON fixture size accepted by the adapter.
 pub const MAX_FIXTURE_BYTES: usize = 16 * 1024 * 1024;
 
+#[path = "conformance_production.rs"]
+pub mod production;
+
 /// Versioned cross-repository purge conformance fixture.
 #[derive(Debug, Deserialize)]
 pub struct ConformanceFixture {

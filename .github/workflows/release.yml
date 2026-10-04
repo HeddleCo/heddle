@@ -10,6 +10,7 @@ name: Release binaries
 #                                                    ├─► sign + checksum
 #                                                    ├─► release (aggregates, publishes, posts SHA256SUMS)
 #                                                    └─► publish-manifests (stable only)
+#   validate-tag ──► build-verifier-npm ──► publish-verifier-npm (stable, after release)
 #
 # validate-tag is the single trust gate for the pipeline. The job is a
 # reusable workflow pinned to a SHA on default-branch main
@@ -77,6 +78,91 @@ jobs:
     uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@e847f41b146e42e5bd688039469ed0a5ab9eff21
     permissions:
       contents: read
+
+  build-verifier-npm:
+    name: build capability-verifier npm package
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install Worker target for the workspace toolchain
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-verifier-npm
+      - name: Install pinned binding generator
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Build, validate release version, and pack
+        working-directory: crates/capability-verifier
+        env:
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          npm run build
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const p = JSON.parse(readFileSync("npm/package.json"));
+            if (p.version !== process.env.RELEASE_TAG.slice(1)) {
+              throw new Error(`npm version ${p.version} differs from ${process.env.RELEASE_TAG}`);
+            }
+          '
+          cd npm
+          npm pack --dry-run --ignore-scripts
+          npm pack --ignore-scripts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capability-verifier-npm
+          path: crates/capability-verifier/npm/*.tgz
+          if-no-files-found: error
+
+  publish-verifier-npm:
+    name: publish capability-verifier to GitHub Packages
+    needs: [validate-tag, build-verifier-npm, release]
+    if: needs.validate-tag.outputs.kind == 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: capability-verifier-npm
+          path: package
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@heddleco'
+      - name: Publish validated tarball (idempotent)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          package="@heddleco/capability-verifier-wasm@${version}"
+          if npm view "$package" version --json > /tmp/npm-probe.json 2>/tmp/npm-probe.log; then
+            echo "$package already published"
+          elif node -e 'const e = require("/tmp/npm-probe.json"); process.exit(e.error?.code === "E404" ? 0 : 1)'; then
+            npm publish "package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts
+          else
+            cat /tmp/npm-probe.log >&2
+            exit 1
+          fi
 
   build:
     name: build non-mac ${{ matrix.target }}

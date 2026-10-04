@@ -11,6 +11,8 @@ if [[ ${OWNER_AUTH_BINDING_READY:-0} != 1 ]]; then
   npm run build --prefix "$REPO_ROOT"
 fi
 
+OWNER_AUTH_BINDING_ROOT="$BINDING_ROOT" node --test "$REPO_ROOT/owner-authorization-conformance/integer-boundaries.test.mjs"
+
 cargo build \
   --manifest-path "$MANIFEST" \
   --target-dir "$TARGET"
