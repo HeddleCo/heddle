@@ -68,6 +68,7 @@ impl Repository {
         replica: &crate::thread_replication::ThreadReplica,
         endpoint: [u8; 32],
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         use objects::object::{
             ContentHash,
             thread_replication::integration::{SPOOL_GENESIS_TRUST_FORMAT, TrustedHostedExecutor},
@@ -108,6 +109,7 @@ impl Repository {
     }
 
     fn read_owner_genesis_pin(&self) -> Result<PinnedOwnerGenesis> {
+        let _serialization = self.installation_lock()?;
         let path = self.owner_genesis_pin_path();
         if fs::metadata(&path)?.len() > verifier_limits()?.max_bundle_bytes() as u64 + 4096 {
             anyhow::bail!("persisted owner authorization exceeds proof bound");
@@ -141,6 +143,7 @@ impl Repository {
         signed: Option<&[u8]>,
         canonical_spool_path_segments: &[String],
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         if protocol_version != OWNER_AUTHORIZATION_PROTOCOL_VERSION {
             anyhow::bail!("unsupported owner authorization protocol version {protocol_version}");
         }
@@ -191,6 +194,7 @@ impl Repository {
         canonical_path: &[String],
         now_unix_seconds: i64,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let limits = verifier_limits()?;
         if observed.encoded_len() > limits.max_bundle_bytes() {
             anyhow::bail!("owner observation exceeds proof bound");
@@ -281,6 +285,7 @@ impl Repository {
         authorization: Option<&SidecarAuthorization>,
         now_unix_seconds: i64,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let authorization = authorization.ok_or_else(|| {
             HeddleError::InvalidObject("owner purge capability is absent".to_owned())
         })?;

@@ -4,10 +4,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-use objects::{
-    lock::RepositoryLockExt,
-    store::{WriterLeaseStatus, WriterLeaseStore},
-};
+use objects::store::{WriterLeaseStatus, WriterLeaseStore};
 use repo::ActorPresenceStore;
 
 use super::*;
@@ -1175,122 +1172,69 @@ fn post_snapshot_hook_can_release_its_lane_writer() {
 }
 
 #[test]
-fn list_cannot_reap_a_writer_during_its_capture() {
-    use std::time::{Duration, Instant};
-
+fn list_cannot_reap_an_authenticated_checkout_writer() {
     let (_main, path, _) = fanout_lane();
     let credential: Value =
         serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
             .unwrap();
     let repo = repo::Repository::open(&path).unwrap();
+    let lease_id = credential["lease"].as_str().unwrap();
+    let token = credential["token"].as_str().unwrap();
     let lease_path = repo
         .heddle_dir()
         .join("writer-leases")
-        .join(format!("{}.toml", credential["lease"].as_str().unwrap()));
-    let initial_lease = fs::read_to_string(&lease_path).unwrap();
-    let entered = path.join("reap-hook-entered");
-    let resume = path.join("reap-hook-resume");
-    let hook = format!(
-        "#!/bin/sh\nif [ -z \"$HEDDLE_HOOK_PROTOCOL\" ]; then\n touch '{}'\n while [ ! -f '{}' ]; do sleep 0.02; done\nfi\n",
-        entered.display(),
-        resume.display(),
-    );
-    let mut install = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args(["hook", "install", "pre-snapshot", "--from-stdin"])
-        .current_dir(&path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    install
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(hook.as_bytes())
-        .unwrap();
-    assert!(install.wait().unwrap().success());
-    fs::write(path.join("reap-race.txt"), "capture under lease").unwrap();
-    let capture = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args(["--output", "json", "capture", "-m", "reap race"])
-        .current_dir(&path)
-        .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !entered.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if !entered.exists() {
-        fs::write(&resume, "resume").unwrap();
-        panic!(
-            "capture did not enter pre-snapshot hook: {:?}",
-            capture.wait_with_output()
-        );
-    }
-    let repo_lock = repo.locker().write().unwrap();
-    fs::write(&resume, "resume").unwrap();
-    let locks = repo.heddle_dir().join("locks");
-    let mut mutation_held = false;
-    while Instant::now() < deadline {
-        for entry in fs::read_dir(&locks).unwrap() {
-            let lock_path = entry.unwrap().path();
-            if lock_path
-                .file_name()
+        .join(format!("{lease_id}.toml"));
+    let store = objects::store::WriterLeaseStore::new(repo.heddle_dir());
+    let replica = repo.native_thread("lane/one").unwrap();
+    // Capture owns this authenticated guard for its entire mutation. Keep it
+    // held while a separate CLI process attempts to reap the expired lease.
+    let writer = repo
+        .authenticate_checkout_writer(replica.thread_id(), lease_id, token)
+        .expect("authenticate capture writer");
+    let unexpired = fs::read(&lease_path).unwrap();
+    let expire = || {
+        let lease = fs::read_to_string(&lease_path).unwrap();
+        let expired = lease
+            .lines()
+            .map(|line| {
+                if line.starts_with("heartbeat_at = ") {
+                    "heartbeat_at = \"2000-01-01T00:00:00Z\""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&lease_path, expired).unwrap();
+        assert_eq!(
+            store
+                .load(lease_id)
                 .unwrap()
-                .to_string_lossy()
-                .starts_with("checkout-")
-                && objects::lock::RepoLock::at(lock_path)
-                    .try_write()
-                    .unwrap()
-                    .is_none()
-            {
-                mutation_held = true;
-            }
-        }
-        if mutation_held {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if !mutation_held {
-        drop(repo_lock);
-        panic!(
-            "capture did not acquire mutation lock: {:?}",
-            capture.wait_with_output()
+                .unwrap()
+                .liveness_at(chrono::Utc::now()),
+            objects::store::Liveness::Dead,
+            "the lease must actually be eligible for reaping"
         );
-    }
-    while fs::read_to_string(&lease_path).unwrap() == initial_lease && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if fs::read_to_string(&lease_path).unwrap() == initial_lease {
-        drop(repo_lock);
-        panic!(
-            "capture did not authenticate: {:?}",
-            capture.wait_with_output()
-        );
-    }
-    let lease = fs::read_to_string(&lease_path).unwrap();
-    let expired = lease
-        .lines()
-        .map(|line| {
-            if line.starts_with("heartbeat_at = ") {
-                "heartbeat_at = \"2000-01-01T00:00:00Z\""
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&lease_path, expired).unwrap();
+    };
+    expire();
     heddle(&["agent", "list"], Some(&path)).unwrap();
     let after_list = fs::read_to_string(&lease_path).unwrap();
-    drop(repo_lock);
-    let output = capture.wait_with_output().unwrap();
     assert!(after_list.contains("status = \"active\""), "{after_list}");
+    // Remove the synthetic expiry before asking the writer to capture again.
+    fs::write(&lease_path, &unexpired).unwrap();
+    writer.finish().unwrap();
+    fs::write(path.join("reap-race.txt"), "capture under lease").unwrap();
+    let output = heddle_output(&["capture", "-m", "reap race"], Some(&path)).unwrap();
     assert!(output.status.success(), "capture failed: {output:?}");
+
+    // Once capture has released the guard, the same expired lease is reapable.
+    expire();
+    heddle(&["agent", "list"], Some(&path)).unwrap();
+    let after_capture = fs::read_to_string(&lease_path).unwrap();
+    assert!(
+        after_capture.contains("status = \"abandoned\""),
+        "{after_capture}"
+    );
 }
 
 fn assert_capture_aborts_after_release_during_hook(replace: bool) {

@@ -35,7 +35,7 @@ impl ThreadReplica {
         &self,
         operation: &ThreadOperation,
     ) -> Result<()> {
-        self.require_local_integration_source_in(&self.connect()?, operation)
+        self.require_local_integration_source_in(&*self.connect()?, operation)
     }
     pub(super) fn require_local_integration_source_in(
         &self,

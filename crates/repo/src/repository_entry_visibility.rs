@@ -229,6 +229,7 @@ impl Repository {
         &self,
         change_id: &ChangeId,
     ) -> Result<Option<Vec<u8>>> {
+        let _serialization = self.installation_lock()?;
         let path = self.entry_visibility_path_for_change(change_id);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -246,6 +247,7 @@ impl Repository {
         change_id: &ChangeId,
         snapshot: Option<Vec<u8>>,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let path = self.entry_visibility_path_for_change(change_id);
         match snapshot {
             Some(bytes) => {
@@ -272,6 +274,7 @@ impl Repository {
         &self,
         sidecar: &EntryVisibility,
     ) -> Result<EntryVisibilityBinding> {
+        let _serialization = self.installation_lock()?;
         let change_id = sidecar.change_id;
         let prior_sidecar = self.get_entry_visibility_bytes(&change_id)?;
         let new_bytes = sidecar

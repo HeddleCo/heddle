@@ -45,6 +45,8 @@ impl ThreadCheckout {
         attribution: Attribution,
         signer: &impl Signer,
     ) -> Result<SignedOperation> {
+        let _serialization =
+            super::install_artifacts::InstallationLock::acquire(self.repository.heddle_dir())?;
         uuid::Uuid::parse_str(operation_id).map_err(|e| Error::Invalid(e.to_string()))?;
         let _writer =
             self.repository

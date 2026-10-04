@@ -183,6 +183,7 @@ impl Repository {
         &self,
         mut record: StateVisibility,
     ) -> Result<PutVisibilityOutcome> {
+        let _serialization = self.installation_lock()?;
         if record.signature.is_none() {
             record.signature =
                 Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
@@ -210,6 +211,7 @@ impl Repository {
         &self,
         mut record: StateVisibility,
     ) -> Result<Option<PutVisibilityOutcome>> {
+        let _serialization = self.installation_lock()?;
         if record.signature.is_none() {
             record.signature =
                 Some(self.sign_client_metadata(&record.canonical_signing_payload())?);
@@ -221,14 +223,13 @@ impl Repository {
         self.put_state_visibility_locked_if_absent(record)
     }
 
-    /// Lock-free body of [`put_state_visibility`](Self::put_state_visibility).
+    /// Body of [`put_state_visibility`](Self::put_state_visibility) used by
+    /// writers that already hold the repo write lock.
     ///
-    /// The caller **must already hold the repo write lock**. The repo lock is an
-    /// OS file lock (`flock`) that does NOT nest within one process — re-taking
-    /// it on a thread that already holds it deadlocks — so the snapshot
-    /// chokepoint, which writes the capture-time default-visibility binding
-    /// while still holding the snapshot write lock (heddle#317 / PR #529 P1),
-    /// calls this directly instead of the lock-taking wrapper.
+    /// The caller **must already hold the repo write lock**. Recovery uses its
+    /// same-thread reentrant acquisition before sidecar access. The snapshot
+    /// chokepoint writes the capture-time default-visibility binding inside
+    /// its existing critical section (heddle#317 / PR #529 P1).
     ///
     /// **Atomic before-image capture (PR #529 P1 r5).** This reads the existing
     /// sidecar bytes (the before-image), appends the record, and writes the new
@@ -241,6 +242,7 @@ impl Repository {
         &self,
         record: StateVisibility,
     ) -> Result<PutVisibilityOutcome> {
+        let _serialization = self.installation_lock()?;
         if record.signature.is_none() {
             anyhow::bail!("authoritative state-visibility metadata must be client-signed");
         }
@@ -308,7 +310,7 @@ impl Repository {
         })
     }
 
-    /// Lock-free body of
+    /// Body for writers that already hold the repo write lock, used by
     /// [`put_state_visibility_if_absent`](Self::put_state_visibility_if_absent).
     /// The caller **must already hold the repo write lock** (see
     /// [`put_state_visibility_locked`](Self::put_state_visibility_locked) for why
@@ -319,6 +321,7 @@ impl Repository {
         &self,
         record: StateVisibility,
     ) -> Result<Option<PutVisibilityOutcome>> {
+        let _serialization = self.installation_lock()?;
         if self
             .get_state_visibility_for_state(&record.state)
             .with_context(|| "read existing visibility for if-absent put")?
@@ -359,6 +362,7 @@ impl Repository {
         record: StateVisibility,
         kind: VisibilityCommitKind,
     ) -> Result<Option<VisibilityCommitOutcome>> {
+        let _serialization = self.installation_lock()?;
         // ONE write lock spans the sidecar write AND the oplog append below, so
         // concurrent visibility mutations are totally ordered.
         let _lock = self
@@ -509,6 +513,7 @@ impl Repository {
     /// state, or `Ok(None)` if no sidecar exists. The bytes are the
     /// wire-transfer payload, not a re-serialized view.
     pub fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
+        let _serialization = self.installation_lock()?;
         let path = self.state_visibility_path_for_state(state);
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -524,6 +529,7 @@ impl Repository {
     /// `put_state_visibility` so validation and public-by-absence
     /// normalization run at the same boundary as local writes.
     pub fn accept_wire_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
             format!(
                 "decode incoming state visibility for state {}",
@@ -562,6 +568,7 @@ impl Repository {
     /// does. A `Private` head that lost its sidecar on clone cannot be
     /// resolved (`state not found`).
     pub fn accept_local_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
             format!(
                 "decode local state visibility for state {}",
@@ -591,6 +598,7 @@ impl Repository {
     /// [`StateVisibilityBlob`] (not an error) when none exist — callers can
     /// treat the result uniformly.
     pub fn get_state_visibility_for_state(&self, state: &StateId) -> Result<StateVisibilityBlob> {
+        let _serialization = self.installation_lock()?;
         let path = self.state_visibility_path_for_state(state);
         if !path.exists() {
             return Ok(StateVisibilityBlob::empty());
@@ -609,6 +617,7 @@ impl Repository {
     /// robust against any blob a future path might introduce. This is the
     /// query the serve-side gate keys off.
     pub fn has_visibility_for_state(&self, state: &StateId) -> Result<bool> {
+        let _serialization = self.installation_lock()?;
         Ok(self
             .get_state_visibility_for_state(state)?
             .latest()?
@@ -621,6 +630,7 @@ impl Repository {
     /// is materialized into a superseding record before it can change the
     /// effective tier, see the spike §5.4).
     pub fn effective_state_visibility(&self, state: &StateId) -> Result<Option<StateVisibility>> {
+        let _serialization = self.installation_lock()?;
         Ok(self
             .get_state_visibility_for_state(state)?
             .latest()?
@@ -742,6 +752,7 @@ impl Repository {
         mut should_withhold: impl FnMut(StateId, &VisibilityTier) -> bool,
         mut visit: impl FnMut(&objects::object::State) -> Result<usize>,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
+        let _serialization = self.installation_lock()?;
         let mut seen = HashSet::new();
         let mut stack = vec![*state_id];
         let mut decoded_bytes = 0usize;
@@ -796,6 +807,7 @@ impl Repository {
     /// `(state_id, blob)` pairs so callers can correlate. Used by listing
     /// surfaces and the GC's "never collect a visibility record" guard.
     pub fn list_all_state_visibility(&self) -> Result<Vec<(StateId, StateVisibilityBlob)>> {
+        let _serialization = self.installation_lock()?;
         let dir = self.state_visibility_dir();
         if !dir.exists() {
             return Ok(Vec::new());
@@ -890,6 +902,7 @@ impl Repository {
         state: &StateId,
         lock_held: bool,
     ) -> Result<Option<DefaultVisibilityBinding>> {
+        let _serialization = self.installation_lock()?;
         let tier = self.resolve_capture_default_visibility();
         if tier == VisibilityTier::Public {
             return Ok(None);
@@ -962,6 +975,7 @@ impl Repository {
         state: &StateId,
         snapshot: Option<Vec<u8>>,
     ) -> Result<()> {
+        let _serialization = self.installation_lock()?;
         let path = self.state_visibility_path_for_state(state);
         match snapshot {
             Some(bytes) => {
@@ -1010,6 +1024,7 @@ impl Repository {
         expected_current: &Option<Vec<u8>>,
         target: Option<Vec<u8>>,
     ) -> Result<VisibilitySidecarRestore> {
+        let _serialization = self.installation_lock()?;
         let _lock = self
             .locker()
             .write()
@@ -1037,6 +1052,7 @@ impl Repository {
     /// `Restricted` sidecar so they carry that one label, not every Private
     /// scope. Unlabeled Owner stays Internal.
     pub fn embargo_membership_label(&self) -> Result<Option<String>> {
+        let _serialization = self.installation_lock()?;
         let path = self.embargo_membership_path();
         if !path.exists() {
             return Ok(None);

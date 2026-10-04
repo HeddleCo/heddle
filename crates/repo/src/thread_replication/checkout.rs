@@ -20,7 +20,7 @@ use objects::{
 use refs::Head;
 use serde::{Deserialize, Serialize};
 
-use super::{Admission, Error, Result, ThreadReplica};
+use super::{Admission, Error, Result, ThreadReplica, install_artifacts::InstallationLock};
 use crate::{AudienceTier, CheckoutMaterialization, Repository};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +67,7 @@ impl ThreadCheckout {
         revision: StateId,
         audience: &AudienceTier,
     ) -> Result<Self> {
+        let _serialization = InstallationLock::acquire(source.heddle_dir())?;
         if path.exists() {
             return Err(Error::Invalid("checkout destination already exists".into()));
         }
@@ -117,17 +118,20 @@ impl ThreadCheckout {
         })
     }
     pub fn open(path: &Path) -> Result<Self> {
+        let repository = Repository::open(path)?;
+        let _serialization = InstallationLock::acquire(repository.heddle_dir())?;
         let local_dir = path.canonicalize()?.join(".heddle");
         let binding =
             serde_json::from_slice(&std::fs::read(local_dir.join("thread-checkout.json"))?)
                 .map_err(|e| Error::Invalid(e.to_string()))?;
         Ok(Self {
             binding,
-            repository: Repository::open(path)?,
+            repository,
             local_dir,
         })
     }
     pub fn claim_writer(&self, actor: String, pid: Option<u32>) -> Result<WriterLeaseGrant> {
+        let _serialization = InstallationLock::acquire(self.repository.heddle_dir())?;
         let result = WriterLeaseStore::new(self.repository.heddle_dir()).reserve(
             WriterLeaseDraft {
                 thread: self.binding.thread.to_hex(),
@@ -168,6 +172,7 @@ impl ThreadCheckout {
         signer: &impl Signer,
         selected_paths: &[String],
     ) -> Result<SignedOperation> {
+        let _serialization = InstallationLock::acquire(self.repository.heddle_dir())?;
         let mut selection = selected_paths.to_vec();
         selection.sort();
         selection.dedup();

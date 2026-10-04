@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Durable filesystem primitives for Heddle.
 
+pub mod directory;
 pub mod fs_atomic;
 pub mod fs_clone;
 pub mod fs_ops;

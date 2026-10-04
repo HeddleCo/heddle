@@ -390,6 +390,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         &records,
         &a,
         repo.store(),
+        |_| Ok(()),
     )
     .expect("full renewed import");
     assert_eq!(replicas.len(), 2);
@@ -413,6 +414,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         &records,
         &a,
         repo.store(),
+        |_| Ok(()),
     )
     .expect("exact replay");
     let db = crate::local_metadata::open(repo.heddle_dir()).expect("metadata");
@@ -426,6 +428,14 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         db.query_row("SELECT count(*) FROM hosted_import_slots", [], |r| r
             .get::<_, i64>(0))
             .expect("slots"),
+        2
+    );
+    assert_eq!(
+        trust
+            .snapshot()
+            .expect("job snapshot")
+            .known_job_associations
+            .len(),
         2
     );
     assert!(!repo.heddle_dir().join("owner-authorization.bin").exists());
@@ -455,7 +465,8 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
             &bundle.encode_to_vec(),
             &records,
             &a,
-            repo.store()
+            repo.store(),
+            |_| Ok(())
         ),
         Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
     ));
@@ -467,6 +478,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         &records,
         &a,
         repo.store(),
+        |_| Ok(()),
     )
     .expect("restored current disclosure control");
     let mut missing = bundle.clone();
@@ -478,7 +490,8 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
             &missing.encode_to_vec(),
             &records,
             &a,
-            repo.store()
+            repo.store(),
+            |_| Ok(())
         ),
         Err(Error::Hybrid(hybrid_codec::Reject::Proof))
     ));
@@ -498,7 +511,8 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
             &revoked.encode_to_vec(),
             &records,
             &a,
-            repo.store()
+            repo.store(),
+            |_| Ok(())
         ),
         Err(Error::HybridEvidence(
             crypto::import_authority::Error::Contract(hybrid_codec::Reject::Revoked)
@@ -603,6 +617,7 @@ fn witnessed_native_control_commits_its_exact_original_and_invalidates_replay() 
         &conversions,
         &a,
         repo.store(),
+        |_| Ok(()),
     )
     .expect("import original genesis controls");
     let payload: wire::ImportAuthorityWitnessV1 = record(&f, "authority_admission_payload");
@@ -717,7 +732,8 @@ fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() 
             &bad.encode_to_vec(),
             &records,
             &a,
-            repo.store()
+            repo.store(),
+            |_| Ok(())
         ),
         Err(Error::ImportAuthority(
             heddleco_capability_verifier::Error::InvalidSignature
@@ -739,7 +755,8 @@ fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() 
             &bundle.encode_to_vec(),
             &records,
             &a,
-            repo.store()
+            repo.store(),
+            |_| Ok(())
         ),
         Err(Error::ImportAuthority(
             heddleco_capability_verifier::Error::Hybrid(hybrid_codec::Reject::Scope)
@@ -764,6 +781,7 @@ fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() 
         &records,
         &a,
         repo.store(),
+        |_| Ok(()),
     )
     .expect("unchanged complete positive control");
 }
@@ -916,6 +934,7 @@ fn review_disclosure_expiry_is_checked_at_commit_without_durable_changes() {
             &records,
             &a,
             repo.store(),
+            |_| Ok(()),
         );
         if accepted {
             assert_eq!(result.expect("unexpired control").len(), 2);
@@ -1340,6 +1359,7 @@ fn review_transfer_preserves_original_genesis_and_exact_historical_prefixes() {
                 &records,
                 &authority,
                 repo.store(),
+                |_| Ok(()),
             )
         };
         if existing {
@@ -1425,6 +1445,7 @@ fn review_fresh_bundle_job_cannot_become_post_transfer_delegator() {
             &records,
             &authority,
             repo.store(),
+            |_| Ok(()),
         );
         if role == "device" {
             assert_eq!(
@@ -1460,4 +1481,1262 @@ fn review_fresh_bundle_job_cannot_become_post_transfer_delegator() {
             }
         }
     }
+}
+
+struct HybridReceiver {
+    _directory: tempfile::TempDir,
+    repo: crate::Repository,
+    trust: HostedTrust<TestClock>,
+    clock: TestClock,
+    authority: Authority,
+    bundle: wire::ImportPublicProofBundleV1,
+    fixture: Value,
+}
+impl HybridReceiver {
+    fn new() -> Self {
+        let fixture = fixture();
+        let directory = tempfile::tempdir().expect("receiver");
+        let repo = crate::Repository::init_default(directory.path()).expect("repository");
+        let selected = root(&fixture);
+        select_root(repo.heddle_dir(), &selected).expect("independent root");
+        let authority = Authority::new(&fixture);
+        select_spool(
+            repo.heddle_dir(),
+            authority.ring.owner_genesis().spool_uuid(),
+            authority.digest,
+            authority.initial,
+        )
+        .expect("independent Spool");
+        let clock = TestClock::new(1_350_000);
+        let trust = HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone())
+            .expect("trust");
+        let mut bundle: wire::ImportPublicProofBundleV1 =
+            record(&fixture, "complete_renewed_export");
+        bundle.history_proofs = [
+            "genesis_proof",
+            "genesis_dev_proof",
+            "publication_proof",
+            "renewed_publication_proof",
+        ]
+        .iter()
+        .map(|name| record(&fixture, name))
+        .collect();
+        Self {
+            _directory: directory,
+            repo,
+            trust,
+            clock,
+            authority,
+            bundle,
+            fixture,
+        }
+    }
+    fn counts(&self) -> Vec<i64> {
+        let db = crate::local_metadata::open(self.repo.heddle_dir()).expect("database");
+        [
+            "threads",
+            "operations",
+            "hosted_import_proofs",
+            "hosted_import_admissions",
+            "hosted_import_slots",
+            "hosted_import_job_keys",
+        ]
+        .map(|table| {
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count")
+        })
+        .to_vec()
+    }
+}
+
+#[test]
+fn hybrid_selected_genesis_does_not_install_unrelated_carried_branch() {
+    let receiver = HybridReceiver::new();
+    let selected = receiver.bundle.original_geneses[0].clone();
+    let (_, genesis) = crypto::import_authority::verify_native_genesis(&selected).expect("genesis");
+    let replicas = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &[selected],
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |_| Ok(()),
+    )
+    .expect("selected genesis without converted operations");
+    assert_eq!(
+        replicas.len(),
+        1,
+        "public evidence must not install another branch"
+    );
+    assert_eq!(replicas[0].thread, genesis.id().expect("id"));
+    let other = receiver
+        .bundle
+        .original_geneses
+        .iter()
+        .find(|record| {
+            crypto::import_authority::verify_native_genesis(record)
+                .expect("genesis")
+                .1
+                .id()
+                .expect("id")
+                != replicas[0].thread
+        })
+        .expect("other branch");
+    assert!(
+        ThreadReplica::open(
+            receiver.repo.heddle_dir(),
+            crypto::import_authority::verify_native_genesis(other)
+                .expect("genesis")
+                .1
+                .id()
+                .expect("id")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        replicas[0].hybrid_import_bundle().expect("bundle"),
+        Some(receiver.bundle)
+    );
+}
+
+#[test]
+fn hybrid_selected_capture_installs_its_genesis_and_checks_unselected_history() {
+    let receiver = HybridReceiver::new();
+    let selected: wire::SignedRecord = record(&receiver.fixture, "converted_main");
+    let (_, operation) =
+        crypto::import_authority::verify_native_operation(&selected).expect("capture");
+    // Tamper only with an unselected branch's public publication signature.
+    let mut bad = receiver.bundle.clone();
+    bad.operations
+        .iter_mut()
+        .find(|op| op.body.as_ref().expect("body").target_thread_id != operation.thread.as_bytes())
+        .expect("other public branch")
+        .job_signature
+        .as_mut()
+        .expect("job signature")
+        .signature[0] ^= 1;
+    let called = AtomicBool::new(false);
+    assert!(
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &bad.encode_to_vec(),
+            std::slice::from_ref(&selected),
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| {
+                called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        )
+        .is_err()
+    );
+    assert!(!called.load(Ordering::SeqCst));
+    let replicas = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &[selected],
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |_| Ok(()),
+    )
+    .expect("selected capture with genesis dependency");
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].thread, operation.thread);
+    assert!(
+        replicas[0]
+            .hosted_admission(operation.id().expect("id"))
+            .expect("admission")
+            .is_some()
+    );
+    assert!(
+        replicas[0]
+            .hosted_admission(operation.thread)
+            .expect("genesis admission")
+            .is_some()
+    );
+}
+
+#[test]
+fn hybrid_uncovered_original_rejects_before_callback() {
+    let receiver = HybridReceiver::new();
+    let payload: wire::ImportAuthorityWitnessV1 =
+        record(&receiver.fixture, "authority_admission_payload");
+    let uncovered = payload.original.expect("genuinely signed native original");
+    crypto::import_authority::verify_native_operation(&uncovered).expect("signature control");
+    let mut selected = vec![
+        record(&receiver.fixture, "converted_main"),
+        record(&receiver.fixture, "converted_dev"),
+    ];
+    selected.extend(payload.dependencies);
+    selected.push(uncovered);
+    let before = receiver.counts();
+    let called = AtomicBool::new(false);
+    assert!(matches!(
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &selected,
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| {
+                called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        ),
+        Err(Error::Hybrid(hybrid_codec::Reject::ImportPermission))
+    ));
+    assert!(!called.load(Ordering::SeqCst));
+    assert_eq!(receiver.counts(), before);
+}
+
+#[test]
+fn hybrid_late_rejection_restores_pack_pins_metadata_and_sql() {
+    for failure in ["callback", "expiry", "rollback", "disclosure"] {
+        let receiver = HybridReceiver::new();
+        let pack = receiver.repo.heddle_dir().join("selected.pack");
+        let spool = receiver.repo.heddle_dir().join("native-spool-id");
+        let owner = receiver.repo.heddle_dir().join("selected-owner-metadata");
+        std::fs::write(&spool, b"previous spool").expect("existing pin");
+        std::fs::write(&owner, b"previous owner").expect("existing metadata");
+        let mut staged = tempfile::NamedTempFile::new().expect("isolated pack");
+        std::io::Write::write_all(&mut staged, b"verified staged pack").expect("staged pack");
+        let before = receiver.counts();
+        let selected = [record(&receiver.fixture, "converted_main")];
+        let called = AtomicBool::new(false);
+        let result = ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &selected,
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |artifacts| {
+                called.store(true, Ordering::SeqCst);
+                // The SQL writer transaction remains uncommitted and held.
+                let second = rusqlite::Connection::open(
+                    receiver
+                        .repo
+                        .heddle_dir()
+                        .join(crate::local_metadata::DATABASE_NAME),
+                )?;
+                second.busy_timeout(std::time::Duration::ZERO)?;
+                assert!(second.execute_batch("BEGIN IMMEDIATE").is_err());
+                artifacts.install_file(
+                    staged.path(),
+                    pack.strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                )?;
+                artifacts.write_file(
+                    spool
+                        .strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                    b"new spool",
+                )?;
+                artifacts.write_file(
+                    owner
+                        .strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                    b"new owner",
+                )?;
+                artifacts.write_file(
+                    owner
+                        .strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                    b"second write",
+                )?;
+                match failure {
+                    "callback" => return Err(Error::Hybrid(hybrid_codec::Reject::Revoked)),
+                    "expiry" => receiver.clock.set(
+                        receiver
+                            .bundle
+                            .witness_set
+                            .as_ref()
+                            .expect("set")
+                            .body
+                            .as_ref()
+                            .expect("body")
+                            .valid_until_unix_millis,
+                    ),
+                    "rollback" => receiver.clock.set(1_349_999),
+                    "disclosure" => receiver.authority.disclosure.store(false, Ordering::SeqCst),
+                    _ => unreachable!("test case"),
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err(), "late {failure} must reject");
+        assert!(
+            called.load(Ordering::SeqCst),
+            "test must reach the callback"
+        );
+        assert!(
+            !pack.exists(),
+            "late {failure} must remove the installed pack"
+        );
+        assert_eq!(
+            std::fs::read(&spool).expect("restored pin"),
+            b"previous spool"
+        );
+        assert_eq!(
+            std::fs::read(&owner).expect("restored metadata"),
+            b"previous owner"
+        );
+        assert_eq!(receiver.counts(), before);
+        receiver.clock.set(1_350_000);
+        receiver.authority.disclosure.store(true, Ordering::SeqCst);
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &selected,
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |artifacts| {
+                artifacts.install_file(
+                    staged.path(),
+                    pack.strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                )?;
+                artifacts.write_file(
+                    spool
+                        .strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                    b"new spool",
+                )?;
+                artifacts.write_file(
+                    owner
+                        .strip_prefix(receiver.repo.heddle_dir())
+                        .expect("relative artifact"),
+                    b"new owner",
+                )
+            },
+        )
+        .expect("successful atomic installation control");
+        assert_eq!(
+            std::fs::read(pack).expect("committed pack"),
+            b"verified staged pack"
+        );
+        assert_eq!(std::fs::read(spool).expect("committed pin"), b"new spool");
+        assert_eq!(
+            std::fs::read(owner).expect("committed metadata"),
+            b"new owner"
+        );
+    }
+}
+
+#[test]
+fn hybrid_snapshot_does_not_mutate_floor_and_restores_retained_root_history() {
+    let receiver = HybridReceiver::new();
+    receiver
+        .trust
+        .mutate(receiver.bundle.witness_set.as_ref().expect("set"), |_| {
+            Ok(())
+        })
+        .expect("persist accepted set");
+    let original = receiver.trust.snapshot().expect("snapshot");
+    receiver.clock.set(1_350_100);
+    assert_eq!(
+        receiver
+            .trust
+            .snapshot()
+            .expect("later read")
+            .clock_floor_millis,
+        original.clock_floor_millis,
+        "an unexpired read must not persist receiver time"
+    );
+    let selected = root(&receiver.fixture);
+    let replacement = RootSelection {
+        root_id: "replacement-root".into(),
+        public_key: key(&receiver.fixture, "owner"),
+        ..selected.clone()
+    };
+    replace_root(receiver.repo.heddle_dir(), &selected, &replacement)
+        .expect("explicit independent replacement");
+    let expired_at = receiver
+        .bundle
+        .witness_set
+        .as_ref()
+        .expect("set")
+        .body
+        .as_ref()
+        .expect("body")
+        .valid_until_unix_millis;
+    receiver.clock.set(expired_at + 1);
+    let before = crate::local_metadata::open(receiver.repo.heddle_dir()).expect("db").query_row("SELECT signed_set,clock_floor,history_root_id,history_root_key FROM hosted_witness_trust", [], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?))).expect("durable row");
+    let snapshot = receiver
+        .trust
+        .snapshot()
+        .expect("expired set remains a history floor under its original root");
+    assert_eq!(snapshot.root, replacement);
+    assert_eq!(snapshot.root_epoch, 2);
+    assert_eq!(snapshot.clock_floor_millis, original.clock_floor_millis);
+    assert_eq!(
+        snapshot.previous.as_ref().expect("previous").digest(),
+        original.previous.as_ref().expect("previous").digest()
+    );
+    assert_eq!(
+        snapshot.previous.as_ref().expect("previous").body(),
+        receiver
+            .bundle
+            .witness_set
+            .as_ref()
+            .expect("original set")
+            .body
+            .as_ref()
+            .expect("body")
+    );
+    assert!(snapshot.known_job_associations.is_empty());
+    let after = crate::local_metadata::open(receiver.repo.heddle_dir()).expect("db").query_row("SELECT signed_set,clock_floor,history_root_id,history_root_key FROM hosted_witness_trust", [], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?))).expect("durable row");
+    assert_eq!(before, after, "reading must never advance durable trust");
+}
+
+#[test]
+fn hybrid_snapshot_rejects_clock_below_durable_floor() {
+    let receiver = HybridReceiver::new();
+    // Simulate a receiver restarted with a persisted wall floor and no
+    // process anchor. No signed set can bypass this check, even absent history.
+    crate::local_metadata::open(receiver.repo.heddle_dir())
+        .expect("db")
+        .execute("UPDATE hosted_witness_trust SET clock_floor=1350001", [])
+        .expect("persisted restart floor");
+    assert!(matches!(receiver.trust.snapshot(), Err(Error::HostedClock)));
+    receiver.clock.set(1_350_001);
+    assert_eq!(
+        receiver
+            .trust
+            .snapshot()
+            .expect("trustworthy clock control")
+            .clock_floor_millis,
+        1_350_001
+    );
+}
+
+#[test]
+fn hybrid_snapshot_rejects_frozen_clock_across_handles() {
+    let receiver = HybridReceiver::new();
+    receiver.trust.snapshot().expect("read anchor");
+    receiver.clock.elapsed.store(100, Ordering::SeqCst);
+    let another = HostedTrust::open(
+        receiver.repo.heddle_dir(),
+        &root(&receiver.fixture).authority,
+        receiver.clock.clone(),
+    )
+    .expect("another handle");
+    assert!(matches!(another.snapshot(), Err(Error::HostedClock)));
+    receiver.clock.set(1_350_100);
+    another.snapshot().expect("restored trustworthy time");
+}
+
+#[test]
+fn hybrid_selected_native_control_installs_with_its_original_admission() {
+    let mut receiver = HybridReceiver::new();
+    let payload: wire::ImportAuthorityWitnessV1 =
+        record(&receiver.fixture, "authority_admission_payload");
+    let original = payload.original.clone().expect("original");
+    let (_, operation) =
+        crypto::import_authority::verify_native_operation(&original).expect("native control");
+    receiver.bundle.authority_witnesses.push(payload);
+    receiver
+        .bundle
+        .statements
+        .push(record(&receiver.fixture, "authority_admission"));
+    receiver
+        .bundle
+        .history_proofs
+        .push(record(&receiver.fixture, "authority_proof"));
+    // The public bundle already carries the independently verified policy.
+    let selected = [record(&receiver.fixture, "converted_main"), original];
+    let replicas = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &selected,
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |_| Ok(()),
+    )
+    .expect("native original and selected causal closure");
+    assert_eq!(replicas.len(), 1);
+    let replica = &replicas[0];
+    assert_eq!(replica.thread, operation.thread);
+    assert_eq!(
+        replica
+            .hosted_admission(operation.id().expect("id"))
+            .expect("admission")
+            .expect("own admission")
+            .statement,
+        record(&receiver.fixture, "authority_admission")
+    );
+}
+
+#[test]
+fn hybrid_selected_boundary_original_installs_only_verified_receipt_dependencies() {
+    let mut receiver = HybridReceiver::new();
+    receiver.bundle.genesis_witnesses = [
+        record(&receiver.fixture, "boundary_genesis_payload"),
+        record(&receiver.fixture, "boundary_dev_genesis_payload"),
+    ]
+    .to_vec();
+    receiver
+        .bundle
+        .statements
+        .retain(|statement| statement.body.as_ref().expect("body").purpose != 1);
+    receiver.bundle.statements.extend([
+        record(&receiver.fixture, "boundary_genesis_statement"),
+        record(&receiver.fixture, "boundary_dev_genesis_statement"),
+    ]);
+    receiver.bundle.history_proofs.extend([
+        record(&receiver.fixture, "boundary_genesis_proof"),
+        record(&receiver.fixture, "boundary_dev_genesis_proof"),
+        record(&receiver.fixture, "boundary_authority_proof"),
+    ]);
+    let payload: wire::ImportAuthorityWitnessV1 =
+        record(&receiver.fixture, "boundary_authority_payload");
+    let original = payload.original.clone().expect("original");
+    let (_, operation) =
+        crypto::import_authority::verify_native_operation(&original).expect("native original");
+    receiver.bundle.authority_witnesses.push(payload);
+    receiver
+        .bundle
+        .statements
+        .push(record(&receiver.fixture, "boundary_authority_statement"));
+    let replicas = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &[original],
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |_| Ok(()),
+    )
+    .expect("individually authenticated native boundary receipts");
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].thread, operation.thread);
+    assert!(
+        replicas[0]
+            .hosted_admission(operation.id().expect("id"))
+            .expect("admission")
+            .is_some()
+    );
+}
+
+#[test]
+fn hybrid_callback_and_post_callback_panics_restore_before_unwinding() {
+    for hook in [false, true] {
+        let receiver = HybridReceiver::new();
+        std::fs::write(receiver.repo.heddle_dir().join("panic-pin"), b"old").expect("old");
+        let before = receiver.counts();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            receiver.trust.mutate_with_artifacts(
+                receiver.bundle.witness_set.as_ref().expect("set"),
+                |context| {
+                    context.sql().execute(
+                        "INSERT INTO hosted_import_job_keys VALUES(?1,?2)",
+                        rusqlite::params![[98u8; 32], [98u8; 16]],
+                    )?;
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                |writer| {
+                    writer.write_file(std::path::Path::new("panic-pin"), b"new")?;
+                    writer.write_file(std::path::Path::new("panic-pack"), b"pack")?;
+                    if !hook {
+                        panic!("callback panic");
+                    }
+                    Ok(())
+                },
+                |_, _| {
+                    panic!("post-callback disclosure hook panic");
+                },
+            )
+        }));
+        assert!(result.is_err(), "must resume panic");
+        assert_eq!(
+            std::fs::read(receiver.repo.heddle_dir().join("panic-pin")).expect("restored"),
+            b"old"
+        );
+        assert!(!receiver.repo.heddle_dir().join("panic-pack").exists());
+        assert_eq!(receiver.counts(), before);
+        receiver
+            .trust
+            .snapshot()
+            .expect("clock anchor not poisoned");
+        receiver
+            .trust
+            .mutate(receiver.bundle.witness_set.as_ref().expect("set"), |_| {
+                Ok(())
+            })
+            .expect("usable after handled unwind");
+    }
+}
+
+#[test]
+fn hybrid_rollback_io_preserves_original_rejection_and_blocks_trusted_use() {
+    use super::install_artifacts::tests::{clear_failure, fail_rollback};
+    for failed in 0..4 {
+        let receiver = HybridReceiver::new();
+        for index in [0, 2] {
+            std::fs::write(
+                receiver.repo.heddle_dir().join(format!("pin{index}")),
+                b"old",
+            )
+            .expect("old");
+        }
+        let before = receiver.counts();
+        fail_rollback(failed, if failed % 2 == 0 { "rename" } else { "unlink" });
+        let result = ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &[record(&receiver.fixture, "converted_main")],
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |writer| {
+                for index in 0..4 {
+                    writer.write_file(std::path::Path::new(&format!("pin{index}")), b"new")?;
+                }
+                Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
+            },
+        );
+        assert!(
+            matches!(result, Err(Error::Hybrid(hybrid_codec::Reject::Revoked))),
+            "original rejection must survive cleanup failure"
+        );
+        assert!(
+            receiver.trust.snapshot().is_err(),
+            "trusted snapshot must wait for undo"
+        );
+        assert!(
+            HostedTrust::open(
+                receiver.repo.heddle_dir(),
+                &root(&receiver.fixture).authority,
+                receiver.clock.clone()
+            )
+            .is_err()
+        );
+        assert!(
+            crate::Repository::open(receiver.repo.root()).is_err(),
+            "repository open must not expose uncommitted artifacts"
+        );
+        let mut called = false;
+        assert!(
+            ThreadReplica::install_hybrid_import(
+                receiver.repo.heddle_dir(),
+                &receiver.trust,
+                &receiver.bundle.encode_to_vec(),
+                &[record(&receiver.fixture, "converted_main")],
+                &receiver.authority,
+                &objects::store::InMemoryStore::new(),
+                |_| {
+                    called = true;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert!(!called, "installer must wait for undo");
+        clear_failure();
+        receiver.trust.snapshot().expect("retry undo");
+        assert_eq!(receiver.counts(), before);
+        for index in 0..4 {
+            let pin = receiver.repo.heddle_dir().join(format!("pin{index}"));
+            if index % 2 == 0 {
+                assert_eq!(std::fs::read(pin).expect("recovered"), b"old");
+            } else {
+                assert!(!pin.exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn hybrid_failed_install_blocks_retained_repository_native_identity_until_retry() {
+    use super::install_artifacts::tests::{clear_failure, fail_rollback};
+    use objects::store::ObjectStore as _;
+    let receiver = HybridReceiver::new();
+    let original = receiver.repo.native_spool_id().expect("original spool");
+    let replacement = uuid::Uuid::now_v7();
+    let replica = receiver
+        .repo
+        .native_thread("main")
+        .expect("original Thread");
+    let base = replica.genesis().expect("genesis").base;
+    let state = receiver
+        .repo
+        .store()
+        .get_state(&base)
+        .expect("base lookup")
+        .expect("base State");
+    let signed = replica.signed_genesis().expect("signed genesis");
+    let owner = receiver
+        .repo
+        .native_original_owner_signer(&replica)
+        .expect("owner");
+    let owner_key = owner.public_key().try_into().expect("owner key");
+    fail_rollback(0, "rename");
+    let rejected = ThreadReplica::install_hybrid_import(
+        receiver.repo.heddle_dir(),
+        &receiver.trust,
+        &receiver.bundle.encode_to_vec(),
+        &[record(&receiver.fixture, "converted_main")],
+        &receiver.authority,
+        &objects::store::InMemoryStore::new(),
+        |writer| {
+            writer.write_file(
+                std::path::Path::new("spool-id"),
+                replacement.to_string().as_bytes(),
+            )?;
+            Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
+        },
+    );
+    assert!(matches!(
+        rejected,
+        Err(Error::Hybrid(hybrid_codec::Reject::Revoked))
+    ));
+    let intent = receiver.repo.heddle_dir().join("hosted-install.intent");
+    assert!(intent.exists(), "failed undo retains its intent");
+    let mut refused = Vec::new();
+    for _ in 0..2 {
+        refused.extend([
+            ("spool read", receiver.repo.native_spool_id().is_err()),
+            (
+                "spool install",
+                receiver.repo.install_native_spool_id(replacement).is_err(),
+            ),
+            (
+                "create",
+                receiver
+                    .repo
+                    .create_native_thread("unrecovered", base, None, "")
+                    .is_err(),
+            ),
+            (
+                "rename",
+                receiver
+                    .repo
+                    .rename_native_thread("main", "unrecovered")
+                    .is_err(),
+            ),
+            (
+                "adopt",
+                receiver
+                    .repo
+                    .adopt_native_thread("unrecovered", &signed)
+                    .is_err(),
+            ),
+            (
+                "capture",
+                receiver.repo.record_native_capture("main", base).is_err(),
+            ),
+            (
+                "owner key",
+                receiver.repo.holds_native_owner_key(&owner_key).is_err(),
+            ),
+            (
+                "original signer",
+                receiver
+                    .repo
+                    .native_original_owner_signer(&replica)
+                    .is_err(),
+            ),
+            (
+                "Thread signer",
+                receiver.repo.native_thread_signer(&replica).is_err(),
+            ),
+            (
+                "Thread lookup",
+                receiver.repo.native_thread("main").is_err(),
+            ),
+            ("Thread list", receiver.repo.list_native_threads().is_err()),
+            (
+                "client metadata signer",
+                receiver.repo.sign_client_metadata(b"metadata").is_err(),
+            ),
+            ("auto signer", receiver.repo.signing_signer().is_none()),
+            (
+                "authored State",
+                receiver.repo.put_authored_state(&state).is_err(),
+            ),
+            (
+                "entry visibility",
+                receiver
+                    .repo
+                    .get_entry_visibility_bytes(&state.change_id)
+                    .is_err(),
+            ),
+            (
+                "state visibility",
+                receiver.repo.get_state_visibility_for_state(&base).is_err(),
+            ),
+            ("redactions", receiver.repo.list_all_redactions().is_err()),
+            ("briefing", receiver.repo.pending_context_receipt().is_err()),
+            ("partial fetch", receiver.repo.missing_blobs().is_err()),
+            (
+                "checkout manifest",
+                receiver.repo.is_incomplete_checkout().is_err(),
+            ),
+            (
+                "catalog binding",
+                crate::device_catalog::load(&crate::identity::heddle_home_dir(), original).is_err(),
+            ),
+        ]);
+    }
+    let polluted = crate::device_catalog::store::Catalog::read(&crate::identity::heddle_home_dir())
+        .expect("catalog")
+        .expect("registered catalog")
+        .spool(replacement)
+        .expect("lookup")
+        .is_some();
+    assert!(intent.exists(), "persistent failure must retain undo");
+    clear_failure();
+    for (api, blocked) in refused {
+        assert!(
+            blocked,
+            "{api} bypassed persistently failing recovery on a retained Repository"
+        );
+    }
+    assert!(
+        !polluted,
+        "uncommitted spool must never enter the device catalog"
+    );
+    assert_eq!(
+        receiver
+            .repo
+            .native_spool_id()
+            .expect("same handle retries recovery"),
+        original
+    );
+    assert!(!intent.exists(), "successful retry retires undo");
+    let created = receiver
+        .repo
+        .create_native_thread("recovered", base, None, "")
+        .expect("create after retry");
+    assert_eq!(
+        created.genesis().expect("genesis").spool,
+        original.to_string()
+    );
+    assert!(
+        receiver
+            .repo
+            .holds_native_owner_key(&owner_key)
+            .expect("recovered owner key")
+    );
+    receiver
+        .repo
+        .sign_client_metadata(b"metadata")
+        .expect("recovered metadata signer");
+    receiver
+        .repo
+        .get_entry_visibility_bytes(&state.change_id)
+        .expect("recovered entry visibility");
+    receiver
+        .repo
+        .get_state_visibility_for_state(&base)
+        .expect("recovered state visibility");
+    receiver
+        .repo
+        .list_all_redactions()
+        .expect("recovered redactions");
+    receiver
+        .repo
+        .pending_context_receipt()
+        .expect("recovered briefing");
+    receiver
+        .repo
+        .missing_blobs()
+        .expect("recovered partial fetch");
+    receiver
+        .repo
+        .is_incomplete_checkout()
+        .expect("recovered manifest");
+    crate::device_catalog::load(&crate::identity::heddle_home_dir(), original)
+        .expect("recovered catalog binding");
+}
+
+fn landing_receiver() -> (
+    HybridReceiver,
+    wire::HostedLandingWitnessV1,
+    Vec<host::SignedHostedWitnessStatementV1>,
+) {
+    use hybrid_codec::Canonical;
+    use objects::object::thread_replication::{
+        SourceAuthor, ThreadOperationBody, metadata::ThreadControl,
+    };
+    let mut receiver = HybridReceiver::new();
+    let landing: wire::HostedLandingWitnessV1 = record(&receiver.fixture, "landing_payload");
+    // This test host's current executor covers the independent admissions at
+    // the landing time; original source, review and landing bytes stay exact.
+    let set = receiver.bundle.witness_set.as_mut().expect("set");
+    let current = set
+        .body
+        .as_mut()
+        .expect("body")
+        .entries
+        .iter_mut()
+        .find(|entry| entry.state == 1)
+        .expect("current witness");
+    current.active_from_unix_millis = 0;
+    let executor = current.executor_id.clone();
+    resign(&receiver.fixture, set);
+    let mut statements = Vec::new();
+    for (index, original) in landing
+        .source_operation
+        .iter()
+        .chain(&landing.review_evidence)
+        .enumerate()
+    {
+        let (_, operation) =
+            crypto::import_authority::verify_native_operation(original).expect("signed original");
+        let envelope = match operation.body {
+            ThreadOperationBody::Capture(capture) => match capture.author {
+                SourceAuthor::Account { authority, .. } => authority,
+                _ => panic!("account capture"),
+            },
+            ThreadOperationBody::Metadata(bytes) => {
+                ThreadControl::decode(&bytes)
+                    .expect("review")
+                    .authority_envelope
+            }
+            _ => panic!("source/review original"),
+        };
+        let payload = wire::ImportAuthorityWitnessV1 {
+            format_version: 1,
+            kind: 1,
+            original: Some(original.clone()),
+            authority_envelope: envelope,
+            ..Default::default()
+        };
+        let mut statement: host::SignedHostedWitnessStatementV1 =
+            record(&receiver.fixture, "authority_admission");
+        let body = statement.body.as_mut().expect("body");
+        body.executor_id = executor.clone();
+        body.canonical_payload = hybrid_codec::canonical(&payload).expect("payload");
+        body.publisher_key_id = hybrid_codec::key_id(&original.signatures[0].public_key);
+        body.authority_digest = hybrid_codec::hash(&[
+            b"heddle-hosted-authority-envelope-v1",
+            &(payload.authority_envelope.len() as u32).to_be_bytes(),
+            &payload.authority_envelope,
+        ]);
+        let mut signatures = (original.signatures.len() as u32).to_be_bytes().to_vec();
+        for signature in &original.signatures {
+            signature.write(&mut signatures).expect("signature");
+        }
+        body.original_signatures_digest =
+            hybrid_codec::hash(&[b"heddle-hosted-original-signatures-v1", &signatures]);
+        body.admission_order = 97 + index as u64;
+        body.host_transaction_id = vec![70 + index as u8; 16];
+        statement.signature = seed_signer(&receiver.fixture, "next_witness")
+            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+            .expect("signed first admission");
+        api::import_authority::verify_witness_payload(
+            body,
+            api::import_authority::WitnessPayload::Authority(&payload),
+        )
+        .expect("matched first admission");
+        receiver.bundle.authority_witnesses.push(payload);
+        receiver.bundle.statements.push(statement.clone());
+        statements.push(statement);
+    }
+    receiver.bundle.landing_witnesses.push(landing.clone());
+    receiver
+        .bundle
+        .statements
+        .push(record(&receiver.fixture, "landing_statement"));
+    receiver
+        .bundle
+        .history_proofs
+        .push(record(&receiver.fixture, "landing_proof"));
+    (receiver, landing, statements)
+}
+
+#[test]
+fn hybrid_landing_requires_each_dependency_first_admission_before_callback() {
+    for missing in 0..2 {
+        let (receiver, landing, statements) = landing_receiver();
+        let mut bundle = receiver.bundle.clone();
+        bundle
+            .statements
+            .retain(|statement| statement != &statements[missing]);
+        let before = receiver.counts();
+        let mut called = false;
+        let result = ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &bundle.encode_to_vec(),
+            &[landing.execution.clone().expect("execution")],
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| {
+                called = true;
+                Ok(())
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::Hybrid(hybrid_codec::Reject::ImportPermission))
+            ),
+            "missing dependency must reach coverage gate: {:?}",
+            result.err()
+        );
+        assert!(!called);
+        assert_eq!(receiver.counts(), before);
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &[landing.execution.expect("execution")],
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| Ok(()),
+        )
+        .expect("valid landing with independent source/review first admissions");
+    }
+}
+#[test]
+fn hybrid_landing_preserves_previously_admitted_dependency_statements_in_both_orders() {
+    for landing_first in [false, true] {
+        let (mut receiver, landing, statements) = landing_receiver();
+        let mut first = receiver.bundle.clone();
+        first.landing_witnesses.clear();
+        first
+            .statements
+            .retain(|statement| statement.body.as_ref().expect("body").purpose != 4);
+        let originals: Vec<_> = landing
+            .source_operation
+            .iter()
+            .chain(&landing.review_evidence)
+            .cloned()
+            .collect();
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &first.encode_to_vec(),
+            &originals,
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| Ok(()),
+        )
+        .expect("independent originals first");
+        if landing_first {
+            receiver.bundle.statements.rotate_right(1);
+        }
+        let replicas = ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &receiver.bundle.encode_to_vec(),
+            &[landing.execution.clone().expect("execution")],
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| Ok(()),
+        )
+        .expect("landing after admitted dependencies");
+        for (original, statement) in originals.iter().zip(statements) {
+            let (_, operation) =
+                crypto::import_authority::verify_native_operation(original).expect("op");
+            let replica = replicas
+                .iter()
+                .find(|replica| replica.thread == operation.thread)
+                .expect("source replica");
+            assert_eq!(
+                replica
+                    .hosted_admission(operation.id().expect("id"))
+                    .expect("retained")
+                    .expect("own statement")
+                    .statement,
+                statement
+            );
+        }
+    }
+}
+
+#[test]
+fn hybrid_failed_sql_commit_restores_artifacts_from_uncommitted_marker() {
+    let receiver = HybridReceiver::new();
+    std::fs::write(receiver.repo.heddle_dir().join("commit-pin"), b"old").expect("old");
+    let before = receiver.counts();
+    let result = receiver.trust.mutate_with_artifacts(
+        receiver.bundle.witness_set.as_ref().expect("set"),
+        |context| {
+            context.sql().execute(
+                "INSERT INTO hosted_import_job_keys VALUES(?1,?2)",
+                rusqlite::params![[97u8; 32], [97u8; 16]],
+            )?;
+            context.sql().commit_hook(Some(|| true))?;
+            Ok(())
+        },
+        |_, _| Ok(()),
+        |writer| {
+            writer.write_file(std::path::Path::new("commit-pin"), b"new")?;
+            writer.write_file(std::path::Path::new("commit-pack"), b"pack")
+        },
+        |_, _| Ok(()),
+    );
+    assert!(
+        matches!(result, Err(Error::Sql(_))),
+        "SQL commit must really fail"
+    );
+    assert_eq!(
+        std::fs::read(receiver.repo.heddle_dir().join("commit-pin")).expect("restored"),
+        b"old"
+    );
+    assert!(!receiver.repo.heddle_dir().join("commit-pack").exists());
+    assert_eq!(receiver.counts(), before);
+    receiver
+        .trust
+        .snapshot()
+        .expect("usable after failed commit");
+}
+
+#[test]
+fn hybrid_installation_process_exit_reconciles_sql_and_artifacts() {
+    use std::{path::Path, process::Command};
+    for step in [
+        "publish",
+        "marker",
+        "before-commit",
+        "commit",
+        "done",
+        "retired",
+    ] {
+        let receiver = HybridReceiver::new();
+        std::fs::write(receiver.repo.heddle_dir().join("crash-pin"), b"old").expect("old");
+        let before = receiver.counts();
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "thread_replication::hosted_trust_tests::hybrid_installation_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("HEDDLE_INSTALL_REPO", receiver.repo.root())
+            .env("HEDDLE_INSTALL_CRASH_STEP", step)
+            .env("HEDDLE_INSTALL_CRASH_OCCURRENCE", "1")
+            .output()
+            .expect("child");
+        assert_eq!(
+            output.status.code(),
+            Some(86),
+            "{step}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reopened = crate::Repository::open(receiver.repo.root())
+            .expect("recover before opening object store");
+        let committed = matches!(step, "commit" | "done" | "retired");
+        assert_eq!(
+            std::fs::read(reopened.heddle_dir().join("crash-pin")).expect("reconciled pin"),
+            if committed {
+                b"new".as_slice()
+            } else {
+                b"old".as_slice()
+            }
+        );
+        assert_eq!(reopened.heddle_dir().join("crash-pack").exists(), committed);
+        let db = crate::local_metadata::open(reopened.heddle_dir()).expect("reconciled sql");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM threads", [], |r| r.get::<_, i64>(0))
+                .expect("replicas"),
+            before[0] + i64::from(committed)
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM hosted_import_admissions", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .expect("admissions"),
+            before[3] + 2 * i64::from(committed)
+        );
+        assert!(
+            !reopened
+                .heddle_dir()
+                .join(Path::new("hosted-install.intent"))
+                .exists()
+        );
+    }
+}
+#[test]
+#[ignore = "entry point for the public-installer process-exit test"]
+fn hybrid_installation_crash_child() {
+    let repository =
+        crate::Repository::open(std::env::var_os("HEDDLE_INSTALL_REPO").expect("repo"))
+            .expect("existing repository");
+    let f = fixture();
+    let selected = root(&f);
+    let authority = Authority::new(&f);
+    let trust = HostedTrust::open(
+        repository.heddle_dir(),
+        &selected.authority,
+        TestClock::new(1_350_000),
+    )
+    .expect("trust");
+    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    bundle.history_proofs = [
+        "genesis_proof",
+        "genesis_dev_proof",
+        "publication_proof",
+        "renewed_publication_proof",
+    ]
+    .map(|name| record(&f, name))
+    .to_vec();
+    ThreadReplica::install_hybrid_import(
+        repository.heddle_dir(),
+        &trust,
+        &bundle.encode_to_vec(),
+        &[record(&f, "converted_main")],
+        &authority,
+        &objects::store::InMemoryStore::new(),
+        |writer| {
+            if std::env::var_os("HEDDLE_INSTALL_CRASH_INVALID_TOML").is_some() {
+                writer.write_file(
+                    std::path::Path::new("config.toml"),
+                    b"invalid installed config [",
+                )?;
+            }
+            writer.write_file(std::path::Path::new("crash-pin"), b"new")?;
+            writer.write_file(std::path::Path::new("crash-pack"), b"pack")
+        },
+    )
+    .expect("install");
+    panic!("crash point was not reached");
+}
+
+#[test]
+fn hybrid_crash_recovers_config_before_repository_readers() {
+    let receiver = HybridReceiver::new();
+    let before = std::fs::read(receiver.repo.heddle_dir().join("config.toml")).expect("config");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "thread_replication::hosted_trust_tests::hybrid_installation_crash_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("HEDDLE_INSTALL_REPO", receiver.repo.root())
+        .env("HEDDLE_INSTALL_CRASH_INVALID_TOML", "1")
+        .env("HEDDLE_INSTALL_CRASH_STEP", "publish")
+        .env("HEDDLE_INSTALL_CRASH_OCCURRENCE", "1")
+        .output()
+        .expect("child");
+    assert_eq!(
+        output.status.code(),
+        Some(86),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        std::fs::read(receiver.repo.heddle_dir().join("config.toml")).expect("uncommitted config"),
+        before
+    );
+    crate::Repository::open(receiver.repo.root())
+        .expect("undo precedes reading the uncommitted config");
+    assert_eq!(
+        std::fs::read(receiver.repo.heddle_dir().join("config.toml")).expect("restored config"),
+        before
+    );
 }

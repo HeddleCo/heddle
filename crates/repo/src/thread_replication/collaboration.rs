@@ -120,7 +120,7 @@ pub struct Command<'a> {
 }
 impl ThreadReplica {
     pub fn collaboration_heads(&self, record: &Record) -> Result<Heads> {
-        heads(&self.connect()?, self.thread, record)
+        heads(&*self.connect()?, self.thread, record)
     }
     /// Validation, observed-head CAS, causal admission and exact response share one commit.
     pub fn collaboration_command(

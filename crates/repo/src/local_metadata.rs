@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -50,6 +50,9 @@ pub enum Error {
 /// The repository resolves worktree pointers before supplying its shared
 /// heddle_dir. Schema creation commits atomically and never runs on hook reads.
 pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
+    let _installation =
+        crate::thread_replication::install_artifacts::InstallationLock::acquire(heddle_dir)
+            .map_err(|error| Error::Initialization(error.to_string()))?;
     let path = heddle_dir.join(DATABASE_NAME);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -74,7 +77,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         }
         return Ok(connection);
     }
-    if !(0..=4).contains(&version) {
+    if !(0..=5).contains(&version) {
         return Err(Error::Schema(version));
     }
     // WAL activation itself can return SQLITE_BUSY without honoring the busy
@@ -122,7 +125,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_run_outbox::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        4 => {
+        4 | 5 => {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
@@ -139,10 +142,13 @@ pub fn open_existing(heddle_dir: &Path) -> Result<Option<Connection>, Error> {
     if !path.try_exists()? {
         return Ok(None);
     }
+    let _installation =
+        crate::thread_replication::install_artifacts::InstallationLock::acquire(heddle_dir)
+            .map_err(|error| Error::Initialization(error.to_string()))?;
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure(&connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 1 || version == 2 || version == 3 || version == 4 {
+    if (1..SCHEMA_VERSION).contains(&version) {
         drop(connection);
         return open(heddle_dir).map(Some);
     }
