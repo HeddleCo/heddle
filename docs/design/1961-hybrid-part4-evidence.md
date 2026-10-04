@@ -81,6 +81,9 @@ original account source proof. Large hosted round-trip futures use the existing
 explicit-stack test harness.
 Endpoint discovery signs a fresh descriptor for each lookup while retaining its
 60-second lifetime, so a slow round trip cannot replay expired routing metadata.
+The capable native host still refuses direct ImportSource without CommitImportJob;
+the CLI import/ref-bound control sends no import request. Old-peer protocol
+refusal remains covered separately by the hosted-client suite.
 
 ## Final gates and guard-removal receipts
 
