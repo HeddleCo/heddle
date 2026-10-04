@@ -19,6 +19,7 @@ pub fn validate_source_artifacts(
     originals: PublicationOriginals,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     originals.validate_bounds().map_err(preparation)?;
+    crate::hybrid::publish_open(opening).map_err(Error::Invalid)?;
     let thread = opening
         .thread
         .as_ref()
@@ -94,12 +95,15 @@ pub fn validate_source_artifacts(
     let mut operations = Vec::new();
     let mut receipts = Vec::new();
     for batch in originals.operations {
+        if batch.import_authority != opening.import_authority {
+            return Err(Error::Invalid("publication proof differs from opening"));
+        }
         for received in crate::authority_admission::match_batch(&batch)? {
             operations.push(received.original);
             receipts.extend(received.authority_admission);
         }
     }
-    crate::fetch::validate_artifacts(
+    let mut validated = crate::fetch::validate_artifacts(
         directory,
         thread,
         revision,
@@ -107,7 +111,9 @@ pub fn validate_source_artifacts(
         operations,
         dependencies,
         receipts,
-    )
+    )?;
+    validated.import_authority = opening.import_authority.clone();
+    Ok(validated)
 }
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())

@@ -474,6 +474,14 @@ export type VerificationErrorCode =
   "hybrid_expired" |
   "hybrid_scope" |
   "hybrid_prepared_fields" |
+  "hybrid_preparation_refused" |
+  "hybrid_ref_disclosure" |
+  "hybrid_ref_pinning" |
+  "hybrid_source_selection" |
+  "hybrid_import_source_requires_commit" |
+  "hybrid_operation_id_reused" |
+  "hybrid_pending_operation" |
+
   "hybrid_validity_bounds" |
   "hybrid_genesis_binding" |
   "hybrid_import_permission" |
@@ -486,5 +494,6 @@ export type VerificationErrorCode =
   "hybrid_slot_conflict" |
   "hybrid_boundary_acceptance" |
   "hybrid_protocol";
-export interface VerificationError { code: VerificationErrorCode; message: string; }
+export type PreparationRefusalReason = "unspecified" | "invalid_scope" | "unsupported_converter" | "unsupported_options" | "budget_exceeded" | "destination_conflict" | "policy_denied";
+export interface VerificationError { code: VerificationErrorCode; message: string; preparation_refusal_reason?: PreparationRefusalReason; }
 "#;

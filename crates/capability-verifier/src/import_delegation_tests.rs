@@ -326,23 +326,21 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
             7 => {
                 let scope = b.scope.as_mut().expect("scope");
                 scope.branches[0].ref_mode = 2;
+                scope.branches[0].ref_disclosure = 1;
                 scope.branches[0].pinned_commit_oid.clear();
                 b.branch_manifest[0].limit = Some(scope.branches[0].clone());
             }
             _ => b.purpose = 2,
         };
         bad.delegating_signature = Some(sign_changed(&f, "device", contract::DELEGATION_DOMAIN, b));
-        let expected = if field == 8 {
-            contract::Reject::Version
-        } else {
-            contract::Reject::Scope
+        let expected = match field {
+            8 => contract::Reject::Version,
+            _ => contract::Reject::Scope,
         };
+        let rejection = verify_current(&bad, Some(&p), &c, |_| false).err();
         assert!(
-            matches!(
-                verify_current(&bad, Some(&p), &c, |_| false),
-                Err(Error::Hybrid(reason)) if reason == expected
-            ),
-            "parent attenuation {field}"
+            matches!(rejection, Some(Error::Hybrid(reason)) if reason == expected),
+            "parent attenuation {field}: {rejection:?}"
         );
     }
     let mut nondelegable = p.clone();

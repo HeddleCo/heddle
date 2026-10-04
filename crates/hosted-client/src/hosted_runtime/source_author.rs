@@ -155,7 +155,7 @@ mod tests {
     fn enrollment_retains_the_exact_device_bearer_for_later_agent_uploads() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let _credential_env_guard = config::credentials::lock_test_env();
-        let isolated_home = tempfile::tempdir().expect("device home");
+        let test_home = tempfile::tempdir().expect("isolated enrollment home");
         struct RestoreHome(Option<std::ffi::OsString>);
         impl Drop for RestoreHome {
             fn drop(&mut self) {
@@ -167,8 +167,8 @@ mod tests {
                 }
             }
         }
-        let _restore = RestoreHome(std::env::var_os("HEDDLE_HOME"));
-        unsafe { std::env::set_var("HEDDLE_HOME", isolated_home.path()) };
+        let _restore_home = RestoreHome(std::env::var_os("HEDDLE_HOME"));
+        unsafe { std::env::set_var("HEDDLE_HOME", test_home.path()) };
         let signer = Ed25519Signer::from_seed(&[89; 32]).expect("device signer");
         let recovery = Ed25519Signer::from_seed(&[90; 32]).expect("recovery signer");
         let owner_id = uuid::Uuid::from_bytes([9; 16]);

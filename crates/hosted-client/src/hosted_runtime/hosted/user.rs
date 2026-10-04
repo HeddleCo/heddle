@@ -551,8 +551,9 @@ impl HostedClient {
             name: display_name
                 .unwrap_or_else(|| Some(current.name.clone()))
                 .unwrap_or_default(),
-            settings: current.settings.clone(),
+            settings: None,
             slug: new_slug.map(ToOwned::to_owned),
+            settings_mask: None,
         };
         let remote = self.native().await.map_err(native_protocol_error)?;
         let response = remote

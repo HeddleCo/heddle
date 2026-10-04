@@ -261,6 +261,7 @@ pub struct Observation<R: MessageReader<Error = transport::Error>, E: ObservedEv
     messages: Messages<R, E>,
     state: Option<ObservationState>,
     binding: Option<[u8; 32]>,
+    authority_valid_until: Option<prost_types::Timestamp>,
     source: EndpointRef,
     requested: ReadBudget,
     accepted: ReadBudget,
@@ -298,6 +299,7 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
             messages,
             state: None,
             binding: None,
+            authority_valid_until: None,
             source,
             accepted: requested,
             requested,
@@ -360,6 +362,7 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
         }
         self.accepted = accepted;
         self.binding = Some(binding);
+        self.authority_valid_until = open.authority_valid_until;
         self.state = Some(ObservationState::new(
             self.resume.as_ref().map(|r| r.binding).unwrap_or(binding),
             self.resume
@@ -384,6 +387,12 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
         self.messages.cancel();
         self.pending.clear();
         self.done = true;
+    }
+
+    /// Authenticated opening deadline for this exact projection and caller.
+    /// A retained observation never extends this authority at local install.
+    pub fn authority_valid_until(&self) -> Option<prost_types::Timestamp> {
+        self.authority_valid_until
     }
 
     pub async fn next_commit(&mut self) -> Result<Option<CommittedBatch<E::Payload>>, Error> {
@@ -441,6 +450,7 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
                 }
                 self.accepted = accepted;
                 self.binding = Some(binding);
+                self.authority_valid_until = open.authority_valid_until;
                 self.state = Some(ObservationState::new(
                     self.resume.as_ref().map(|r| r.binding).unwrap_or(binding),
                     self.resume

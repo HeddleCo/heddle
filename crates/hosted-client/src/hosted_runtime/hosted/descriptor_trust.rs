@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,6 +22,261 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const STORE_VERSION: u32 = 1;
+
+/// Root selected by local descriptor trust, retained separately from the
+/// authenticated endpoint. Served witness metadata cannot construct this pin.
+#[derive(Clone, Debug)]
+pub struct HostedRootSelection {
+    pub(crate) authority: String,
+    pub(crate) root_id: String,
+    pub(crate) public_key: [u8; 32],
+    pub(crate) automatic_store: Option<PathBuf>,
+}
+impl HostedRootSelection {
+    pub(crate) fn require_current(&self) -> Result<()> {
+        if let Some(path) = &self.automatic_store {
+            require_current_pin(path, &self.authority, &self.root_id, &self.public_key)?;
+        }
+        Ok(())
+    }
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+    pub fn root_id(&self) -> &str {
+        &self.root_id
+    }
+    pub fn public_key(&self) -> &[u8; 32] {
+        &self.public_key
+    }
+}
+
+pub(crate) fn require_current_pin(
+    path: &Path,
+    authority: &str,
+    root_id: &str,
+    key: &[u8; 32],
+) -> Result<()> {
+    let store = load_store_from(path)?;
+    let pin = store
+        .servers
+        .get(authority)
+        .context("descriptor root selection no longer exists")?;
+    if pin.key_id != root_id || pin.public_key_bytes()? != *key {
+        bail!(
+            "descriptor root selection changed; reconnect after explicit repository trust replacement"
+        );
+    }
+    Ok(())
+}
+
+type ProofCache =
+    BTreeMap<(Vec<u8>, Vec<u8>), api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse>;
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct TestWitnessResponses {
+    pub set: Option<api::heddle::api::common::SignedHostedWitnessSetV1>,
+    pub proofs: Vec<(
+        api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofRequest,
+        api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse,
+    )>,
+}
+/// Public witness metadata from the selected HTTPS authority. No credential,
+/// original statement, Thread identity or account identity is sent to lookup.
+pub struct HostedWitnessLookup {
+    server: String,
+    config: config::ClientConfig,
+    proofs: Mutex<ProofCache>,
+    #[cfg(test)]
+    pub(crate) test_responses: Option<TestWitnessResponses>,
+}
+
+impl HostedWitnessLookup {
+    pub fn new(server: &str, config: &config::ClientConfig) -> super::Result<Self> {
+        let server = canonical_server_authority(server)
+            .map_err(|error| super::HostedError::DescriptorTrust(error.to_string()))?;
+        Ok(Self {
+            server,
+            config: config.clone(),
+            proofs: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            test_responses: None,
+        })
+    }
+
+    /// This is an untrusted carrier. The receiver trust store verifies the
+    /// independently pinned root and serializes high-water advancement.
+    pub async fn fetch_set(
+        &self,
+    ) -> super::Result<api::heddle::api::common::SignedHostedWitnessSetV1> {
+        #[cfg(test)]
+        if let Some(responses) = &self.test_responses {
+            return responses.set.clone().ok_or_else(|| {
+                super::HostedError::BootstrapHttp("witness set unavailable".into())
+            });
+        }
+        api::import_authority::canonical_https(&self.server, true)?;
+        let url = format!("{}/.well-known/heddle/hosted-witnesses", self.server);
+        let (client, url, host) =
+            super::bootstrap::bootstrap_http_client(&url, &self.config).await?;
+        let mut request = client.get(url);
+        if let Some(host) = host {
+            request = request.header(reqwest::header::HOST, host);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(super::HostedError::BootstrapHttp(
+                "witness set unavailable".into(),
+            ));
+        }
+        let body = super::bootstrap::bounded_response_body(
+            response,
+            api::witness_trust::MAX_SET_BYTES,
+            "witness set",
+        )
+        .await?;
+        Ok(api::hybrid_codec::strict_decode(
+            &body,
+            api::witness_trust::MAX_SET_BYTES,
+        )?)
+    }
+}
+
+pub(crate) async fn refresh_import_proofs(
+    lookup: &HostedWitnessLookup,
+    bundle: &mut api::heddle::api::v1alpha2::ImportPublicProofBundleV1,
+    selected: api::witness_trust::SetExpectation<'_>,
+    previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+    let signed = lookup.fetch_set().await?;
+    let now = selected.now_unix_millis;
+    let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
+    let mut prepared = bundle.clone();
+    thread_api::hybrid::history::complete_bundle(lookup, &verified, &mut prepared, now)
+        .await
+        .map_err(|error| match error {
+            thread_api::hybrid::history::Error::Rejected(error) => {
+                super::HostedError::Hybrid(error)
+            }
+            thread_api::hybrid::history::Error::Lookup(error) => error,
+            thread_api::hybrid::history::Error::NotFound => {
+                super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
+            }
+        })?;
+    prepared.witness_set = Some(signed);
+    thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
+    Ok(verified)
+}
+
+impl thread_api::hybrid::history::HistoryProofLookup for HostedWitnessLookup {
+    type Error = super::HostedError;
+
+    async fn lookup(
+        &self,
+        request: &api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofRequest,
+    ) -> super::Result<Option<api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse>>
+    {
+        use api::hybrid_codec::Reject;
+        use prost::Message;
+        api::witness_trust::validate_lookup(request)?;
+        #[cfg(test)]
+        if let Some(responses) = &self.test_responses {
+            return Ok(responses
+                .proofs
+                .iter()
+                .find(|(r, _)| r == request)
+                .map(|(_, response)| response.clone()));
+        }
+        api::import_authority::canonical_https(&self.server, true)?;
+        let selector = (
+            request.executor_id.clone(),
+            request.statement_leaf_digest.clone(),
+        );
+        // Cache public bytes only. Every use still resolves the exact original
+        // against the newest receiver-owned root/set under mutation serialization.
+        if let Some(proof) = self
+            .proofs
+            .lock()
+            .map_err(|_| Reject::StaleContext)?
+            .get(&selector)
+            .cloned()
+        {
+            return Ok(Some(proof));
+        }
+        let url = format!(
+            "{}/.well-known/heddle/hosted-witness-history-proof",
+            self.server
+        );
+        let (client, url, host) =
+            super::bootstrap::bootstrap_http_client(&url, &self.config).await?;
+        let mut outgoing = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .header("Heddle-Protocol-Version", "2")
+            .header(
+                "Heddle-Mandatory-Features",
+                "import-authority-host-witness-v1",
+            )
+            .body(request.encode_to_vec());
+        if let Some(host) = host {
+            outgoing = outgoing.header(reqwest::header::HOST, host);
+        }
+        let response = outgoing.send().await?;
+        require_hybrid_headers(response.headers())?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            reqwest::StatusCode::TOO_MANY_REQUESTS => Err(super::HostedError::Call {
+                code: api::heddle::api::common::CallFailureCode::ResourceExhausted,
+                message: "history proof lookup throttled".into(),
+                error: None,
+            }),
+            status if status.is_success() => {
+                let body = super::bootstrap::bounded_response_body(
+                    response,
+                    api::witness_trust::MAX_PROOF_BYTES,
+                    "history proof",
+                )
+                .await?;
+                let decoded: api::heddle::api::v1alpha2::GetHostedWitnessHistoryProofResponse =
+                    api::hybrid_codec::strict_decode(&body, api::witness_trust::MAX_PROOF_BYTES)?;
+                let proof = decoded.proof.as_ref().ok_or(Reject::Proof)?;
+                if proof.executor_id != request.executor_id
+                    || proof.siblings.len() > api::witness_trust::MAX_SIBLINGS
+                {
+                    return Err(Reject::Proof.into());
+                }
+                let mut cache = self.proofs.lock().map_err(|_| Reject::StaleContext)?;
+                if cache.len() >= 1024 {
+                    cache.pop_first();
+                }
+                cache.insert(selector, decoded.clone());
+                Ok(Some(decoded))
+            }
+            _ => Err(super::HostedError::BootstrapHttp(
+                "history proof lookup unavailable".into(),
+            )),
+        }
+    }
+}
+
+fn require_hybrid_headers(headers: &reqwest::header::HeaderMap) -> super::Result<()> {
+    let exact = |name: &str, expected: &str| {
+        let mut values = headers.get_all(name).iter();
+        values
+            .next()
+            .is_some_and(|value| value.as_bytes() == expected.as_bytes())
+            && values.next().is_none()
+    };
+    if !exact("Heddle-Protocol-Version", "2")
+        || !exact(
+            "Heddle-Mandatory-Features",
+            "import-authority-host-witness-v1",
+        )
+    {
+        return Err(api::hybrid_codec::Reject::Protocol.into());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +442,7 @@ pub fn replace_descriptor_trust(
     expected_current_public_key: &str,
     new_key_id: &str,
     new_public_key: &str,
+    repository: Option<&Path>,
 ) -> Result<DescriptorTrustRecord> {
     let expected = parse_descriptor_public_key(expected_current_public_key)?;
     let new_key = validate_descriptor_pair(new_key_id, new_public_key)?;
@@ -198,12 +455,30 @@ pub fn replace_descriptor_trust(
     let current = store.servers.get(canonical_server).ok_or_else(|| {
         anyhow::anyhow!("no automatic descriptor trust pin exists for {canonical_server}")
     })?;
-    if current.public_key_bytes()? != expected {
+    let repository_only = repository.is_some()
+        && current.key_id == new_key_id
+        && current.public_key_bytes()? == new_key;
+    if current.public_key_bytes()? != expected && !repository_only {
         bail!(
             "descriptor trust replacement refused for {canonical_server}: \
              --expect-current-public-key does not match the current descriptor public key"
         );
     }
+    // Select only a repository explicitly named by the trust ceremony. Other
+    // enrolled repositories fail closed against the changed automatic pin until
+    // this command is repeated with their path and the same expected old key.
+    let selected_repository = repository.map(repo::Repository::open).transpose()?;
+    let expected_root = if let Some(repository) = &selected_repository {
+        use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+        let snapshot = HostedTrust::open(repository.heddle_dir(), canonical_server, SystemClock)?
+            .snapshot()?;
+        if snapshot.root.public_key != expected {
+            bail!("repository descriptor root does not match --expect-current-public-key");
+        }
+        Some(snapshot.root)
+    } else {
+        None
+    };
     let replacement = DescriptorTrustRecord {
         key_id: new_key_id.to_string(),
         public_key: hex::encode(new_key),
@@ -213,6 +488,17 @@ pub fn replace_descriptor_trust(
         .servers
         .insert(canonical_server.to_string(), replacement.clone());
     save_store_to(&path, &store)?;
+    if let (Some(repository), Some(expected_root)) = (selected_repository, expected_root) {
+        repo::thread_replication::hosted_trust::replace_root(
+            repository.heddle_dir(),
+            &expected_root,
+            &repo::thread_replication::hosted_trust::RootSelection {
+                authority: canonical_server.into(),
+                root_id: new_key_id.into(),
+                public_key: new_key,
+            },
+        )?;
+    }
     Ok(replacement)
 }
 
@@ -340,6 +626,34 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn proof_lookup_gate_requires_one_exact_version_and_feature_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("Heddle-Protocol-Version", "2".parse().expect("version"));
+        headers.insert(
+            "Heddle-Mandatory-Features",
+            "import-authority-host-witness-v1".parse().expect("feature"),
+        );
+        require_hybrid_headers(&headers).expect("supported protocol");
+        headers.append("Heddle-Protocol-Version", "2".parse().expect("duplicate"));
+        assert!(require_hybrid_headers(&headers).is_err());
+        headers.insert("Heddle-Protocol-Version", "1".parse().expect("old peer"));
+        assert!(require_hybrid_headers(&headers).is_err());
+        headers.insert("Heddle-Protocol-Version", "2".parse().expect("version"));
+        headers.insert(
+            "Heddle-Mandatory-Features",
+            "import-authority-host-witness-v1, unknown"
+                .parse()
+                .expect("feature"),
+        );
+        assert!(require_hybrid_headers(&headers).is_err());
+        headers.insert(
+            "Heddle-Mandatory-Features",
+            "import-authority-host-witness-v1".parse().expect("feature"),
+        );
+        require_hybrid_headers(&headers).expect("exact control");
+    }
+
     fn with_isolated_home<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
         let _guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temporary Heddle home");
@@ -412,19 +726,26 @@ mod tests {
                     server,
                     &hex::encode([0x33; 32]),
                     "new-id",
-                    &hex::encode(new)
+                    &hex::encode(new),
+                    None
                 )
                 .is_err()
             );
             assert_eq!(fs::read(descriptor_trust_path()).unwrap(), before);
             assert!(
-                replace_descriptor_trust(server, &hex::encode(old), "", &hex::encode(new)).is_err()
+                replace_descriptor_trust(server, &hex::encode(old), "", &hex::encode(new), None)
+                    .is_err()
             );
             assert_eq!(fs::read(descriptor_trust_path()).unwrap(), before);
 
-            let replacement =
-                replace_descriptor_trust(server, &hex::encode(old), "new-id", &hex::encode(new))
-                    .unwrap();
+            let replacement = replace_descriptor_trust(
+                server,
+                &hex::encode(old),
+                "new-id",
+                &hex::encode(new),
+                None,
+            )
+            .unwrap();
             assert_eq!(replacement.key_id, "new-id");
             assert_eq!(replacement.public_key, hex::encode(new));
 

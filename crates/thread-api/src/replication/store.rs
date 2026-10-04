@@ -1,5 +1,5 @@
 //! Async durable-store boundary shared by device and hosted replication.
-use std::{collections::BTreeSet, future::Future};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use crypto::{
     thread_authority_admission::SignedAuthorityAdmission, thread_operation::SignedOperation,
@@ -12,16 +12,20 @@ use heddle_object_model::object::{
 /// Original immutable bytes plus optional independently signed first-authority
 /// admission. A receipt never replaces the original signature or current courier
 /// authorization, and remains attached across later peer relays.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ReceivedOperation {
     pub original: SignedOperation,
     pub authority_admission: Option<SignedAuthorityAdmission>,
+    /// Complete public evidence stays attached through staging, admission and
+    /// relay. Its presence is not authority; the store verifies it at mutation.
+    pub import_authority: Option<Arc<crate::contract::ImportPublicProofBundleV1>>,
 }
 impl From<SignedOperation> for ReceivedOperation {
     fn from(original: SignedOperation) -> Self {
         Self {
             original,
             authority_admission: None,
+            import_authority: None,
         }
     }
 }
@@ -43,6 +47,10 @@ pub trait ReplicaStore: Clone + Send + Sync + 'static {
         after: Option<ContentHash>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<ContentHash>, Self::Error>> + Send;
+    /// Recheck retained hosted authority under the receiver's mutation
+    /// serialization before exporting an accepted original. Cached acceptance
+    /// and structural sidecars grant no authority; keep the complete public
+    /// evidence attached for the next receiver.
     fn operation(
         &self,
         id: ContentHash,

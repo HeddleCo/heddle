@@ -54,6 +54,11 @@ pub fn load(home: &Path, id: uuid::Uuid) -> Result<DeviceSpool> {
     if id.is_nil() {
         bail!("nil local spool identity");
     }
+    let entry = registration(home, id)?;
+    let serialization = InstallationLock::acquire(&entry.heddle_dir)?;
+    load_serialized(home, id, &serialization)
+}
+fn registration(home: &Path, id: uuid::Uuid) -> Result<DeviceSpool> {
     let entry = store::Catalog::read(home)?
         .context("local catalog unavailable")?
         .spool(id)?
@@ -62,7 +67,20 @@ pub fn load(home: &Path, id: uuid::Uuid) -> Result<DeviceSpool> {
     if entry.id != id || entry.capability_path.is_empty() {
         bail!("local spool registration differs from lookup");
     }
-    let _serialization = InstallationLock::acquire(&entry.heddle_dir)?;
+    Ok(entry)
+}
+pub(crate) fn load_serialized(
+    home: &Path,
+    id: uuid::Uuid,
+    serialization: &InstallationLock,
+) -> Result<DeviceSpool> {
+    if id.is_nil() {
+        bail!("nil local spool identity");
+    }
+    let entry = registration(home, id)?;
+    if entry.heddle_dir.canonicalize()? != serialization.directory() {
+        bail!("device spool registration changed");
+    }
     validate_spool_id(&entry)?;
     Ok(entry)
 }

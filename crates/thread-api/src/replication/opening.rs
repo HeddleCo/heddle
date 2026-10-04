@@ -103,6 +103,7 @@ pub fn accept(
     Ok(AcceptedOpening {
         genesis,
         genesis_record: open.thread_genesis.clone(),
+        import_authority: open.import_authority.clone(),
         ready: ReplicationReady {
             thread: Some(thread.clone()),
             endpoint: Some(local.clone()),
@@ -118,8 +119,9 @@ pub fn accept(
                 max_snapshot_bytes: 0,
             }),
             record_formats: vec![OPERATION_FORMAT.into()],
-            // No HYBRID import-authority support is claimed; no proof bundle.
-            protocol: None,
+            // Echo only this exact opening's optional capable path. The
+            // mandatory Sync switch stays off until api#307.
+            protocol: open.protocol.clone(),
             import_authority: None,
         },
     })
@@ -130,6 +132,8 @@ pub struct AcceptedOpening {
     pub ready: ReplicationReady,
     pub genesis: Option<ThreadGenesis>,
     pub genesis_record: Option<ThreadGenesisRecord>,
+    /// Retained structural evidence; the receiver must verify before mutation.
+    pub import_authority: Option<crate::contract::ImportPublicProofBundleV1>,
 }
 
 /// Structural and original-signature validation only. Account authority and

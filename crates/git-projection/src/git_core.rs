@@ -3673,6 +3673,13 @@ pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<Stri
     discover_git_source_refs_with_client(clone_url, configured_https_client())
 }
 
+/// Retain the advertised object IDs so import scope can pin every known branch.
+pub fn discover_git_source_ref_targets(
+    clone_url: &str,
+) -> GitProjectionResult<Vec<(String, Vec<u8>)>> {
+    discover_git_source_ref_targets_with_client(clone_url, configured_https_client())
+}
+
 /// [`discover_git_source_refs`] over an explicit HTTP client (Sley's default
 /// when `None`). An HTTPS advertisement is metered while it is read, so an
 /// oversized one fails with [`GitProjectionError::SourceAdvertisementOverBudget`]
@@ -3681,6 +3688,18 @@ pub(crate) fn discover_git_source_refs_with_client(
     clone_url: &str,
     http_client: Option<&dyn HttpClient>,
 ) -> GitProjectionResult<Vec<String>> {
+    Ok(
+        discover_git_source_ref_targets_with_client(clone_url, http_client)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect(),
+    )
+}
+
+fn discover_git_source_ref_targets_with_client(
+    clone_url: &str,
+    http_client: Option<&dyn HttpClient>,
+) -> GitProjectionResult<Vec<(String, Vec<u8>)>> {
     use sley::remote::{
         LsRemoteRequest, LsRemoteSource, ls_remote_with_http_client, new_http_client_with_config,
     };
@@ -3750,7 +3769,7 @@ pub(crate) fn discover_git_source_refs_with_client(
     Ok(outcome
         .records
         .into_iter()
-        .map(|record| record.name)
+        .map(|record| (record.name, record.oid.as_bytes().to_vec()))
         .collect())
 }
 
@@ -4018,6 +4037,12 @@ mod tests {
                 "refs/tags/v1"
             ]
         );
+        let targets = discover_git_source_ref_targets(temp.path().to_str().expect("path"))
+            .expect("advertised targets");
+        for (name, oid) in targets {
+            let expected = if name == "refs/tags/v1" { tag } else { commit };
+            assert_eq!(oid, expected.as_bytes(), "{name}");
+        }
         assert!(discover_git_source_refs("https://user:secret@example.test/repo.git").is_err());
         assert!(discover_git_source_refs("ssh://example.test/repo.git").is_err());
     }

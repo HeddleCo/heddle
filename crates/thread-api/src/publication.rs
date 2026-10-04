@@ -160,8 +160,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
-        // Re-batching rebuilds each unit, so refuse HYBRID import authority
-        // here rather than relay originals with it silently dropped (api#307).
+        // Re-batching retains each unit's complete original evidence.
         for batch in &originals.operations {
             crate::hybrid::operations(batch).map_err(Error::Invalid)?;
         }
@@ -173,6 +172,18 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
         };
+        crate::hybrid::publish_open(open).map_err(Error::Invalid)?;
+        if open.protocol.is_some() {
+            api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())
+                .map_err(|_| Error::Invalid("peer does not support HYBRID publication"))?;
+        }
+        if originals.operations.iter().any(|batch| {
+            batch.import_authority.is_some() && batch.import_authority != open.import_authority
+        }) {
+            return Err(Error::Invalid(
+                "publication proof differs from negotiated opening",
+            ));
+        }
         if open.destination != self.description.endpoint
             || open.thread.is_none()
             || open.revision.is_none()
@@ -213,6 +224,8 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             _ => return Err(Error::Invalid("Ready or replay receipt required")),
         };
         crate::hybrid::transfer_ready(&ready).map_err(Error::Invalid)?;
+        crate::hybrid::negotiated(open.protocol.as_ref(), ready.protocol.as_ref())
+            .map_err(Error::Invalid)?;
         if ready.endpoint != open.destination
             || ready.thread != open.thread
             || ready.current != open.revision
@@ -342,6 +355,10 @@ fn validate_receipt(
         return Err(Error::Invalid("Open required"));
     };
     crate::hybrid::publication_receipt(&receipt).map_err(Error::Invalid)?;
+    if receipt.import_authority.is_some() {
+        api::import_authority::require_hybrid_peer(open.protocol.as_ref())
+            .map_err(|_| Error::Invalid("HYBRID receipt requires negotiated publication"))?;
+    }
     if receipt.client_operation_id != opening.client_operation_id
         || receipt.destination != open.destination
         || receipt.thread != open.thread
@@ -512,8 +529,14 @@ mod tests {
                     thread: open.thread.clone(),
                     current: open.revision.clone(),
                     checkpoint: Some(checkpoint.clone()),
+                    protocol: open.protocol.clone(),
+                    import_authority: open.import_authority.clone(),
                     budget: Some(ReadBudget {
-                        max_frame_bytes: 2048,
+                        max_frame_bytes: if open.import_authority.is_some() {
+                            256 * 1024
+                        } else {
+                            2048
+                        },
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -523,7 +546,15 @@ mod tests {
                 let mut lengths = [0_u64; 2];
                 let mut original_counts = [0usize; 2];
                 while let Some(bytes) = incoming.recv().await {
-                    assert!(bytes.len() <= 2048, "negotiated frame size");
+                    assert!(
+                        bytes.len()
+                            <= if open.import_authority.is_some() {
+                                256 * 1024
+                            } else {
+                                2048
+                            },
+                        "negotiated frame size"
+                    );
                     let frame = PublishContentClientFrame::decode(bytes.as_slice()).expect("frame");
                     assert_eq!(frame.client_operation_id, opening.client_operation_id);
                     match frame.body {
@@ -603,7 +634,7 @@ mod tests {
                                 outcome: Some(publication_receipt::Outcome::Accepted(
                                     Applied::default(),
                                 )),
-                                import_authority: None,
+                                import_authority: open.import_authority.clone(),
                             };
                             if wrong_receipt {
                                 receipt.thread = None;
@@ -777,6 +808,147 @@ mod tests {
         .expect("must not deadlock")
         .expect("negotiated bounded publication");
         assert_eq!(receipt.client_operation_id, "op-test");
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn hosted_source_publication_retains_complete_history_and_original_signatures() {
+        use objects::store::{FsStore, ObjectStore};
+        let scratch = tempfile::tempdir().expect("source");
+        let (staged, _, pinned) = crate::fetch::hosted::tests::source(scratch.path(), false);
+        let bundle = staged.import_authority().expect("complete history").clone();
+        let store = FsStore::new(scratch.path().join("publication-store"));
+        store.init().expect("store");
+        let paths = staged.artifact_paths();
+        store
+            .install_pack_streaming(&paths[0], &paths[1])
+            .expect("isolated original pack");
+        let pack = SourcePack::prepare(
+            &store,
+            staged.state(),
+            scratch.path(),
+            SourceBudget {
+                max_objects: 16,
+                max_decoded_bytes: 1024 * 1024,
+            },
+        )
+        .expect("selected closure");
+        let operations = crate::authority_admission::batches(
+            staged.operations().iter().cloned().map(|original| {
+                crate::replication::store::ReceivedOperation {
+                    original,
+                    authority_admission: None,
+                    import_authority: Some(std::sync::Arc::new(bundle.clone())),
+                }
+            }),
+            128 * 1024,
+            128,
+        )
+        .expect("bounded carrier")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("originals");
+        let originals = PublicationOriginals {
+            geneses: vec![
+                staged
+                    .ready()
+                    .thread_genesis
+                    .clone()
+                    .expect("selected genesis"),
+            ],
+            operations,
+        };
+        let selected = staged.ready().thread.clone().expect("Thread");
+        let (mut remote, _, _) = fixture(false);
+        let options = || PublicationOptions {
+            client_operation_id: "2a2a2a2a-2a2a-2a2a-2a2a-2a2a2a2a2a2a".into(),
+            source: EndpointRef {
+                public_key: vec![2; 32],
+                kind: EndpointKind::Device as i32,
+            },
+            sharing_policy_version: vec![],
+            checkpoint: None,
+        };
+        assert!(
+            remote
+                .thread(selected.clone())
+                .publish_source(&pack, &originals, options())
+                .await
+                .is_err(),
+            "old peer cannot strip history"
+        );
+        remote.description.protocol = Some(crate::hybrid::protocol());
+        let receipt = remote
+            .thread(selected)
+            .publish_source(&pack, &originals, options())
+            .await
+            .expect("capable publication");
+        assert_eq!(receipt.import_authority.as_ref(), Some(&bundle));
+        let history = crate::hybrid::authority::AcceptedHistory::from_selected_spool(
+            &bundle,
+            &pinned,
+            1350,
+            heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                .expect("limits"),
+        )
+        .expect("independent owner");
+        let prepared = remote
+            .thread(staged.ready().thread.clone().expect("Thread"))
+            .prepare_publication(
+                &pack,
+                originals.clone(),
+                PublicationOptions {
+                    client_operation_id: "2b2b2b2b-2b2b-2b2b-2b2b-2b2b2b2b2b2b".into(),
+                    source: EndpointRef {
+                        public_key: vec![2; 32],
+                        kind: EndpointKind::Device as i32,
+                    },
+                    sharing_policy_version: vec![],
+                    checkpoint: None,
+                },
+                heddle_object_model::object::ContentHash::from_bytes(*history.genesis()),
+            )
+            .expect("prepared public originals");
+        let Some(publish_content_client_frame::Body::Open(open)) = &prepared.opening().body else {
+            panic!("Open")
+        };
+        assert_eq!(open.import_authority.as_ref(), Some(&bundle));
+        let received = tempfile::tempdir().expect("received artifacts");
+        for (mut file, name) in pack
+            .open_artifacts()
+            .await
+            .expect("original artifacts")
+            .into_iter()
+            .zip(["source.pack", "source.idx"])
+        {
+            let mut output = tokio::fs::File::create(received.path().join(name))
+                .await
+                .expect("received file");
+            tokio::io::copy(&mut file, &mut output)
+                .await
+                .expect("exact uploaded bytes");
+        }
+        let validated = validate_source_artifacts(received, open, prepared.originals().clone())
+            .expect("signed originals and actual closure");
+        assert_eq!(validated.import_authority(), Some(&bundle));
+        let received = validated
+            .into_hosted_source(staged.ready().clone())
+            .expect("retain public history through staging");
+        assert_eq!(received.import_authority(), Some(&bundle));
+        assert_eq!(received.operations(), staged.operations());
+
+        assert_eq!(
+            originals.operations[0].operations[0].canonical_record,
+            staged.operations()[0].canonical
+        );
+        assert_eq!(
+            originals.operations[0].operations[0].signatures[0].signature,
+            staged.operations()[0].signature
+        );
+        assert_eq!(
+            bundle.original_geneses.len(),
+            2,
+            "complete sibling public history survives selected source publication"
+        );
     }
 
     #[tokio::test]

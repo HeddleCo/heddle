@@ -37,19 +37,14 @@ fn commit_file(path: &Path, body: &str, message: &str) {
 /// this process rather than from a child command. The previous value is
 /// restored so a later test in the same process keeps the runner's home.
 struct ProcessHeddleHome {
-    _guard: std::sync::MutexGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,
 }
 
 impl ProcessHeddleHome {
     fn install(home: &Path) -> Self {
-        let guard = ::config::credentials::lock_test_env();
         let previous = std::env::var_os("HEDDLE_HOME");
         unsafe { std::env::set_var("HEDDLE_HOME", home) };
-        Self {
-            _guard: guard,
-            previous,
-        }
+        Self { previous }
     }
 }
 
@@ -63,7 +58,7 @@ impl Drop for ProcessHeddleHome {
 }
 
 #[test]
-fn adopted_history_publication_preserves_authorship_and_evergreen_fetch_fails_closed() {
+fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     on_large_stack(adopted_history_round_trip);
 }
 
@@ -143,7 +138,7 @@ async fn adopted_history_round_trip() {
     // Adoption passed the disjoint source home to its own command.
     assert_ne!(source_home, clone_home.path());
     let clone = temp.path().join("clone");
-    let error = hosted
+    let (pulled, cloned) = hosted
         .clone_pull_with_depth_and_materialization(
             "acme/widgets",
             Some("main"),
@@ -152,22 +147,109 @@ async fn adopted_history_round_trip() {
             |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
         )
         .await
-        .err()
-        .expect("Part 2 must supply fresh witness evidence");
-    assert!(
-        matches!(error, wire::ProtocolError::InvalidState(reason) if reason == "source preparation: pin hosted executor for native Thread")
+        .expect("clone published adopted source");
+    assert!(pulled.success);
+    assert_eq!(pulled.final_state, Some(source_state.id()));
+    assert_eq!(
+        cloned
+            .refs()
+            .get_thread(&objects::object::ThreadName::new("main"))
+            .expect("read clone thread ref"),
+        None,
+        "native object installation must not publish the clone checkout ref"
     );
-    let staged = repo::Repository::open(&clone).expect("staging repository");
-    let original = repo::thread_replication::ThreadReplica::open(
-        staged.heddle_dir(),
-        objects::object::ContentHash::from_bytes(thread_id),
-    )
-    .expect("signature-only genesis staging");
-    assert!(
-        original
-            .source_operation_page(source_state.id(), None, 1)
-            .expect("no admitted source")
-            .is_empty()
+    let cloned_state = cloned
+        .store()
+        .get_state(&source_state.id())
+        .expect("read cloned HEAD")
+        .expect("cloned HEAD state");
+    let cloned_replica = cloned.native_thread("main").expect("fresh native replica");
+    assert_eq!(cloned_replica.thread_id(), thread.thread_id());
+    assert_eq!(
+        cloned_replica.signed_genesis().expect("original genesis"),
+        thread.signed_genesis().expect("adopted genesis")
+    );
+    let operation_ids = thread
+        .source_operation_page(source_state.id(), None, 64)
+        .expect("original source IDs");
+    assert!(!operation_ids.is_empty());
+    for id in operation_ids {
+        let original = thread
+            .operation(&id)
+            .expect("source operation")
+            .expect("original")
+            .0;
+        let received = cloned_replica
+            .operation(&id)
+            .expect("fetched operation")
+            .expect("received")
+            .0;
+        assert_eq!(
+            received, original,
+            "fresh Fetch retains the creator's exact signed conversion"
+        );
+        cloned_replica
+            .verify_local_source_owner(&received.verify().expect("signature"))
+            .expect("independent local owner binding");
+    }
+    assert_eq!(cloned_state.attribution, source_attribution);
+    let cloned_tree = cloned
+        .store()
+        .get_tree(&cloned_state.tree)
+        .expect("read cloned HEAD tree")
+        .expect("cloned HEAD tree");
+    let story = cloned_tree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "story.txt")
+        .and_then(|entry| entry.blob_hash())
+        .expect("cloned story blob");
+    assert_eq!(
+        cloned
+            .store()
+            .get_blob(&story)
+            .expect("read cloned story")
+            .expect("cloned story")
+            .content(),
+        b"one\ntwo\n"
+    );
+
+    cloned
+        .fast_forward_attached_from_materialized_state(&source_state.id(), None)
+        .expect("publish materialized clone checkout");
+    let newer_local_state = objects::object::State::new(
+        cloned_state.tree,
+        vec![source_state.id()],
+        source_attribution.clone(),
+    );
+    let newer_local = newer_local_state.id();
+    cloned
+        .store()
+        .put_state(&newer_local_state)
+        .expect("store newer local state");
+    assert_ne!(newer_local, source_state.id());
+    cloned
+        .set_thread_recorded(&objects::object::ThreadName::new("main"), &newer_local)
+        .expect("advance local main without changing its tree");
+    hosted
+        .fetch_state(&cloned, "acme/widgets", "main", source_state.id())
+        .await
+        .expect("hydrate historical hosted revision");
+    assert_eq!(
+        cloned
+            .refs()
+            .get_thread(&objects::object::ThreadName::new("main"))
+            .expect("read main after hydration"),
+        Some(newer_local),
+        "historical hydration must leave the current thread at its newer tip"
+    );
+    assert_eq!(
+        cloned.head().expect("HEAD after hydration"),
+        Some(newer_local)
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("story.txt")).expect("checkout after hydration"),
+        "one\ntwo\n"
     );
 
     hosted.close().await;
@@ -249,7 +331,7 @@ async fn native_hosted_review_verbs_fit_weft_budget() {
 }
 
 #[test]
-fn hosted_publication_batches_140_states_and_rejects_evergreen_fetch() {
+fn hosted_publication_batches_140_states_and_clones_full_history() {
     on_large_stack(|| large_history_round_trip(140, false));
 }
 
@@ -406,7 +488,7 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
     }
     if !capture_again {
         let clone = temp.path().join("clone");
-        let error = hosted
+        let (pulled, cloned) = hosted
             .clone_pull_with_depth_and_materialization(
                 "acme/widgets",
                 Some("main"),
@@ -415,23 +497,32 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
                 |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
             )
             .await
-            .err()
-            .expect("fresh set/public proof routing belongs to Part 2");
-        assert!(
-            matches!(error, wire::ProtocolError::InvalidState(reason) if reason == "source preparation: pin hosted executor for native Thread")
-        );
-        let staged = repo::Repository::open(&clone).expect("staged repository");
-        let replica = repo::thread_replication::ThreadReplica::open(
-            staged.heddle_dir(),
-            objects::object::ContentHash::from_bytes(thread_id),
-        )
-        .expect("signature-only genesis");
-        assert!(
-            replica
-                .source_operation_page(tip.id(), None, 1)
-                .expect("no admitted source")
-                .is_empty()
-        );
+            .expect("fresh clone");
+        assert_eq!(pulled.final_state, Some(tip.id()));
+        let replica = cloned.native_thread("main").expect("cloned Thread");
+        let operation = replica
+            .source_operation_page(tip.id(), None, 1)
+            .expect("tip operation")[0];
+        let originals = replica
+            .source_ancestry(operation, 10_000, 16 * 1024 * 1024)
+            .expect("full cloned ancestry");
+        assert_eq!(originals.len(), states, "fresh clone retains full history");
+        for original in originals {
+            let state = original
+                .original
+                .verify()
+                .expect("signature")
+                .source_state()
+                .expect("source")
+                .expect("State");
+            assert!(
+                cloned
+                    .store()
+                    .get_state(&state.id())
+                    .expect("stored State")
+                    .is_some()
+            );
+        }
     }
     if capture_again {
         use objects::object::{Blob, State, Tree, TreeEntry};

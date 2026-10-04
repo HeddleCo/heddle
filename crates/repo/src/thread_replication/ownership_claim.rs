@@ -141,7 +141,17 @@ impl ThreadReplica {
             Option<crypto::thread_authority_admission::SignedAuthorityAdmission>,
         )>,
     > {
-        let connection = self.connect()?;
+        self.ownership_claims_with_admission_in(&*self.connect()?)
+    }
+    pub(super) fn ownership_claims_with_admission_in(
+        &self,
+        connection: &rusqlite::Connection,
+    ) -> Result<
+        Vec<(
+            SignedOwnershipClaim,
+            Option<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        )>,
+    > {
         let mut statement = connection.prepare("SELECT canonical,local_signature,acceptance_signature,admission,admission_signature FROM thread_owner_claims WHERE thread=?1 ORDER BY id LIMIT 2")?;
         let rows = statement
             .query_map([self.thread.as_bytes()], |row| {
@@ -159,7 +169,7 @@ impl ThreadReplica {
         rows.into_iter().map(|(claim,canonical,signature)| {
             let admission = match (canonical,signature) {
                 (None,None) => None,
-                (Some(canonical),Some(signature)) => Some(crypto::thread_authority_admission::SignedAuthorityAdmission {boundary_acceptance: super::boundary_evidence::load(&connection,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
+                (Some(canonical),Some(signature)) => Some(crypto::thread_authority_admission::SignedAuthorityAdmission {boundary_acceptance: super::boundary_evidence::load(connection,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
  canonical,signature}),
                 _ => return Err(Error::Invalid("incomplete ownership claim admission".into())),
             };
@@ -174,13 +184,23 @@ impl ThreadReplica {
             .collect())
     }
     pub fn effective_owner(&self) -> Result<GenesisOwner> {
-        if let Some(signed) = self.ownership_resolution()? {
+        self.effective_owner_in(&*self.connect()?)
+    }
+    pub(super) fn effective_owner_in(
+        &self,
+        connection: &rusqlite::Connection,
+    ) -> Result<GenesisOwner> {
+        if let Some(signed) = self.ownership_resolution_in(connection)? {
             let resolution = objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&signed.canonical)?;
             return Ok(GenesisOwner::Account(resolution.account()?));
         }
-        let claims = self.ownership_claims()?;
+        let claims = self
+            .ownership_claims_with_admission_in(connection)?
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect::<Vec<_>>();
         match claims.as_slice() {
-            [] => Ok(self.genesis()?.owner),
+            [] => Ok(self.genesis_in(connection)?.owner),
             [signed] => Ok(GenesisOwner::Account(signed.verify()?.account()?)),
             _ => Err(Error::Invalid(
                 "conflicting Thread ownership claims require explicit resolution".into(),

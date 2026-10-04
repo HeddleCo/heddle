@@ -208,7 +208,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         originals: &PublicationOriginals,
         options: PublicationOptions,
     ) -> Result<PublicationReceipt, Error> {
-        let opening = self.publication_opening(source, options)?;
+        let opening = self.publication_opening(source, options, originals)?;
         let [pack, index] = source.open_artifacts().await?;
         self.remote
             .publish_content(&opening, originals, [pack, index])
@@ -224,7 +224,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         spool_genesis: heddle_object_model::object::ContentHash,
     ) -> Result<PreparedPublication, Error> {
         Ok(PreparedPublication::new(
-            self.publication_opening(source, options)?,
+            self.publication_opening(source, options, &originals)?,
             originals,
             spool_genesis,
         )?)
@@ -256,6 +256,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         &self,
         source: &SourcePack,
         options: PublicationOptions,
+        originals: &PublicationOriginals,
     ) -> Result<PublishContentClientFrame, Error> {
         if self
             .reference
@@ -281,6 +282,31 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             .endpoint
             .clone()
             .ok_or(Error::Invalid("remote endpoint identity missing"))?;
+        let mut import_authority = None;
+        for bundle in originals
+            .operations
+            .iter()
+            .filter_map(|batch| batch.import_authority.as_ref())
+        {
+            if import_authority.is_some_and(|previous| previous != bundle) {
+                return Err(Error::Invalid(
+                    "publication originals have different import histories",
+                ));
+            }
+            crate::hybrid::bundle(Some(bundle)).map_err(Error::Invalid)?;
+            import_authority = Some(bundle);
+        }
+        let protocol = if import_authority.is_some() {
+            api::import_authority::require_hybrid_peer(self.remote.description.protocol.as_ref())
+                .map_err(|_| {
+                Error::Invalid(
+                    "HYBRID originals require a capable publication peer (api#307 cutover)",
+                )
+            })?;
+            Some(crate::hybrid::protocol())
+        } else {
+            crate::hybrid::sync_protocol()
+        };
         Ok(PublishContentClientFrame {
             client_operation_id: options.client_operation_id,
             body: Some(publish_content_client_frame::Body::Open(
@@ -300,9 +326,8 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     source: Some(options.source),
                     destination: Some(destination),
                     semantic_indexes: Vec::new(),
-                    // No HYBRID import-authority support is claimed; no proof bundle.
-                    protocol: None,
-                    import_authority: None,
+                    protocol,
+                    import_authority: import_authority.cloned(),
                 },
             )),
         })

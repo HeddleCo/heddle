@@ -391,6 +391,7 @@ fn auth_trust(command: AuthTrustCommand) -> Result<AuthTrust> {
             })
         }
         AuthTrustCommand::Replace {
+            repository,
             server,
             expected_current_public_key,
             key_id,
@@ -410,6 +411,7 @@ fn auth_trust(command: AuthTrustCommand) -> Result<AuthTrust> {
                 &expected_current_public_key,
                 &key_id,
                 &public_key,
+                repository.as_deref(),
             )?;
             let fingerprint = record.fingerprint()?;
             Ok(AuthTrust {
@@ -2440,6 +2442,7 @@ mod tests {
                 );
             }
             let result = auth_trust(AuthTrustCommand::Replace {
+                repository: None,
                 server: server.to_string(),
                 expected_current_public_key: hex::encode([0x11; 32]),
                 key_id: "new-id".to_string(),

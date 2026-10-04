@@ -54,6 +54,7 @@ pub(crate) enum VirtualizedMountBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VirtualizedMountOwner {
     Daemon,
+    #[cfg_attr(not(feature = "mount"), allow(dead_code))]
     InProcess(VirtualizedMountBackend),
 }
 
@@ -992,6 +993,7 @@ mod stub {
     /// Placeholder type so call sites compile on every platform.
     /// Constructing one is impossible because the real
     /// constructors are gated to a supported target + feature.
+    #[allow(dead_code)] // Mount-less builds retain the handle type without a constructor.
     pub struct MountHandle(std::convert::Infallible);
 
     pub fn spawn_mount_for_thread(

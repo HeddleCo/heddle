@@ -280,13 +280,16 @@ pub(super) async fn roundtrip(
     );
     let created = created.spool.expect("created overview");
     assert_eq!(created.r#ref.as_ref().expect("ref").id, id.to_string());
+    let mut unselected = created.settings.clone().expect("settings");
+    unselected.description = "unselected value must be ignored".into();
     let revise = ReviseSpoolRequest {
         slug: None,
         client_operation_id: uuid::Uuid::new_v4().to_string(),
         spool: created.r#ref.clone(),
         expected_version: created.version.clone(),
         name: "Renamed local".into(),
-        settings: created.settings.clone(),
+        settings: Some(unselected),
+        settings_mask: None,
     };
     let revised = remote
         .api
@@ -295,6 +298,50 @@ pub(super) async fn roundtrip(
         .expect("revise")
         .spool
         .expect("revised");
+    assert_eq!(
+        revised.settings, created.settings,
+        "omitted mask retains durable settings"
+    );
+    let patch = ReviseSpoolRequest {
+        client_operation_id: uuid::Uuid::new_v4().to_string(),
+        expected_version: revised.version.clone(),
+        settings: Some(SpoolSettings {
+            description: "selected description".into(),
+            ..Default::default()
+        }),
+        settings_mask: Some(prost_types::FieldMask {
+            paths: vec!["description".into()],
+        }),
+        ..revise.clone()
+    };
+    for paths in [
+        vec!["description".into(), "description".into()],
+        vec!["description.value".into()],
+    ] {
+        let invalid = ReviseSpoolRequest {
+            client_operation_id: uuid::Uuid::new_v4().to_string(),
+            settings_mask: Some(prost_types::FieldMask { paths }),
+            ..patch.clone()
+        };
+        assert!(
+            remote
+                .api
+                .call::<thread_api::rpc::SpoolServiceReviseSpool>(&invalid)
+                .await
+                .is_err()
+        );
+    }
+    let patched = remote
+        .api
+        .call::<thread_api::rpc::SpoolServiceReviseSpool>(&patch)
+        .await
+        .expect("selected patch after rejects")
+        .spool
+        .expect("patched");
+    let mut expected = created.settings.clone().expect("original settings");
+    expected.description = "selected description".into();
+    assert_eq!(patched.settings, Some(expected));
+    let revised = patched;
     let mut stale = revise.clone();
     stale.client_operation_id = uuid::Uuid::new_v4().to_string();
     assert!(

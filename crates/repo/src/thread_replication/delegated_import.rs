@@ -43,6 +43,7 @@ pub trait AcceptedAuthority {
         &self,
         bundle: &wire::ImportPublicProofBundleV1,
         now_millis: i64,
+        context: &TrustTransaction<'_>,
     ) -> Result<()>;
     fn for_witness(&self, statement: &host::HostedWitnessStatementV1) -> Result<Selection<'_>>;
     fn for_policy(&self, policy: &wire::SignedPolicyBody) -> Result<Selection<'_>>;
@@ -244,6 +245,28 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         before_commit: impl FnOnce(&mut InstallArtifacts<'_>) -> Result<()>,
     ) -> Result<Vec<Self>> {
+        Self::install_hybrid_import_with(
+            directory,
+            trust,
+            bundle_bytes,
+            native_records,
+            authority,
+            store,
+            |_| Ok(()),
+            |_, artifacts| before_commit(artifacts),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn install_hybrid_import_with(
+        directory: &Path,
+        trust: &HostedTrust<impl Clock>,
+        bundle_bytes: &[u8],
+        native_records: &[wire::SignedRecord],
+        authority: &impl AcceptedAuthority,
+        store: &impl ObjectStore,
+        before_install: impl FnOnce(&TrustTransaction<'_>) -> Result<()>,
+        before_commit: impl FnOnce(&TrustTransaction<'_>, &mut InstallArtifacts<'_>) -> Result<()>,
+    ) -> Result<Vec<Self>> {
         if directory.canonicalize()? != trust.directory().canonicalize()? {
             return Err(Error::Hybrid(Reject::Root));
         }
@@ -260,6 +283,7 @@ impl ThreadReplica {
         let replicas = trust.mutate_with_artifacts(
             signed_set,
             |context| {
+                before_install(context)?;
                 install_in(
                     directory,
                     &bundle,
@@ -269,9 +293,9 @@ impl ThreadReplica {
                     context,
                 )
             },
-            |_, now| authority.authorize_import(&bundle, now),
+            |context, now| authority.authorize_import(&bundle, now, context),
             before_commit,
-            |_, now| authority.authorize_import(&bundle, now),
+            |context, now| authority.authorize_import(&bundle, now, context),
         )?;
         if let Some(replica) = replicas.first() {
             replica.notify_committed()?;
@@ -305,7 +329,7 @@ fn install_in(
     store: &impl ObjectStore,
     context: &TrustTransaction<'_>,
 ) -> Result<Vec<ThreadReplica>> {
-    authority.authorize_import(bundle, context.now_millis())?;
+    authority.authorize_import(bundle, context.now_millis(), context)?;
     let mut job_associations = context.job_associations().to_vec();
     // Carried declarations restrict roles before any mutation. Only fully
     // verified certificates become durable job associations below.

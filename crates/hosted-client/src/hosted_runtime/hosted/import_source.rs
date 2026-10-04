@@ -2,18 +2,88 @@
 //! Submit a server-side public Git import and observe its durable operation.
 
 use api::heddle::api::v1alpha2 as contract;
-use crypto::Signer as _;
-use objects::object::thread_replication::{
-    GenesisOwner, ThreadGenesis, git_import_graph::MAX_IMPORT_REFS, hosted_import,
-};
-use thread_api::{creation::ThreadCreation, rpc};
+use objects::object::thread_replication::git_import_graph::MAX_IMPORT_REFS;
+use thread_api::rpc;
 use uuid::Uuid;
 use wire::ProtocolError;
 
 use super::{HostedClient, operation_id::ClientOperationId};
 
+mod job;
+pub use job::{
+    ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob,
+    ResolvedImportSource,
+};
+
+#[cfg(test)]
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
 const RETRY_IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/RetryImportSource";
+
+/// Completeness at the client transport boundary. This grants no authority;
+/// the host still verifies independently selected owner permission and the
+/// current job/CAS fence. An old unsigned request never reaches a capable peer.
+pub(super) fn require_request_authority(method: &str, encoded: &[u8]) -> super::Result<()> {
+    use api::hybrid_codec::Reject;
+    use prost::Message;
+    match method.trim_start_matches('/') {
+        "heddle.api.v1alpha2.IntegrationService/ImportSource" => {
+            let request = contract::ImportSourceRequest::decode(encoded)?;
+            api::import_authority::validate_import_source(&request)?;
+        }
+        "heddle.api.v1alpha2.IntegrationService/CommitImportJob" => {
+            let request = contract::CommitImportJobRequest::decode(encoded)?;
+            let signed = request_delegation(request.proof.as_ref())?;
+            let scope = signed
+                .body
+                .as_ref()
+                .and_then(|body| body.scope.as_ref())
+                .ok_or(Reject::Scope)?;
+            // This only checks the caller's carrier. It selects no trusted
+            // provider/owner context; Commit preflight and the host do that.
+            api::import_authority::validate_scope(scope)?;
+            let source = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+            let provider = api::import_authority::resolve_import_provider(
+                source,
+                source.connection.as_ref().map(|_| scope.provider.as_str()),
+            )?;
+            if provider != scope.provider || source.clone_url != scope.source_url {
+                return Err(Reject::SourceSelection.into());
+            }
+            api::import_authority::validate_repository_hash_algorithm(source, true)?;
+        }
+        "heddle.api.v1alpha2.IntegrationService/SynchronizeRemote" => {
+            let request = contract::SynchronizeRemoteRequest::decode(encoded)?;
+            // Recurring sync needs its own explicit caller-signed proposal;
+            // the host checks Own authority and that proposal's exact scope.
+            request_delegation(request.import_authority.as_ref())?;
+        }
+        "heddle.api.v1alpha2.IntegrationService/RetryImportSource" => {
+            let request = contract::RetryImportSourceRequest::decode(encoded)?;
+            if request.logical_job_id.len() != 16
+                || request.active_delegation_digest.len() != 32
+                || request.expected_authority_epoch == 0
+            {
+                return Err(Reject::ImportPermission.into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn request_delegation(
+    proof: Option<&contract::ImportPublicProofBundleV1>,
+) -> super::Result<&contract::SignedImportJobDelegationV1> {
+    use api::hybrid_codec::Reject;
+    use prost::Message;
+    let proof = proof.ok_or(Reject::ImportPermission)?;
+    if proof.format_version != 1 || proof.encoded_len() > api::import_authority::MAX_BUNDLE_BYTES {
+        return Err(Reject::Bounds.into());
+    }
+    let signed = proof.delegations.last().ok_or(Reject::ImportPermission)?;
+    job::verify_delegating_signature(signed)?;
+    Ok(signed)
+}
 
 /// Source admission failures carry exact branch and tag counts.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +98,8 @@ pub enum ImportSourceRefError {
     NoBranches,
     #[error("source ref {ref_name:?} is not a valid Thread name: {reason}")]
     InvalidBranch { ref_name: String, reason: String },
+    #[error("source branch {ref_name:?} advertises conflicting object IDs")]
+    ConflictingBranch { ref_name: String },
     /// Discovery stopped reading an advertisement too large to admit.
     #[error(transparent)]
     AdvertisementOverBudget(heddle_git_projection::source_ref_budget::RefAdvertisementOverBudget),
@@ -39,10 +111,22 @@ pub enum ImportSourceRefError {
 #[derive(Clone, Debug)]
 pub struct ImportSourceRefs {
     branches: Vec<String>,
+    known_oids: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl ImportSourceRefs {
-    fn from_names(names: impl IntoIterator<Item = String>) -> Result<Self, ImportSourceRefError> {
+    /// Exact advertised targets for selecting the signed branch limits.
+    pub fn branches(&self) -> impl Iterator<Item = (&str, Option<&[u8]>)> {
+        self.branches
+            .iter()
+            .map(|name| (name.as_str(), self.known_oids.get(name).map(Vec::as_slice)))
+    }
+
+    /// Explicitly OID-unavailable ref knowledge. Known targets must be retained
+    /// through `from_targets` or `discover`; names alone imply no observe consent.
+    pub fn from_names(
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ImportSourceRefError> {
         let names = names.into_iter().collect::<std::collections::BTreeSet<_>>();
         let branches = names
             .iter()
@@ -72,14 +156,53 @@ impl ImportSourceRefs {
                 }
             })?;
         }
-        Ok(Self { branches })
+        Ok(Self {
+            branches,
+            known_oids: Default::default(),
+        })
+    }
+
+    /// Independently observed targets, including authenticated provider inventory.
+    pub fn from_targets(targets: Vec<(String, Vec<u8>)>) -> Result<Self, ImportSourceRefError> {
+        let mut refs = Self::from_names(targets.iter().map(|(name, _)| name.clone()))?;
+        for (name, oid) in targets {
+            if !name.starts_with("refs/heads/") {
+                continue;
+            }
+            if !matches!(oid.len(), 20 | 32) {
+                return Err(ImportSourceRefError::Discovery(format!(
+                    "source branch {name:?} has an invalid object ID width"
+                )));
+            }
+            if let Some(previous) = refs.known_oids.insert(name.clone(), oid.clone())
+                && previous != oid
+            {
+                return Err(ImportSourceRefError::ConflictingBranch { ref_name: name });
+            }
+        }
+        Ok(refs)
+    }
+
+    /// Check caller-selected limits against independently discovered targets.
+    /// Unknown refs cannot become observe mode without explicit signed disclosure.
+    pub fn validate_scope(&self, scope: &contract::ImportPermissionScopeV1) -> super::Result<()> {
+        for branch in &scope.branches {
+            if !self.branches.contains(&branch.ref_name) {
+                return Err(api::hybrid_codec::Reject::RefPinning.into());
+            }
+            api::import_authority::validate_ref_selection(
+                branch,
+                self.known_oids.get(&branch.ref_name).map(Vec::as_slice),
+            )?;
+        }
+        Ok(())
     }
 
     /// Enumerate branches and tags without peeled-tag duplicates or HEAD.
     pub async fn discover(clone_url: &str) -> Result<Self, ImportSourceRefError> {
         let clone_url = clone_url.to_string();
-        let names = tokio::task::spawn_blocking(move || {
-            heddle_git_projection::discover_git_source_refs(&clone_url)
+        let targets = tokio::task::spawn_blocking(move || {
+            heddle_git_projection::discover_git_source_ref_targets(&clone_url)
         })
         .await
         .map_err(|error| ImportSourceRefError::Discovery(error.to_string()))?
@@ -89,7 +212,7 @@ impl ImportSourceRefs {
             }
             error => ImportSourceRefError::Discovery(error.to_string()),
         })?;
-        Self::from_names(names)
+        Self::from_targets(targets)
     }
 }
 
@@ -111,111 +234,23 @@ pub struct ImportOperationStart {
 }
 
 impl HostedClient {
-    /// Ask weft to fetch a public Git repository and import it asynchronously.
-    ///
-    /// The destination Spool already exists. The request carries the canonical
-    /// empty State so the same admission can create one native Thread per branch.
+    /// The legacy initial route is closed by the alpha.23 contract. Use an
+    /// authenticated configuration, caller-signed preparation and Commit.
     pub async fn import_source(
         &mut self,
-        destination_path: &str,
-        clone_url: &str,
-        refs: &ImportSourceRefs,
-        caller_operation_id: impl Into<String>,
+        _destination_path: &str,
+        _clone_url: &str,
+        _refs: &ImportSourceRefs,
+        _caller_operation_id: impl Into<String>,
     ) -> Result<ImportSourceStart, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(IMPORT_SOURCE, caller_operation_id);
-        let overview = self.native_spool_overview(destination_path).await?;
-        let destination = overview.r#ref.clone().ok_or_else(|| {
-            ProtocolError::InvalidState("hosted import destination identity is absent".into())
-        })?;
-        let (owner, creator_authority, _) = self.current_creator_authority().await?;
-        let initial_base = hosted_import::synthetic_initial_base()
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-
-        let mut threads = Vec::with_capacity(refs.branches.len());
-        let mut branches = Vec::with_capacity(refs.branches.len());
-        for ref_name in &refs.branches {
-            let thread_name = &ref_name["refs/heads/".len()..];
-            let creation = {
-                let signer = self.claim_proof_signer().ok_or_else(|| {
-                    ProtocolError::AuthenticationFailed(
-                        "hosted source import requires a proof-bound credential".into(),
-                    )
-                })?;
-                let creator = signer.public_key().try_into().map_err(|_| {
-                    ProtocolError::InvalidState("invalid hosted creator signing key".into())
-                })?;
-                let genesis = ThreadGenesis {
-                    version: 1,
-                    spool: destination.id.clone(),
-                    parent: None,
-                    base: initial_base.id(),
-                    name: thread_name.to_string(),
-                    intent: String::new(),
-                    creator,
-                    owner: GenesisOwner::Account(owner),
-                    nonce: Vec::new(),
-                };
-                ThreadCreation::sign_with_authority(
-                    operation_id.to_wire(),
-                    &genesis,
-                    signer,
-                    creator_authority.clone(),
-                )
-                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
-            };
-            threads.push(creation.reference().clone());
-            let creation_request = creation.request();
-            branches.push(contract::ImportBranchGenesis {
-                ref_name: ref_name.clone(),
-                thread_genesis: creation_request.thread_genesis.clone(),
-                creator_authority: creation_request.creator_authority.clone(),
-                // No HYBRID import authority is claimed; none is signed.
-                genesis_authority: None,
-            });
-        }
-        let request = contract::ImportSourceRequest {
-            client_operation_id: operation_id.to_wire(),
-            destination: Some(destination.clone()),
-            source: Some(contract::ProviderRepository {
-                connection: None,
-                provider_repository_id: clone_url.to_string(),
-                clone_url: clone_url.to_string(),
-                name: String::new(),
-                private: false,
-                installation_id: String::new(),
-                // Server-side read projection; an import request names none.
-                linked_spools: Vec::new(),
-                // Provider read projections; an import request names none.
-                default_branch: String::new(),
-                refs: Vec::new(),
-                refs_status: None,
-            }),
-            expected_destination_version: overview.version,
-            branches,
-            initial_base_state: initial_base
-                .encode_current_msgpack()
-                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
-            // No HYBRID import authority is claimed; no proof bundle.
-            import_authority: None,
-        };
-        let remote = self.native().await.map_err(protocol_error)?;
-        let response: contract::MutationResponse =
-            self.call_unary(IMPORT_SOURCE, &request)
-                .await
-                .map_err(super::helpers::hosted_to_protocol_error)?;
-        let pending_operation = require_pending_receipt(
-            response.receipt,
-            operation_id.as_str(),
-            &remote.description.endpoint,
-            &destination,
-            "hosted source import",
-        )?;
-        Ok(ImportSourceStart {
-            client_operation_id: operation_id.to_wire(),
-            destination,
-            threads,
-            operation: pending_operation,
-        })
+        self.require_import_authority_protocol()
+            .await
+            .map_err(super::helpers::hosted_to_protocol_error)?;
+        api::import_authority::validate_import_source(&contract::ImportSourceRequest::default())
+            .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
+        Err(ProtocolError::InvalidState(
+            "ImportSource requires CommitImportJob".into(),
+        ))
     }
 
     /// Follow the exact durable operation created by [`Self::import_source`].
@@ -254,6 +289,8 @@ impl HostedClient {
                         "operation stream returned another hosted source import".into(),
                     ));
                 }
+                api::import_authority::import_job_state_request_from_operation(&record)
+                    .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
                 on_progress(&record)?;
                 if matches!(
                     contract::operation_record::State::try_from(record.state),
@@ -370,6 +407,8 @@ impl HostedClient {
                         "operation stream returned another hosted source import".into(),
                     ));
                 }
+                api::import_authority::import_job_state_request_from_operation(&record)
+                    .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
                 on_progress(&record)?;
                 let terminal = is_terminal_state(record.state);
                 latest = Some(record);
@@ -437,7 +476,6 @@ fn require_pending_receipt(
     if receipt.client_operation_id != operation_id
         || &receipt.endpoint != endpoint
         || operation.spool.as_ref() != Some(destination)
-        || operation.id != operation_id
         || Uuid::parse_str(&operation.id).is_err()
     {
         return Err(ProtocolError::InvalidState(format!(
@@ -454,8 +492,157 @@ fn protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use api::v2::client::Rpc as _;
+    use objects::object::thread_replication::hosted_import;
+    use prost::Message;
 
     use super::*;
+
+    fn signed_proof() -> contract::ImportPublicProofBundleV1 {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+        )))
+        .expect("alpha.25 fixed vectors");
+        let bytes = hex::decode(
+            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex");
+        contract::ImportPublicProofBundleV1::decode(bytes.as_slice()).expect("bundle")
+    }
+
+    #[test]
+    fn initial_import_source_is_closed_by_the_commit_only_contract() {
+        let request = contract::ImportSourceRequest::default();
+        assert!(matches!(
+            require_request_authority(IMPORT_SOURCE, &request.encode_to_vec()),
+            Err(super::super::HostedError::Hybrid(
+                api::hybrid_codec::Reject::ImportSourceRequiresCommit
+            ))
+        ));
+        assert!(request_delegation(Some(&signed_proof())).is_ok());
+    }
+
+    #[test]
+    fn retry_transport_requires_the_complete_observed_job_fence() {
+        let control = contract::RetryImportSourceRequest {
+            logical_job_id: vec![1; 16],
+            active_delegation_digest: vec![2; 32],
+            expected_authority_epoch: 1,
+            ..Default::default()
+        };
+        require_request_authority(RETRY_IMPORT_SOURCE, &control.encode_to_vec())
+            .expect("complete CAS control");
+        for field in 0..3 {
+            let mut missing = control.clone();
+            match field {
+                0 => missing.logical_job_id.clear(),
+                1 => missing.active_delegation_digest.clear(),
+                _ => missing.expected_authority_epoch = 0,
+            }
+            assert!(
+                require_request_authority(RETRY_IMPORT_SOURCE, &missing.encode_to_vec()).is_err()
+            );
+        }
+        require_request_authority(RETRY_IMPORT_SOURCE, &control.encode_to_vec())
+            .expect("unchanged CAS control");
+    }
+
+    #[test]
+    fn recurring_sync_transport_requires_explicit_original_authority() {
+        let method = "/heddle.api.v1alpha2.IntegrationService/SynchronizeRemote";
+        let control = contract::SynchronizeRemoteRequest {
+            import_authority: Some(signed_proof()),
+            ..Default::default()
+        };
+        // Completeness only: the host separately checks Own and recurring scope.
+        require_request_authority(method, &control.encode_to_vec())
+            .expect("explicit signed proposal");
+        let unsigned = contract::SynchronizeRemoteRequest::default();
+        assert!(require_request_authority(method, &unsigned.encode_to_vec()).is_err());
+        let mut substituted = control.clone();
+        substituted
+            .import_authority
+            .as_mut()
+            .expect("proof")
+            .delegations
+            .last_mut()
+            .expect("delegation")
+            .delegating_signature = None;
+        assert!(require_request_authority(method, &substituted.encode_to_vec()).is_err());
+        require_request_authority(method, &control.encode_to_vec())
+            .expect("original completeness control");
+    }
+
+    #[test]
+    fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
+        let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+        )))
+        .expect("vectors");
+        let bytes = hex::decode(
+            f["wire_vectors"]["scope"]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex");
+        let scope = contract::ImportPermissionScopeV1::decode(bytes.as_slice()).expect("scope");
+        let targets = scope
+            .branches
+            .iter()
+            .map(|b| (b.ref_name.clone(), b.pinned_commit_oid.clone()))
+            .collect::<Vec<_>>();
+        let refs = ImportSourceRefs::from_targets(targets.clone()).expect("discovered OIDs");
+        refs.validate_scope(&scope).expect("exact known OID pins");
+        assert!(refs.branches().all(|(_, oid)| oid.is_some()));
+        let mut changed = scope.clone();
+        changed.branches[0].pinned_commit_oid[0] ^= 1;
+        assert!(refs.validate_scope(&changed).is_err());
+        changed = scope.clone();
+        changed.branches[0].ref_mode = 2;
+        changed.branches[0].ref_disclosure = 1;
+        changed.branches[0].pinned_commit_oid.clear();
+        assert!(
+            refs.validate_scope(&changed).is_err(),
+            "known OID cannot become observe mode"
+        );
+        let mut conflicting = targets;
+        conflicting.push((scope.branches[0].ref_name.clone(), vec![0; 20]));
+        assert!(matches!(
+            ImportSourceRefs::from_targets(conflicting),
+            Err(ImportSourceRefError::ConflictingBranch { .. })
+        ));
+        refs.validate_scope(&scope).expect("unchanged pin control");
+    }
+
+    #[test]
+    fn unavailable_oids_require_explicit_signed_observe_disclosure() {
+        let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+        )))
+        .expect("fixture");
+        let decode = |name: &str| {
+            let bytes = hex::decode(f["wire_vectors"][name]["wire_hex"].as_str().expect("wire"))
+                .expect("hex");
+            contract::ImportPermissionScopeV1::decode(bytes.as_slice()).expect("scope")
+        };
+        let disclosed = decode("scope_observe_disclosed");
+        let refs =
+            ImportSourceRefs::from_names(disclosed.branches.iter().map(|b| b.ref_name.clone()))
+                .expect("unavailable knowledge");
+        assert!(refs.branches().all(|(_, oid)| oid.is_none()));
+        refs.validate_scope(&disclosed)
+            .expect("explicit disclosed observe choice");
+        assert!(
+            refs.validate_scope(&decode("scope_observe_undisclosed"))
+                .is_err()
+        );
+        refs.validate_scope(&disclosed)
+            .expect("unchanged disclosure control");
+    }
 
     #[test]
     fn source_refs_reject_empty_and_invalid_branch_names_and_bound_all_tags() {
@@ -506,6 +693,7 @@ mod tests {
             default_branch: String::new(),
             refs: Vec::new(),
             refs_status: None,
+            hash_algorithm: 0,
         };
         assert!(source.connection.is_none());
         assert_eq!(source.provider_repository_id, source.clone_url);
@@ -543,7 +731,7 @@ mod tests {
         });
         let operation = contract::RecordRef {
             spool: Some(spool.clone()),
-            id: operation_id.clone(),
+            id: Uuid::now_v7().to_string(),
         };
         let receipt = contract::MutationReceipt {
             client_operation_id: operation_id.clone(),
@@ -582,98 +770,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_source_round_trips_request_and_live_operation_updates() {
+    async fn import_source_rejects_an_old_peer_before_sending_unsigned_authority() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_import_source().await;
-        let source_url = "https://github.com/octocat/Hello-World.git";
-        let operation_id = Uuid::now_v7().to_string();
-        let started = client
+        let error = client
             .import_source(
                 "acme",
-                source_url,
+                "https://github.com/octocat/Hello-World.git",
                 &ImportSourceRefs::from_names(["refs/heads/main".into()]).expect("refs"),
-                operation_id.clone(),
+                Uuid::now_v7().to_string(),
             )
             .await
-            .expect("ImportSource reaches the hosted transport");
-        let mut updates = Vec::new();
-        let terminal = client
-            .observe_import_source(&started, |record| {
-                updates.push((record.state, record.completed_units));
-                Ok(())
-            })
-            .await
-            .expect("ObserveOperations reaches a terminal import state");
-        assert_eq!(
-            terminal.state,
-            contract::operation_record::State::Completed as i32
+            .expect_err("old peer cannot ignore new import authority");
+        assert!(
+            matches!(error, ProtocolError::Remote(ref message)
+                if message == &super::super::HostedError::Hybrid(api::hybrid_codec::Reject::Protocol).to_string()),
+            "{error}"
         );
-        assert_eq!(
-            updates,
-            vec![
-                (contract::operation_record::State::Queued as i32, 0),
-                (
-                    contract::operation_record::State::Running as i32,
-                    8 * 1024 * 1024
-                ),
-                (
-                    contract::operation_record::State::Running as i32,
-                    16 * 1024 * 1024
-                ),
-                (
-                    contract::operation_record::State::Completed as i32,
-                    32 * 1024 * 1024
-                ),
-            ]
-        );
-
         client.close().await;
         server.await.expect("hosted test server");
-        let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
-        let request = captured.requests.first().expect("captured ImportSource");
-        assert_eq!(request.client_operation_id, started.client_operation_id);
-        assert!(Uuid::parse_str(&request.client_operation_id).is_ok());
-        assert_eq!(request.destination, Some(started.destination.clone()));
-        assert_eq!(request.expected_destination_version, vec![7; 32]);
-        let source = request.source.as_ref().expect("public Git source");
-        assert!(source.connection.is_none());
-        assert_eq!(source.provider_repository_id, source_url);
-        assert_eq!(source.clone_url, source_url);
-        assert!(!source.private);
-        assert!(source.installation_id.is_empty());
-        assert!(!request.branches[0].creator_authority.is_empty());
-        let signed = request.branches[0]
-            .thread_genesis
-            .as_ref()
-            .expect("signed genesis");
-        let genesis = ThreadGenesis::decode(&signed.canonical_record).expect("canonical genesis");
-        let base = objects::object::State::decode_current_msgpack(&request.initial_base_state)
-            .expect("canonical initial base");
-        assert_eq!(genesis.base, base.id());
-        assert_eq!(genesis.spool, started.destination.id);
-        assert_eq!(genesis.name, "main");
-        assert_eq!(
-            started.threads[0],
-            ThreadCreation::from_signed_with_authority(
-                request.client_operation_id.clone(),
-                signed.clone(),
-                request.branches[0].creator_authority.clone(),
-            )
-            .expect("valid signed genesis")
-            .reference()
-            .clone()
-        );
-
-        let observation = captured
-            .observations
-            .first()
-            .expect("captured ObserveOperations");
-        assert_eq!(
-            observation.client_operation_ids,
-            [started.client_operation_id]
-        );
-        assert_eq!(observation.spools, [started.destination]);
-        assert_eq!(observation.operations, [started.operation]);
+        assert!(captured.lock().expect("capture").requests.is_empty());
     }
 }

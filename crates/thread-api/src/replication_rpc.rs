@@ -134,11 +134,11 @@ impl Peer {
             session_nonce: uuid::Uuid::new_v4().as_bytes().to_vec(),
             source: Some(self.endpoint.clone()),
             destination: Some(destination.clone()),
-            // No HYBRID import-authority support is claimed; no proof bundle.
-            protocol: None,
+            protocol: crate::hybrid::sync_protocol(),
             import_authority: None,
         };
         let transport = IrohTransport::new(connection, signer, FRAME_LIMIT, TIMEOUT)?;
+        let requested_protocol = opening.protocol.clone();
         let (writer, mut reader) = transport
             .exchange(
                 rpc::SyncServiceReplicateThread::METHOD,
@@ -158,7 +158,8 @@ impl Peer {
         };
         let (facets, max_items) =
             opening::validate_ready(&ready, &thread, &destination, &self.facets, 64)?;
-        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?
+            .with_protocol(requested_protocol.as_ref(), ready.protocol.as_ref())?;
         live_replication::run(
             session,
             reader,
@@ -243,15 +244,20 @@ impl Peer {
                 return Err(transport::Error::Protocol("replication requires Open"));
             };
             let (_, version) = peer.replica.sharing(&remote_key).map_err(store_error)?;
-            let ready = opening::accept(
+            let accepted = opening::accept(
                 &open,
                 &peer.reference()?,
                 &peer.endpoint,
                 remote_key,
                 &peer.facets,
                 version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
-            )?
-            .ready;
+            )?;
+            if accepted.import_authority.is_some() {
+                return Err(transport::Error::Protocol(
+                    "HYBRID replication requires independently selected hosted trust",
+                ));
+            }
+            let ready = accepted.ready;
             let (facets, max_items) = opening::validate_ready(
                 &ready,
                 &peer.reference()?,
@@ -283,6 +289,7 @@ impl Peer {
                 return Err(error.into());
             }
         };
+        let negotiated_protocol = ready.protocol.clone();
         writer
             .send(
                 ReplicateThreadResponse {
@@ -291,7 +298,8 @@ impl Peer {
                 .encode_to_vec(),
             )
             .await?;
-        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?
+            .with_protocol(negotiated_protocol.as_ref(), negotiated_protocol.as_ref())?;
         live_replication::run(
             session,
             reader,
