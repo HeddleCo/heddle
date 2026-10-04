@@ -30,6 +30,11 @@ use tracing::{Instrument, instrument::WithSubscriber};
 
 use super::{DeviceRpc, auth, checkout};
 
+type DeviceHostedReplica<F> = thread_api::replication::native::HostedReplica<
+    repo::thread_replication::hosted_trust::SystemClock,
+    thread_api::hybrid::authority::SelectedAuthority<F>,
+>;
+
 struct AbortTask(tokio::task::AbortHandle);
 impl Drop for AbortTask {
     fn drop(&mut self) {
@@ -58,7 +63,7 @@ impl DeviceRpc {
                 .await;
         }
         let descriptor = api::v2::method_descriptor(method).context("unknown device stream")?;
-        let (mut writer, mut reader) = thread_api::transport::accepted_stream(
+        let (writer, mut reader) = thread_api::transport::accepted_stream(
             send,
             recv,
             opening::FRAME_LIMIT,
@@ -134,16 +139,93 @@ impl DeviceRpc {
         );
         let _notifier = AbortTask(notifier.abort_handle());
         let feed = live_replication::Feed::from_changes(replica.thread_id(), receiver);
-        let backend = OwnedReplica(
-            LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
-                .with_device_authority(self.home.clone()),
-        );
-        let causal = replication::Session::new(backend, peer, negotiated, max_items)?;
+        let bundle = accepted
+            .import_authority
+            .clone()
+            .or(replica.hybrid_import_bundle()?);
+        let backend = LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
+            .with_device_authority(self.home.clone());
+        if let Some(bundle) = bundle {
+            let backend = self.hosted_backend(backend, session.clone(), bundle)?;
+            let causal =
+                replication::Session::new(OwnedReplica(backend), peer, negotiated, max_items)?
+                    .with_protocol(open.protocol.as_ref(), accepted.ready.protocol.as_ref())?;
+            self.run_replica(causal, accepted.ready, session, feed, reader, writer)
+                .await
+        } else {
+            let causal =
+                replication::Session::new(OwnedReplica(backend), peer, negotiated, max_items)?
+                    .with_protocol(open.protocol.as_ref(), accepted.ready.protocol.as_ref())?;
+            self.run_replica(causal, accepted.ready, session, feed, reader, writer)
+                .await
+        }
+    }
+    pub(super) fn hosted_backend(
+        &self,
+        local: LocalReplica<FsStore>,
+        session: Arc<auth::Session>,
+        bundle: ImportPublicProofBundleV1,
+    ) -> Result<
+        DeviceHostedReplica<
+            impl Fn(&ImportPublicProofBundleV1, i64) -> repo::thread_replication::Result<()>
+            + Send
+            + Sync
+            + 'static
+            + use<>,
+        >,
+    > {
+        use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+        use thread_api::hybrid::authority::{AcceptedHistory, SelectedAuthority};
+        let repository = repo::Repository::open(&session.spool.root)?;
+        let now = chrono::Utc::now().timestamp();
+        let (_, pinned) = repository.pinned_owner_observation(now)?;
+        let history = AcceptedHistory::from_selected_spool(
+            &bundle,
+            &pinned,
+            now,
+            heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)?,
+        )?;
+        // This carrier names a lookup in durable, independently selected trust.
+        // HostedTrust::open cannot enroll a root from the incoming bundle.
+        let authority = &bundle
+            .witness_set
+            .as_ref()
+            .and_then(|s| s.body.as_ref())
+            .context("hosted witness set absent")?
+            .deployment_authority;
+        let trust = Arc::new(HostedTrust::open(
+            &session.spool.heddle_dir,
+            authority,
+            SystemClock,
+        )?);
+        let home = self.home.clone();
+        let directory = session.spool.heddle_dir.clone();
+        let authority = Arc::new(SelectedAuthority::new(
+            history,
+            bundle,
+            move |_: &ImportPublicProofBundleV1, _: i64| {
+                session
+                    .check_current(&home)
+                    .map_err(|error| repo::thread_replication::Error::Invalid(error.to_string()))
+            },
+        ));
+        Ok(local.with_hosted_authority(directory, trust, authority))
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn run_replica<B: ReplicaStore<Error = Error>>(
+        &self,
+        causal: replication::Session<OwnedReplica<B>>,
+        ready: ReplicationReady,
+        session: Arc<auth::Session>,
+        feed: live_replication::Feed,
+        reader: transport::Reader,
+        mut writer: transport::Writer,
+    ) -> Result<()> {
         session.check_current(&self.home)?;
         writer
             .send(
                 ReplicateThreadResponse {
-                    body: Some(replicate_thread_response::Body::Ready(accepted.ready)),
+                    body: Some(replicate_thread_response::Body::Ready(ready)),
                 }
                 .encode_to_vec(),
             )
@@ -180,8 +262,8 @@ impl DeviceRpc {
 /// exact method/resource caveats and request proof. Hosted publication policy
 /// does not restrict an owner's direct access to their own private device.
 #[derive(Clone)]
-struct OwnedReplica(LocalReplica<FsStore>);
-impl ReplicaStore for OwnedReplica {
+struct OwnedReplica<B>(B);
+impl<B: ReplicaStore<Error = Error>> ReplicaStore for OwnedReplica<B> {
     type Error = Error;
     fn thread_id(&self) -> ContentHash {
         self.0.thread_id()

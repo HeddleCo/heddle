@@ -68,6 +68,22 @@ impl DeviceRpc {
         let thread = checkout::thread(&session, Some(reference))?;
         let replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
         let revision = selected_revision(&session, &open)?;
+        ensure!(
+            open.import_authority.is_some() || replica.hybrid_import_bundle()?.is_none(),
+            "hosted publication requires its complete retained authority"
+        );
+        let hosted = if let Some(bundle) = &open.import_authority {
+            Some(self.hosted_backend(
+                thread_api::replication::native::LocalReplica::new(
+                    replica.clone(),
+                    Arc::new(objects::store::FsStore::new(&session.spool.heddle_dir)),
+                ),
+                session.clone(),
+                bundle.clone(),
+            )?)
+        } else {
+            None
+        };
         check_policy(&session, &replica, &open)?;
         let inventory = inventory(&open)?;
         let digest =
@@ -88,6 +104,19 @@ impl DeviceRpc {
             repo::device_operations::replay_response(&session.spool.heddle_dir, &command)?
         {
             session.check_current(&self.home)?;
+            if let Some(hosted) = &hosted {
+                let originals = replica.accepted_source_originals_for_revisions(&[revision])?;
+                ensure!(!originals.is_empty(), "hosted replay source is absent");
+                for (_, original) in originals {
+                    let id = original.verify()?.id()?;
+                    let retained =
+                        thread_api::replication::store::ReplicaStore::operation(hosted, id).await?;
+                    ensure!(
+                        retained.is_some_and(|(_, status)| status == Admission::Accepted),
+                        "hosted publication replay lacks current retained admission"
+                    );
+                }
+            }
             writer
                 .send(
                     PublishContentServerFrame {
@@ -122,6 +151,8 @@ impl DeviceRpc {
                         thread: open.thread.clone(),
                         current: open.revision.clone(),
                         checkpoint: Some(checkpoint.clone()),
+                        protocol: open.protocol.clone(),
+                        import_authority: open.import_authority.clone(),
                         budget: Some(ReadBudget {
                             max_items: 12_048,
                             max_frame_bytes: FRAME as u32,
@@ -275,19 +306,38 @@ impl DeviceRpc {
                 guards.push((dependency.clone(), dependency.generation()?));
             }
             check_policy(&admitted, &replica, &opening)?;
-            for signed in validated.operations() {
-                authorize_original(
-                    &guards,
-                    signed,
-                    validated.authority_admissions(),
-                    &admitted,
-                    &home,
-                )?;
+            let operations = validated.operations().to_vec();
+            let authority_admissions = validated.authority_admissions().clone();
+            let ordinary_paths = if let Some(hosted) = hosted {
+                let (owner, keyring) =
+                    repository.pinned_owner_observation(chrono::Utc::now().timestamp())?;
+                let ready = TransferReady {
+                    thread: opening.thread.clone(),
+                    current: opening.revision.clone(),
+                    protocol: opening.protocol.clone(),
+                    import_authority: opening.import_authority.clone(),
+                    owner_genesis: Some(keyring.owner_genesis().signed().clone()),
+                    ownership: Some(owner),
+                    full_closure_available: true,
+                    ..Default::default()
+                };
+                let staged = validated.into_hosted_source(ready)?;
+                hosted.install_source(staged, &repository, chrono::Utc::now().timestamp())?;
+                for (dependency, generation) in &mut guards {
+                    *generation = dependency.generation()?;
+                }
+                None
+            } else {
+                Some(validated.artifact_paths())
+            };
+            for signed in &operations {
+                authorize_original(&guards, signed, &authority_admissions, &admitted, &home)?;
             }
-            let paths = validated.artifact_paths();
-            repository
-                .store()
-                .install_pack_streaming(&paths[0], &paths[1])?;
+            if let Some(paths) = ordinary_paths {
+                repository
+                    .store()
+                    .install_pack_streaming(&paths[0], &paths[1])?;
+            }
             admitted.check_current(&home)?;
             for (dependency, _) in &guards {
                 admitted.authorize_thread(&repository, dependency)?;
@@ -304,13 +354,12 @@ impl DeviceRpc {
                     digest: inventory.as_bytes().to_vec(),
                 }),
                 outcome: Some(publication_receipt::Outcome::Accepted(Applied::default())),
-                // Native publication carries no import-authority proof bundle.
-                import_authority: None,
+                import_authority: opening.import_authority.clone(),
             };
             let bytes = replica.publish_prepared_source(
                 repo::thread_replication::source_publication::PreparedPublication {
-                    operations: validated.operations(),
-                    authority_admissions: validated.authority_admissions(),
+                    operations: &operations,
+                    authority_admissions: &authority_admissions,
                     revision,
                     guards: &guards,
                 },
@@ -322,14 +371,10 @@ impl DeviceRpc {
                     request_hash,
                 },
                 |_, signed| {
-                    authorize_original(
-                        &guards,
-                        signed,
-                        validated.authority_admissions(),
-                        &admitted,
-                        &home,
-                    )
-                    .map_err(|error| repo::thread_replication::Error::Invalid(error.to_string()))
+                    authorize_original(&guards, signed, &authority_admissions, &admitted, &home)
+                        .map_err(|error| {
+                            repo::thread_replication::Error::Invalid(error.to_string())
+                        })
                 },
                 || Ok(receipt.encode_to_vec()),
             )?;

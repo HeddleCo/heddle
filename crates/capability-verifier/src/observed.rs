@@ -583,8 +583,9 @@ impl From<crate::wire::ImportPreparationRefusalReason> for PreparationRefusalRea
 }
 #[cfg(test)]
 mod hybrid_error_tests {
-    use super::*;
     use heddle_api::hybrid_codec::Reject as R;
+
+    use super::*;
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn new_hybrid_failures_preserve_their_category_and_typed_refusal_detail() {

@@ -16,6 +16,32 @@ impl ImportConfiguration {
     pub fn response(&self) -> &wire::GetImportConfigurationResponse {
         &self.response
     }
+
+    /// Absent means the caller must choose; converter ordering is not a rank.
+    pub fn default_converter(&self) -> Option<&wire::ImportConverterConfigurationV1> {
+        let version = self.response.default_converter_version.as_ref()?;
+        self.response
+            .converters
+            .iter()
+            .find(|c| &c.converter_version == version)
+    }
+}
+
+/// Caller-bound source discovery, obtained only from ResolveImportSource.
+/// Repository format is independent of the width or availability of ref OIDs.
+#[derive(Clone, Debug)]
+pub struct ResolvedImportSource {
+    request: wire::ResolveImportSourceRequest,
+    source: wire::ProviderRepository,
+    provider: &'static str,
+}
+impl ResolvedImportSource {
+    pub fn source(&self) -> &wire::ProviderRepository {
+        &self.source
+    }
+    pub fn provider(&self) -> &'static str {
+        self.provider
+    }
 }
 
 /// Authenticated destination-writer snapshot for reviewing the remaining scope.
@@ -28,6 +54,25 @@ pub struct ImportJobState {
 impl ImportJobState {
     pub fn response(&self) -> &wire::GetImportJobStateResponse {
         &self.response
+    }
+
+    /// An expired predecessor is a CAS handle, never executable permission.
+    pub fn predecessor(
+        &self,
+        expected: &authority::ImportOwnerExpectation<'_>,
+    ) -> Result<authority::VerifiedImportRenewalPredecessor> {
+        let state = self.response.state.as_ref().ok_or(Reject::StaleContext)?;
+        let signed = state.active_predecessor.as_ref().ok_or(Reject::Canonical)?;
+        let proof = self
+            .response
+            .retained_proof
+            .as_ref()
+            .ok_or(Reject::Canonical)?;
+        Ok(authority::verify_renewal_predecessor(
+            state,
+            member_permission(proof, signed)?,
+            expected,
+        )?)
     }
 }
 
@@ -49,6 +94,8 @@ pub struct PreparedImportJob {
     destination: wire::SpoolRef,
     response: wire::PrepareImportJobResponse,
     renewal_read: Option<ImportJobState>,
+    configuration: ImportConfiguration,
+    source: ResolvedImportSource,
 }
 impl PreparedImportJob {
     pub fn response(&self) -> &wire::PrepareImportJobResponse {
@@ -106,6 +153,32 @@ impl PreparedImportJob {
 }
 
 impl HostedClient {
+    pub async fn resolve_import_source(
+        &self,
+        request: &wire::ResolveImportSourceRequest,
+    ) -> Result<ResolvedImportSource> {
+        let selected = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+        // The authenticated resolver checks the connection's current GitHub
+        // grant. Public GitHub URLs remain public-git without a connection.
+        authority::resolve_import_provider(
+            selected,
+            selected.connection.as_ref().map(|_| "github"),
+        )?;
+        if request.encoded_len() > authority::MAX_BUNDLE_BYTES
+            || request.page.as_ref().is_some_and(|page| page.size > 512)
+        {
+            return Err(Reject::Bounds.into());
+        }
+        self.require_import_authority_protocol().await?;
+        let response: wire::ResolveImportSourceResponse = self
+            .call_unary(
+                "/heddle.api.v1alpha2.IntegrationService/ResolveImportSource",
+                request,
+            )
+            .await?;
+        resolved_source(request, &response)
+    }
+
     pub async fn get_import_job_state(
         &self,
         request: &wire::GetImportJobStateRequest,
@@ -159,31 +232,42 @@ impl HostedClient {
     pub async fn prepare_import_job(
         &self,
         configuration: &ImportConfiguration,
-        refs: &super::ImportSourceRefs,
+        source: &ResolvedImportSource,
         request: &wire::PrepareImportJobRequest,
     ) -> Result<PreparedImportJob> {
-        self.prepare_import_job_from_read(configuration, refs, request, None)
+        self.prepare_import_job_from_read(configuration, source, request, None)
             .await
     }
 
     pub async fn prepare_import_renewal(
         &self,
         configuration: &ImportConfiguration,
-        refs: &super::ImportSourceRefs,
+        source: &ResolvedImportSource,
         request: &wire::PrepareImportJobRequest,
         read: &ImportJobState,
+        predecessor_context: &authority::ImportOwnerExpectation<'_>,
     ) -> Result<PreparedImportJob> {
-        self.prepare_import_job_from_read(configuration, refs, request, Some(read))
-            .await
+        let predecessor = read.predecessor(predecessor_context)?;
+        self.prepare_import_job_from_read(
+            configuration,
+            source,
+            request,
+            Some((read, &predecessor)),
+        )
+        .await
     }
 
     async fn prepare_import_job_from_read(
         &self,
         configuration: &ImportConfiguration,
-        refs: &super::ImportSourceRefs,
+        source: &ResolvedImportSource,
         request: &wire::PrepareImportJobRequest,
-        read: Option<&ImportJobState>,
+        retained: Option<(
+            &ImportJobState,
+            &authority::VerifiedImportRenewalPredecessor,
+        )>,
     ) -> Result<PreparedImportJob> {
+        let read = retained.map(|(read, _)| read);
         match read {
             Some(read)
                 if read.request.destination == request.destination
@@ -207,14 +291,29 @@ impl HostedClient {
         }
         authority::initial_operation_id(&request.retry_lineage_id, false)?;
         let proposed = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
-        refs.validate_scope(proposed)?;
+        validate_source_selection(request, source)?;
+        let retained_state = retained
+            .map(|(read, predecessor)| {
+                Ok::<_, Reject>((
+                    predecessor,
+                    read.response.state.as_ref().ok_or(Reject::StaleContext)?,
+                ))
+            })
+            .transpose()?;
         // Empty explicitly asks Prepare for the current opaque CAS token.
+        // Source format/custody are checked before RPC; the complete prepared
+        // scope is checked against the issued token before it reaches signing.
         if !proposed.destination_version.is_empty() {
-            authority::prepare_scope(
-                proposed,
+            authority::prepare_import_source_scope(
+                request,
+                &source.source,
+                source.source.connection.as_ref().map(|_| source.provider),
                 &configuration.response,
                 &proposed.destination_version,
+                retained_state,
             )?;
+        } else if retained_state.is_none() {
+            authority::validate_discovered_import_scope(proposed, &source.source)?;
         }
         let response: wire::PrepareImportJobResponse = self
             .call_unary(
@@ -231,15 +330,20 @@ impl HostedClient {
             .as_ref()
             .and_then(|p| p.scope.as_ref())
             .ok_or(Reject::Canonical)?;
-        authority::prepare_scope(
-            proposed,
+        authority::prepare_import_source_scope(
+            request,
+            &source.source,
+            source.source.connection.as_ref().map(|_| source.provider),
             &configuration.response,
             &returned.destination_version,
+            retained_state,
         )?;
         Ok(PreparedImportJob {
             destination: destination.clone(),
             response,
             renewal_read: read.cloned(),
+            configuration: configuration.clone(),
+            source: source.clone(),
         })
     }
 
@@ -253,7 +357,10 @@ impl HostedClient {
         resolved_provider: &str,
         expected: &authority::ImportOwnerExpectation<'_>,
     ) -> Result<wire::MutationResponse> {
-        validate_commit(prepared, request, resolved_provider, expected)?;
+        let mut current = prepared.clone();
+        current.configuration = self.get_import_configuration(&prepared.destination).await?;
+        current.source = self.resolve_import_source(&prepared.source.request).await?;
+        validate_commit(&current, request, resolved_provider, expected)?;
         let response: wire::MutationResponse = self
             .call_unary(
                 "/heddle.api.v1alpha2.IntegrationService/CommitImportJob",
@@ -307,6 +414,66 @@ impl HostedClient {
     }
 }
 
+fn resolved_source(
+    request: &wire::ResolveImportSourceRequest,
+    response: &wire::ResolveImportSourceResponse,
+) -> Result<ResolvedImportSource> {
+    if response.encoded_len() > authority::MAX_BUNDLE_BYTES {
+        return Err(Reject::Bounds.into());
+    }
+    let selected = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+    let source = response.source.as_ref().ok_or(Reject::SourceSelection)?;
+    if selected.connection != source.connection
+        || selected.clone_url != source.clone_url
+        || selected.installation_id != source.installation_id
+        || (!selected.provider_repository_id.is_empty()
+            && selected.provider_repository_id != source.provider_repository_id)
+    {
+        return Err(Reject::SourceSelection.into());
+    }
+    let provider =
+        authority::resolve_import_provider(source, source.connection.as_ref().map(|_| "github"))?;
+    authority::validate_repository_hash_algorithm(source, false)?;
+    Ok(ResolvedImportSource {
+        request: request.clone(),
+        source: source.clone(),
+        provider,
+    })
+}
+
+fn validate_source_selection(
+    request: &wire::PrepareImportJobRequest,
+    source: &ResolvedImportSource,
+) -> Result<()> {
+    let selector = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+    let scope = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
+    if selector.connection != source.source.connection
+        || selector.installation_id != source.source.installation_id
+        || selector.private != source.source.private
+        || (!selector.provider_repository_id.is_empty()
+            && selector.provider_repository_id != source.source.provider_repository_id)
+        || scope.provider != source.provider
+        || scope.source_url != source.source.clone_url
+    {
+        return Err(Reject::SourceSelection.into());
+    }
+    authority::validate_repository_hash_algorithm(&source.source, true)?;
+    // A partial page cannot prove that a selected ref's OID is unavailable.
+    if source.request.include_refs
+        && source.source.refs_status.as_ref().is_none_or(|s| {
+            s.section != "provider_refs"
+                || s.coverage != wire::Coverage::Complete as i32
+                || s.page.as_ref().is_none_or(|p| !p.exhausted)
+        })
+    {
+        return Err(Reject::SourceSelection.into());
+    }
+    if !source.request.include_refs {
+        return Err(Reject::SourceSelection.into());
+    }
+    Ok(())
+}
+
 fn validate_commit(
     prepared: &PreparedImportJob,
     request: &wire::CommitImportJobRequest,
@@ -318,7 +485,15 @@ fn validate_commit(
     {
         return Err(Reject::StaleContext.into());
     }
-    authority::validate_commit_request(request, resolved_provider)?;
+    if resolved_provider != prepared.source.provider {
+        return Err(Reject::SourceSelection.into());
+    }
+    authority::validate_commit_request(
+        request,
+        resolved_provider,
+        &prepared.source.source,
+        &prepared.configuration.response,
+    )?;
     prepared.preflight(request.proof.as_ref().ok_or(Reject::Canonical)?, expected)
 }
 
@@ -483,9 +658,9 @@ mod tests {
     fn wire<T: Message + Default>(section: &str, name: &str) -> T {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
         )))
-        .expect("alpha.24 fixed vectors");
+        .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
             fixture[section][name]["wire_hex"]
                 .as_str()
@@ -554,6 +729,8 @@ mod tests {
             destination: wire::SpoolRef::default(),
             response,
             renewal_read: None,
+            configuration: configuration(),
+            source: source("source_connected"),
         };
         let mut proof = wire::ImportPublicProofBundleV1 {
             format_version: 1,
@@ -600,9 +777,9 @@ mod tests {
     fn fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
         )))
-        .expect("published alpha.24 vectors")
+        .expect("published alpha.25 vectors")
     }
 
     fn with_context(now: i64, check: impl FnOnce(&authority::ImportOwnerExpectation<'_>)) {
@@ -640,7 +817,167 @@ mod tests {
                 request: wire("wire_vectors", "job_state_request"),
                 response: wire("wire_vectors", "job_state_partial"),
             }),
+            configuration: configuration(),
+            source: source("source_connected"),
         }
+    }
+
+    fn configuration() -> ImportConfiguration {
+        ImportConfiguration {
+            destination: wire::<wire::CommitImportJobRequest>("wire_vectors", "commit_request")
+                .destination
+                .expect("destination"),
+            response: wire("wire_vectors", "import_configuration"),
+        }
+    }
+    fn source(name: &str) -> ResolvedImportSource {
+        let mut source: wire::ProviderRepository = wire("wire_vectors", name);
+        source.refs_status = Some(wire::SectionStatus {
+            section: "provider_refs".into(),
+            coverage: wire::Coverage::Complete as i32,
+            page: Some(wire::PageInfo {
+                exhausted: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let provider = authority::resolve_import_provider(
+            &source,
+            source.connection.as_ref().map(|_| "github"),
+        )
+        .expect("resolved provider");
+        ResolvedImportSource {
+            request: wire::ResolveImportSourceRequest {
+                source: Some(source.clone()),
+                include_refs: true,
+                ..Default::default()
+            },
+            source,
+            provider,
+        }
+    }
+
+    #[test]
+    fn authenticated_resolution_preserves_custody_and_never_guesses_unknown_format() {
+        let request = wire("wire_vectors", "resolve_public_request");
+        let mut response: wire::ResolveImportSourceResponse =
+            wire("wire_vectors", "resolve_public_response");
+        // The published codec vector omits page status; the RPC supplies it.
+        response.source.as_mut().expect("source").refs_status =
+            source("source_public_sha256").source.refs_status;
+        let resolved =
+            resolved_source(&request, &response).expect("authenticated public discovery");
+        assert_eq!(resolved.provider(), "public-git");
+        let prepare: wire::PrepareImportJobRequest = wire("wire_vectors", "prepare_public_sha256");
+        validate_source_selection(&prepare, &resolved).expect("independent SHA-256 format");
+        let unknown = wire("wire_vectors", "resolve_unknown_response");
+        let unknown = resolved_source(&request, &unknown).expect("unknown is valid discovery");
+        assert!(matches!(
+            validate_source_selection(&prepare, &unknown),
+            Err(super::super::super::HostedError::Hybrid(Reject::Version))
+        ));
+        let mut changed = resolved.clone();
+        changed.source.connection = source("source_connected").source.connection;
+        assert!(validate_source_selection(&prepare, &changed).is_err());
+        let mut partial = resolved.clone();
+        partial
+            .source
+            .refs_status
+            .as_mut()
+            .expect("page")
+            .page
+            .as_mut()
+            .expect("page")
+            .exhausted = false;
+        assert!(validate_source_selection(&prepare, &partial).is_err());
+        validate_source_selection(&prepare, &resolved).expect("unchanged complete discovery");
+    }
+
+    #[test]
+    fn converter_default_requires_an_explicit_advertised_marker() {
+        let mut config = configuration();
+        assert!(config.default_converter().is_some());
+        config.response = wire("wire_vectors", "configuration_no_default");
+        authority::validate_import_configuration(&config.response).expect("explicit chooser");
+        assert!(config.default_converter().is_none());
+        for row in fixture()["source_vectors"]["configuration_negative"]
+            .as_array()
+            .expect("vectors")
+        {
+            let bad = wire(
+                "wire_vectors",
+                row["configuration"].as_str().expect("configuration"),
+            );
+            assert!(
+                authority::validate_import_configuration(&bad).is_err(),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn commit_rechecks_current_discovery_and_support_before_activation() {
+        with_context(1100, |expected| {
+            for row in fixture()["source_vectors"]["commit_negative"]
+                .as_array()
+                .expect("vectors")
+            {
+                let mut current = prepared("commit_preparation");
+                current.source = source(row["source"].as_str().expect("source"));
+                current.configuration.response = wire(
+                    "wire_vectors",
+                    row["configuration"].as_str().expect("configuration"),
+                );
+                let request = wire("wire_vectors", row["request"].as_str().expect("request"));
+                assert!(
+                    validate_commit(&current, &request, "github", expected).is_err(),
+                    "{row}"
+                );
+            }
+            let current = prepared("commit_preparation");
+            let control = wire("wire_vectors", "commit_request");
+            validate_commit(&current, &control, "github", expected)
+                .expect("unchanged current source and support");
+        });
+    }
+
+    #[test]
+    fn renewal_prepare_retains_authorized_pins_across_head_movement_and_exact_cas() {
+        let read = prepared("renewal_preparation")
+            .renewal_read
+            .expect("authenticated read");
+        with_context(1350, |expected| {
+            let predecessor = read
+                .predecessor(expected)
+                .expect("expired predecessor CAS handle");
+            let state = read.response.state.as_ref().expect("state");
+            for row in fixture()["source_vectors"]["renewal_prepare"]
+                .as_array()
+                .expect("vectors")
+            {
+                let request = wire("wire_vectors", row["request"].as_str().expect("request"));
+                let current_source = source(row["source"].as_str().expect("source"));
+                let configuration = row["configuration"]
+                    .as_str()
+                    .map(|name| wire("wire_vectors", name))
+                    .unwrap_or_else(|| configuration().response);
+                let changed_state = row["state"].as_str().map(|name| wire("wire_vectors", name));
+                let retained = row["retained"]
+                    .as_bool()
+                    .expect("retained")
+                    .then_some((&predecessor, changed_state.as_ref().unwrap_or(state)));
+                let result = authority::prepare_import_source_scope(
+                    &request,
+                    &current_source.source,
+                    Some("github"),
+                    &configuration,
+                    &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
+                        .destination_version,
+                    retained,
+                );
+                assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
+            }
+        });
     }
 
     #[test]
@@ -856,25 +1193,56 @@ mod tests {
             .expect("exact authenticated CAS");
         let before_publication = wire("wire_vectors", "job_state_empty");
         assert_eq!(
-            authority::validate_renewal_preparation_from_read(&request, &response, &before_publication),
+            authority::validate_renewal_preparation_from_read(
+                &request,
+                &response,
+                &before_publication
+            ),
             Err(Reject::StaleContext)
         );
         let prepared = prepared("renewal_preparation");
         let request: wire::RenewImportJobRequest = wire("wire_vectors", "renew_request_partial");
         with_context(1350, |expected| {
-            let frozen = prepared.renewal_submission(&request, expected, expected)
+            let frozen = prepared
+                .renewal_submission(&request, expected, expected)
                 .expect("submission with candidate outside accepted history");
             assert_eq!(frozen.bytes(), request.encode_to_vec());
             authority::check_renew_replay(frozen.bytes(), frozen.bytes()).expect("exact replay");
             let mut candidate_in_history = request.clone();
-            candidate_in_history.proof.as_mut().expect("proof").delegations.push(
-                request.renewal.as_ref().expect("renewal").body.as_ref().expect("body")
-                    .replacement.clone().expect("candidate")
+            candidate_in_history
+                .proof
+                .as_mut()
+                .expect("proof")
+                .delegations
+                .push(
+                    request
+                        .renewal
+                        .as_ref()
+                        .expect("renewal")
+                        .body
+                        .as_ref()
+                        .expect("body")
+                        .replacement
+                        .clone()
+                        .expect("candidate"),
+                );
+            assert!(
+                prepared
+                    .renewal_submission(&candidate_in_history, expected, expected)
+                    .is_err()
             );
-            assert!(prepared.renewal_submission(&candidate_in_history, expected, expected).is_err());
-            assert_eq!(authority::check_renew_replay(&candidate_in_history.encode_to_vec(), frozen.bytes()),
-                Err(Reject::OperationIdReused));
-            assert_eq!(frozen.bytes(), request.encode_to_vec(), "caller edits cannot change replay");
+            assert_eq!(
+                authority::check_renew_replay(
+                    &candidate_in_history.encode_to_vec(),
+                    frozen.bytes()
+                ),
+                Err(Reject::OperationIdReused)
+            );
+            assert_eq!(
+                frozen.bytes(),
+                request.encode_to_vec(),
+                "caller edits cannot change replay"
+            );
         });
     }
 }

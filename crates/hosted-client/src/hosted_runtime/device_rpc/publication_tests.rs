@@ -169,9 +169,8 @@ pub(super) async fn roundtrip(
             sharing_policy_version: vec![],
             checkpoint: None,
         };
-        // The daemon is not a HYBRID peer (api#307): an otherwise valid opening
-        // that carries import authority is refused before staging, never
-        // published with the bundle silently ignored.
+        // A capable daemon rejects an incomplete import carrier before staging;
+        // publication cannot silently ignore its bundle.
         let hybrid = PublishContentClientFrame {
             client_operation_id: uuid::Uuid::new_v4().to_string(),
             body: Some(publish_content_client_frame::Body::Open(

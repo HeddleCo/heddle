@@ -10,7 +10,10 @@ use wire::ProtocolError;
 use super::{HostedClient, operation_id::ClientOperationId};
 
 mod job;
-pub use job::{ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob};
+pub use job::{
+    ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob,
+    ResolvedImportSource,
+};
 
 #[cfg(test)]
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
@@ -37,7 +40,16 @@ pub(super) fn require_request_authority(method: &str, encoded: &[u8]) -> super::
                 .ok_or(Reject::Scope)?;
             // This only checks the caller's carrier. It selects no trusted
             // provider/owner context; Commit preflight and the host do that.
-            api::import_authority::validate_commit_request(&request, &scope.provider)?;
+            api::import_authority::validate_scope(scope)?;
+            let source = request.source.as_ref().ok_or(Reject::SourceSelection)?;
+            let provider = api::import_authority::resolve_import_provider(
+                source,
+                source.connection.as_ref().map(|_| scope.provider.as_str()),
+            )?;
+            if provider != scope.provider || source.clone_url != scope.source_url {
+                return Err(Reject::SourceSelection.into());
+            }
+            api::import_authority::validate_repository_hash_algorithm(source, true)?;
         }
         "heddle.api.v1alpha2.IntegrationService/SynchronizeRemote" => {
             let request = contract::SynchronizeRemoteRequest::decode(encoded)?;
@@ -484,9 +496,9 @@ mod tests {
     fn signed_proof() -> contract::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
         )))
-        .expect("alpha.24 fixed vectors");
+        .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
                 .as_str()
@@ -563,7 +575,7 @@ mod tests {
     fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
         )))
         .expect("vectors");
         let bytes = hex::decode(
@@ -605,7 +617,7 @@ mod tests {
     fn unavailable_oids_require_explicit_signed_observe_disclosure() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha24.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha25.json"
         )))
         .expect("fixture");
         let decode = |name: &str| {
@@ -677,6 +689,7 @@ mod tests {
             default_branch: String::new(),
             refs: Vec::new(),
             refs_status: None,
+            hash_algorithm: 0,
         };
         assert!(source.connection.is_none());
         assert_eq!(source.provider_repository_id, source.clone_url);

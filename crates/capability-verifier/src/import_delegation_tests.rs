@@ -338,8 +338,10 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
             _ => contract::Reject::Scope,
         };
         let rejection = verify_current(&bad, Some(&p), &c, |_| false).err();
-        assert!(matches!(rejection, Some(Error::Hybrid(reason)) if reason == expected),
-            "parent attenuation {field}: {rejection:?}");
+        assert!(
+            matches!(rejection, Some(Error::Hybrid(reason)) if reason == expected),
+            "parent attenuation {field}: {rejection:?}"
+        );
     }
     let mut nondelegable = p.clone();
     let b = nondelegable.body.as_mut().expect("body");

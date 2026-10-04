@@ -9,6 +9,244 @@ use api::{
 use heddleco_capability_verifier::{
     self as permission, VerificationLimits, VerifiedCloneKeyring, VerifiedOwnerState,
 };
+/// Historical permission is bound to exact authenticated witness order. The
+/// caller supplies today's disclosure check, which runs again at commit.
+pub struct SelectedAuthority<F> {
+    history: AcceptedHistory,
+    bundle: wire::ImportPublicProofBundleV1,
+    authorize: F,
+}
+impl<F> SelectedAuthority<F> {
+    pub fn new(
+        history: AcceptedHistory,
+        bundle: wire::ImportPublicProofBundleV1,
+        authorize: F,
+    ) -> Self {
+        Self {
+            history,
+            bundle,
+            authorize,
+        }
+    }
+    fn selection<'a>(
+        &'a self,
+        selected: &'a HistoricalSelection,
+    ) -> permission::import_delegation::Selection<'a> {
+        permission::import_delegation::Selection {
+            owner: &selected.owner,
+            keyring: &selected.keyring,
+            spool_genesis_digest: self.history.genesis(),
+            initial_owner_id: self.history.initial_owner(),
+            limits: self.history.limits(),
+        }
+    }
+    fn policy(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> Option<&wire::SignedSpoolPolicy> {
+        // The native verifier independently authenticates this exact policy.
+        self.bundle.policies.iter().find_map(|signed| {
+            let body = signed.body.as_ref()?;
+            (body.spool_uuid == statement.spool_uuid
+                && body.sequence == statement.policy_sequence
+                && body.policy_state_hash == statement.policy_state_hash)
+                .then_some(body.policy.as_ref())
+                .flatten()
+        })
+    }
+    fn native_envelope(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> Option<(wire::ThreadControlAuthority, Vec<Vec<u8>>)> {
+        let matches =
+            |bytes: Result<Vec<u8>, Reject>| bytes.is_ok_and(|b| b == statement.canonical_payload);
+        let (bytes, keys) = match statement.purpose {
+            1 => {
+                let payload = self
+                    .bundle
+                    .genesis_witnesses
+                    .iter()
+                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
+                (
+                    &payload.creator_authority_envelope,
+                    payload
+                        .original_genesis
+                        .as_ref()?
+                        .signatures
+                        .iter()
+                        .map(|s| s.public_key.clone())
+                        .collect(),
+                )
+            }
+            2 => {
+                let payload = self
+                    .bundle
+                    .authority_witnesses
+                    .iter()
+                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
+                (
+                    &payload.authority_envelope,
+                    payload
+                        .original
+                        .as_ref()?
+                        .signatures
+                        .iter()
+                        .map(|s| s.public_key.clone())
+                        .collect(),
+                )
+            }
+            4 => {
+                let payload = self
+                    .bundle
+                    .landing_witnesses
+                    .iter()
+                    .find(|p| matches(api::hybrid_codec::canonical(*p)))?;
+                (
+                    &payload.authority_envelope,
+                    vec![
+                        payload
+                            .request
+                            .as_ref()?
+                            .signature
+                            .as_ref()?
+                            .public_key
+                            .clone(),
+                    ],
+                )
+            }
+            _ => return None,
+        };
+        let envelope =
+            api::mint_root_association::decode_thread_control_authority_for_verification(bytes)
+                .ok()?;
+        Some((envelope, keys))
+    }
+}
+impl<F: Fn(&wire::ImportPublicProofBundleV1, i64) -> repo::thread_replication::Result<()>>
+    repo::thread_replication::delegated_import::AcceptedAuthority for SelectedAuthority<F>
+{
+    fn authorize_import(
+        &self,
+        bundle: &wire::ImportPublicProofBundleV1,
+        now: i64,
+    ) -> repo::thread_replication::Result<()> {
+        if bundle != &self.bundle {
+            return Err(Reject::StaleContext.into());
+        }
+        (self.authorize)(bundle, now)
+    }
+    fn for_witness(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+    ) -> repo::thread_replication::Result<permission::import_delegation::Selection<'_>> {
+        let selected = self
+            .history
+            .for_witness(statement)
+            .map_err(authority_error)?;
+        Ok(self.selection(selected))
+    }
+    fn for_policy(
+        &self,
+        policy: &wire::SignedPolicyBody,
+    ) -> repo::thread_replication::Result<permission::import_delegation::Selection<'_>> {
+        let selected = self.history.for_policy(policy).map_err(authority_error)?;
+        Ok(self.selection(selected))
+    }
+    fn import_revoked(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+        revocation: permission::import_delegation::Revocation<'_>,
+    ) -> bool {
+        let (Ok(selected), Some(policy)) =
+            (self.history.for_witness(statement), self.policy(statement))
+        else {
+            return true;
+        };
+        match revocation {
+            permission::import_delegation::Revocation::Key(id) => {
+                let known = selected
+                    .owner
+                    .authority_public_keys()
+                    .chain(selected.keyring.authority_public_keys().cloned())
+                    .chain(
+                        self.bundle
+                            .delegations
+                            .iter()
+                            .filter_map(|d| d.body.as_ref())
+                            .flat_map(|d| {
+                                [d.delegating_public_key.clone(), d.job_public_key.clone()]
+                            }),
+                    )
+                    .any(|key| api::hybrid_codec::key_id(&key).as_slice() == id);
+                !known || policy.revoked_key_ids.iter().any(|key| key == id)
+            }
+            permission::import_delegation::Revocation::Cancellation(namespace, id) => {
+                // Cancellation status is attested at exact accepted order by
+                // the witness; only identifiers actually bound by its signed
+                // delegation history can use that historical acceptance.
+                namespace != api::import_authority::CANCELLATION_NAMESPACE
+                    || !self
+                        .bundle
+                        .delegations
+                        .iter()
+                        .filter_map(|d| d.body.as_ref())
+                        .any(|d| d.cancellation_id == id)
+                        && !self
+                            .bundle
+                            .member_permissions
+                            .iter()
+                            .filter_map(|p| p.body.as_ref())
+                            .any(|p| p.cancellation_id == id)
+            }
+        }
+    }
+    fn native_revoked(
+        &self,
+        statement: &host::HostedWitnessStatementV1,
+        revocation: permission::thread_control_authority::Revocation<'_>,
+    ) -> bool {
+        let (Some(policy), Some((envelope, publishers))) =
+            (self.policy(statement), self.native_envelope(statement))
+        else {
+            return true;
+        };
+        match revocation {
+            permission::thread_control_authority::Revocation::MintRoot(key) => {
+                key != envelope.mint_root_public_key
+                    || policy
+                        .revoked_key_ids
+                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+            }
+            permission::thread_control_authority::Revocation::Publisher(key) => {
+                !publishers.iter().any(|p| p == key)
+                    || policy
+                        .revoked_key_ids
+                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+            }
+            permission::thread_control_authority::Revocation::Credential(id) => {
+                let keys = biscuit_verifier::parse_ed25519_public_keys_hex(
+                    &hex::encode(&envelope.mint_root_public_key),
+                    1,
+                );
+                let inspected = keys.ok().and_then(|keys| {
+                    let key = *keys.first()?;
+                    let token =
+                        biscuit_verifier::signature_v1::verify(&envelope.sealed_biscuit, key)
+                            .ok()?;
+                    biscuit_verifier::inspect_verified_credential(&token, &key).ok()
+                });
+                // The authenticated witness attests this exact original's
+                // session and signed-block status at first admission. Current
+                // delivery credentials never answer historical revocations.
+                inspected
+                    .is_none_or(|facts| !facts.revocation_identities().any(|known| known == id))
+            }
+        }
+    }
+}
+fn authority_error(error: impl std::fmt::Display) -> repo::thread_replication::Error {
+    repo::thread_replication::Error::Invalid(error.to_string())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -219,14 +457,14 @@ impl AcceptedHistory {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use prost::Message;
 
     use super::*;
 
-    fn bundle() -> wire::ImportPublicProofBundleV1 {
+    pub(crate) fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha24.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
                 .expect("fixed vectors");
         let bytes = hex::decode(
             fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
@@ -236,7 +474,7 @@ mod tests {
         .expect("hex");
         wire::ImportPublicProofBundleV1::decode(bytes.as_slice()).expect("public export")
     }
-    fn selected(
+    pub(crate) fn selected(
         bundle: &wire::ImportPublicProofBundleV1,
         limits: VerificationLimits,
     ) -> VerifiedCloneKeyring {
@@ -303,6 +541,100 @@ mod tests {
         assert!(accepted.for_witness(&foreign).is_err());
         AcceptedHistory::from_selected_spool(&original, &selected, 1200, limits)
             .expect("original evidence remains usable");
+    }
+
+    #[test]
+    fn historical_revocation_selectors_are_exact_and_keep_their_namespaces() {
+        use permission::{
+            import_delegation::Revocation as Import, thread_control_authority::Revocation as Native,
+        };
+        use repo::thread_replication::delegated_import::AcceptedAuthority as _;
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
+                .expect("published vectors");
+        let decode = |name: &str, signed: bool| {
+            hex::decode(
+                fixture[if signed {
+                    "signed_vectors"
+                } else {
+                    "wire_vectors"
+                }][name]["wire_hex"]
+                    .as_str()
+                    .expect("wire"),
+            )
+            .expect("hex")
+        };
+        let mut bundle = bundle();
+        let native: wire::ImportAuthorityWitnessV1 = wire::ImportAuthorityWitnessV1::decode(
+            decode("authority_admission_payload", false).as_slice(),
+        )
+        .expect("original payload");
+        let witness: host::SignedHostedWitnessStatementV1 =
+            host::SignedHostedWitnessStatementV1::decode(
+                decode("authority_admission", true).as_slice(),
+            )
+            .expect("native witness");
+        bundle.authority_witnesses.push(native.clone());
+        bundle.statements.push(witness.clone());
+        let limits = VerificationLimits::new(30 * 24 * 60 * 60).expect("limits");
+        let pinned = selected(&bundle, limits);
+        let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
+            .expect("exact selected history");
+        let import_statement = bundle
+            .statements
+            .iter()
+            .find_map(|s| s.body.as_ref().filter(|s| s.purpose == 3))
+            .expect("publication witness")
+            .clone();
+        let delegation = bundle.delegations[0]
+            .body
+            .as_ref()
+            .expect("delegation")
+            .clone();
+        let authority = SelectedAuthority::new(
+            history,
+            bundle,
+            |_: &wire::ImportPublicProofBundleV1, _: i64| Ok(()),
+        );
+        assert!(!authority.import_revoked(
+            &import_statement,
+            Import::Key(&api::hybrid_codec::key_id(&delegation.job_public_key))
+        ));
+        assert!(!authority.import_revoked(
+            &import_statement,
+            Import::Cancellation(
+                api::import_authority::CANCELLATION_NAMESPACE,
+                &delegation.cancellation_id
+            )
+        ));
+        assert!(authority.import_revoked(
+            &import_statement,
+            Import::Cancellation("credential", &delegation.cancellation_id)
+        ));
+        assert!(
+            authority.import_revoked(&import_statement, Import::Key(&delegation.cancellation_id)),
+            "cancellation bytes cannot impersonate a key ID"
+        );
+        assert!(authority.import_revoked(
+            &import_statement,
+            Import::Cancellation(api::import_authority::CANCELLATION_NAMESPACE, &[0; 32])
+        ));
+        let statement = witness.body.as_ref().expect("body");
+        let envelope = wire::ThreadControlAuthority::decode(native.authority_envelope.as_slice())
+            .expect("retained original credential");
+        assert!(
+            !authority.native_revoked(statement, Native::MintRoot(&envelope.mint_root_public_key))
+        );
+        assert!(!authority.native_revoked(
+            statement,
+            Native::Publisher(
+                &native.original.as_ref().expect("original").signatures[0].public_key
+            )
+        ));
+        assert!(!authority.native_revoked(statement, Native::Credential("hybrid-native-fixture")));
+        assert!(authority.native_revoked(statement, Native::Credential("neighboring-session")));
+        assert!(authority.native_revoked(statement, Native::Publisher(&[0; 32])));
+        assert!(authority.native_revoked(statement, Native::MintRoot(&[0; 32])));
     }
 
     struct FixtureAuthority(AcceptedHistory);
@@ -383,7 +715,7 @@ mod tests {
             }
         }
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha24.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha25.json"))
                 .expect("published fixture");
         fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
             let vector = fixture["wire_vectors"]
@@ -448,6 +780,7 @@ mod tests {
                 &records,
                 &authority,
                 repository.store(),
+                |_| Ok(()),
             )
         };
         let replicas = install().expect("unchanged complete import control");
@@ -482,7 +815,8 @@ mod tests {
                 &prepared.encode_to_vec(),
                 &records,
                 &authority,
-                repository.store()
+                repository.store(),
+                |_| Ok(()),
             ),
             Err(repo::thread_replication::Error::Hybrid(Reject::HighWater))
         ));

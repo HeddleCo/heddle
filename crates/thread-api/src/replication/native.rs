@@ -10,6 +10,9 @@ use repo::thread_replication::ThreadReplica;
 
 use super::store::{ReceivedOperation, ReplicaStore};
 
+mod hosted;
+pub use hosted::HostedReplica;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -91,7 +94,12 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         let Some(stored) = stored else {
             return Ok(None);
         };
-        if stored.authority_admission.is_some() {
+        if stored.authority_admission.is_some()
+            || self
+                .execute(|replica, _| replica.hybrid_import_bundle())
+                .await?
+                .is_some()
+        {
             return Err(Error::HostedTrustRequired);
         }
         Ok(Some((

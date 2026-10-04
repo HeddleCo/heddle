@@ -508,23 +508,41 @@ pub(super) async fn initial_base_roundtrip(
         seed.id(),
         "fresh native Thread uses the portable seed"
     );
-    // The daemon does not advertise HYBRID support. Reject a capable opening
-    // at the client gate before opening its Sync stream.
+    // Optional capability is explicit; it does not enroll hosted roots or
+    // turn ordinary signed native source into hosted testimony.
     let hybrid = FetchOpen {
         protocol: Some(thread_api::hybrid::protocol()),
         ..open(&genesis, seed.id())
     };
-    let refused = remote
-        .fetch_content(hybrid, Default::default())
+    let negotiated = remote
+        .fetch_content(hybrid.clone(), Default::default())
         .await
-        .err()
-        .unwrap_or_else(|| panic!("a HYBRID fetch opening must be refused, not ignored"));
+        .expect("optional capable Fetch");
+    let scratch = tempfile::tempdir().expect("negotiated source staging");
+    let negotiated = negotiated
+        .stage(scratch.path())
+        .await
+        .expect("original native source");
+    assert_eq!(negotiated.ready().protocol, hybrid.protocol);
+    assert!(
+        negotiated.import_authority().is_none(),
+        "capability advertisement cannot mint import authority"
+    );
+    assert_eq!(negotiated.state().id(), seed.id());
+    let mut unsupported = hybrid;
+    unsupported
+        .protocol
+        .as_mut()
+        .expect("protocol")
+        .protocol_version = 1;
     assert!(
         matches!(
-            refused,
-            thread_api::fetch::Error::Hybrid(api::hybrid_codec::Reject::Protocol)
+            remote.fetch_content(unsupported, Default::default()).await,
+            Err(thread_api::fetch::Error::Invalid(
+                "incompatible HYBRID protocol (api#307 cutover)"
+            ))
         ),
-        "the client rejects an old peer at the protocol gate: {refused}"
+        "unsupported protocol is rejected before source disclosure"
     );
     let download = remote
         .fetch_content(open(&genesis, seed.id()), Default::default())
