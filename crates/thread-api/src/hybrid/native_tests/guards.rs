@@ -8,6 +8,184 @@ use objects::object::thread_replication::{
 
 use super::*;
 
+fn fresh_spool_landing() -> wire::NativePublicProofBundleV1 {
+    let mut bundle: wire::NativePublicProofBundleV1 = record(&fixture(), "native_landing");
+    bundle.policies.clear();
+    for signed in &mut bundle.statements {
+        let body = signed.body.as_mut().expect("statement");
+        body.policy_sequence = 0;
+        body.policy_state_hash = vec![0; 32];
+        let entry = bundle
+            .witness_set
+            .as_ref()
+            .expect("set")
+            .body
+            .as_ref()
+            .expect("set body")
+            .entries
+            .iter()
+            .find(|entry| entry.executor_id == body.executor_id)
+            .expect("witness key");
+        signed.signature = signer(&entry.public_key)
+            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+            .expect("witness signature");
+    }
+    sort(&mut bundle);
+    bundle
+}
+
+#[test]
+fn native_landing_accepts_genesis_governance_with_nonzero_review_policy() {
+    let bundle = fresh_spool_landing();
+    assert!(!bundle.landing_witnesses.is_empty());
+    for payload in &bundle.landing_witnesses {
+        let (_, execution) =
+            verify::verify_native_operation(payload.execution.as_ref().expect("execution"))
+                .expect("signed execution");
+        assert_ne!(
+            execution
+                .integration()
+                .expect("receipt")
+                .expect("integration")
+                .review_policy_version
+                .as_bytes(),
+            &[0; 32],
+        );
+    }
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+        .expect("API authenticates genesis governance independently");
+    verify_semantics(&bundle, 1_100_000)
+        .expect("fresh Spool landing retains its separate review policy");
+    let originals: Vec<_> = bundle
+        .authority_witnesses
+        .iter()
+        .filter_map(|p| p.original.clone())
+        .chain(
+            bundle
+                .landing_witnesses
+                .iter()
+                .filter_map(|p| p.execution.clone()),
+        )
+        .collect();
+    local_work::install_bundle("fresh Spool landing", bundle, &originals, None);
+}
+
+fn change_landing_review_policy(
+    bundle: &mut wire::NativePublicProofBundleV1,
+    change_execution_policy: bool,
+) {
+    use objects::object::{ContentHash, thread_replication::ThreadOperationBody};
+
+    let payload = bundle
+        .landing_witnesses
+        .iter_mut()
+        .find(|p| !p.review_evidence.is_empty())
+        .expect("landing with reviews");
+    let old_payload = hybrid_codec::canonical(payload).expect("payload");
+    let execution = payload.execution.as_mut().expect("execution");
+    let (_, mut operation) = verify::verify_native_operation(execution).expect("operation");
+    let mut integration = operation
+        .integration()
+        .expect("receipt")
+        .expect("integration");
+    let version = ContentHash::from_bytes([42; 32]);
+    assert_ne!(integration.review_policy_version, version);
+    // Request-only changes isolate its selection gate. Changing both the
+    // request and receipt instead leaves only the original reviews mismatched.
+    if change_execution_policy {
+        integration.review_policy_version = version;
+    }
+    let request = payload.request.as_mut().expect("request");
+    let mut body: wire::LandThreadRequest =
+        hybrid_codec::strict_decode(&request.request_body, 65536).expect("request body");
+    body.expected_policy_version = version.as_bytes().to_vec();
+    request.request_body = body.encode_to_vec();
+    let signature = request.signature.as_mut().expect("signature");
+    let mut proof = api::signing::unary_bytes(
+        &request.signing_identity,
+        &request.method_path,
+        request.timestamp_millis,
+        &request.nonce,
+        &request.request_body,
+    );
+    signature.signature = signer(&signature.public_key)
+        .sign(&proof)
+        .expect("request PoP");
+    proof.extend_from_slice(&signature.signature);
+    integration.initiating_request_proof =
+        ContentHash::compute_typed("weft-hosted-landing-request-proof-v1", &proof);
+    operation.body = ThreadOperationBody::Integration(integration.encode().expect("receipt"));
+    let signed =
+        crypto::thread_operation::SignedOperation::sign(&operation, &signer(&operation.publisher))
+            .expect("execution signature");
+    execution.canonical_record = signed.canonical;
+    execution.signatures[0].signature = signed.signature;
+
+    let statement = bundle
+        .statements
+        .iter_mut()
+        .find(|s| s.body.as_ref().expect("body").canonical_payload == old_payload)
+        .expect("landing statement");
+    let body = statement.body.as_mut().expect("body");
+    body.canonical_payload = hybrid_codec::canonical(payload).expect("changed payload");
+    let signatures: Vec<_> = payload
+        .execution
+        .iter()
+        .chain(&payload.source_operation)
+        .chain(&payload.review_evidence)
+        .flat_map(|r| &r.signatures)
+        .chain(payload.request.as_ref().expect("request").signature.iter())
+        .collect();
+    let mut bytes = (signatures.len() as u32).to_be_bytes().to_vec();
+    for signature in signatures {
+        bytes.extend(hybrid_codec::canonical(signature).expect("signature"));
+    }
+    body.original_signatures_digest =
+        hybrid_codec::hash(&[b"heddle-hosted-original-signatures-v1", &bytes]);
+    statement.signature = signer(&operation.publisher)
+        .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+        .expect("witness signature");
+    bundle.landing_witnesses.sort_by_key(|p| {
+        hybrid_codec::signing_digest("heddle-hosted-landing-witness-payload-v1", p).expect("digest")
+    });
+    sort(bundle);
+}
+
+#[test]
+fn native_landing_rejects_signed_request_policy_mismatch() {
+    let mut bundle = fresh_spool_landing();
+    verify_semantics(&bundle, 1_100_000).expect("passing control");
+    change_landing_review_policy(&mut bundle, false);
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+        .expect("valid signatures, commitments and governance history");
+    let error =
+        verify_semantics(&bundle, 1_100_000).expect_err("request policy must match receipt");
+    assert!(
+        matches!(
+            error.downcast_ref::<verify::Error>(),
+            Some(verify::Error::Contract(hybrid_codec::Reject::Scope))
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn native_landing_rejects_review_policy_mismatch() {
+    let mut bundle = fresh_spool_landing();
+    verify_semantics(&bundle, 1_100_000).expect("passing control");
+    change_landing_review_policy(&mut bundle, true);
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+        .expect("valid signatures, commitments and governance history");
+    let error = verify_semantics(&bundle, 1_100_000).expect_err("review policy must match receipt");
+    assert!(
+        matches!(
+            error.downcast_ref::<verify::Error>(),
+            Some(verify::Error::Contract(hybrid_codec::Reject::Scope))
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn native_genesis_policy_accepts_empty_revocations_on_fresh_receiver() {
     let mut bundle: wire::NativePublicProofBundleV1 = record(&fixture(), "account_source");

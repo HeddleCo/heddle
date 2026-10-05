@@ -1012,7 +1012,6 @@ pub fn verify_landing_payload(
         || integration.spool_genesis.as_bytes() != context.spool_genesis
         || witness_trust::witness_id(&integration.executor) != s.executor_id
         || integration.executed_at_ms != s.observed_at_unix_millis
-        || integration.review_policy_version.as_bytes().as_slice() != s.policy_state_hash
     {
         return Err(Reject::Scope.into());
     }
