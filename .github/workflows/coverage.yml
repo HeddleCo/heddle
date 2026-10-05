@@ -35,6 +35,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: llvm-tools-preview
 
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -50,7 +51,7 @@ jobs:
       # OSS resolves to the reservation stub and won't compile. Cover the OSS
       # feature set instead.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd,heddle-cli/ci --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features heddle-cli/git-overlay,heddle-cli/native,heddle-cli/semantic,heddle-cli/zstd,heddle-cli/ci,heddle-thread-api/semantic-analysis --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt

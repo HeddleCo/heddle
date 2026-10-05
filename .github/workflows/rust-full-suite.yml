@@ -1,14 +1,15 @@
 name: Rust Full Suite
 
 # The landing gate. Normal PR pushes use rust-tests.yml's fast lane; this
-# workflow pays for the existing heavy matrix only for a merge group, while a
-# PR carries `full-ci`, or when explicitly dispatched. The weekly coverage
-# sentinel remains independent of PR activity.
+# workflow pays for the heavy matrix for merge groups, integration batch PRs,
+# PRs carrying `full-ci`, and explicit dispatches. The weekly coverage sentinel
+# remains independent of PR activity.
 
 on:
   pull_request:
     branches:
       - main
+      - integration
     types:
       - opened
       - reopened
@@ -50,6 +51,7 @@ jobs:
     name: Facade render-free
     if: >-
       github.event_name != 'pull_request' ||
+      github.event.pull_request.head.ref == 'integration' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
@@ -78,6 +80,7 @@ jobs:
     name: Detect changed paths
     if: >-
       github.event_name != 'pull_request' ||
+      github.event.pull_request.head.ref == 'integration' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -102,6 +105,8 @@ jobs:
           # bases are fetched explicitly below before diffing.
           fetch-depth: 2
       - id: decide
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
         run: |
           # Fail-closed helper: on any uncertainty (fetch or diff failure,
           # empty diff, missing push base) run the full matrix. The
@@ -131,6 +136,8 @@ jobs:
             exit 0
           elif [ "$event" = "workflow_dispatch" ] || [ "$event" = "merge_group" ]; then
             run_all "$event event"
+          elif [ "$event" = "pull_request" ] && [ "$PR_HEAD_REF" = "integration" ]; then
+            run_all "integration batch PR"
           elif [ "$event" = "pull_request" ]; then
             if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
               run_all "fetch failed"
@@ -430,6 +437,7 @@ jobs:
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.ref == 'integration' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 5
@@ -722,6 +730,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: llvm-tools-preview
 
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -738,7 +747,7 @@ jobs:
       # Cover the OSS feature set instead; `ci` is included so the gated
       # executor stays measured.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd,heddle-cli/ci --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features heddle-cli/git-overlay,heddle-cli/native,heddle-cli/semantic,heddle-cli/zstd,heddle-cli/ci,heddle-thread-api/semantic-analysis --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
@@ -854,6 +863,7 @@ jobs:
       always() &&
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.ref == 'integration' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5

@@ -2,7 +2,7 @@ name: Core Loop Performance
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, integration]
     types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches: [main]
@@ -32,13 +32,21 @@ jobs:
     name: Release contract (10k/100k)
     if: >-
       github.event_name != 'pull_request' ||
+      github.event.pull_request.head.ref == 'integration' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
+      - name: Prepare benchmark scratch space
+        run: |
+          sudo mkdir -p /home/scratch
+          sudo chown "$(id -u):$(id -g)" /home/scratch
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -46,11 +54,6 @@ jobs:
         with:
           shared-key: perf-core-loop-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
-
-      - name: Prepare benchmark scratch space
-        run: |
-          sudo mkdir -p /home/scratch
-          sudo chown "$(id -u):$(id -g)" /home/scratch
 
       - name: Compile release harness (out of band)
         run: |
