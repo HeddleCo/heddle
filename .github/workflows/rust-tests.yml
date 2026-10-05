@@ -31,7 +31,6 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  HEDDLE_HOME: ${{ runner.temp }}/heddle-test-home
   RUSTC_WRAPPER: sccache
   # sccache caches to LOCAL DISK, not the GitHub Actions (Azure-backed) cache.
   # The Blacksmith self-hosted runners can't DNS-resolve the GHA cache's Azure

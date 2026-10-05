@@ -22,7 +22,6 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  HEDDLE_HOME: ${{ runner.temp }}/heddle-test-home
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "false"
   TMPDIR: /home/scratch

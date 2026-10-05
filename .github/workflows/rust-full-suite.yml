@@ -38,7 +38,6 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  HEDDLE_HOME: ${{ runner.temp }}/heddle-test-home
   RUSTC_WRAPPER: sccache
   # sccache caches to LOCAL DISK, not the GitHub Actions (Azure-backed) cache.
   # The Blacksmith self-hosted runners can't DNS-resolve the GHA cache's Azure
@@ -770,6 +769,8 @@ jobs:
       # Cover the OSS feature set instead; `ci` is included so the gated
       # executor stays measured.
       - name: Generate coverage report
+        env:
+          HEDDLE_HOME: ${{ runner.temp }}/heddle-test-home
         run: cargo llvm-cov --locked --workspace --features heddle-cli/git-overlay,heddle-cli/native,heddle-cli/semantic,heddle-cli/zstd,heddle-cli/ci,heddle-thread-api/semantic-analysis --lcov --output-path lcov.info
 
       - name: Generate coverage summary
