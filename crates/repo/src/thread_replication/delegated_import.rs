@@ -369,6 +369,130 @@ impl ThreadReplica {
             .transpose()
     }
 }
+/// Compose API-owned admission order, renewal CAS, narrowing and cumulative
+/// budgets with independently verified owner/policy/native contexts.
+fn verify_import_history(
+    bundle: &wire::ImportPublicProofBundleV1,
+    authority: &impl AcceptedAuthority,
+    context: &TrustTransaction<'_>,
+) -> Result<()> {
+    let mut facts = Vec::new();
+    for signed in &bundle.delegations {
+        let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
+        let id = body.identity.as_ref().ok_or(Reject::Root)?;
+        let selector = host::HostedWitnessStatementV1 {
+            spool_uuid: id.spool_uuid.clone(),
+            spool_genesis_digest: id.spool_genesis_digest.clone(),
+            owner_id: id.owner_id.clone(),
+            owner_state_hash: id.owner_state_hash.clone(),
+            ownership_transfer_sequence: id.ownership_transfer_sequence,
+            ..Default::default()
+        };
+        // This selects verified lineage facts, without inventing an observation.
+        let selection = authority.for_witness(&selector)?;
+        context.require_spool_selection(&selection)?;
+        let (identity, chain, expiry) = permission::native_lineage(&selection)?;
+        let mut forbidden = context.forbidden_job_keys();
+        forbidden.extend(selection.owner.authority_public_keys());
+        forbidden.extend(selection.keyring.authority_public_keys().cloned());
+        facts.push((
+            identity,
+            chain,
+            expiry,
+            selection.owner.authority_key().public_key.clone(),
+            forbidden,
+        ));
+    }
+    let owners = facts
+        .iter()
+        .map(
+            |(identity, chain, expiry, key, forbidden)| contract::ImportBundleOwnerExpectation {
+                identity,
+                owner_public_key: key,
+                owner_chain_digest: chain,
+                authority_expires_at_seconds: *expiry,
+                forbidden_job_keys: forbidden,
+                known_job_associations: context.job_associations(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let snapshot = context.import_witness_snapshot()?;
+    let verified = contract::verify_import_bundle_witnesses(
+        bundle,
+        &context.import_witness_pin(),
+        snapshot.as_ref(),
+        context.now_millis(),
+        &owners,
+        |bundle, statement| {
+            let verify = || -> Result<()> {
+                let statement = statement.ok_or(Reject::Scope)?;
+                let selection = authority.for_witness(statement)?;
+                context.require_spool_selection(&selection)?;
+                selection.keyring.verify_current_owner(
+                    selection.owner,
+                    statement.observed_at_unix_millis / 1000,
+                    selection.limits,
+                )?;
+                if statement.policy_sequence == 0 {
+                    return Ok(());
+                }
+                let mut chain = Vec::new();
+                let mut digest = statement.policy_state_hash.as_slice();
+                while digest != [0; 32] {
+                    let record = bundle
+                        .policies
+                        .iter()
+                        .find(|p| {
+                            p.body
+                                .as_ref()
+                                .is_some_and(|b| b.policy_state_hash == digest)
+                        })
+                        .ok_or(Reject::Scope)?;
+                    if chain.len() >= bundle.policies.len() {
+                        return Err(Reject::Scope.into());
+                    }
+                    chain.push(record.clone());
+                    digest = &record
+                        .body
+                        .as_ref()
+                        .ok_or(Reject::Canonical)?
+                        .expected_head
+                        .as_ref()
+                        .ok_or(Reject::Canonical)?
+                        .state_hash;
+                }
+                chain.reverse();
+                heddleco_capability_verifier::policy::verify_signed_policy_chain(
+                    &chain, &selection.keyring.owner_genesis().spool_uuid(),
+                    statement.ownership_transfer_sequence,
+                    |owner_id, state, sequence| {
+                        let selector = wire::SignedPolicyBody {
+                            spool_uuid: statement.spool_uuid.clone(), owner_id: owner_id.to_vec(),
+                            owner_state_hash: state.to_vec(), ownership_transfer_sequence: sequence,
+                            ..Default::default()
+                        };
+                        let selection = authority.for_policy(&selector).map_err(|_| heddleco_capability_verifier::policy::OwnerGovernanceError::NotOwnerSigned)?;
+                        Ok((selection.owner.authority_key().clone(), selection.owner.authority_public_keys()
+                            .map(|key| hybrid_codec::key_id(&key).try_into().map_err(|_| heddleco_capability_verifier::policy::OwnerGovernanceError::NotOwnerSigned))
+                            .collect::<std::result::Result<Vec<_>, _>>()?))
+                    },
+                ).map_err(|_| Reject::Scope)?;
+                Ok(())
+            };
+            verify().map_err(|error| match error {
+                Error::Hybrid(reason) => reason,
+                _ => Reject::Scope,
+            })
+        },
+    )?;
+    if verified.evidence != contract::ImportBundleEvidence::Witnessed {
+        return Err(Reject::Scope.into());
+    }
+    // The existing transaction retains original bundles, job associations and
+    // its freshly verified witness set atomically with the installed records.
+    Ok(())
+}
+
 fn install_in(
     directory: &Path,
     bundle: &wire::ImportPublicProofBundleV1,
@@ -465,6 +589,7 @@ fn install_in(
         }
         permission::verify_policy_record(policy, &[selection.owner])?;
     }
+    verify_import_history(bundle, authority, context)?;
     let mut delegations: BTreeMap<Vec<u8>, VerifiedImportDelegation> = BTreeMap::new();
     // Each result resolves its ORIGINAL certificate at its own exact
     // publication, never a later permission or current author timestamp.
@@ -600,54 +725,6 @@ fn install_in(
         delegations
             .entry(contract::signed_delegation_digest(signed)?)
             .or_insert(d);
-    }
-    for (i, renewal) in bundle.renewals.iter().enumerate() {
-        let next = &bundle.delegations[i + 1];
-        let previous = &bundle.delegations[i];
-        let d = delegations
-            .get(&contract::signed_delegation_digest(next)?)
-            .ok_or(Reject::Scope)?;
-        let old = delegations
-            .get(&contract::signed_delegation_digest(previous)?)
-            .ok_or(Reject::Scope)?;
-        let r = renewal.body.as_ref().ok_or(Reject::Canonical)?;
-        let manifest = contract::resolve_bundle_manifest(bundle, &r.committed_manifest_digest)?;
-        // The successor has already been checked at its own exact
-        // witnessed publication. Reuse that accepted owner/time context.
-        let op = bundle
-            .operations
-            .iter()
-            .find(|o| {
-                o.body
-                    .as_ref()
-                    .is_some_and(|o| o.delegation_digest == d.scope().digest())
-            })
-            .ok_or(Reject::Scope)?;
-        let (_, statement) = find_publication(bundle, op)?;
-        let s = statement.body.as_ref().ok_or(Reject::Canonical)?;
-        let selection = authority.for_witness(s)?;
-        let expected = contract::ImportOwnerExpectation {
-            identity: d
-                .scope()
-                .body()
-                .identity
-                .as_ref()
-                .ok_or(Reject::Canonical)?,
-            owner_public_key: &selection.owner.authority_key().public_key,
-            owner_chain_digest: &d.scope().body().owner_chain_digest,
-            authority_expires_at_seconds: selection.owner.authority_expires_at_seconds(),
-            now_unix_seconds: s.observed_at_unix_millis / 1000,
-            forbidden_job_keys: &forbidden,
-            known_job_associations: &job_associations,
-        };
-        contract::verify_renewal(
-            renewal,
-            old.scope(),
-            manifest,
-            r.expected_authority_epoch,
-            d.member_permission(),
-            &expected,
-        )?;
     }
     for statement in &bundle.statements {
         let s = statement.body.as_ref().ok_or(Reject::Canonical)?;

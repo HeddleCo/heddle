@@ -5,6 +5,8 @@ use api::heddle::api::common::{CallFailure, ErrorDetail};
 pub enum HostedError {
     #[error("HYBRID authority rejected: {0}")]
     Hybrid(#[from] api::hybrid_codec::Reject),
+    #[error("import control unavailable: {0:?}")]
+    ImportControlUnavailable(api::heddle::api::v1alpha2::ImportControlUnavailableReason),
     #[error("server does not publish descriptor trust")]
     DescriptorTrustUnavailable,
     #[error("server does not advertise an Iroh endpoint at /.well-known/heddle/iroh-endpoint")]

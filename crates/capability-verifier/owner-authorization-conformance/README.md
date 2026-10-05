@@ -2,7 +2,7 @@
 
 This repository owns the executable parity gate for the canonical verifier.
 The harness starts from every checked-in `conformance/fixtures/*` matrix and
-API alpha.21's verbatim HYBRID fixture. It applies deterministic evidence
+API alpha.32's verbatim HYBRID fixture. It applies deterministic evidence
 mutations and sends identical inputs to:
 
 1. a native adapter whose dependency is the repository root by path; and
@@ -13,7 +13,7 @@ same source. Tapestry can consume the WebAssembly package instead of carrying
 a second authorization implementation, so this gate checks target/binding
 parity without allowing the two implementations to drift.
 
-Install `wasm-pack`, then run one seed with:
+Install the pinned `wasm-bindgen-cli 0.2.127`, then run one seed with:
 
 ```bash
 OWNER_AUTH_CASE_SEED=38322398 \
@@ -35,3 +35,9 @@ Set `OWNER_AUTH_FORCE_DIVERGENCE=1` only when testing the gate itself. It
 injects a result mismatch specifically in the import route after both verifiers
 run and must make the harness
 fail with `OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED`.
+
+Alpha.32 also exercises large and `u64::MAX` signed totals and the public
+`remainingImportScope` binding on empty, partial, complete and progressively
+narrowed scopes. Original and replacement scopes share cumulative consumption;
+removed historical slots cannot be charged again. The total crosses JS in exact
+protobuf bytes, while clock and TTL arguments retain the checked bigint gate.

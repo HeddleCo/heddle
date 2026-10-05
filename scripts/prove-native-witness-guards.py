@@ -100,7 +100,29 @@ MUTATIONS = [
     ('pending-migration', 'crates/repo/src/local_metadata.rs', 'pub const SCHEMA_VERSION: i64 = 7;',
      'pub const SCHEMA_VERSION: i64 = 6;', REPO,
      'version_six_migrates_pending_native_bindings_without_touching_final_bindings', 'new pending table'),
+    ('part2-install', 'crates/thread-api/src/fetch/hosted.rs',
+     '        crate::hybrid::transfer_ready(&self.ready).map_err(Error::Invalid)?;',
+     '''        repository.install_native_spool_id(
+            self.ready.thread.as_ref().and_then(|t| t.spool.as_ref())
+                .ok_or(Error::Invalid("Spool absent"))?.id.parse::<uuid::Uuid>()
+                .map_err(preparation)?
+        ).map_err(preparation)?;
+        crate::hybrid::transfer_ready(&self.ready).map_err(Error::Invalid)?;''', API,
+     'verify_before_install_rejects_without_partial_repository_mutation', 'rejection must precede Spool mutation'),
+    ('part2-durable-witness', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     'verify_set(signed, &expected, previous.as_ref())?', 'verify_set(signed, &expected, None)?', API,
+     'staged_context_rechecks_concurrent_durable_revocation_before_install',
+     'staged N must never authorize install after durable N+1 revocation'),
 ]
+
+# The import composition helper also enforces the durable witness checkpoint.
+# Remove both checks to prove the family; removing one leaves the other active.
+EXTRA_MUTATIONS = {
+    'part2-durable-witness': [
+        ('crates/repo/src/thread_replication/delegated_import.rs',
+         '        snapshot.as_ref(),', '        None,'),
+    ],
+}
 
 
 def main():
@@ -131,6 +153,12 @@ def main():
         path = source / file
         original = path.read_text()
         assert original.count(old) == 1, (name, original.count(old))
+        changes = [(path, original, old, new)]
+        for file, before, after in EXTRA_MUTATIONS.get(name, []):
+            extra_path = source / file
+            extra_original = extra_path.read_text()
+            assert extra_original.count(before) == 1, (name, file, extra_original.count(before))
+            changes.append((extra_path, extra_original, before, after))
         for red in [True, False]:
             label = name + ('-red' if red else '-green')
             command = ['cargo', 'test', '--locked', '-p', crate, '--lib']
@@ -144,11 +172,13 @@ def main():
             print('RUN', label, flush=True)
             try:
                 if red:
-                    path.write_text(original.replace(old, new))
+                    for changed_path, contents, before, after in changes:
+                        changed_path.write_text(contents.replace(before, after))
                 with log.open('w') as output:
                     result = subprocess.run(command, cwd=source, env=env, stdout=output, stderr=subprocess.STDOUT)
             finally:
-                path.write_text(original)
+                for changed_path, contents, _, _ in changes:
+                    changed_path.write_text(contents)
             output = log.read_text(errors='replace')
             assert 'could not compile' not in output and 'running 0 tests' not in output, output[-6000:]
             if red:
@@ -160,7 +190,7 @@ def main():
             receipts.append(receipt)
             (args.output / 'results.json').write_text(json.dumps(receipts, indent=2)+'\n')
             print('PASS', label, receipt['seconds'], flush=True)
-            assert path.read_text() == original
+            assert all(changed_path.read_text() == contents for changed_path, contents, _, _ in changes)
     print('ALL', len(selected), 'FAIL-THEN-PASS PAIRS VERIFIED', flush=True)
 
 

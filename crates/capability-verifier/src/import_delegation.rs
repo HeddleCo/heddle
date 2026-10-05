@@ -196,6 +196,16 @@ pub fn native_lineage(selection: &Selection<'_>) -> Result<(ImportIdentityV1, Ve
     ))
 }
 
+/// Compute remaining per-job authority from exact alpha.32 protobuf records.
+/// Uint64 totals stay in encoded bytes at the JS boundary. The result can be
+/// empty for completed work; it grants no new permission or execution authority.
+pub fn remaining_scope_bytes(scope: &[u8], manifest: &[u8]) -> Result<Vec<u8>> {
+    use prost::Message;
+    let scope = crate::canonical::canonical_message(scope, contract::MAX_RECORD_BYTES)?;
+    let manifest = crate::canonical::canonical_message(manifest, contract::MAX_BUNDLE_BYTES)?;
+    Ok(contract::remaining_import_scope(&scope, &manifest)?.encode_to_vec())
+}
+
 fn verify_at(
     signed: &SignedImportJobDelegationV1,
     member: Option<&SignedImportMemberPermissionV1>,

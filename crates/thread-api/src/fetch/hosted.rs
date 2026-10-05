@@ -454,7 +454,7 @@ pub(crate) mod tests {
         heddleco_capability_verifier::VerifiedCloneKeyring,
     ) {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
                 .expect("release fixture");
         let mut bundle = bundle();
         bundle.history_proofs = [
@@ -833,7 +833,7 @@ pub(crate) mod tests {
             .install_hosted(&repo, &trust, authority.as_ref(), 1350)
             .expect("genesis-only receiver");
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
                 .expect("vectors");
         let original = crate::replication::decode_record(record(&fixture, "converted_main"))
             .expect("original conversion");

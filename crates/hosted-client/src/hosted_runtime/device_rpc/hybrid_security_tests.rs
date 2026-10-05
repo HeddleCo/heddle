@@ -29,7 +29,7 @@ use super::{DeviceRpc, auth};
 
 pub(crate) fn record<T: Message + Default>(name: &str) -> T {
     let f: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../thread-api/tests/fixtures/hybrid-alpha27.json"
+        "../../../../thread-api/tests/fixtures/hybrid-alpha32.json"
     ))
     .expect("API fixture");
     let v = f["wire_vectors"]

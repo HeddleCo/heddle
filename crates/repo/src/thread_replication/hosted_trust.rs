@@ -496,6 +496,59 @@ impl TrustTransaction<'_> {
     pub fn job_associations(&self) -> &[(Vec<u8>, Vec<u8>)] {
         &self.associations
     }
+    pub(super) fn import_witness_pin(&self) -> api::import_authority::ImportWitnessRootPin {
+        api::import_authority::ImportWitnessRootPin {
+            authority: self.set.body().deployment_authority.clone(),
+            root_id: self.set.body().descriptor_root_id.clone(),
+            public_key: self.root_public_key.to_vec(),
+            epoch: self.set.root_epoch(),
+        }
+    }
+    /// Restore receiver-owned history while the trust and installation lock is
+    /// held. Sibling histories share this transaction without replacing each other.
+    pub(super) fn import_witness_snapshot(
+        &self,
+    ) -> Result<Option<api::import_authority::ImportWitnessSnapshot>> {
+        let row: (String, Vec<u8>, Option<Vec<u8>>, i64) = self.tx.query_row(
+            "SELECT history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1",
+            [&self.set.body().deployment_authority],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let Some(bytes) = row.2 else {
+            return Ok(None);
+        };
+        let mut statement = self
+            .tx
+            .prepare("SELECT DISTINCT bundle FROM hosted_import_proofs WHERE authority=?1")?;
+        let history = statement
+            .query_map([&self.set.body().deployment_authority], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?
+            .map(|bytes| {
+                Ok(hybrid_codec::strict_decode(
+                    &bytes?,
+                    api::import_authority::MAX_BUNDLE_BYTES,
+                )?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut pin = self.import_witness_pin();
+        if row.0 != pin.root_id || row.1 != pin.public_key {
+            pin.epoch = pin
+                .epoch
+                .checked_sub(1)
+                .filter(|e| *e > 0)
+                .ok_or(Reject::StaleContext)?;
+        }
+        pin.root_id = row.0;
+        pin.public_key = row.1;
+        Ok(Some(api::import_authority::ImportWitnessSnapshot {
+            root: pin,
+            witness_set: hybrid_codec::strict_decode(&bytes, witness_trust::MAX_SET_BYTES)?,
+            clock_floor_unix_millis: row.3,
+            job_associations: self.associations.clone(),
+            accepted_history: history,
+        }))
+    }
     pub fn forbidden_job_keys(&self) -> Vec<Vec<u8>> {
         std::iter::once(self.root_public_key.to_vec())
             .chain(self.set.body().entries.iter().map(|e| e.public_key.clone()))

@@ -243,5 +243,89 @@ pub fn cases(f: &Value) -> Result<Value, String> {
             add("claimed-human-revoked", revoked, Some("witness is revoked"))?;
         }
     }
+    let mut large = d.clone();
+    let large_body = large.body.as_mut().ok_or("body")?;
+    large_body.scope.as_mut().ok_or("scope")?.max_result_bytes = u64::MAX;
+    let mut parent = p.clone();
+    let parent_body = parent.body.as_mut().ok_or("parent")?;
+    parent_body.scope.as_mut().ok_or("scope")?.max_result_bytes = u64::MAX;
+    parent.owner_signature = Some(sign(f, "owner", contract::PERMISSION_DOMAIN, parent_body)?);
+    large_body.parent_permission_digest =
+        contract::signed_permission_digest(&parent).map_err(|e| e.to_string())?;
+    large.delegating_signature = Some(sign(f, "device", contract::DELEGATION_DOMAIN, large_body)?);
+    let mut c = Inputs {
+        certificate_hex: hex::encode(large.encode_to_vec()),
+        permission_hex: hex::encode(parent.encode_to_vec()),
+        keyring_hex: hex::encode(ring.encode_to_vec()),
+        owner_history_hex: hex::encode(h.encode_to_vec()),
+        initial_owner_hex: hex::encode(owner.owner_id()),
+        spool_genesis_hex: hex::encode(digest),
+        forbidden_json: "[]".into(),
+        associations_json: "[]".into(),
+        cancellations_json: "[]".into(),
+        revoked_json: "[]".into(),
+        now: "1100".into(),
+        max_ttl: "3600".into(),
+    };
+    add("u64-max-total", c.clone(), None)?;
+    let signed: SignedImportJobDelegationV1 = record(f, "alpha32_large_owner")?;
+    c.certificate_hex = hex::encode(signed.encode_to_vec());
+    c.permission_hex.clear();
+    add("large-owner-total", c, None)?;
+    for (id, scope, manifest) in [
+        (
+            "empty",
+            record::<ImportPermissionScopeV1>(f, "scope")?,
+            record::<ImportResultManifestV1>(f, "empty_manifest")?,
+        ),
+        (
+            "partial",
+            record(f, "scope")?,
+            record(f, "partial_manifest")?,
+        ),
+        (
+            "complete",
+            record(f, "scope")?,
+            record(f, "terminal_manifest")?,
+        ),
+        (
+            "removed-not-recharged",
+            record(f, "alpha32_remaining")?,
+            record(f, "partial_manifest")?,
+        ),
+    ] {
+        out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
+            "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
+            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,
+        }).to_string()}));
+    }
+    for (id, request, manifest) in [
+        ("large", "alpha32_commit_large", "alpha32_manifest_large"),
+        (
+            "u64-max",
+            "alpha32_commit_u64_max",
+            "alpha32_manifest_u64_max",
+        ),
+    ] {
+        let request: CommitImportJobRequest = record(f, request)?;
+        let scope = request
+            .proof
+            .as_ref()
+            .ok_or("proof")?
+            .delegations
+            .last()
+            .ok_or("delegation")?
+            .body
+            .as_ref()
+            .ok_or("body")?
+            .scope
+            .as_ref()
+            .ok_or("scope")?;
+        let manifest: ImportResultManifestV1 = record(f, manifest)?;
+        out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
+            "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
+            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,
+        }).to_string()}));
+    }
     Ok(Value::Array(out))
 }

@@ -92,3 +92,10 @@ verified StartThread authority with `requires_hosting_claim: false`.
 `owner_kind: "local_key"` reports only a verified creator binding with
 `requires_hosting_claim: true`; callers must separately verify the hosting claim
 and source cutoff before granting hosted authority.
+
+HYBRID uses the alpha.32 scope: one positive `max_result_bytes` total per logical
+job plus `max_operations`; branches carry no byte allowances. `remainingImportScope`
+accepts and returns exact protobuf bytes, subtracting only consumption for slots
+still covered by the predecessor. The `u64` total stays lossless in encoded bytes.
+Clocks and TTLs continue to require checked `bigint` inputs. Renewals and retries
+cannot reset budgets; sibling jobs have separate signed totals.

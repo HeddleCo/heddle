@@ -23,6 +23,12 @@ pub fn evaluate(case: &Value) -> Result<Value> {
             3600
         };
         let value = match case["api"].as_str() {
+            Some("import-scope") => serde_json::to_value(hex::encode(
+                crate::import_delegation::remaining_scope_bytes(
+                    &bytes("scope_hex")?,
+                    &bytes("manifest_hex")?,
+                )?,
+            )),
             Some("native-genesis") => {
                 let digest = crate::native_genesis::verify_bytes(
                     &bytes("binding_hex")?,
