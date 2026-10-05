@@ -82,7 +82,7 @@ jobs:
   build-verifier-npm:
     name: build capability-verifier npm package
     needs: validate-tag
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -128,7 +128,7 @@ jobs:
     name: publish capability-verifier to GitHub Packages
     needs: [validate-tag, build-verifier-npm, release]
     if: needs.validate-tag.outputs.kind == 'stable'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: release
     permissions:
@@ -182,10 +182,10 @@ jobs:
             # binaries run on Debian 12 (2.36) and Ubuntu 22.04+ forward.
             # Building on ubuntu-24.04 (glibc 2.39) crashed at runtime on
             # those targets with GLIBC_2.3x-not-found (#549).
-            runner: ubuntu-22.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: blacksmith-4vcpu-ubuntu-2404
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
@@ -458,7 +458,7 @@ jobs:
     name: publish release
     needs: [validate-tag, build, build-macos-cask]
     if: needs.validate-tag.outputs.publish_release == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: release
     permissions:
@@ -519,7 +519,7 @@ jobs:
     name: publish package manifests
     needs: [validate-tag, build, build-macos-cask, release]
     if: needs.validate-tag.outputs.kind == 'stable'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: release
     permissions:
