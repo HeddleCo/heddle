@@ -243,6 +243,41 @@ pub fn verify_import_delegation_binding(
     })
 }
 
+/// Verify the frozen creator binding and original StartThread capability.
+#[wasm_bindgen(js_name = verifyNativeGenesisAuthority, unchecked_return_type = "NativeGenesisSummary")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_native_genesis_authority_binding(
+    binding: &[u8],
+    original: &[u8],
+    envelope: &[u8],
+    keyring: &[u8],
+    current_owner: &[u8],
+    selected_initial_owner_id: &[u8],
+    selected_spool_genesis_digest: &[u8],
+    revoked_key_ids_json: &str,
+    revoked_credential_ids_json: &str,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] now_unix_seconds: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "bigint")] max_capability_ttl_seconds: JsValue,
+) -> Result<JsValue, JsValue> {
+    let now: i64 = checked_integer(now_unix_seconds, "now_unix_seconds")?;
+    let ttl: i64 = checked_integer(max_capability_ttl_seconds, "max_capability_ttl_seconds")?;
+    let digest = crate::native_genesis::verify_bytes(
+        binding,
+        original,
+        envelope,
+        keyring,
+        current_owner,
+        selected_initial_owner_id,
+        selected_spool_genesis_digest,
+        revoked_key_ids_json,
+        revoked_credential_ids_json,
+        now,
+        ttl,
+    )
+    .map_err(verification_error)?;
+    object(&digest)
+}
+
 /// Exact crate version backing this generated package.
 #[wasm_bindgen(js_name = verifierVersion)]
 #[must_use]
@@ -439,6 +474,11 @@ export interface PolicySummary {
 export interface ImportSummary {
   certificate_digest_hex: string;
 }
+/** Account verifies StartThread authority. LocalKey verifies only its creator
+ * binding and MUST acquire a separately verified hosting ownership claim. */
+export type NativeGenesisSummary =
+  | { certificate_digest_hex: string; owner_kind: "account"; requires_hosting_claim: false }
+  | { certificate_digest_hex: string; owner_kind: "local_key"; requires_hosting_claim: true };
 export type PurgeDecision = "purge" | { deny: "over-limit" | "malformed" | "invalid-proof" | "genesis-binding" | "stale-owner" | "capability" | "direct-only" | "operation-binding" | "time" };
 export type VerificationErrorCode =
   "invalid" |

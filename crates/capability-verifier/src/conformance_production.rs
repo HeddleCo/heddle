@@ -23,6 +23,26 @@ pub fn evaluate(case: &Value) -> Result<Value> {
             3600
         };
         let value = match case["api"].as_str() {
+            Some("native-genesis") => {
+                let digest = crate::native_genesis::verify_bytes(
+                    &bytes("binding_hex")?,
+                    &bytes("original_hex")?,
+                    &bytes("envelope_hex")?,
+                    &bytes("keyring_hex")?,
+                    &bytes("current_owner_hex")?,
+                    &bytes("initial_owner_hex")?,
+                    &bytes("spool_genesis_hex")?,
+                    case["revoked_keys_json"]
+                        .as_str()
+                        .ok_or_else(|| Error::Invalid("missing revoked keys".into()))?,
+                    case["revoked_credentials_json"]
+                        .as_str()
+                        .ok_or_else(|| Error::Invalid("missing revoked credentials".into()))?,
+                    now,
+                    ttl,
+                )?;
+                serde_json::to_value(digest)
+            }
             Some("owner-root") => {
                 serde_json::to_value(observed::verify_owner_root_bytes(&bytes("root_hex")?)?)
             }

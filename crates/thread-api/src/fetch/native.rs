@@ -16,119 +16,8 @@ pub struct OwnedDeviceBinding<'a> {
 }
 
 impl StagedSource {
-    /// Call on the application's disk worker. Locally signed conversion is
-    /// checked before any repository mutation. Hosted testimony needs the
-    /// separate selected-root installation path; transport keys grant no trust.
-    pub fn install(self, repository: &Repository, now_unix_seconds: i64) -> Result<StateId, Error> {
-        let endpoint = self
-            .ready
-            .endpoint
-            .as_ref()
-            .ok_or(Error::Invalid("endpoint absent"))?;
-        if endpoint.kind != EndpointKind::Weft as i32 {
-            return Err(Error::Invalid(
-                "hosted installation requires the selected Weft endpoint",
-            ));
-        }
-        // Endpoint possession authenticates transport only. Every hosted
-        // original requires independently selected witness/owner context.
-        self.require_locally_signed_source()?;
-        let spool = uuid::Uuid::parse_str(
-            &self
-                .ready
-                .thread
-                .as_ref()
-                .and_then(|t| t.spool.as_ref())
-                .ok_or(Error::Invalid("Spool absent"))?
-                .id,
-        )
-        .map_err(preparation)?;
-        let genesis = self
-            .ready
-            .owner_genesis
-            .as_ref()
-            .ok_or(Error::Invalid("owner genesis absent"))?;
-        let owner = self
-            .ready
-            .ownership
-            .as_ref()
-            .ok_or(Error::Invalid("owner history absent"))?;
-        let verified =
-            repo::verify_spool_owner_observation(genesis, owner, spool, now_unix_seconds)
-                .map_err(preparation)?;
-        // A verified hosted download belongs to this Spool, just as an
-        // owned-device download does. Never let a later local write mint one.
-        repository
-            .install_native_spool_id(spool)
-            .map_err(preparation)?;
-        repository
-            .verify_and_pin_owner_observation(
-                genesis,
-                owner,
-                spool,
-                &verified.wire().canonical_spool_path_segments,
-                now_unix_seconds,
-            )
-            .map_err(preparation)?;
-        self.install_replicas(repository, None, "", now_unix_seconds)?;
-        Ok(self.state.id())
-    }
-    fn require_locally_signed_source(&self) -> Result<(), Error> {
-        use heddle_object_model::object::thread_replication::{GenesisOwner, SourceAuthor};
-        if self.ready.import_authority.is_some() || !self.authority_admissions.is_empty() {
-            return Err(Error::HostedTrustRequired);
-        }
-        let main = self
-            .ready
-            .thread_genesis
-            .as_ref()
-            .ok_or(Error::Invalid("Thread genesis absent"))?;
-        let mut owners = std::collections::BTreeMap::new();
-        for wrapper in std::iter::once(main).chain(&self.dependencies) {
-            let record = wrapper
-                .genesis
-                .as_ref()
-                .ok_or(Error::Invalid("original genesis absent"))?;
-            let genesis = heddle_object_model::object::thread_replication::ThreadGenesis::decode(
-                &record.canonical_record,
-            )
-            .map_err(preparation)?;
-            let GenesisOwner::LocalKey(key) = genesis.owner else {
-                return Err(Error::HostedTrustRequired);
-            };
-            if wrapper.admission.is_some()
-                || !wrapper.creator_authority.is_empty()
-                || !wrapper.ownership_claims.is_empty()
-                || !wrapper.ownership_resolutions.is_empty()
-                || !wrapper.ownership_claim_admissions.is_empty()
-                || !wrapper.ownership_resolution_admissions.is_empty()
-                || !wrapper.boundary_acceptances.is_empty()
-            {
-                return Err(Error::HostedTrustRequired);
-            }
-            owners.insert(genesis.id().map_err(preparation)?, key);
-        }
-        for signed in &self.operations {
-            let operation = signed.verify().map_err(preparation)?;
-            require_source_operation(&operation).map_err(preparation)?;
-            let local = match operation.source_author().map_err(preparation)? {
-                Some(SourceAuthor::LocalKey) => true,
-                None => operation
-                    .local_integration()
-                    .map_err(preparation)?
-                    .is_some(),
-                _ => false,
-            };
-            if !local || owners.get(&operation.thread) != Some(&operation.publisher) {
-                return Err(Error::HostedTrustRequired);
-            }
-        }
-        Ok(())
-    }
-    /// Device-only source uses independently admitted local account authority;
-    /// incoming material cannot enroll its endpoint or replace a Spool owner.
-    /// The destination must be an unseeded `Repository::init` skeleton or
-    /// already belong to this exact Spool; importing never replaces local work.
+    /// Verify a privately owned device through independent account authority.
+    /// Originals must already belong to this exact Spool.
     pub fn install_owned_device(
         self,
         repository: &Repository,
@@ -209,11 +98,13 @@ impl StagedSource {
             .as_ref()
             .ok_or(Error::Invalid("Thread genesis absent"))?;
         if self.ready.import_authority.is_some()
+            || self.ready.native_authority.is_some()
             || !self.authority_admissions.is_empty()
             || std::iter::once(main)
                 .chain(&self.dependencies)
                 .any(|record| {
                     record.admission.is_some()
+                        || record.native_genesis_authority.is_some()
                         || !record.ownership_claim_admissions.is_empty()
                         || !record.ownership_resolution_admissions.is_empty()
                 })

@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(feature = "client")]
 
-#[path = "support/native_hosted_https.rs"]
-mod native_hosted_https;
 #[path = "support/native_hosted_server.rs"]
 mod native_hosted_server;
 mod support;
 
-use std::{
-    collections::{HashMap, VecDeque},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crypto::{Ed25519Signer, Signer};
 use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
@@ -20,7 +15,7 @@ use support::*;
 
 struct Fixture {
     _temp: TempDir,
-    https: native_hosted_https::TestHttpsServer,
+    https: std::sync::Arc<native_hosted_server::https::TestHttpsServer>,
     server: tokio::task::JoinHandle<()>,
     client: hosted_client::hosted_runtime::hosted::HostedClient,
     captured: std::sync::Arc<std::sync::Mutex<native_hosted_server::PublicationCapture>>,
@@ -74,38 +69,33 @@ impl Fixture {
             .parse()
             .expect("spool");
         let thread_id = native.thread_id();
-        let (mut client, server, captured, addr, secret) =
+        let (mut client, server, captured, addr, _secret, https) =
             native_hosted_server::start_routed(spool, "main", *thread_id.as_bytes()).await;
+        let process_home = ProcessHeddleHome::install(&source_home);
+        native_hosted_server::enroll_device(spool, &source_home);
         assert!(
             client
                 .push_profiled(&repo, "spool/acme", state, "main", false, "seed".into())
                 .await
-                .expect("seed hosted source")
+                .unwrap_or_else(|error| panic!(
+                    "seed hosted source: {error:?}; calls: {:?}",
+                    captured.lock().expect("captured calls").calls
+                ))
                 .0
                 .success
         );
-        let root = Ed25519Signer::generate().expect("descriptor root");
-        let ephemeral = Ed25519Signer::from_seed(&secret.to_bytes()).expect("endpoint signer");
-        let direct = addr.ip_addrs().next().expect("direct address").to_string();
-        let descriptor = native_hosted_https::signed_descriptor(
-            &addr.id.to_string(),
-            &direct,
-            &root,
-            &ephemeral,
-        );
-        let https = native_hosted_https::TestHttpsServer::start(HashMap::from([(
-            "/.well-known/heddle/iroh-endpoint".into(),
-            VecDeque::from(vec![descriptor; 64]),
-        )]));
+        drop(process_home);
+        let root = Ed25519Signer::from_seed(&[7; 32]).expect("descriptor root");
         let ca = temp.path().join("ca.pem");
         std::fs::write(&ca, &https.certificate_pem).expect("test CA");
         let home = temp.path().join("clone-home");
         std::fs::create_dir(&home).expect("clone home");
-        // This unclaimed native fixture belongs to one device. Retain that
-        // device's key in a disjoint home; clone must carry no private keys.
-        let signer = repo
-            .native_thread_signer(&native)
-            .expect("source owner key");
+        native_hosted_server::enroll_device(spool, &home);
+        let signer = Ed25519Signer::from_seed(&[71; 32]).expect("accepted account device");
+        native_hosted_server::enroll_source_author(
+            &home,
+            &signer.public_key().try_into().expect("source key"),
+        );
         let device = repo::identity::DeviceIdentity {
             public_key: hex::encode(signer.public_key()),
             private_key_pem: signer.to_pem().expect("device PEM"),
@@ -196,6 +186,7 @@ impl Fixture {
             Some(path),
             &[
                 ("HEDDLE_HOME", self.home.to_str().expect("home")),
+                ("HTTPS_PROXY", &self.https.proxy_uri),
                 ("HEDDLE_REMOTE_TLS_CA_CERT", self.ca.to_str().expect("CA")),
                 ("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "clone-test-key"),
                 ("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY", &self.root_key),
@@ -268,8 +259,14 @@ impl Fixture {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_source_fetch_preserves_original_authority_without_executor_enrollment() {
+#[test]
+fn local_source_fetch_preserves_original_authority_without_executor_enrollment() {
+    on_large_stack(
+        local_source_fetch_preserves_original_authority_without_executor_enrollment_case,
+    );
+}
+
+async fn local_source_fetch_preserves_original_authority_without_executor_enrollment_case() {
     let fixture = Fixture::uninstalled().await;
     let output = fixture.output_at(
         fixture._temp.path(),
@@ -333,8 +330,12 @@ async fn local_source_fetch_preserves_original_authority_without_executor_enroll
 
 // The remaining hosted write regressions await fresh independently selected
 // HYBRID trust from the Part 2 Fetch adapter.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scoped_derived_agent_clones_and_pushes_its_spool() {
+#[test]
+fn scoped_derived_agent_clones_and_pushes_its_spool() {
+    on_large_stack(scoped_derived_agent_clones_and_pushes_its_spool_case);
+}
+
+async fn scoped_derived_agent_clones_and_pushes_its_spool_case() {
     let mut fixture = Fixture::new().await;
     let child = fixture._temp.path().join("scoped.hcred");
     fixture.run_at(
@@ -371,8 +372,12 @@ async fn scoped_derived_agent_clones_and_pushes_its_spool() {
     fixture.server.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn derive_agent_json_output_contract() {
+#[test]
+fn derive_agent_json_output_contract() {
+    on_large_stack(derive_agent_json_output_contract_case);
+}
+
+async fn derive_agent_json_output_contract_case() {
     let fixture = Fixture::new().await;
     let mode = "json";
     for export in [true, false] {
@@ -457,8 +462,12 @@ async fn derive_agent_json_output_contract() {
     fixture.server.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_capture_push_main() {
+#[test]
+fn fresh_clone_capture_push_main() {
+    on_large_stack(fresh_clone_capture_push_main_case);
+}
+
+async fn fresh_clone_capture_push_main_case() {
     let fixture = Fixture::new().await;
     fixture.capture();
     println!("(a) {}", fixture.run(&["push", "origin"]));
@@ -466,8 +475,12 @@ async fn fresh_clone_capture_push_main() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_without_owner_key_capture_advises_new_thread_without_capturing() {
+#[test]
+fn fresh_clone_without_owner_key_capture_advises_new_thread_without_capturing() {
+    on_large_stack(fresh_clone_without_owner_key_capture_advises_new_thread_without_capturing_case);
+}
+
+async fn fresh_clone_without_owner_key_capture_advises_new_thread_without_capturing_case() {
     let fixture = Fixture::new().await;
     std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))
         .expect("clone has no original owner key");
@@ -550,8 +563,12 @@ async fn fresh_clone_without_owner_key_capture_advises_new_thread_without_captur
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_without_owner_key_start_reapply_capture_push_succeeds() {
+#[test]
+fn fresh_clone_without_owner_key_start_reapply_capture_push_succeeds() {
+    on_large_stack(fresh_clone_without_owner_key_start_reapply_capture_push_succeeds_case);
+}
+
+async fn fresh_clone_without_owner_key_start_reapply_capture_push_succeeds_case() {
     let fixture = Fixture::new().await;
     std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))
         .expect("clone has no original owner key");
@@ -637,8 +654,12 @@ async fn fresh_clone_without_owner_key_start_reapply_capture_push_succeeds() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_start_capture_push() {
+#[test]
+fn fresh_clone_start_capture_push() {
+    on_large_stack(fresh_clone_start_capture_push_case);
+}
+
+async fn fresh_clone_start_capture_push_case() {
     let fixture = Fixture::new().await;
     let path = fixture.run(&["start", "feature", "--print-cd-path"]);
     let feature = PathBuf::from(path.trim());
@@ -658,8 +679,13 @@ async fn fresh_clone_start_capture_push() {
 }
 
 #[cfg(all(feature = "ci", feature = "preview"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_ci_run_record() {
+#[test]
+fn fresh_clone_ci_run_record() {
+    on_large_stack(fresh_clone_ci_run_record_case);
+}
+
+#[cfg(all(feature = "ci", feature = "preview"))]
+async fn fresh_clone_ci_run_record_case() {
     let fixture = Fixture::new().await;
     fixture.configure_ci();
     println!("(c) {}", fixture.run(&["ci", "run", "--record"]));
@@ -753,8 +779,12 @@ fn fresh_discussion(fixture: &Fixture, name: &str) -> objects::object::Materiali
     discussion
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn private_symbol_discussion_fixture_publishes_and_clones() {
+#[test]
+fn private_symbol_discussion_fixture_publishes_and_clones() {
+    on_large_stack(private_symbol_discussion_fixture_publishes_and_clones_case);
+}
+
+async fn private_symbol_discussion_fixture_publishes_and_clones_case() {
     let fixture = Fixture::new().await;
     // Source was initialized and captured before the server was routed.
     fixture.run_at(
@@ -925,8 +955,12 @@ fn capture_source(fixture: &Fixture, checkout: &Path, path: &str, content: &str,
 /// heddle#1901: a symbol annotation stays a symbol annotation, with its
 /// stable ID, across push -> pull and push -> clone, and keeps travelling
 /// with its symbol afterwards. Unresolvable selectors report explicitly.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn symbol_context_survives_hosted_push_pull_and_clone() {
+#[test]
+fn symbol_context_survives_hosted_push_pull_and_clone() {
+    on_large_stack(symbol_context_survives_hosted_push_pull_and_clone_case);
+}
+
+async fn symbol_context_survives_hosted_push_pull_and_clone_case() {
     let fixture = Fixture::new().await;
     fixture.run_at(
         &fixture.source,
@@ -1092,8 +1126,12 @@ async fn symbol_context_survives_hosted_push_pull_and_clone() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn discussion_open_reply_resolve_publish_and_clone() {
+#[test]
+fn discussion_open_reply_resolve_publish_and_clone() {
+    on_large_stack(discussion_open_reply_resolve_publish_and_clone_case);
+}
+
+async fn discussion_open_reply_resolve_publish_and_clone_case() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "discuss",
@@ -1236,8 +1274,12 @@ fn assert_push_sends_no_discussions(fixture: &Fixture, path: &Path) {
     assert!(result["discussions"].get("unsent").is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cloned_discussions_are_already_published() {
+#[test]
+fn cloned_discussions_are_already_published() {
+    on_large_stack(cloned_discussions_are_already_published_case);
+}
+
+async fn cloned_discussions_are_already_published_case() {
     let fixture = Fixture::new().await;
     publish_resolved_discussion(&fixture);
     let path = fixture._temp.path().join("author-clone");
@@ -1274,8 +1316,12 @@ async fn cloned_discussions_are_already_published() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pulled_discussions_are_already_published() {
+#[test]
+fn pulled_discussions_are_already_published() {
+    on_large_stack(pulled_discussions_are_already_published_case);
+}
+
+async fn pulled_discussions_are_already_published_case() {
     let fixture = Fixture::new().await;
     // Clone before the author publishes, then fetch into this existing checkout.
     let path = fixture._temp.path().join("author-pull");
@@ -1289,8 +1335,12 @@ async fn pulled_discussions_are_already_published() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pulled_discussions_keep_local_replies_and_resolutions_pending() {
+#[test]
+fn pulled_discussions_keep_local_replies_and_resolutions_pending() {
+    on_large_stack(pulled_discussions_keep_local_replies_and_resolutions_pending_case);
+}
+
+async fn pulled_discussions_keep_local_replies_and_resolutions_pending_case() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "discuss",
@@ -1336,8 +1386,12 @@ async fn pulled_discussions_keep_local_replies_and_resolutions_pending() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cloned_discussion_without_publication_links_replays_signed_operations() {
+#[test]
+fn cloned_discussion_without_publication_links_replays_signed_operations() {
+    on_large_stack(cloned_discussion_without_publication_links_replays_signed_operations_case);
+}
+
+async fn cloned_discussion_without_publication_links_replays_signed_operations_case() {
     let fixture = Fixture::new().await;
     publish_resolved_discussion(&fixture);
     let path = fixture._temp.path().join("old-author-clone");
@@ -1431,8 +1485,12 @@ async fn deliver(
     result
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn discussion_signed_replay_is_idempotent_and_mismatch_never_mutates() {
+#[test]
+fn discussion_signed_replay_is_idempotent_and_mismatch_never_mutates() {
+    on_large_stack(discussion_signed_replay_is_idempotent_and_mismatch_never_mutates_case);
+}
+
+async fn discussion_signed_replay_is_idempotent_and_mismatch_never_mutates_case() {
     use prost::Message;
     let fixture = Fixture::new().await;
     fixture.run(&[
@@ -1524,8 +1582,12 @@ async fn discussion_signed_replay_is_idempotent_and_mismatch_never_mutates() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn discussion_failure_keeps_push_partial_after_source_success() {
+#[test]
+fn discussion_failure_keeps_push_partial_after_source_success() {
+    on_large_stack(discussion_failure_keeps_push_partial_after_source_success_case);
+}
+
+async fn discussion_failure_keeps_push_partial_after_source_success_case() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "context",
@@ -1617,8 +1679,12 @@ async fn discussion_failure_keeps_push_partial_after_source_success() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_rejects_another_spool_remote() {
+#[test]
+fn fresh_clone_rejects_another_spool_remote() {
+    on_large_stack(fresh_clone_rejects_another_spool_remote_case);
+}
+
+async fn fresh_clone_rejects_another_spool_remote_case() {
     let fixture = Fixture::new().await;
     fixture.capture();
     let before =
@@ -1639,7 +1705,7 @@ async fn fresh_clone_rejects_another_spool_remote() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(76), "{error}");
     assert!(
-        error.contains("spool") || error.contains("identity differs"),
+        error.to_ascii_lowercase().contains("spool") || error.contains("identity differs"),
         "{error}"
     );
     assert!(
@@ -1684,8 +1750,13 @@ async fn fresh_clone_rejects_another_spool_remote() {
 }
 
 #[cfg(all(feature = "ci", feature = "preview"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_capture_ci_run_record() {
+#[test]
+fn fresh_clone_capture_ci_run_record() {
+    on_large_stack(fresh_clone_capture_ci_run_record_case);
+}
+
+#[cfg(all(feature = "ci", feature = "preview"))]
+async fn fresh_clone_capture_ci_run_record_case() {
     let fixture = Fixture::new().await;
     fixture.capture();
     fixture.configure_ci();
@@ -1698,8 +1769,13 @@ async fn fresh_clone_capture_ci_run_record() {
 }
 
 #[cfg(all(feature = "ci", feature = "preview"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_clone_ci_rejects_another_spool_remote() {
+#[test]
+fn fresh_clone_ci_rejects_another_spool_remote() {
+    on_large_stack(fresh_clone_ci_rejects_another_spool_remote_case);
+}
+
+#[cfg(all(feature = "ci", feature = "preview"))]
+async fn fresh_clone_ci_rejects_another_spool_remote_case() {
     let fixture = Fixture::new().await;
     fixture.capture();
     fixture.configure_ci();
@@ -1819,8 +1895,12 @@ fn only_context_id(fixture: &Fixture, checkout: &Path, path: &str) -> String {
 /// published in. A child Thread revising it after a resolve, an edit and a
 /// file move must extend that bound frontier, not be refused as stale when
 /// nothing else wrote to it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn child_thread_revision_extends_the_bound_context_frontier() {
+#[test]
+fn child_thread_revision_extends_the_bound_context_frontier() {
+    on_large_stack(child_thread_revision_extends_the_bound_context_frontier_case);
+}
+
+async fn child_thread_revision_extends_the_bound_context_frontier_case() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "context",
@@ -1908,8 +1988,12 @@ async fn child_thread_revision_extends_the_bound_context_frontier() {
 /// and human output agree on. A genuinely concurrent writer is still refused,
 /// an unchanged retry sends nothing, and refresh -> compare -> explicit
 /// revision recovers.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn context_failures_report_recovery_and_concurrent_writer_stays_rejected() {
+#[test]
+fn context_failures_report_recovery_and_concurrent_writer_stays_rejected() {
+    on_large_stack(context_failures_report_recovery_and_concurrent_writer_stays_rejected_case);
+}
+
+async fn context_failures_report_recovery_and_concurrent_writer_stays_rejected_case() {
     let fixture = Fixture::new().await;
     fixture.run(&["context", "set", "--path", "example.py", "--body", "v1"]);
     assert_push_succeeded(&fixture, &fixture.clone);
@@ -2279,28 +2363,48 @@ async fn assert_hostile_discussion_heads_refused(resolve: bool, foreign: &str, m
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_append_head_rebinding_discussion_thread_is_refused() {
+#[test]
+fn hostile_append_head_rebinding_discussion_thread_is_refused() {
+    on_large_stack(hostile_append_head_rebinding_discussion_thread_is_refused_case);
+}
+
+async fn hostile_append_head_rebinding_discussion_thread_is_refused_case() {
     assert_hostile_discussion_heads_refused(false, "thread", false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_resolve_head_rebinding_discussion_thread_is_refused() {
+#[test]
+fn hostile_resolve_head_rebinding_discussion_thread_is_refused() {
+    on_large_stack(hostile_resolve_head_rebinding_discussion_thread_is_refused_case);
+}
+
+async fn hostile_resolve_head_rebinding_discussion_thread_is_refused_case() {
     assert_hostile_discussion_heads_refused(true, "thread", false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_append_head_of_another_discussion_is_refused() {
+#[test]
+fn hostile_append_head_of_another_discussion_is_refused() {
+    on_large_stack(hostile_append_head_of_another_discussion_is_refused_case);
+}
+
+async fn hostile_append_head_of_another_discussion_is_refused_case() {
     assert_hostile_discussion_heads_refused(false, "discussion", false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_resolve_head_of_another_spool_is_refused() {
+#[test]
+fn hostile_resolve_head_of_another_spool_is_refused() {
+    on_large_stack(hostile_resolve_head_of_another_spool_is_refused_case);
+}
+
+async fn hostile_resolve_head_of_another_spool_is_refused_case() {
     assert_hostile_discussion_heads_refused(true, "spool", false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_append_mixed_discussion_heads_are_refused() {
+#[test]
+fn hostile_append_mixed_discussion_heads_are_refused() {
+    on_large_stack(hostile_append_mixed_discussion_heads_are_refused_case);
+}
+
+async fn hostile_append_mixed_discussion_heads_are_refused_case() {
     assert_hostile_discussion_heads_refused(false, "thread", true).await;
 }
 
@@ -2424,8 +2528,12 @@ async fn assert_hostile_context_head_refused(
 }
 
 /// The head is another record's revision.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_head_of_another_context_is_refused() {
+#[test]
+fn hostile_head_of_another_context_is_refused() {
+    on_large_stack(hostile_head_of_another_context_is_refused_case);
+}
+
+async fn hostile_head_of_another_context_is_refused_case() {
     assert_hostile_context_head_refused(false, |fixture, _| {
         hostile_context(fixture, uuid::Uuid::now_v7())
     })
@@ -2433,22 +2541,34 @@ async fn hostile_head_of_another_context_is_refused() {
 }
 
 /// The head is a discussion operation that extracts no context.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_discussion_head_without_extraction_is_refused() {
+#[test]
+fn hostile_discussion_head_without_extraction_is_refused() {
+    on_large_stack(hostile_discussion_head_without_extraction_is_refused_case);
+}
+
+async fn hostile_discussion_head_without_extraction_is_refused_case() {
     assert_hostile_context_head_refused(false, |fixture, _| hostile_discussion(fixture)).await;
 }
 
 /// The head is a forged revision of a record the client is creating, in
 /// another Thread than the one being pushed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_head_binding_a_new_context_to_another_thread_is_refused() {
+#[test]
+fn hostile_head_binding_a_new_context_to_another_thread_is_refused() {
+    on_large_stack(hostile_head_binding_a_new_context_to_another_thread_is_refused_case);
+}
+
+async fn hostile_head_binding_a_new_context_to_another_thread_is_refused_case() {
     assert_hostile_context_head_refused(false, hostile_context).await;
 }
 
 /// The head is a forged revision of a published record in another Thread;
 /// the binding the client retained from its own create refuses it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hostile_head_rebinding_a_published_context_is_refused() {
+#[test]
+fn hostile_head_rebinding_a_published_context_is_refused() {
+    on_large_stack(hostile_head_rebinding_a_published_context_is_refused_case);
+}
+
+async fn hostile_head_rebinding_a_published_context_is_refused_case() {
     assert_hostile_context_head_refused(true, hostile_context).await;
 }
 
@@ -2515,8 +2635,12 @@ impl Fixture {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_1889_captureless_thread_push_has_actionable_error() {
+#[test]
+fn issue_1889_captureless_thread_push_has_actionable_error() {
+    on_large_stack(issue_1889_captureless_thread_push_has_actionable_error_case);
+}
+
+async fn issue_1889_captureless_thread_push_has_actionable_error_case() {
     let fixture = Fixture::new().await;
     let human = fixture.start_decision_thread(false);
     let before = {
@@ -2549,8 +2673,12 @@ async fn issue_1889_captureless_thread_push_has_actionable_error() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_1889_cloned_thread_reports_real_target() {
+#[test]
+fn issue_1889_cloned_thread_reports_real_target() {
+    on_large_stack(issue_1889_cloned_thread_reports_real_target_case);
+}
+
+async fn issue_1889_cloned_thread_reports_real_target_case() {
     let fixture = Fixture::new().await;
     fixture.start_decision_thread(true);
     let agent = fixture.clone_decision_thread();
@@ -2593,8 +2721,12 @@ async fn issue_1889_cloned_thread_reports_real_target() {
     fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_1889_ready_after_pulling_agent_captures() {
+#[test]
+fn issue_1889_ready_after_pulling_agent_captures() {
+    on_large_stack(issue_1889_ready_after_pulling_agent_captures_case);
+}
+
+async fn issue_1889_ready_after_pulling_agent_captures_case() {
     let fixture = Fixture::new().await;
     let human = fixture.start_decision_thread(true);
     let agent = fixture.clone_decision_thread();
@@ -2736,8 +2868,14 @@ fn story_of(heads: &TwoHeads, state: objects::object::StateId) -> &'static str {
 
 /// Whole-spool clone: the default is the greatest State ID, stated in the
 /// output, and both heads stay listed in clone and status output.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternatives() {
+#[test]
+fn two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternatives() {
+    on_large_stack(
+        two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternatives_case,
+    );
+}
+
+async fn two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternatives_case() {
     let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
     let (default, alternative) = heads.default_and_alternative();
     let (fresh, clone) = heads.clone_into("fresh");
@@ -2832,8 +2970,12 @@ async fn two_head_thread_whole_spool_clone_checks_out_default_and_lists_alternat
 
 /// `pull --thread` on a two-head Thread succeeds and keeps each writer's own
 /// head checked out, reporting the other.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_head_thread_pull_keeps_each_writers_head() {
+#[test]
+fn two_head_thread_pull_keeps_each_writers_head() {
+    on_large_stack(two_head_thread_pull_keeps_each_writers_head_case);
+}
+
+async fn two_head_thread_pull_keeps_each_writers_head_case() {
     let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
     for (checkout, own) in [
         (&heads.fixture.source, heads.a),
@@ -2859,8 +3001,12 @@ async fn two_head_thread_pull_keeps_each_writers_head() {
 /// Select head B by a unique prefix and pick it: the Thread takes exactly its
 /// tree, every head stays in ancestry, status clears, and publishing the pick
 /// collapses the hosted heads.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_head_thread_pick_resolves_every_head() {
+#[test]
+fn two_head_thread_pick_resolves_every_head() {
+    on_large_stack(two_head_thread_pick_resolves_every_head_case);
+}
+
+async fn two_head_thread_pick_resolves_every_head_case() {
     let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
     let (default, alternative) = heads.default_and_alternative();
     let (fresh, _) = heads.clone_into("fresh");
@@ -2917,8 +3063,12 @@ async fn two_head_thread_pick_resolves_every_head() {
 
 /// A conflicting merge of the selected head stops in merge state; resolving
 /// the conflict finishes one capture naming both heads.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_head_thread_conflicted_merge_finishes_with_resolve() {
+#[test]
+fn two_head_thread_conflicted_merge_finishes_with_resolve() {
+    on_large_stack(two_head_thread_conflicted_merge_finishes_with_resolve_case);
+}
+
+async fn two_head_thread_conflicted_merge_finishes_with_resolve_case() {
     let heads = TwoHeads::publish("story.txt", "head A\n", "story.txt", "head B\n").await;
     let (default, alternative) = heads.default_and_alternative();
     let (fresh, _) = heads.clone_into("fresh");
@@ -2950,8 +3100,12 @@ async fn two_head_thread_conflicted_merge_finishes_with_resolve() {
     heads.fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_head_thread_merges_the_selected_head() {
+#[test]
+fn two_head_thread_merges_the_selected_head() {
+    on_large_stack(two_head_thread_merges_the_selected_head_case);
+}
+
+async fn two_head_thread_merges_the_selected_head_case() {
     let heads = TwoHeads::publish("a.txt", "from A\n", "b.txt", "from B\n").await;
     let (default, alternative) = heads.default_and_alternative();
     let (fresh, _) = heads.clone_into("fresh");
@@ -2982,8 +3136,12 @@ async fn two_head_thread_merges_the_selected_head() {
     heads.fixture.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn single_head_thread_reports_no_alternatives() {
+#[test]
+fn single_head_thread_reports_no_alternatives() {
+    on_large_stack(single_head_thread_reports_no_alternatives_case);
+}
+
+async fn single_head_thread_reports_no_alternatives_case() {
     let fixture = Fixture::new().await;
     let fresh = fixture._temp.path().join("fresh");
     let output = fixture.run_at(
@@ -3010,8 +3168,12 @@ async fn single_head_thread_reports_no_alternatives() {
 
 /// heddle#1948: context history must select annotations when discussions share
 /// the Spool. Reproduce a clone inheriting context, then publishing a child.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inherited_annotation_and_public_discussion_push() {
+#[test]
+fn inherited_annotation_and_public_discussion_push() {
+    on_large_stack(inherited_annotation_and_public_discussion_push_case);
+}
+
+async fn inherited_annotation_and_public_discussion_push_case() {
     let fixture = Fixture::new().await;
     fixture.run(&[
         "context",
@@ -3092,8 +3254,12 @@ async fn inherited_annotation_and_public_discussion_push() {
 
 /// A context-only interruption must leave already published discussion
 /// originals on the server exactly once, including across a human retry.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn partial_context_push_retry_keeps_published_discussions_once() {
+#[test]
+fn partial_context_push_retry_keeps_published_discussions_once() {
+    on_large_stack(partial_context_push_retry_keeps_published_discussions_once_case);
+}
+
+async fn partial_context_push_retry_keeps_published_discussions_once_case() {
     let fixture = Fixture::new().await;
     fixture.run(&["context", "set", "--path", "example.py", "--body", "v1"]);
     assert_push_succeeded(&fixture, &fixture.clone);

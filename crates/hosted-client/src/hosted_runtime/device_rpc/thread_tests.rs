@@ -52,6 +52,7 @@ pub(super) async fn roundtrip(
     )
     .expect("proof");
     let request = StartThreadRequest {
+        native_genesis_authority: None,
         creator_authority: proof.clone(),
         client_operation_id: uuid::Uuid::now_v7().to_string(),
         spool: Some(SpoolRef {

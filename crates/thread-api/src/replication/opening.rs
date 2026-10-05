@@ -104,7 +104,9 @@ pub fn accept(
         genesis,
         genesis_record: open.thread_genesis.clone(),
         import_authority: open.import_authority.clone(),
+        native_authority: open.native_authority.clone(),
         ready: ReplicationReady {
+            native_authority: None,
             thread: Some(thread.clone()),
             endpoint: Some(local.clone()),
             facets: facets.into_iter().map(super::wire_facet).collect(),
@@ -134,6 +136,7 @@ pub struct AcceptedOpening {
     pub genesis_record: Option<ThreadGenesisRecord>,
     /// Retained structural evidence; the receiver must verify before mutation.
     pub import_authority: Option<crate::contract::ImportPublicProofBundleV1>,
+    pub native_authority: Option<crate::contract::NativePublicProofBundleV1>,
 }
 
 /// Structural and original-signature validation only. Account authority and
@@ -152,6 +155,17 @@ pub fn verify_genesis_record(
         .genesis
         .as_ref()
         .ok_or(Error::Protocol("original signed genesis missing"))?;
+    if let Some(binding) = &record.native_genesis_authority {
+        api::native_witness::verify_genesis_authority(
+            binding,
+            record
+                .genesis
+                .as_ref()
+                .ok_or(Error::Protocol("original genesis absent"))?,
+            &record.creator_authority,
+        )
+        .map_err(|_| Error::Protocol("native creator binding differs from original"))?;
+    }
     let genesis = verify_genesis(signed, thread)?;
     if record.creator_authority.len() > 64 * 1024 {
         return Err(Error::Protocol("creator authority exceeds bound"));
@@ -310,6 +324,7 @@ mod tests {
         let open = ReplicationOpen {
             thread: Some(thread.clone()),
             thread_genesis: Some(ThreadGenesisRecord {
+                native_genesis_authority: None,
                 boundary_acceptances: Vec::new(),
                 ownership_claims: vec![],
                 ownership_claim_admissions: vec![],

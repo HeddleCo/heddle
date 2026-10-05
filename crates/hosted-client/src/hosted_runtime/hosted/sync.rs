@@ -201,6 +201,38 @@ mod native_exchange_tests {
 
     const REMOTE_THREAD: &str = "main";
 
+    struct IsolatedHome {
+        previous: Option<std::ffi::OsString>,
+        _home: TempDir,
+    }
+
+    impl IsolatedHome {
+        fn new() -> Self {
+            let previous = std::env::var_os("HEDDLE_HOME");
+            let home = TempDir::new().expect("isolated device home");
+            unsafe {
+                std::env::set_var("HEDDLE_HOME", home.path());
+            }
+            Self {
+                previous,
+                _home: home,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe {
+                    std::env::set_var("HEDDLE_HOME", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("HEDDLE_HOME");
+                },
+            }
+        }
+    }
+
     fn repository(temp: &TempDir) -> (Repository, StateId) {
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("tracked.txt"), "content\n").unwrap();
@@ -228,6 +260,19 @@ mod native_exchange_tests {
     ) {
         let thread = repo.native_thread(REMOTE_THREAD).unwrap();
         let spool = uuid::Uuid::parse_str(&thread.genesis().unwrap().spool).unwrap();
+        let (_, owner) = super::super::native_exchange_test_server::witnessing::ownership(spool);
+        repo::device_authority::publish(
+            &repo::identity::heddle_home_dir(),
+            &repo::device_authority::DeviceAuthority {
+                owner,
+                mint_roots: vec![],
+                revoked_ids: vec![],
+                revoked_mint_roots: vec![],
+                revoked_publishers: vec![],
+            },
+            chrono::Utc::now().timestamp(),
+        )
+        .expect("independent account enrollment");
         crate::hosted_runtime::hosted::native_exchange_test_server::start(
             spool,
             REMOTE_THREAD,
@@ -418,7 +463,8 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn native_push_and_clone_preserve_original_local_authority() {
-        let _process_env_guard = crate::test_process_env::shared().await;
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _home = IsolatedHome::new();
         crate::on_large_stack(native_push_and_clone_pull);
     }
 
@@ -499,7 +545,12 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn compact_local_pull_preserves_original_authority_and_existing_closure() {
-        let _process_env_guard = crate::test_process_env::shared().await;
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _home = IsolatedHome::new();
+        crate::on_large_stack(compact_local_pull);
+    }
+
+    async fn compact_local_pull() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let before: Vec<_> = wire::enumerate_state_closure(repo.store(), state)
@@ -533,7 +584,8 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn supported_local_pull_modes_preserve_original_authority() {
-        let _process_env_guard = crate::test_process_env::shared().await;
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _home = IsolatedHome::new();
         crate::on_large_stack(complete_local_state_pull_modes);
     }
 
@@ -595,7 +647,8 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn clone_pull_installs_exact_locally_authorized_originals() {
-        let _process_env_guard = crate::test_process_env::shared().await;
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _home = IsolatedHome::new();
         crate::on_large_stack(clone_pull_complete_native_pack);
     }
 

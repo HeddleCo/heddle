@@ -34,10 +34,17 @@ pub fn decode(record: &SignedRecord) -> Result<ClaimProof, Error> {
                 .map_err(|_| Error::Protocol("invalid account acceptance signature"))?;
             Ok(ClaimProof::Acceptance(proof))
         }
-        [local, acceptor]
-            if local.public_key == value.prior_local_key
-                && acceptor.public_key == value.accepting_publisher =>
-        {
+        [_, _] if record.signatures[0].public_key < record.signatures[1].public_key => {
+            let local = record
+                .signatures
+                .iter()
+                .find(|s| s.public_key == value.prior_local_key)
+                .ok_or(Error::Protocol("local ownership signature missing"))?;
+            let acceptor = record
+                .signatures
+                .iter()
+                .find(|s| s.public_key == value.accepting_publisher)
+                .ok_or(Error::Protocol("accepting ownership signature missing"))?;
             let proof = SignedOwnershipClaim {
                 canonical: record.canonical_record.clone(),
                 local_signature: local.signature.clone(),
@@ -57,19 +64,21 @@ pub fn encode(proof: &SignedOwnershipClaim) -> Result<SignedRecord, Error> {
     let value = proof
         .verify()
         .map_err(|_| Error::Protocol("invalid dual ownership signatures"))?;
+    let mut signatures = vec![
+        RecordSignature {
+            public_key: value.prior_local_key.to_vec(),
+            signature: proof.local_signature.clone(),
+        },
+        RecordSignature {
+            public_key: value.accepting_publisher.to_vec(),
+            signature: proof.acceptance_signature.clone(),
+        },
+    ];
+    signatures.sort_by(|a, b| a.public_key.cmp(&b.public_key));
     Ok(SignedRecord {
         format: FORMAT.into(),
         canonical_record: proof.canonical.clone(),
-        signatures: vec![
-            RecordSignature {
-                public_key: value.prior_local_key.to_vec(),
-                signature: proof.local_signature.clone(),
-            },
-            RecordSignature {
-                public_key: value.accepting_publisher.to_vec(),
-                signature: proof.acceptance_signature.clone(),
-            },
-        ],
+        signatures,
     })
 }
 pub fn encode_acceptance(proof: &SignedOwnershipAcceptance) -> Result<SignedRecord, Error> {
@@ -91,16 +100,23 @@ pub fn decode_resolution(record: &SignedRecord) -> Result<SignedOwnershipResolut
     }
     let value = ThreadOwnershipResolution::decode(&record.canonical_record)
         .map_err(|_| Error::Protocol("invalid canonical ownership resolution"))?;
-    let [local, acceptor] = record.signatures.as_slice() else {
+    if record.signatures.len() != 2
+        || record.signatures[0].public_key >= record.signatures[1].public_key
+    {
         return Err(Error::Protocol(
-            "resolution needs ordered owner and recipient signatures",
-        ));
-    };
-    if local.public_key != value.local_owner || acceptor.public_key != value.accepting_publisher {
-        return Err(Error::Protocol(
-            "resolution signature roles differ from canonical record",
+            "resolution requires two canonical ordered signatures",
         ));
     }
+    let local = record
+        .signatures
+        .iter()
+        .find(|s| s.public_key == value.local_owner)
+        .ok_or(Error::Protocol("local resolution signature missing"))?;
+    let acceptor = record
+        .signatures
+        .iter()
+        .find(|s| s.public_key == value.accepting_publisher)
+        .ok_or(Error::Protocol("accepting resolution signature missing"))?;
     Ok(SignedOwnershipResolution {
         canonical: record.canonical_record.clone(),
         local_signature: local.signature.clone(),
@@ -110,7 +126,7 @@ pub fn decode_resolution(record: &SignedRecord) -> Result<SignedOwnershipResolut
 pub fn encode_resolution(proof: &SignedOwnershipResolution) -> Result<SignedRecord, Error> {
     let value = ThreadOwnershipResolution::decode(&proof.canonical)
         .map_err(|_| Error::Protocol("invalid ownership resolution"))?;
-    Ok(SignedRecord {
+    let mut record = SignedRecord {
         format: RESOLUTION_FORMAT.into(),
         canonical_record: proof.canonical.clone(),
         signatures: vec![
@@ -123,5 +139,9 @@ pub fn encode_resolution(proof: &SignedOwnershipResolution) -> Result<SignedReco
                 signature: proof.acceptance_signature.clone(),
             },
         ],
-    })
+    };
+    record
+        .signatures
+        .sort_by(|a, b| a.public_key.cmp(&b.public_key));
+    Ok(record)
 }

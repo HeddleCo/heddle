@@ -16,8 +16,9 @@ pub(super) fn before_lock() {
 
 #[test]
 fn concurrent_capture_and_native_rename_follow_repository_lock_order() {
-    use objects::lock::RepositoryLockExt;
     use std::{sync::mpsc, time::Duration};
+
+    use objects::lock::RepositoryLockExt;
 
     let directory = tempfile::tempdir().expect("repository directory");
     let capture = crate::Repository::init_default(directory.path()).expect("capture handle");

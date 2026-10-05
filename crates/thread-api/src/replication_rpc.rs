@@ -116,6 +116,7 @@ impl Peer {
         let thread = self.reference()?;
         let (_, version) = self.replica.sharing(&remote_key).map_err(store_error)?;
         let opening = ReplicationOpen {
+            native_authority: None,
             thread: Some(thread.clone()),
             facets: self
                 .facets

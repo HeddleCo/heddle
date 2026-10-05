@@ -104,6 +104,7 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         }
         Ok(Some((
             ReceivedOperation {
+                native_authority: None,
                 original: stored.original,
                 authority_admission: None,
                 import_authority: None,

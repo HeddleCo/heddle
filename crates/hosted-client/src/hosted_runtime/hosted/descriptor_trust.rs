@@ -149,7 +149,13 @@ pub(crate) async fn refresh_import_proofs(
     previous: Option<&api::witness_trust::VerifiedWitnessSet>,
 ) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
     let signed = lookup.fetch_set().await?;
-    let now = selected.now_unix_millis;
+    // A lookup may return a set issued after the request began. Verify at the
+    // receiver's current time; commit still rechecks the serialized trust.
+    let now = chrono::Utc::now().timestamp_millis();
+    let selected = api::witness_trust::SetExpectation {
+        now_unix_millis: now,
+        ..selected
+    };
     let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
     let mut prepared = bundle.clone();
     thread_api::hybrid::history::complete_bundle(lookup, &verified, &mut prepared, now)
@@ -165,6 +171,38 @@ pub(crate) async fn refresh_import_proofs(
         })?;
     prepared.witness_set = Some(signed);
     thread_api::hybrid::history::replace_receiver_metadata(bundle, prepared)?;
+    Ok(verified)
+}
+
+pub(crate) async fn refresh_native_proofs(
+    lookup: &HostedWitnessLookup,
+    bundle: &mut api::heddle::api::v1alpha2::NativePublicProofBundleV1,
+    selected: api::witness_trust::SetExpectation<'_>,
+    previous: Option<&api::witness_trust::VerifiedWitnessSet>,
+) -> super::Result<api::witness_trust::VerifiedWitnessSet> {
+    let signed = lookup.fetch_set().await?;
+    // A lookup may return a set issued after the request began. Verify at the
+    // receiver's current time; commit still rechecks the serialized trust.
+    let now = chrono::Utc::now().timestamp_millis();
+    let selected = api::witness_trust::SetExpectation {
+        now_unix_millis: now,
+        ..selected
+    };
+    let verified = api::witness_trust::verify_set(&signed, &selected, previous)?;
+    let mut prepared = bundle.clone();
+    thread_api::hybrid::history::complete_native_bundle(lookup, &verified, &mut prepared, now)
+        .await
+        .map_err(|error| match error {
+            thread_api::hybrid::history::Error::Rejected(error) => {
+                super::HostedError::Hybrid(error)
+            }
+            thread_api::hybrid::history::Error::Lookup(error) => error,
+            thread_api::hybrid::history::Error::NotFound => {
+                super::HostedError::Hybrid(api::hybrid_codec::Reject::Proof)
+            }
+        })?;
+    prepared.witness_set = Some(signed);
+    thread_api::hybrid::history::replace_native_receiver_metadata(bundle, prepared)?;
     Ok(verified)
 }
 
@@ -625,6 +663,100 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn witness_refresh_samples_time_after_lookup_for_both_carriers() {
+        use api::hybrid_codec::Reject;
+        use prost::Message as _;
+
+        use crate::hosted_runtime::device_rpc::hybrid_security_tests::{Fixture, sign_set};
+
+        let _guard = crate::test_process_env::exclusive().await;
+        for native in [false, true] {
+            let mut fixture = if native {
+                Fixture::native()
+            } else {
+                Fixture::new()
+            };
+            let mut fresh = if let Some(bundle) = &fixture.native_bundle {
+                bundle.witness_set.clone().expect("native set")
+            } else {
+                fixture.bundle.witness_set.clone().expect("import set")
+            };
+            let now = chrono::Utc::now().timestamp_millis();
+            let body = fresh.body.as_mut().expect("set body");
+            body.issued_at_unix_millis = now - 1000;
+            body.valid_until_unix_millis = now + 240_000;
+            sign_set(&mut fresh, 7);
+            let body = fresh.body.as_ref().expect("set body");
+            let authority = body.deployment_authority.clone();
+            let root_id = body.descriptor_root_id.clone();
+            let selected = api::witness_trust::SetExpectation {
+                authority: &authority,
+                root_id: &root_id,
+                root_public_key: &fixture.root.public_key,
+                root_epoch: 1,
+                now_unix_millis: now - 10_000,
+                clock_floor_unix_millis: 0,
+                known_job_keys: &[],
+            };
+            assert!(
+                matches!(
+                    api::witness_trust::verify_set(&fresh, &selected, None),
+                    Err(Reject::Expired)
+                ),
+                "the response was issued after the request's sampled time"
+            );
+            let mut lookup = HostedWitnessLookup::new(&authority, &config::ClientConfig::default())
+                .expect("selected HTTPS origin");
+            lookup.test_responses = Some(TestWitnessResponses {
+                set: Some(fresh.clone()),
+                proofs: vec![],
+            });
+            let verified = if let Some(bundle) = &mut fixture.native_bundle {
+                refresh_native_proofs(&lookup, bundle, selected, None).await
+            } else {
+                refresh_import_proofs(&lookup, &mut fixture.bundle, selected, None).await
+            }
+            .expect("fresh response verifies at receiver time after lookup");
+            assert_eq!(verified.body(), fresh.body.as_ref().expect("fresh body"));
+
+            let mut expired = fresh.clone();
+            let body = expired.body.as_mut().expect("set body");
+            body.issued_at_unix_millis = now - 241_000;
+            body.valid_until_unix_millis = now - 1000;
+            sign_set(&mut expired, 7);
+            api::witness_trust::verify_set(&expired, &selected, None)
+                .expect("the earlier request time would accept an already expired response");
+            lookup.test_responses = Some(TestWitnessResponses {
+                set: Some(expired),
+                proofs: vec![],
+            });
+            let before = if let Some(bundle) = &fixture.native_bundle {
+                bundle.encode_to_vec()
+            } else {
+                fixture.bundle.encode_to_vec()
+            };
+            let result = if let Some(bundle) = &mut fixture.native_bundle {
+                refresh_native_proofs(&lookup, bundle, selected, None).await
+            } else {
+                refresh_import_proofs(&lookup, &mut fixture.bundle, selected, None).await
+            };
+            assert!(matches!(
+                result,
+                Err(super::super::HostedError::Hybrid(Reject::Expired))
+            ));
+            let after = if let Some(bundle) = &fixture.native_bundle {
+                bundle.encode_to_vec()
+            } else {
+                fixture.bundle.encode_to_vec()
+            };
+            assert_eq!(
+                after, before,
+                "expired metadata never changes retained originals"
+            );
+        }
+    }
 
     #[test]
     fn proof_lookup_gate_requires_one_exact_version_and_feature_header() {

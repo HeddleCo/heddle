@@ -234,6 +234,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        native_authority: None,
                         import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),
@@ -357,6 +358,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        native_authority: None,
                         import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),
@@ -443,6 +445,7 @@ pub(super) async fn roundtrip(
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        native_authority: None,
                         import_authority: None,
                         boundary_acceptances: Vec::new(),
                         authority_admissions: Vec::new(),

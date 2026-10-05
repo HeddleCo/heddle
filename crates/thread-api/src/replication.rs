@@ -161,7 +161,7 @@ impl<B: ReplicaStore> Session<B> {
         Ok(self)
     }
     fn require_bundle_protocol(&self, batch: &ReplicationOperations) -> Result<()> {
-        if batch.import_authority.is_some() {
+        if batch.import_authority.is_some() || batch.native_authority.is_some() {
             api::import_authority::require_hybrid_peer(self.protocol.as_ref())
                 .map_err(|_| Error::Protocol("HYBRID operations require negotiated protocol"))?;
         }
@@ -520,7 +520,7 @@ impl<B: ReplicaStore> Session<B> {
         else {
             return Err(Error::Protocol("requested operation unavailable").into());
         };
-        if record.import_authority.is_some() {
+        if record.import_authority.is_some() || record.native_authority.is_some() {
             api::import_authority::require_hybrid_peer(self.protocol.as_ref())
                 .map_err(|_| Error::Protocol("HYBRID relay requires negotiated protocol"))?;
         }
@@ -529,6 +529,7 @@ impl<B: ReplicaStore> Session<B> {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
         Ok(Frame::Operations(ReplicationOperations {
+            native_authority: record.native_authority.as_deref().cloned(),
             boundary_acceptances: crate::boundary_acceptance::authority_evidence(
                 record.authority_admission.as_ref(),
             )
