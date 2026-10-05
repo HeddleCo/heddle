@@ -18,6 +18,12 @@ by Heddle. The API derives historical owner times, renewal order, narrowing and
 cumulative consumption. Durable install rejects recovery-only evidence;
 recovery reads expose its typed outcome and optional authenticated snapshot.
 Unwitnessed scheduled Commit and renewal tails do not become admitted history.
+Every retained Thread projection of a job constrains its next admission; those
+projections advance together so an older row cannot reset accepted history.
+Retained root history crosses exactly one selected epoch, requiring an admitted
+checkpoint before another root replacement.
+Transferred observations select a policy accepted in their new owner’s phase;
+the signer-based controls retain the earlier owner’s policy for earlier receipts.
 
 Renew checks current control availability and returns authority-only Applied.
 Retry selects the writer-only retry target and validates a fresh host attempt
@@ -37,7 +43,7 @@ JSON ordering are retained after comparing every generated record. Signatures
 are never edited by hand.
 
 Iteration proof at the PR head includes both workspace clippy configurations,
-66 crypto tests, 105 capability-verifier tests, 17 repository HYBRID tests,
+66 crypto tests, 105 capability-verifier tests, 29 repository trust tests,
 38 Thread API HYBRID tests, hosted import lifecycle tests, sibling Commit
 validation in both orders, and native/WASM differential seed 38322398.
 Final receipts will record the final Heddle SHA, the complete requested gate

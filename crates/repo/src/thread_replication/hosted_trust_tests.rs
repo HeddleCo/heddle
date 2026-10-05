@@ -209,6 +209,13 @@ fn cached_context_concurrent_revocation_and_root_replacement() {
         Err(Error::Hybrid(hybrid_codec::Reject::Root))
     ));
     replace_root(repo.heddle_dir(), &selected, &replacement).expect("explicit routine replacement");
+    assert!(
+        matches!(
+            replace_root(repo.heddle_dir(), &replacement, &selected),
+            Err(Error::Hybrid(hybrid_codec::Reject::StaleContext))
+        ),
+        "a retained checkpoint cannot skip an unadmitted root epoch"
+    );
     let mut fresh: host::SignedHostedWitnessSetV1 = record(&f, "revoked_set");
     let seed =
         hex::decode(f["keys"]["wrong_root"]["seed_hex"].as_str().expect("seed")).expect("bytes");
@@ -229,6 +236,16 @@ fn cached_context_concurrent_revocation_and_root_replacement() {
             Ok(())
         })
         .expect("known tombstones survive new root");
+    replace_root(repo.heddle_dir(), &replacement, &selected)
+        .expect("the admitted replacement can select its next epoch");
+    // Return to the root whose set the remaining tombstone controls use.
+    let mut original_root_set = fresh.clone();
+    resign(&f, &mut original_root_set);
+    trust
+        .mutate(&original_root_set, |_| Ok(()))
+        .expect("next epoch checkpoint");
+    replace_root(repo.heddle_dir(), &selected, &replacement)
+        .expect("subsequent explicit replacement");
     let mut enlarged = fresh.clone();
     enlarged.body.as_mut().expect("body").generation += 1;
     let entry = enlarged
@@ -763,9 +780,7 @@ fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() 
             repo.store(),
             |_| Ok(())
         ),
-        Err(Error::ImportAuthority(
-            heddleco_capability_verifier::Error::Hybrid(hybrid_codec::Reject::Scope)
-        ))
+        Err(Error::Hybrid(hybrid_codec::Reject::KeyRole))
     ));
     let db = crate::local_metadata::open(repo.heddle_dir()).expect("db");
     assert_eq!(
@@ -1301,6 +1316,33 @@ fn transferred_bundle(
     s.owner_id = owner.owner_id().to_vec();
     s.owner_state_hash = owner.state_hash().to_vec();
     s.ownership_transfer_sequence = 1;
+    // The new owner accepts the unchanged policy at its own transfer phase.
+    // Keep A's original policy so earlier observations resolve their own head.
+    let mut next_policy = bundle.policies[0].clone();
+    let policy = next_policy.body.as_mut().expect("policy body");
+    policy.expected_head = Some(wire::SignedPolicyHead {
+        state_hash: policy.policy_state_hash.clone(),
+        sequence: policy.sequence,
+    });
+    policy.sequence += 1;
+    policy.owner_id = owner.owner_id().to_vec();
+    policy.owner_state_hash = owner.state_hash().to_vec();
+    policy.ownership_transfer_sequence = 1;
+    policy.policy_state_hash = heddleco_capability_verifier::policy::policy_state_hash(policy)
+        .expect("post-transfer policy hash")
+        .to_vec();
+    next_policy.owner_signature = Some(wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(b_key.public_key()),
+        signature: b_key
+            .sign(
+                &heddleco_capability_verifier::policy::policy_signature_digest(policy)
+                    .expect("post-transfer policy digest"),
+            )
+            .expect("B policy signature"),
+    });
+    s.policy_sequence = policy.sequence;
+    s.policy_state_hash = policy.policy_state_hash.clone();
+    bundle.policies.push(next_policy);
     s.authority_digest = next_digest;
     s.original_signatures_digest = hybrid_codec::hash(&[&operation
         .job_signature
@@ -1348,7 +1390,7 @@ fn review_transfer_preserves_original_genesis_and_exact_historical_prefixes() {
     let device = Ed25519Signer::from_seed(&[72; 32]).expect("B device");
     let (bundle, authority, fork) = transferred_bundle(&f, &device);
     let records = [record(&f, "converted_main"), record(&f, "converted_dev")];
-    for existing in [true, false] {
+    for existing in [false, true] {
         let dir = tempfile::tempdir().expect("dir");
         let repo = crate::Repository::init_default(dir.path()).expect("repo");
         let selected = root(&f);
@@ -1380,6 +1422,37 @@ fn review_transfer_preserves_original_genesis_and_exact_historical_prefixes() {
         if existing {
             install(&bundle).expect("existing mixed-history control");
         }
+        let mut previous_policy = bundle.clone();
+        let previous_head = previous_policy.policies[0]
+            .body
+            .as_ref()
+            .expect("A policy")
+            .clone();
+        previous_policy.policies.truncate(1);
+        let statement = previous_policy
+            .statements
+            .iter_mut()
+            .find(|s| {
+                s.body
+                    .as_ref()
+                    .is_some_and(|s| s.purpose == 3 && s.ownership_transfer_sequence == 1)
+            })
+            .expect("B publication");
+        let body = statement.body.as_mut().expect("statement");
+        body.policy_sequence = previous_head.sequence;
+        body.policy_state_hash = previous_head.policy_state_hash;
+        statement.signature = seed_signer(&f, "witness")
+            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+            .expect("authentic wrong-policy observation");
+        api::import_authority::validate_public_bundle(&previous_policy)
+            .expect("wrong-policy control still has complete signed reference closure");
+        assert!(
+            matches!(
+                install(&previous_policy),
+                Err(Error::Hybrid(hybrid_codec::Reject::Scope))
+            ),
+            "a transferred owner must select its own accepted policy phase"
+        );
         let db = crate::local_metadata::open(repo.heddle_dir()).expect("db");
         let before: i64 = db
             .query_row("SELECT count(*) FROM hosted_import_admissions", [], |r| {
@@ -1564,6 +1637,81 @@ impl HybridReceiver {
         })
         .to_vec()
     }
+}
+
+#[test]
+fn hybrid_job_history_advances_unselected_threads_and_rejects_every_older_projection() {
+    let receiver = HybridReceiver::new();
+    let first = receiver.bundle.original_geneses[0].clone();
+    let second = receiver.bundle.original_geneses[1].clone();
+    let first_id = crypto::import_authority::verify_native_genesis(&first)
+        .expect("genesis")
+        .1
+        .id()
+        .expect("id");
+    let mut advanced = receiver.bundle.clone();
+    advanced
+        .authority_witnesses
+        .push(record(&receiver.fixture, "authority_admission_payload"));
+    advanced
+        .statements
+        .push(record(&receiver.fixture, "authority_admission"));
+    advanced
+        .history_proofs
+        .push(record(&receiver.fixture, "authority_proof"));
+    let install = |bundle: &wire::ImportPublicProofBundleV1, selected: &wire::SignedRecord| {
+        ThreadReplica::install_hybrid_import(
+            receiver.repo.heddle_dir(),
+            &receiver.trust,
+            &bundle.encode_to_vec(),
+            std::slice::from_ref(selected),
+            &receiver.authority,
+            &objects::store::InMemoryStore::new(),
+            |_| Ok(()),
+        )
+    };
+    install(&receiver.bundle, &first).expect("first Thread projection");
+    install(&advanced, &second).expect("another Thread advances the same job");
+    let db = crate::local_metadata::open(receiver.repo.heddle_dir()).expect("db");
+    let histories = || {
+        db.prepare("SELECT DISTINCT bundle FROM hosted_import_proofs WHERE authority=?1")
+            .expect("query")
+            .query_map([root(&receiver.fixture).authority], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .expect("rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("histories")
+    };
+    assert_eq!(
+        histories(),
+        vec![advanced.encode_to_vec()],
+        "unselected Thread history advances atomically"
+    );
+    // Restore a genuinely authenticated earlier projection, as retained before
+    // alpha.32. Its neighboring Thread still retains the later original.
+    db.execute(
+        "UPDATE hosted_import_proofs SET bundle=?2 WHERE thread=?1",
+        rusqlite::params![first_id.as_bytes(), receiver.bundle.encode_to_vec()],
+    )
+    .expect("earlier projection");
+    let before = histories();
+    assert_eq!(before.len(), 2);
+    assert_eq!(
+        before[0],
+        receiver.bundle.encode_to_vec(),
+        "older first-match control"
+    );
+    assert!(
+        matches!(
+            install(&receiver.bundle, &first),
+            Err(Error::Hybrid(hybrid_codec::Reject::HighWater))
+        ),
+        "same job must not lose another Thread's admitted originals"
+    );
+    assert_eq!(histories(), before, "rejection preserves every projection");
+    install(&advanced, &first).expect("complete history control");
+    assert_eq!(histories(), vec![advanced.encode_to_vec()]);
 }
 
 #[test]

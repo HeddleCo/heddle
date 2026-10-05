@@ -417,13 +417,9 @@ fn verify_import_history(
         )
         .collect::<Vec<_>>();
     let snapshot = context.import_witness_snapshot()?;
-    let verified = contract::verify_import_bundle_witnesses(
-        bundle,
-        &context.import_witness_pin(),
-        snapshot.as_ref(),
-        context.now_millis(),
-        &owners,
-        |bundle, statement| {
+    let mut verify_policy =
+        |bundle: &wire::ImportPublicProofBundleV1,
+         statement: Option<&host::HostedWitnessStatementV1>| {
             let verify = || -> Result<()> {
                 let statement = statement.ok_or(Reject::Scope)?;
                 let selection = authority.for_witness(statement)?;
@@ -483,13 +479,71 @@ fn verify_import_history(
                 Error::Hybrid(reason) => reason,
                 _ => Reject::Scope,
             })
-        },
+        };
+    let verified = contract::verify_import_bundle_witnesses(
+        bundle,
+        &context.import_witness_pin(),
+        snapshot.as_ref(),
+        context.now_millis(),
+        &owners,
+        &mut verify_policy,
     )?;
     if verified.evidence != contract::ImportBundleEvidence::Witnessed {
         return Err(Reject::Scope.into());
     }
-    // The existing transaction retains original bundles, job associations and
-    // its freshly verified witness set atomically with the installed records.
+    if let Some(snapshot) = snapshot {
+        let terminal = bundle.terminal_manifest.as_ref().ok_or(Reject::Canonical)?;
+        let spool = bundle
+            .delegations
+            .first()
+            .and_then(|d| d.body.as_ref())
+            .and_then(|d| d.identity.as_ref())
+            .map(|id| &id.spool_uuid);
+        let histories = snapshot
+            .accepted_history
+            .iter()
+            .filter(|old| {
+                old.terminal_manifest
+                    .as_ref()
+                    .is_some_and(|m| m.logical_job_id == terminal.logical_job_id)
+                    && old
+                        .delegations
+                        .first()
+                        .and_then(|d| d.body.as_ref())
+                        .and_then(|d| d.identity.as_ref())
+                        .map(|id| &id.spool_uuid)
+                        == spool
+            })
+            .collect::<Vec<_>>();
+        // A Thread projection can retain an older version of this same job.
+        // The API checks its first matching history; check every other version
+        // too, then advance all those projections together under this lock.
+        for old in histories.iter().skip(1) {
+            let mut previous = snapshot.clone();
+            previous.accepted_history = vec![(*old).clone()];
+            contract::verify_import_bundle_witnesses(
+                bundle,
+                &context.import_witness_pin(),
+                Some(&previous),
+                context.now_millis(),
+                &owners,
+                &mut verify_policy,
+            )?;
+        }
+        let current = bundle.encode_to_vec();
+        for old in histories {
+            context.sql().execute(
+                "UPDATE hosted_import_proofs SET bundle=?3 WHERE authority=?1 AND bundle=?2",
+                params![
+                    context.set().body().deployment_authority,
+                    old.encode_to_vec(),
+                    current
+                ],
+            )?;
+        }
+    }
+    // Original bundles, job associations and fresh witness trust commit with
+    // the installed records; rejection rolls every projection back together.
     Ok(())
 }
 
@@ -575,11 +629,8 @@ fn install_in(
         let selection = authority.for_policy(p)?;
         context.require_spool_selection(&selection)?;
         require_public_selection(bundle.into(), &owners, &selection)?;
-        selection.keyring.verify_current_owner(
-            selection.owner,
-            context.now_millis() / 1000,
-            selection.limits,
-        )?;
+        // A retained policy is historical evidence. The composition callback
+        // checks its selected owner at the authenticated observation time.
         if p.spool_uuid != selection.keyring.owner_genesis().spool_uuid()
             || p.owner_id != selection.owner.owner_id()
             || p.ownership_transfer_sequence

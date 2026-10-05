@@ -697,7 +697,9 @@ pub fn replace_root(
     let mut connection = crate::local_metadata::open(directory)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_root_role(&tx, &replacement.public_key)?;
-    let changed=tx.execute("UPDATE hosted_witness_trust SET root_id=?2,root_key=?3,root_epoch=root_epoch+1 WHERE authority=?1 AND root_id=?4 AND root_key=?5 AND root_epoch<9223372036854775807",params![expected.authority,replacement.root_id,replacement.public_key,expected.root_id,expected.public_key])?;
+    // Retained history may cross exactly one independently selected epoch.
+    // Admit a set under that root before selecting another replacement.
+    let changed=tx.execute("UPDATE hosted_witness_trust SET root_id=?2,root_key=?3,root_epoch=root_epoch+1 WHERE authority=?1 AND root_id=?4 AND root_key=?5 AND root_epoch<9223372036854775807 AND (signed_set IS NULL OR (root_id=history_root_id AND root_key=history_root_key))",params![expected.authority,replacement.root_id,replacement.public_key,expected.root_id,expected.public_key])?;
     if changed != 1 {
         return Err(Error::Hybrid(Reject::StaleContext));
     }
