@@ -14,7 +14,16 @@ use prost::Message;
 
 use super::{CallContextFactory, HostedClient};
 
-async fn exercise(corrupt: bool, truncated: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Echo {
+    Valid,
+    Missing,
+    Duplicate,
+    Late,
+    Widened,
+}
+
+async fn exercise(corrupt: bool, truncated: bool, echo: Echo) {
     let temp = tempfile::tempdir().expect("repository directory");
     let repo = repo::Repository::init_default(temp.path()).expect("repository");
     let wanted = Blob::from("selected immutable content\n");
@@ -119,6 +128,22 @@ async fn exercise(corrupt: bool, truncated: bool) {
                 length: 0,
             }))
         );
+        let mut accepted = read.budget.expect("requested budget");
+        if echo == Echo::Widened {
+            accepted.max_items += 1;
+        }
+        let budget_event = v2::ContentEvent {
+            // Weft's alpha.22 echo retains the exact revision and has an empty selection ID.
+            revision: Some(revision.clone()),
+            payload: Some(v2::content_event::Payload::AcceptedBudget(accepted)),
+            ..Default::default()
+        };
+        let echo_frame = encode_stream_message(&budget_event.encode_to_vec()).expect("budget echo");
+        // Buffer the whole finite response so a rejected echo cannot race server writes.
+        let mut response = Vec::new();
+        if !matches!(echo, Echo::Missing | Echo::Late) {
+            response.extend_from_slice(&echo_frame);
+        }
         let selection = read.selections[0].selection_id.clone();
         let chunk = v2::ContentEvent {
             selection_id: selection.clone(),
@@ -131,9 +156,10 @@ async fn exercise(corrupt: bool, truncated: bool) {
                 range_complete: true,
             })),
         };
-        send.write_all(&encode_stream_message(&chunk.encode_to_vec()).expect("chunk"))
-            .await
-            .expect("send chunk");
+        response.extend_from_slice(&encode_stream_message(&chunk.encode_to_vec()).expect("chunk"));
+        if matches!(echo, Echo::Duplicate | Echo::Late) {
+            response.extend_from_slice(&echo_frame);
+        }
         if !truncated {
             let complete = v2::ContentEvent {
                 selection_id: selection,
@@ -147,10 +173,13 @@ async fn exercise(corrupt: bool, truncated: bool) {
                     },
                 )),
             };
-            send.write_all(&encode_stream_message(&complete.encode_to_vec()).expect("completion"))
-                .await
-                .expect("send completion");
+            response.extend_from_slice(
+                &encode_stream_message(&complete.encode_to_vec()).expect("completion"),
+            );
         }
+        send.write_all(&response)
+            .await
+            .expect("finite content response");
         send.finish().expect("content FIN");
         connection.closed().await;
         server.close().await;
@@ -171,7 +200,7 @@ async fn exercise(corrupt: bool, truncated: bool) {
         .await;
     client.close().await;
     task.await.expect("native server finished");
-    if corrupt || truncated {
+    if corrupt || truncated || echo != Echo::Valid {
         assert!(
             result.is_err(),
             "unverified or incomplete content cannot be installed"
@@ -215,17 +244,25 @@ async fn exercise(corrupt: bool, truncated: bool) {
 #[tokio::test]
 async fn native_hydration_fetches_only_exact_missing_hash() {
     let _process_env_guard = crate::test_process_env::shared().await;
-    exercise(false, false).await;
+    exercise(false, false, Echo::Valid).await;
 }
 
 #[tokio::test]
 async fn native_hydration_rejects_content_that_does_not_hash_to_requested_object() {
     let _process_env_guard = crate::test_process_env::shared().await;
-    exercise(true, false).await;
+    exercise(true, false, Echo::Valid).await;
 }
 
 #[tokio::test]
 async fn native_hydration_requires_selection_completion_before_installing() {
     let _process_env_guard = crate::test_process_env::shared().await;
-    exercise(false, true).await;
+    exercise(false, true, Echo::Valid).await;
+}
+
+#[tokio::test]
+async fn native_hydration_rejects_invalid_budget_echo_before_installing() {
+    let _process_env_guard = crate::test_process_env::shared().await;
+    for echo in [Echo::Missing, Echo::Duplicate, Echo::Late, Echo::Widened] {
+        exercise(false, false, echo).await;
+    }
 }
