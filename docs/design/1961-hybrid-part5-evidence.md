@@ -98,7 +98,50 @@ import tip positives, strict default, seed exclusion, nonempty causal ancestry,
 exact carrier binding, import/native genesis policy, and honest owner intervals.
 Each isolated mutation must fail its named runtime assertion, restore byte-exact
 sources, then pass. Compilation failures and zero selected tests cannot count.
-Runtime receipts are appended after these proofs complete.
+All eight pairs passed on code commit
+`554b92fb9094b45e1c23e6babc8d197ecdccbe7e`. The final receipt commit changes
+only documentation; its Rust, manifests, fixtures and proof scripts are identical.
+
+Run the scoped proofs after committing:
+
+```bash
+python3 scripts/prove-native-witness-guards.py \
+  import-tip import-tip-strict-default import-tip-seed \
+  import-tip-causal-frontier import-tip-carrier-binding \
+  genesis-import-policy genesis-native-policy owner-effective-interval \
+  --output /tmp/heddle-part5-scoped-guards
+```
+
+Actual affected test output (each selection used a fresh `HEDDLE_HOME`):
+
+```text
+crypto import_authority: test result: ok. 32 passed; 0 failed
+capability import_delegation: test result: ok. 20 passed; 0 failed; 1 ignored
+object-model thread_replication: test result: ok. 37 passed; 0 failed
+repo hosted_trust_tests: test result: ok. 29 passed; 0 failed; 1 ignored
+repo owner_interval_tests: test result: ok. 1 passed; 0 failed
+Thread API HYBRID: test result: ok. 43 passed; 0 failed
+Thread API policy_tests (including added zero-record rejection): test result: ok. 5 passed; 0 failed
+Thread API fetch::staging: test result: ok. 16 passed; 0 failed
+Thread API fetch::provider: test result: ok. 4 passed; 0 failed
+hosted import_source: test result: ok. 36 passed; 0 failed
+hosted native_provider::tests: test result: ok. 2 passed; 0 failed
+ALL 8 FAIL-THEN-PASS PAIRS VERIFIED
+```
+
+Nightly rustfmt and `git diff --check` passed. Default affected all-target clippy
+passed for object-model, crypto, capability-verifier, repo and Thread API; default
+hosted-client library clippy passed. The client configuration passed all targets
+for all six touched crates. Both configurations deny warnings and dead code.
+The later receiver/test correction also passed repo/Thread API all-target clippy.
+The standalone source-transfer-only library build passed; its supplementary
+warnings-denied clippy still reports pre-existing native-only `StagedSource`
+fields unused without the native feature. No full feature matrix was run.
+
+Local receipts: `/tmp/heddle-part5-affected-*.log`,
+`/tmp/heddle-part5-clippy-*.log`, `/tmp/heddle-part5-regeneration-final.log`, and
+`/tmp/heddle-part5-scoped-guards/results.json`. The two ignored tests are fixture
+printing and the crash-test child entry point, not skipped owner regressions.
 
 ## Alpha.33 deletion/rework map
 
@@ -110,8 +153,8 @@ Runtime receipts are appended after these proofs complete.
 | Original window | `crates/capability-verifier/src/observed.rs:463`, line 527; `crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs:192` | Delete `HybridOriginalWindowEnded` mapping and renewal-only original-admission helpers. |
 | Scheduled Commit admission | `crates/capability-verifier/src/import_delegation.rs:313` and its admission tests | Rework Part 1d for same-transaction branch P1/P3 publication admission; Commit alone grants no genesis admission. |
 | Witness composition | `crates/repo/src/thread_replication/delegated_import.rs:523`, line 548, line 751 | Adopt the alpha.33 helper and single-delegation contract; preserve honest history/time selection and cumulative publication accounting. |
-| Original converter relation | `crates/crypto/src/import_authority.rs:125`, `crates/repo/src/thread_replication/delegated_import.rs:1090` | Simplify renewal-era converter/delegation pairing to the one-delegation job. |
-| Sibling preparation/window | `crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs:509`, line 603 | Audit sequential siblings and 24-hour advertised windows against alpha.33; regenerate signed vectors with its final tag. |
+| Original converter relation | `crates/crypto/src/import_authority.rs:125`, `crates/repo/src/thread_replication/delegated_import.rs:1114` | Simplify renewal-era converter/delegation pairing to the one-delegation job. |
+| Sibling preparation/window | `crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs:509`, line 608 | Audit sequential siblings and 24-hour advertised windows against alpha.33; regenerate signed vectors with its final tag. |
 
 Applied surfaces: Git import/native content, durable receivers, source transfer,
 replica export/ingest and independently authenticated wire evidence. No CLI verb,
