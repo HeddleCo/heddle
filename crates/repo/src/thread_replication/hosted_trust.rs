@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS hosted_witness_trust(
 CREATE TABLE IF NOT EXISTS hosted_import_job_keys(public_key BLOB PRIMARY KEY CHECK(length(public_key)=32),logical_job BLOB NOT NULL CHECK(length(logical_job)=16));
 CREATE TABLE IF NOT EXISTS hosted_import_proofs(thread BLOB PRIMARY KEY CHECK(length(thread)=32),authority TEXT NOT NULL,bundle BLOB NOT NULL CHECK(length(bundle)<=1048576));
 CREATE TABLE IF NOT EXISTS hosted_native_proofs(thread BLOB PRIMARY KEY CHECK(length(thread)=32),authority TEXT NOT NULL,bundle BLOB NOT NULL CHECK(length(bundle)<=1048576));
+CREATE TABLE IF NOT EXISTS pending_native_genesis_bindings(thread BLOB PRIMARY KEY CHECK(length(thread)=32),binding BLOB NOT NULL CHECK(length(binding)<=65536));
 CREATE TABLE IF NOT EXISTS hosted_native_genesis_bindings(thread BLOB PRIMARY KEY CHECK(length(thread)=32),binding BLOB NOT NULL CHECK(length(binding)<=65536));
 CREATE TABLE IF NOT EXISTS hosted_spool_lineage(spool BLOB PRIMARY KEY CHECK(length(spool)=16),genesis BLOB NOT NULL CHECK(length(genesis)=32),initial_owner BLOB NOT NULL CHECK(length(initial_owner)=32));
 CREATE TABLE IF NOT EXISTS hosted_import_admissions(operation BLOB PRIMARY KEY CHECK(length(operation)=32),authority TEXT NOT NULL,statement BLOB NOT NULL CHECK(length(statement)<=131072),proof BLOB CHECK(proof IS NULL OR length(proof)<=4096));

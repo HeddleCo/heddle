@@ -244,7 +244,7 @@ pub fn verify_import_delegation_binding(
 }
 
 /// Verify the frozen creator binding and original StartThread capability.
-#[wasm_bindgen(js_name = verifyNativeGenesisAuthority, unchecked_return_type = "ImportSummary")]
+#[wasm_bindgen(js_name = verifyNativeGenesisAuthority, unchecked_return_type = "NativeGenesisSummary")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_native_genesis_authority_binding(
     binding: &[u8],
@@ -275,9 +275,7 @@ pub fn verify_native_genesis_authority_binding(
         ttl,
     )
     .map_err(verification_error)?;
-    object(&ImportSummary {
-        certificate_digest_hex: hex::encode(digest),
-    })
+    object(&digest)
 }
 
 /// Exact crate version backing this generated package.
@@ -476,6 +474,11 @@ export interface PolicySummary {
 export interface ImportSummary {
   certificate_digest_hex: string;
 }
+/** Account verifies StartThread authority. LocalKey verifies only its creator
+ * binding and MUST acquire a separately verified hosting ownership claim. */
+export type NativeGenesisSummary =
+  | { certificate_digest_hex: string; owner_kind: "account"; requires_hosting_claim: false }
+  | { certificate_digest_hex: string; owner_kind: "local_key"; requires_hosting_claim: true };
 export type PurgeDecision = "purge" | { deny: "over-limit" | "malformed" | "invalid-proof" | "genesis-binding" | "stale-owner" | "capability" | "direct-only" | "operation-binding" | "time" };
 export type VerificationErrorCode =
   "invalid" |

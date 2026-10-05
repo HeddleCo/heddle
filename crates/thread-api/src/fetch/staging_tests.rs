@@ -305,6 +305,45 @@ fn fixture(
 }
 
 #[cfg(feature = "native")]
+fn install_unwitnessed(
+    staged: StagedSource,
+    repository: &repo::Repository,
+) -> Result<objects::object::StateId, Error> {
+    use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock, TrustTransaction};
+
+    use crate::hybrid::authority::{
+        AcceptedHistory, SelectedAuthority,
+        tests::{bundle, selected},
+    };
+    let bundle = bundle();
+    let limits = heddleco_capability_verifier::VerificationLimits::new(3600).expect("limits");
+    let pinned = selected(&bundle, limits);
+    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1100, limits)
+        .expect("selected history");
+    let authority = SelectedAuthority::new(
+        history,
+        bundle,
+        |_: &crate::contract::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+    );
+    repo::thread_replication::hosted_trust::select_root(
+        repository.heddle_dir(),
+        &repo::thread_replication::hosted_trust::RootSelection {
+            authority: "https://weft.example.test".into(),
+            root_id: "unused-root".into(),
+            public_key: [1; 32],
+        },
+    )
+    .expect("independent root");
+    let trust = HostedTrust::open(
+        repository.heddle_dir(),
+        "https://weft.example.test",
+        SystemClock,
+    )
+    .expect("trust");
+    staged.install_hosted(repository, &trust, &authority, 1100)
+}
+
+#[cfg(feature = "native")]
 fn installation_fixture(
     scratch: &Path,
 ) -> (
@@ -372,7 +411,7 @@ fn verify_before_install_rejects_without_partial_repository_mutation() {
     operations[0] = SignedOperation::sign(&operation, &stranger).expect("valid original signature");
     let staged = validate(directory, ready, operations, vec![])
         .expect("structural staging is not ownership authority");
-    assert!(staged.install(&repository, 1100).is_err());
+    assert!(install_unwitnessed(staged, &repository).is_err());
     assert!(
         !repository.heddle_dir().join("spool-id").exists(),
         "rejection must precede Spool mutation"
@@ -397,7 +436,7 @@ fn verify_before_install_rejects_without_partial_repository_mutation() {
     let staged =
         validate(directory, ready, operations, vec![]).expect("valid structural local source");
     assert!(matches!(
-        staged.install(&repository, 1100),
+        install_unwitnessed(staged, &repository),
         Err(Error::HostedTrustRequired)
     ));
     // Witnessed passing controls exercise install_hosted in hybrid::native_tests.
@@ -435,14 +474,13 @@ fn structural_staging_never_authorizes_an_account_genesis() {
     operations[0] = SignedOperation::sign(&operation, &signer).expect("original signature");
     let staged = validate(directory, ready, operations, vec![]).expect("structural originals");
     assert!(matches!(
-        staged.install(&repository, 1100),
+        install_unwitnessed(staged, &repository),
         Err(Error::HostedTrustRequired)
     ));
     assert!(!repository.heddle_dir().join("spool-id").exists());
     let (directory, ready, operations, _) = installation_fixture(scratch.path());
-    validate(directory, ready, operations, vec![])
-        .expect("local originals")
-        .install(&repository, 1100)
+    let staged = validate(directory, ready, operations, vec![]).expect("local originals");
+    install_unwitnessed(staged, &repository)
         .expect_err("local originals on Weft still require hosted witness trust");
 }
 #[test]

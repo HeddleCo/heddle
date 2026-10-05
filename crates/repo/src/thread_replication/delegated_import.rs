@@ -1201,11 +1201,19 @@ fn replica_genesis(
         },
     )?)
 }
-fn retain_bundle(
+pub(super) fn retain_bundle(
     context: &TrustTransaction<'_>,
     thread: &ContentHash,
     bundle: &wire::ImportPublicProofBundleV1,
 ) -> Result<()> {
+    let native: bool = context.sql().query_row(
+        "SELECT EXISTS(SELECT 1 FROM hosted_native_proofs WHERE thread=?1)",
+        [thread.as_bytes()],
+        |r| r.get(0),
+    )?;
+    if native {
+        return Err(Reject::Scope.into());
+    }
     let old: Option<Vec<u8>> = context
         .sql()
         .query_row(

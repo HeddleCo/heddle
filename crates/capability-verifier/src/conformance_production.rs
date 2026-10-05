@@ -41,7 +41,7 @@ pub fn evaluate(case: &Value) -> Result<Value> {
                     now,
                     ttl,
                 )?;
-                Ok(json!({"certificate_digest_hex": hex::encode(digest)}))
+                serde_json::to_value(digest)
             }
             Some("owner-root") => {
                 serde_json::to_value(observed::verify_owner_root_bytes(&bytes("root_hex")?)?)

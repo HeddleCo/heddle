@@ -121,7 +121,6 @@ impl ThreadReplica {
                 // this transaction, after install_in verified the whole bundle.
                 for signed in prepared.operations {
                     let op = signed.verify()?;
-                    let id = op.id()?;
                     if op.source_state()?.is_none()
                         || !records.iter().any(|r| {
                             r.format == objects::object::thread_replication::OPERATION_FORMAT
@@ -135,7 +134,7 @@ impl ThreadReplica {
                             "witnessed publication original absent".into(),
                         ));
                     }
-                    let accepted: bool = context.sql().query_row("SELECT EXISTS(SELECT 1 FROM operations o LEFT JOIN hosted_import_admissions a ON a.operation=o.id WHERE o.id=?1 AND o.thread=?2 AND o.canonical=?3 AND o.signature=?4 AND o.status=1 AND (a.operation IS NOT NULL OR EXISTS(SELECT 1 FROM hosted_native_proofs p WHERE p.thread=o.thread)))", params![id.as_bytes(),op.thread.as_bytes(),signed.canonical,signed.signature], |r| r.get(0))?;
+                    let accepted = settled_source(context.sql(), signed, native)?;
                     if !accepted {
                         return Err(Error::Invalid(
                             "witnessed publication source did not settle".into(),
@@ -258,6 +257,89 @@ impl ThreadReplica {
     }
 }
 
+fn settled_source(
+    tx: &rusqlite::Transaction<'_>,
+    signed: &SignedOperation,
+    native: bool,
+) -> Result<bool> {
+    let op = signed.verify()?;
+    let id = op.id()?;
+    let local = native
+        && matches!(
+            op.source_author()?,
+            Some(objects::object::thread_replication::SourceAuthor::LocalKey)
+        )
+        && native_local_source_covered(tx, &op)?;
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o LEFT JOIN hosted_import_admissions a ON a.operation=o.id WHERE o.id=?1 AND o.thread=?2 AND o.canonical=?3 AND o.signature=?4 AND o.status=1 AND (a.operation IS NOT NULL OR (?5 AND EXISTS(SELECT 1 FROM hosted_native_proofs p WHERE p.thread=o.thread))))", params![id.as_bytes(),op.thread.as_bytes(),signed.canonical,signed.signature,local], |r|r.get(0))?)
+}
+fn native_local_source_covered(
+    tx: &rusqlite::Transaction<'_>,
+    op: &ThreadOperation,
+) -> Result<bool> {
+    use objects::object::thread_replication::{
+        GenesisOwner, ThreadGenesis, ownership_claim::ThreadOwnershipClaim,
+        ownership_resolution::ThreadOwnershipResolution,
+    };
+    let genesis: Vec<u8> = tx.query_row(
+        "SELECT genesis FROM threads WHERE id=?1",
+        [op.thread.as_bytes()],
+        |r| r.get(0),
+    )?;
+    if ThreadGenesis::decode(&genesis)?.owner != GenesisOwner::LocalKey(op.publisher) {
+        return Ok(false);
+    }
+    let mut query = tx.prepare("SELECT canonical FROM thread_owner_claims WHERE thread=?1")?;
+    let mut claims = std::collections::BTreeMap::new();
+    for bytes in query.query_map([op.thread.as_bytes()], |r| r.get::<_, Vec<u8>>(0))? {
+        let claim = ThreadOwnershipClaim::decode(&bytes?)?;
+        claims.insert(claim.id()?, claim);
+    }
+    if claims.is_empty() {
+        return Ok(false);
+    }
+    let resolution: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT canonical FROM thread_owner_resolutions WHERE thread=?1",
+            [op.thread.as_bytes()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut resolutions = std::collections::BTreeMap::new();
+    if let Some(bytes) = resolution {
+        resolutions.insert(op.thread, ThreadOwnershipResolution::decode(&bytes)?);
+    }
+    let mut cutoffs = super::native_witness::ownership_cutoffs(
+        &std::collections::BTreeMap::from([(op.thread, claims)]),
+        &resolutions,
+    )?;
+    let mut pending = cutoffs
+        .remove(&op.thread)
+        .ok_or(api::hybrid_codec::Reject::Scope)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let id = op.id()?;
+    while let Some(head) = pending.pop() {
+        if !seen.insert(head) {
+            continue;
+        }
+        let accepted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND thread=?2 AND status=1)",
+            params![head.as_bytes(), op.thread.as_bytes()],
+            |r| r.get(0),
+        )?;
+        if !accepted {
+            return Ok(false);
+        }
+        if head == id {
+            return Ok(true);
+        }
+        let mut parents = tx.prepare("SELECT parent FROM parents WHERE child=?1")?;
+        for parent in parents.query_map([head.as_bytes()], |r| r.get::<_, Vec<u8>>(0))? {
+            pending.push(super::hash(&parent?)?);
+        }
+    }
+    Ok(false)
+}
+
 fn command_replay(
     tx: &rusqlite::Transaction<'_>,
     command: &Command<'_>,
@@ -316,6 +398,147 @@ mod tests {
     };
 
     use super::*;
+    #[test]
+    fn publication_settle_requires_admission_or_native_local_claim_coverage() {
+        use objects::object::{
+            CollaborationActor, thread_replication::ownership_claim::ThreadOwnershipClaim,
+        };
+        let root = tempfile::tempdir().expect("repository");
+        let repository = crate::Repository::init_default(root.path()).expect("init");
+        let signer = Ed25519Signer::from_seed(&[41; 32]).expect("local");
+        let acceptor = Ed25519Signer::from_seed(&[42; 32]).expect("account");
+        let key = signer.public_key().try_into().expect("key");
+        let base = repository.head().expect("head").expect("base");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: uuid::Uuid::from_u128(43).to_string(),
+            owner: GenesisOwner::LocalKey(key),
+            creator: key,
+            parent: None,
+            base,
+            name: "settled".into(),
+            intent: String::new(),
+            nonce: vec![1],
+        };
+        let replica = ThreadReplica::create(
+            repository.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).expect("genesis"),
+        )
+        .expect("Thread");
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![base],
+            Attribution::human(Principal::new("owner", "")),
+        );
+        let op = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: Default::default(),
+            publisher: key,
+            body: ThreadOperationBody::Capture(AuthoredCapture::local(
+                replica
+                    .prepare_capture(&repository, &state)
+                    .expect("references"),
+            )),
+        };
+        let signed = SignedOperation::sign(&op, &signer).expect("source");
+        replica
+            .receive(&signed, repository.store(), |_| Ok(()))
+            .expect("local acceptance");
+        let mut db = replica.connect().expect("db");
+        let tx = db.transaction().expect("tx");
+        tx.execute(
+            "INSERT INTO hosted_native_proofs VALUES(?1,?2,?3)",
+            params![
+                replica.thread_id().as_bytes(),
+                "https://weft.example.test",
+                vec![1u8]
+            ],
+        )
+        .expect("proof row");
+        assert!(
+            !settled_source(&tx, &signed, true).expect("settled"),
+            "a native proof row alone cannot authorize local work"
+        );
+        let claim = ThreadOwnershipClaim {
+            version: 1,
+            thread: replica.thread_id(),
+            prior_local_key: key,
+            accepting_publisher: acceptor.public_key().try_into().expect("key"),
+            acceptance: objects::object::thread_replication::SourceAuthor::account(
+                uuid::Uuid::from_u128(43),
+                CollaborationActor {
+                    principal_id: uuid::Uuid::from_u128(44),
+                    agent_id: None,
+                },
+                vec![5; 32],
+            )
+            .expect("author"),
+            source_frontier: [op.id().expect("id")].into(),
+        };
+        let original =
+            crypto::thread_ownership_claim::SignedOwnershipClaim::sign(&claim, &signer, &acceptor)
+                .expect("claim");
+        let mut signatures = vec![
+            api::heddle::api::v1alpha2::RecordSignature {
+                public_key: key.to_vec(),
+                signature: original.local_signature,
+            },
+            api::heddle::api::v1alpha2::RecordSignature {
+                public_key: claim.accepting_publisher.to_vec(),
+                signature: original.acceptance_signature,
+            },
+        ];
+        signatures.sort_by(|a, b| a.public_key.cmp(&b.public_key));
+        replica
+            .install_verified_claim_in(
+                &tx,
+                &api::heddle::api::v1alpha2::SignedRecord {
+                    format: objects::object::thread_replication::ownership_claim::FORMAT.into(),
+                    canonical_record: original.canonical,
+                    signatures,
+                },
+            )
+            .expect("retained verified claim");
+        assert!(
+            settled_source(&tx, &signed, true).expect("settled"),
+            "native work within signed cutoff passes"
+        );
+        assert!(
+            !settled_source(&tx, &signed, false).expect("settled"),
+            "import arm cannot borrow native claim coverage"
+        );
+        tx.execute(
+            "INSERT INTO hosted_import_admissions VALUES(?1,?2,?3,NULL)",
+            params![
+                op.id().expect("id").as_bytes(),
+                "https://weft.example.test",
+                vec![2u8]
+            ],
+        )
+        .expect("admission row");
+        assert!(
+            settled_source(&tx, &signed, false).expect("settled"),
+            "exact accepted original with its own admission passes import"
+        );
+        tx.execute("DELETE FROM hosted_import_admissions", [])
+            .expect("remove admission control");
+        let changed = SignedOperation {
+            signature: vec![0; 64],
+            ..signed.clone()
+        };
+        assert!(
+            settled_source(&tx, &changed, true).is_err(),
+            "invalid original signature cannot settle"
+        );
+        tx.execute("DELETE FROM thread_owner_claims", [])
+            .expect("remove claims");
+        assert!(
+            !settled_source(&tx, &signed, true).expect("settled"),
+            "accepted local work without its signed cutoff must reject"
+        );
+    }
+
     #[test]
     fn publication_receipt_and_source_availability_commit_or_roll_back_together() {
         let root = tempfile::tempdir().expect("repository");

@@ -90,3 +90,10 @@ test("verifyImportDelegation: native positive TTL preserved", () => assert.throw
   () => wasm.verifyImportDelegation(...importArgs.map((arg, i) => i === 11 ? 0n : arg)),
   error => { typed(error); assert.equal(error.code, "invalid"); assert.match(error.message, /TTL ceiling must be positive/); return true; },
 ));
+
+for (const [id, kind, requiresClaim] of [["start_thread", "account", false], ["local_adopt_push", "local_key", true]]) {
+  const c = fixture("fixtures/native-genesis-v1.json").cases.find(c => c.id === id);
+  const result = wasm.verifyNativeGenesisAuthority(bytes(c.binding_hex), bytes(c.original_hex), bytes(c.envelope_hex), bytes(c.keyring_hex), bytes(c.current_owner_hex), bytes(c.initial_owner_hex), bytes(c.spool_genesis_hex), "[]", "[]", 1100n, 3600n);
+  assert.equal(result.owner_kind, kind, "native binding kind must be explicit");
+  assert.equal(result.requires_hosting_claim, requiresClaim, "LocalKey binding needs separate hosted authority");
+}

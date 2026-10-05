@@ -39,11 +39,15 @@ The corrected owner-chain vectors are enabled; there is no alpha.28 skip.
   already expired response cannot borrow the earlier request time. Both native
   and import carriers exercise that timing rule and preserve originals on refusal.
 - CLI/client StartThread freezes authority and genesis, signs the creator
-  binding, then signs request PoP. Local adopt retains the original local key
+  binding as pending, then signs request PoP. Success finalizes the exact binding;
+  failed attempts remain outside public genesis records. Retry reselects owner
+  history and recomputes pending bindings after rotation. Local adopt retains the original local key
   and publishes its explicit claim. Present bindings require capable peers and
   advertise protocol 2; `SYNC_MANDATORY_GATE` stays **off**.
 - The production WASM binding exposes `verifyNativeGenesisAuthority` with
-  checked bigint time/TTL inputs. Native/WASM conformance includes native
+  checked bigint time/TTL inputs and a discriminated `NativeGenesisSummary`.
+  Account verifies StartThread authority; LocalKey verifies only its creator
+  binding and explicitly requires a separate hosting claim. Native/WASM conformance includes native
   creator-binding, envelope, lineage, expiry and revocation cases.
 
 ## Tests and discriminating controls
@@ -116,3 +120,34 @@ conversion and original attribution. Wire fields come from the pinned API;
 no view RPC or server-minted client root is added. Reverse states are exercised
 by atomic rollback, ownership resolution, stale/revoked trust, proof refresh,
 replay and exact-original export.
+
+## PR #1968 review follow-up
+
+The branch plain-merges integration's #1970 Commit admission verifier. Native
+lineage remains job independent; Commit admission retains historical selection,
+key-role and publication gates.
+
+Native and import retention now reject the opposite arm explicitly, independent
+of shared admissions. Publication's settled check requires either the operation's
+own admission or, only for the native arm, a LocalKey original covered by the
+signed ownership decision. The always-refusing `StagedSource::install` entry
+point is deleted; staging tests call the selected hosted install path.
+
+Permanent production guard tests cover requested account captures absent from
+every carrier payload and requested claims without purpose 2, equal-frontier
+ownership conflicts, missing admitted conflict members, orphan resolutions,
+job/authority creator keys, ambiguous owner chains, duplicate genesis admissions,
+both directions of proof exclusivity, exact Ready bindings, and carrier-less
+hosted export. Requested-record tests run the main atomic installer and assert
+unchanged records, claims, resolutions, bindings, witness trust and artifacts.
+The ownership decision and genesis accumulation seams are tested directly where
+portable closure checks or the shared first-admission gate would mask removal.
+
+Run `python3 scripts/prove-native-witness-guards.py` on the committed source.
+The script archives that commit, changes one guard at a time, requires the named
+runtime assertion to fail, restores exact source bytes, and reruns the identical
+filter to pass. It also proves publication cutoff/arm checks, typed native
+summaries, pending/final binding ordering, rotation-aware retries, and the
+version-6 to version-7 pending-table migration. Each receipt includes SHA,
+command, exit, duration and log; compilation failures and empty filters reject.
+The Part 4 and Part 2 guard families remain part of the final gate.

@@ -2756,3 +2756,63 @@ fn hybrid_crash_recovers_config_before_repository_readers() {
         before
     );
 }
+
+#[test]
+fn native_and_import_retention_are_exclusive_without_shared_admissions() {
+    use super::{delegated_import, native_witness};
+    let f = fixture();
+    let current: host::SignedHostedWitnessSetV1 = record(&f, "current_set");
+    let imported: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let native = wire::NativePublicProofBundleV1 {
+        format_version: 1,
+        ..Default::default()
+    };
+    let thread = objects::object::ContentHash::from_bytes([42; 32]);
+    for native_first in [false, true] {
+        let dir = tempfile::tempdir().expect("repository");
+        let repository = crate::Repository::init_default(dir.path()).expect("init");
+        let selected = root(&f);
+        select_root(repository.heddle_dir(), &selected).expect("root");
+        let trust = HostedTrust::open(
+            repository.heddle_dir(),
+            &selected.authority,
+            TestClock::new(1_100_000),
+        )
+        .expect("trust");
+        // Exercise storage exclusivity directly: neither test relies on the
+        // shared first-admission table to reject a cross-arm refresh.
+        trust
+            .mutate(&current, |c| {
+                if native_first {
+                    native_witness::retain_bundle(c, thread, &native)
+                } else {
+                    delegated_import::retain_bundle(c, &thread, &imported)
+                }
+            })
+            .expect("first arm control");
+        let db = crate::local_metadata::open(repository.heddle_dir()).expect("db");
+        let admissions: i64 = db
+            .query_row("SELECT count(*) FROM hosted_import_admissions", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(admissions, 0);
+        let result = trust.mutate(&current, |c| {
+            if native_first {
+                delegated_import::retain_bundle(c, &thread, &imported)
+            } else {
+                native_witness::retain_bundle(c, thread, &native)
+            }
+        });
+        assert!(
+            matches!(result, Err(Error::Hybrid(hybrid_codec::Reject::Scope))),
+            "cross-arm retention must reject without shared admissions"
+        );
+        let counts:(i64,i64)=db.query_row("SELECT (SELECT count(*) FROM hosted_native_proofs),(SELECT count(*) FROM hosted_import_proofs)",[],|r|Ok((r.get(0)?,r.get(1)?))).expect("counts");
+        assert_eq!(
+            counts,
+            if native_first { (1, 0) } else { (0, 1) },
+            "refusal preserves the first arm"
+        );
+    }
+}

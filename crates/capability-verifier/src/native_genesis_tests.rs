@@ -48,7 +48,7 @@ fn input(name: &str) -> Value {
     let p = &bundle.genesis_witnesses[0];
     json!({"id":name,"api":"native-genesis","binding_hex":hex::encode(p.binding.clone().unwrap_or_default().encode_to_vec()),"original_hex":hex::encode(p.original_genesis.as_ref().expect("original").encode_to_vec()),"envelope_hex":hex::encode(&p.creator_authority_envelope),"keyring_hex":hex::encode(keyring.encode_to_vec()),"current_owner_hex":hex::encode(observed.encode_to_vec()),"initial_owner_hex":hex::encode(owner.owner_id()),"spool_genesis_hex":hex::encode(digest),"revoked_keys_json":"[]","revoked_credentials_json":"[]","now":"1100","max_ttl":"3600","expected_accept":true})
 }
-fn verify(c: &Value) -> crate::Result<Vec<u8>> {
+fn verify(c: &Value) -> crate::Result<super::native_genesis::NativeGenesisSummary> {
     let bytes = |field: &str| hex::decode(c[field].as_str().expect("hex field")).expect("hex");
     super::native_genesis::verify_bytes(
         &bytes("binding_hex"),
@@ -176,4 +176,22 @@ fn native_creator_binding_checks_lineage_envelope_time_and_revocation() {
         serde_json::to_string_pretty(&json!({"cases":cases})).expect("JSON"),
     )
     .expect("parity corpus");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn native_summary_distinguishes_account_authority_from_local_binding() {
+    for (name, kind, requires_claim) in [
+        ("start_thread", "account", false),
+        ("local_adopt_push", "local_key", true),
+    ] {
+        let outcome =
+            serde_json::to_value(verify(&input(name)).expect("verified binding")).expect("summary");
+        assert_eq!(
+            outcome["owner_kind"],
+            json!(kind),
+            "binding kind must be explicit"
+        );
+        assert_eq!(outcome["requires_hosting_claim"], json!(requires_claim));
+    }
 }

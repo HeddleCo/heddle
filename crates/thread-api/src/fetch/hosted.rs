@@ -177,13 +177,7 @@ impl StagedSource {
         }
         if let Some(bundle) = native {
             for wrapper in std::iter::once(main).chain(&self.dependencies) {
-                if !bundle.genesis_witnesses.iter().any(|p| {
-                    p.original_genesis == wrapper.genesis
-                        && p.creator_authority_envelope == wrapper.creator_authority
-                        && p.binding == wrapper.native_genesis_authority
-                }) {
-                    return Err(api::hybrid_codec::Reject::GenesisBinding.into());
-                }
+                require_native_genesis_match(bundle, wrapper)?;
             }
         }
         let state = self.state.id();
@@ -282,6 +276,66 @@ impl StagedSource {
                 .map_err(preparation)?;
         }
         Ok((state, receipt))
+    }
+}
+
+fn require_native_genesis_match(
+    bundle: &crate::contract::NativePublicProofBundleV1,
+    wrapper: &crate::contract::ThreadGenesisRecord,
+) -> Result<(), Error> {
+    if !bundle.genesis_witnesses.iter().any(|p| {
+        p.original_genesis == wrapper.genesis
+            && p.creator_authority_envelope == wrapper.creator_authority
+            && p.binding == wrapper.native_genesis_authority
+    }) {
+        return Err(api::hybrid_codec::Reject::GenesisBinding.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn native_ready_binding_must_match_the_exact_witnessed_genesis() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native-host-witness-v1.json"
+        ))
+        .expect("vectors");
+        let bundle: crate::contract::NativePublicProofBundleV1 = api::hybrid_codec::strict_decode(
+            &hex::decode(
+                fixture["wire_vectors"]["start_thread"]["wire_hex"]
+                    .as_str()
+                    .expect("wire"),
+            )
+            .expect("hex"),
+            api::import_authority::MAX_BUNDLE_BYTES,
+        )
+        .expect("bundle");
+        let p = &bundle.genesis_witnesses[0];
+        let control = crate::contract::ThreadGenesisRecord {
+            genesis: p.original_genesis.clone(),
+            creator_authority: p.creator_authority_envelope.clone(),
+            native_genesis_authority: p.binding.clone(),
+            ..Default::default()
+        };
+        require_native_genesis_match(&bundle, &control).expect("exact Ready control");
+        for field in 0..3 {
+            let mut changed = control.clone();
+            match field {
+                0 => changed.genesis = None,
+                1 => changed.creator_authority.push(0),
+                _ => changed.native_genesis_authority = None,
+            }
+            assert!(
+                matches!(
+                    require_native_genesis_match(&bundle, &changed),
+                    Err(Error::Hybrid(api::hybrid_codec::Reject::GenesisBinding))
+                ),
+                "Ready original, envelope and binding must match"
+            );
+        }
+        require_native_genesis_match(&bundle, &control).expect("unchanged Ready control");
     }
 }
 

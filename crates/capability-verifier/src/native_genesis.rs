@@ -7,6 +7,27 @@ use crate::{
     thread_control_authority::{self, Context, Revocation},
 };
 
+/// Successful verification reports whether StartThread account authority was
+/// checked or only a LocalKey binding (which still needs a hosted claim).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeOwnerKind {
+    /// Original account StartThread authority was verified.
+    Account,
+    /// Creator binding only; hosted ownership requires a separate claim.
+    LocalKey,
+}
+/// Typed result of portable native creator verification.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct NativeGenesisSummary {
+    /// Digest of the exact signed creator binding.
+    pub certificate_digest_hex: String,
+    /// Immutable genesis owner variant that was verified.
+    pub owner_kind: NativeOwnerKind,
+    /// True when this result grants no account hosting authority.
+    pub requires_hosting_claim: bool,
+}
+
 /// Verify the binding against independently verified owner and Spool history.
 /// Boundary acceptance must additionally verify its current accepting authority.
 pub fn verify_binding(
@@ -90,7 +111,7 @@ pub fn verify_bytes(
     revoked_credentials_json: &str,
     now: i64,
     max_ttl: i64,
-) -> Result<Vec<u8>> {
+) -> Result<NativeGenesisSummary> {
     let limits = crate::VerificationLimits::new(max_ttl)?;
     let (keyring, owner) = crate::observed::ownership(keyring, current_owner, now, limits)?;
     let initial = crate::canonical::fixed(initial_owner, "selected initial owner")?;
@@ -144,5 +165,19 @@ pub fn verify_bytes(
             Revocation::Credential(id) => lists[1].iter().any(|v| v == id),
         },
     )?;
-    Ok(native_witness::signed_genesis_digest(&binding)?)
+    let owner_kind = match binding
+        .body
+        .as_ref()
+        .ok_or(Reject::GenesisBinding)?
+        .owner_kind
+    {
+        1 => NativeOwnerKind::Account,
+        2 => NativeOwnerKind::LocalKey,
+        _ => return Err(Reject::GenesisBinding.into()),
+    };
+    Ok(NativeGenesisSummary {
+        certificate_digest_hex: hex::encode(native_witness::signed_genesis_digest(&binding)?),
+        requires_hosting_claim: owner_kind == NativeOwnerKind::LocalKey,
+        owner_kind,
+    })
 }

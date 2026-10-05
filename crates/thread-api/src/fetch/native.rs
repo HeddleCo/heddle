@@ -16,15 +16,6 @@ pub struct OwnedDeviceBinding<'a> {
 }
 
 impl StagedSource {
-    /// Hosted originals require independently selected witness and owner
-    /// context through `install_hosted`, including LocalKey history.
-    pub fn install(
-        self,
-        _repository: &Repository,
-        _now_unix_seconds: i64,
-    ) -> Result<StateId, Error> {
-        Err(Error::HostedTrustRequired)
-    }
     /// Verify a privately owned device through independent account authority.
     /// Originals must already belong to this exact Spool.
     pub fn install_owned_device(

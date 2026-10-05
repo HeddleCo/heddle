@@ -96,7 +96,54 @@ impl ThreadReplica {
             })
             .transpose()
     }
-    /// Retain the producer's frozen creator binding, never rewrite first admission.
+    /// Pending bindings grant no hosted trust and are excluded from exports.
+    /// Retry may replace one after independently selecting a new owner state.
+    pub fn stage_native_genesis_binding(
+        &self,
+        binding: &wire::SignedNativeGenesisAuthorityV1,
+    ) -> Result<()> {
+        let record = self.genesis_record()?;
+        api::native_witness::verify_genesis_authority(
+            binding,
+            record.genesis.as_ref().ok_or(Reject::Canonical)?,
+            &record.creator_authority,
+        )?;
+        let mut db = self.connect()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let final_binding: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT binding FROM hosted_native_genesis_bindings WHERE thread=?1",
+                [self.thread.as_bytes()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if final_binding.is_some_and(|b| b != binding.encode_to_vec()) {
+            return Err(Reject::SlotConflict.into());
+        }
+        tx.execute(
+            "INSERT INTO pending_native_genesis_bindings(thread,binding) VALUES(?1,?2) ON CONFLICT(thread) DO UPDATE SET binding=excluded.binding",
+            params![self.thread.as_bytes(), binding.encode_to_vec()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Producer retry state; never included in a public genesis record.
+    pub fn pending_native_genesis_binding(
+        &self,
+    ) -> Result<Option<wire::SignedNativeGenesisAuthorityV1>> {
+        let bytes: Option<Vec<u8>> = self
+            .connect()?
+            .query_row(
+                "SELECT binding FROM pending_native_genesis_bindings WHERE thread=?1",
+                [self.thread.as_bytes()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|b| hybrid_codec::strict_decode(&b, 65536).map_err(Error::from))
+            .transpose()
+    }
+    /// Finalize the producer binding after StartThread succeeds.
     pub fn retain_native_genesis_binding(
         &self,
         binding: &wire::SignedNativeGenesisAuthorityV1,
@@ -253,12 +300,7 @@ fn install_in(
                     |r| authority.native_revoked(s, r),
                 )?;
                 let id = signed.verify()?.id()?;
-                if geneses
-                    .insert(id, (signed, p.creator_authority_envelope.clone()))
-                    .is_some()
-                {
-                    return Err(Reject::SlotConflict.into());
-                }
+                admit_genesis(&mut geneses, id, signed, &p.creator_authority_envelope)?;
                 retain_binding(context.sql(), id, binding)?;
                 delegated_import::admit_boundary_originals(
                     &mut admissions,
@@ -361,39 +403,14 @@ fn install_in(
             _ => {}
         }
     }
-    if resolutions
-        .keys()
-        .any(|thread| !claims.contains_key(thread))
-    {
-        return Err(Reject::Scope.into());
-    }
     let mut claimed_local_work = BTreeMap::<_, std::collections::BTreeSet<_>>::new();
-    for (thread, claims) in &claims {
-        let mut pending = match resolutions.get(thread) {
-            Some(resolution) => {
-                if resolution.conflicting_claims != claims.keys().copied().collect()
-                    || !claims.contains_key(&resolution.winning_claim)
-                {
-                    return Err(Reject::Scope.into());
-                }
-                resolution.frontier.iter().copied().collect::<Vec<_>>()
-            }
-            None if claims.len() == 1 => claims
-                .values()
-                .next()
-                .ok_or(Reject::Scope)?
-                .source_frontier
-                .iter()
-                .copied()
-                .collect(),
-            None => return Err(Reject::Scope.into()),
-        };
-        let covered = claimed_local_work.entry(*thread).or_default();
+    for (thread, mut pending) in ownership_cutoffs(&claims, &resolutions)? {
+        let covered = claimed_local_work.entry(thread).or_default();
         while let Some(id) = pending.pop() {
             let operation = closure.operation(&id)?;
             // Cross-Thread source work is authorized by its own claim and
             // cutoff, never by walking another Thread's accepted frontier.
-            if operation.thread == *thread && covered.insert(id) {
+            if operation.thread == thread && covered.insert(id) {
                 pending.extend(operation.parents.iter().copied());
             }
         }
@@ -434,6 +451,57 @@ fn install_in(
     )
 }
 
+fn admit_genesis(
+    geneses: &mut BTreeMap<ContentHash, (crypto::thread_operation::SignedGenesis, Vec<u8>)>,
+    id: ContentHash,
+    signed: crypto::thread_operation::SignedGenesis,
+    envelope: &[u8],
+) -> Result<()> {
+    if geneses.insert(id, (signed, envelope.to_vec())).is_some() {
+        return Err(Reject::SlotConflict.into());
+    }
+    Ok(())
+}
+
+pub(super) fn ownership_cutoffs(
+    claims: &BTreeMap<
+        ContentHash,
+        BTreeMap<ContentHash, native::ownership_claim::ThreadOwnershipClaim>,
+    >,
+    resolutions: &BTreeMap<ContentHash, native::ownership_resolution::ThreadOwnershipResolution>,
+) -> Result<BTreeMap<ContentHash, Vec<ContentHash>>> {
+    if resolutions
+        .keys()
+        .any(|thread| !claims.contains_key(thread))
+    {
+        return Err(Reject::Scope.into());
+    }
+    let mut cutoffs = BTreeMap::new();
+    for (thread, claims) in claims {
+        let pending = match resolutions.get(thread) {
+            Some(resolution) => {
+                if resolution.conflicting_claims != claims.keys().copied().collect()
+                    || !claims.contains_key(&resolution.winning_claim)
+                {
+                    return Err(Reject::Scope.into());
+                }
+                resolution.frontier.iter().copied().collect::<Vec<_>>()
+            }
+            None if claims.len() == 1 => claims
+                .values()
+                .next()
+                .ok_or(Reject::Scope)?
+                .source_frontier
+                .iter()
+                .copied()
+                .collect(),
+            None => return Err(Reject::Scope.into()),
+        };
+        cutoffs.insert(*thread, pending);
+    }
+    Ok(cutoffs)
+}
+
 #[derive(PartialEq)]
 enum NativeRole {
     Authority,
@@ -470,9 +538,13 @@ fn retain_binding(
         "INSERT OR IGNORE INTO hosted_native_genesis_bindings(thread,binding) VALUES(?1,?2)",
         params![thread.as_bytes(), bytes],
     )?;
+    sql.execute(
+        "DELETE FROM pending_native_genesis_bindings WHERE thread=?1",
+        [thread.as_bytes()],
+    )?;
     Ok(())
 }
-fn retain_bundle(
+pub(super) fn retain_bundle(
     context: &TrustTransaction<'_>,
     thread: ContentHash,
     bundle: &wire::NativePublicProofBundleV1,
@@ -532,3 +604,7 @@ fn retain_bundle(
     context.sql().execute("INSERT INTO hosted_native_proofs(thread,authority,bundle) VALUES(?1,?2,?3) ON CONFLICT(thread) DO UPDATE SET bundle=excluded.bundle", params![thread.as_bytes(), context.set().body().deployment_authority, bundle.encode_to_vec()])?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "native_witness_tests.rs"]
+mod tests;

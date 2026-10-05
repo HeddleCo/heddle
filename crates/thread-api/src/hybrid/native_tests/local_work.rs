@@ -84,10 +84,13 @@ pub(super) fn install_bundle(
         "operations",
         "hosted_native_proofs",
         "hosted_native_genesis_bindings",
+        "pending_native_genesis_bindings",
         "hosted_import_admissions",
         "hosted_witness_trust",
         "thread_owner_claims",
         "thread_owner_claim_history",
+        "thread_owner_claim_frontier",
+        "thread_owner_resolutions",
     ];
     let counts = || {
         tables.map(|table| {
@@ -114,7 +117,7 @@ pub(super) fn install_bundle(
     if rejection.is_none() {
         let replicas = result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert!(published.get());
-        assert!(!replicas.is_empty());
+        assert_eq!(replicas.is_empty(), originals.is_empty());
         for replica in replicas {
             assert_eq!(
                 replica.hybrid_native_bundle().expect("retained history"),

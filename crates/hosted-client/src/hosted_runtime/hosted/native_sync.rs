@@ -627,7 +627,7 @@ impl HostedClient {
                 }
             };
             replica
-                .retain_native_genesis_binding(&binding)
+                .stage_native_genesis_binding(&binding)
                 .map_err(replica_err)?;
             creation = creation
                 .with_native_authority(binding)
@@ -660,6 +660,15 @@ impl HostedClient {
                     .into(),
             ));
         }
+        replica
+            .retain_native_genesis_binding(
+                creation
+                    .request()
+                    .native_genesis_authority
+                    .as_ref()
+                    .ok_or_else(|| native_error("native genesis binding absent"))?,
+            )
+            .map_err(replica_err)?;
         Ok((reference, creator_authority))
     }
 
@@ -2574,6 +2583,143 @@ mod tests {
                 .expect("frozen creator binding");
         }
         (dir, repo, replica, signer, spool, owner, authority)
+    }
+
+    #[tokio::test]
+    async fn start_thread_failure_keeps_binding_pending_and_retry_tracks_owner_rotation() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        for rotate in [false, true] {
+            let (_dir, repo, replica, signer, spool, _owner, _authority) =
+                hosted_like_replica_with_binding(false);
+            replica.bind_local_name("main").expect("main");
+            let (client, server, captured) = super::super::native_exchange_test_server::start(
+                spool,
+                "main",
+                *replica.thread_id().as_bytes(),
+            )
+            .await;
+            captured.lock().expect("capture").start_failures = 1;
+            let command = Uuid::now_v7().to_string();
+            let base = replica.genesis().expect("genesis").base;
+            assert!(
+                client
+                    .start_hosted_thread(&repo, "acme/widgets", "main", base, command.clone())
+                    .await
+                    .is_err(),
+                "RPC failure control"
+            );
+            assert!(
+                replica
+                    .genesis_record()
+                    .expect("public original")
+                    .native_genesis_authority
+                    .is_none(),
+                "failed StartThread must not finalize binding"
+            );
+            let pending = replica
+                .pending_native_genesis_binding()
+                .expect("pending")
+                .expect("retry binding");
+            if rotate {
+                let now = chrono::Utc::now().timestamp();
+                let (mut observed, keyring) = repo.pinned_owner_observation(now).expect("pin");
+                let previous =
+                    repo::verify_account_owner_observation(&observed, now).expect("owner");
+                let next = Ed25519Signer::from_seed(&[73; 32]).expect("next owner");
+                let transition = contract::OwnerKeyTransition {
+                    format_version: 1,
+                    owner_id: previous.owner_id().to_vec(),
+                    previous_state_hash: previous.state_hash().to_vec(),
+                    sequence: 1,
+                    kind: contract::OwnerKeyTransitionKind::Rotate as i32,
+                    next_authority_key: Some(
+                        repo::ed25519_verification_key(next.public_key()).expect("key"),
+                    ),
+                    next_recovery_policy: Some(previous.recovery_policy().clone()),
+                    valid_from_unix_seconds: now - 1,
+                    previous_key_valid_until_unix_seconds: now,
+                    nonce: vec![2; 32],
+                };
+                let body = repo::owner_key_transition_body(&transition).expect("body");
+                let signed = contract::SignedOwnerKeyTransition {
+                    transition: Some(transition),
+                    authorizations: vec![
+                        repo::sign_canonical(&signer, repo::OWNER_TRANSITION_DOMAIN, &body)
+                            .expect("old owner"),
+                    ],
+                    next_authority_key_proof: Some(
+                        repo::sign_canonical(&next, repo::OWNER_TRANSITION_DOMAIN, &body)
+                            .expect("next owner"),
+                    ),
+                    next_recovery_key_proofs: vec![],
+                };
+                let current = heddleco_capability_verifier::apply_accepted_transition(
+                    &previous,
+                    &signed,
+                    now,
+                    heddleco_capability_verifier::VerificationLimits::new(3600).expect("limits"),
+                )
+                .expect("verified rotation");
+                observed.accepted_transitions.push(signed.clone());
+                observed.version = current.state_hash().to_vec();
+                let wire = observed.resource_keyring.as_mut().expect("keyring");
+                wire.accepted_transitions.push(signed);
+                wire.accepted_state_hash = current.state_hash().to_vec();
+                // Pin the new observation without changing immutable Spool lineage.
+                let genesis = keyring.owner_genesis().signed().clone();
+                repo.verify_and_pin_owner_observation(
+                    &genesis,
+                    &observed,
+                    spool,
+                    &["acme".into(), "widgets".into()],
+                    now,
+                )
+                .expect("rotated pin");
+            }
+            client
+                .start_hosted_thread(&repo, "acme/widgets", "main", base, command)
+                .await
+                .expect("successful retry");
+            let final_binding = replica
+                .genesis_record()
+                .expect("public original")
+                .native_genesis_authority
+                .expect("final binding");
+            assert_eq!(
+                replica.pending_native_genesis_binding().expect("pending"),
+                None,
+                "success consumes pending state"
+            );
+            let sent = captured
+                .lock()
+                .expect("capture")
+                .thread_genesis
+                .clone()
+                .expect("request")
+                .native_genesis_authority
+                .expect("sent binding");
+            assert_eq!(sent, final_binding, "only successful request is final");
+            assert_eq!(
+                pending == final_binding,
+                !rotate,
+                "retry recomputes exactly when selected owner changes"
+            );
+            let (observed, _) = repo
+                .pinned_owner_observation(chrono::Utc::now().timestamp())
+                .expect("current pin");
+            assert_eq!(
+                final_binding
+                    .body
+                    .as_ref()
+                    .expect("body")
+                    .identity
+                    .as_ref()
+                    .expect("identity")
+                    .owner_state_hash,
+                observed.version
+            );
+            server.abort();
+        }
     }
 
     #[tokio::test]

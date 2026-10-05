@@ -6,6 +6,7 @@ use repo::thread_replication::delegated_import::AcceptedAuthority;
 use super::authority::{AcceptedHistory, SelectedAuthority};
 
 mod admissions;
+mod guards;
 mod local_work;
 
 fn fixture() -> serde_json::Value {
@@ -46,6 +47,14 @@ fn set(bundle: &wire::NativePublicProofBundleV1, now: i64) -> witness_trust::Ver
 fn verify_semantics(
     bundle: &wire::NativePublicProofBundleV1,
     now: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    verify_semantics_with_keys(bundle, now, &[], &[])
+}
+fn verify_semantics_with_keys(
+    bundle: &wire::NativePublicProofBundleV1,
+    now: i64,
+    known_job_associations: &[(Vec<u8>, Vec<u8>)],
+    forbidden_authority_keys: &[Vec<u8>],
 ) -> Result<(), Box<dyn std::error::Error>> {
     use super::authority::tests::{bundle as imported, selected};
     let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)?;
@@ -106,8 +115,8 @@ fn verify_semantics(
             spool_path: &path,
             witness_set: &fresh,
             original_geneses: OriginalGeneses::Native(&bundle.genesis_witnesses),
-            known_job_associations: &[],
-            forbidden_authority_keys: &[],
+            known_job_associations,
+            forbidden_authority_keys,
         };
         match s.purpose {
             1 => {

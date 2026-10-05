@@ -27,6 +27,7 @@ pub(crate) mod witnessing;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PublicationCapture {
+    pub start_failures: usize,
     pub revision: Option<v2::RevisionRef>,
     pub thread_genesis: Option<v2::ThreadGenesisRecord>,
     pub operations: Vec<v2::ReplicationOperations>,
@@ -363,6 +364,29 @@ async fn serve_call(
                         native_genesis_authority: request.native_genesis_authority,
                         ..Default::default()
                     });
+                let refuse = {
+                    let mut captured = fixture.captured.lock().expect("capture");
+                    if captured.start_failures > 0 {
+                        captured.start_failures -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if refuse {
+                    let failure = api::heddle::api::common::CallFailure {
+                        code: api::heddle::api::common::CallFailureCode::Unavailable as i32,
+                        message: "StartThread failed before admission".into(),
+                        ..Default::default()
+                    };
+                    let frame =
+                        api::framing::encode_failure_response(&failure).expect("failure frame");
+                    send.write_chunk(bytes::Bytes::from(frame))
+                        .await
+                        .expect("failure response");
+                    send.finish().expect("finish");
+                    return;
+                }
                 write_unary(
                     &mut send,
                     &v2::ThreadMutationResponse {
