@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -77,7 +77,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         }
         return Ok(connection);
     }
-    if !(0..=5).contains(&version) {
+    if !(0..SCHEMA_VERSION).contains(&version) {
         return Err(Error::Schema(version));
     }
     // WAL activation itself can return SQLITE_BUSY without honoring the busy
@@ -125,7 +125,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_run_outbox::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        4 | 5 => {
+        4..=6 => {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
@@ -268,6 +268,39 @@ pub fn changes(connection: &mut Connection, after: i64, limit: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_six_migrates_pending_native_bindings_without_touching_final_bindings() {
+        let directory = tempfile::tempdir().expect("metadata");
+        let db = open(directory.path()).expect("current schema");
+        db.execute(
+            "INSERT INTO hosted_native_genesis_bindings VALUES(?1,?2)",
+            rusqlite::params![[1u8; 32], vec![2u8]],
+        )
+        .expect("final binding");
+        db.execute("DROP TABLE pending_native_genesis_bindings", [])
+            .expect("version six layout");
+        db.pragma_update(None, "user_version", 6)
+            .expect("old version");
+        drop(db);
+        let migrated = open(directory.path()).expect("migration");
+        let pending: i64 = migrated
+            .query_row(
+                "SELECT count(*) FROM pending_native_genesis_bindings",
+                [],
+                |r| r.get(0),
+            )
+            .expect("new pending table");
+        assert_eq!(pending, 0);
+        let final_binding: Vec<u8> = migrated
+            .query_row(
+                "SELECT binding FROM hosted_native_genesis_bindings",
+                [],
+                |r| r.get(0),
+            )
+            .expect("retained final binding");
+        assert_eq!(final_binding, vec![2u8]);
+    }
 
     #[test]
     fn core_state_receipt_and_cursor_commit_or_rollback_together() {

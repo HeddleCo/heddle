@@ -17,6 +17,7 @@ use objects::{
 };
 use prost::Message;
 use thread_api::{
+    hybrid::authority::PublicProof,
     live_replication::{self, Activity, Side},
     replication::{
         self,
@@ -32,7 +33,7 @@ use super::{DeviceRpc, auth, checkout};
 
 type DeviceHostedReplica<F> = thread_api::replication::native::HostedReplica<
     repo::thread_replication::hosted_trust::SystemClock,
-    thread_api::hybrid::authority::SelectedAuthority<F>,
+    thread_api::hybrid::authority::SelectedAuthority<F, PublicProof>,
 >;
 
 struct AbortTask(tokio::task::AbortHandle);
@@ -237,31 +238,84 @@ impl DeviceRpc {
         }
         Ok(())
     }
+    pub(super) async fn refresh_native_export_bundle(
+        &self,
+        session: &auth::Session,
+        bundle: &mut NativePublicProofBundleV1,
+    ) -> Result<()> {
+        use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
+        let authority = &bundle
+            .witness_set
+            .as_ref()
+            .and_then(|s| s.body.as_ref())
+            .context("hosted witness set absent")?
+            .deployment_authority;
+        let trust = HostedTrust::open(&session.spool.heddle_dir, authority, SystemClock)?;
+        let snapshot = trust.snapshot()?;
+        self.require_current_root(&snapshot.root)?;
+        let config = config::UserConfig::load_default()?.hosted_runtime_config(None)?;
+        let lookup = super::super::hosted::descriptor_trust::HostedWitnessLookup::new(
+            &snapshot.root.authority,
+            &config,
+        )?;
+        #[cfg(test)]
+        let lookup = {
+            let mut lookup = lookup;
+            lookup.test_responses = self
+                .test_witness_responses
+                .lock()
+                .map_err(|_| anyhow::anyhow!("test lookup poisoned"))?
+                .clone();
+            lookup
+        };
+        let jobs = snapshot
+            .known_job_associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        super::super::hosted::descriptor_trust::refresh_native_proofs(
+            &lookup,
+            bundle,
+            api::witness_trust::SetExpectation {
+                authority: &snapshot.root.authority,
+                root_id: &snapshot.root.root_id,
+                root_public_key: &snapshot.root.public_key,
+                root_epoch: snapshot.root_epoch,
+                now_unix_millis: chrono::Utc::now().timestamp_millis(),
+                clock_floor_unix_millis: snapshot.clock_floor_millis,
+                known_job_keys: &jobs,
+            },
+            snapshot.previous.as_ref(),
+        )
+        .await?;
+        Ok(())
+    }
     #[allow(clippy::type_complexity)]
-    pub(crate) fn hosted_backend(
+    pub(crate) fn hosted_backend<B: Into<PublicProof>>(
         &self,
         local: LocalReplica<FsStore>,
         session: Arc<auth::Session>,
-        bundle: ImportPublicProofBundleV1,
+        bundle: B,
     ) -> Result<
         DeviceHostedReplica<
             impl Fn(
-                &ImportPublicProofBundleV1,
+                &PublicProof,
                 i64,
                 &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
             ) -> repo::thread_replication::Result<()>
             + Send
             + Sync
             + 'static
-            + use<>,
+            + use<B>,
         >,
     > {
         use repo::thread_replication::hosted_trust::{HostedTrust, SystemClock};
         use thread_api::hybrid::authority::{AcceptedHistory, SelectedAuthority};
+        let bundle = bundle.into();
         let repository = repo::Repository::open(&session.spool.root)?;
         let now = chrono::Utc::now().timestamp();
         let (_, pinned) = repository.pinned_owner_observation(now)?;
-        let history = AcceptedHistory::from_selected_spool(
+        let history = AcceptedHistory::from_public(
             &bundle,
             &pinned,
             now,
@@ -270,8 +324,7 @@ impl DeviceRpc {
         // This carrier names a lookup in durable, independently selected trust.
         // HostedTrust::open cannot enroll a root from the incoming bundle.
         let authority = &bundle
-            .witness_set
-            .as_ref()
+            .witness_set()
             .and_then(|s| s.body.as_ref())
             .context("hosted witness set absent")?
             .deployment_authority;
@@ -288,10 +341,10 @@ impl DeviceRpc {
         let export = bundle.clone();
         let authority =
             Arc::new(
-                SelectedAuthority::new(
+                SelectedAuthority::from_proof(
                     history,
                     bundle,
-                    move |_: &ImportPublicProofBundleV1,
+                    move |_: &PublicProof,
                           _: i64,
                           context: &repo::thread_replication::hosted_trust::TrustTransaction<
                         '_,
@@ -307,7 +360,7 @@ impl DeviceRpc {
             );
         Ok(local
             .with_hosted_authority(directory, trust, authority)
-            .with_export_bundle(export))
+            .with_export_proof(export))
     }
     #[allow(clippy::too_many_arguments)]
     async fn run_replica<B: ReplicaStore<Error = Error>>(
@@ -390,41 +443,62 @@ impl ReplicaStore for DeviceReplica {
         id: ContentHash,
     ) -> Result<Option<(ReceivedOperation, Admission)>, Error> {
         let replica = self.replica.clone();
-        let bundle = tokio::task::spawn_blocking(move || replica.hybrid_import_bundle()).await??;
-        if let Some(mut bundle) = bundle {
-            self.device
-                .refresh_export_bundle(&self.session, &mut bundle)
-                .await
-                .map_err(|error| {
-                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
-                })?;
-            let backend = self
-                .device
-                .hosted_backend(self.local.clone(), self.session.clone(), bundle)
-                .map_err(|error| {
-                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
-                })?;
-            backend.operation(id).await
-        } else {
-            self.local.operation(id).await
-        }
+        let (imported, native) = tokio::task::spawn_blocking(move || {
+            Ok::<_, repo::thread_replication::Error>((
+                replica.hybrid_import_bundle()?,
+                replica.hybrid_native_bundle()?,
+            ))
+        })
+        .await??;
+        let bundle = match (imported, native) {
+            (Some(mut b), None) => {
+                self.device
+                    .refresh_export_bundle(&self.session, &mut b)
+                    .await
+                    .map_err(store_error)?;
+                PublicProof::from(b)
+            }
+            (None, Some(mut b)) => {
+                self.device
+                    .refresh_native_export_bundle(&self.session, &mut b)
+                    .await
+                    .map_err(store_error)?;
+                PublicProof::from(b)
+            }
+            (None, None) => return self.local.operation(id).await,
+            _ => return Err(Error::HostedTrustRequired),
+        };
+        let backend = self
+            .device
+            .hosted_backend(self.local.clone(), self.session.clone(), bundle)
+            .map_err(store_error)?;
+        backend.operation(id).await
     }
     async fn receive(&self, operation: ReceivedOperation) -> Result<Admission, Error> {
-        if let Some(bundle) = &operation.import_authority {
-            let backend = self
-                .device
-                .hosted_backend(
-                    self.local.clone(),
-                    self.session.clone(),
-                    bundle.as_ref().clone(),
-                )
-                .map_err(|error| {
-                    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
-                })?;
-            backend.receive(operation).await
-        } else {
-            self.local.receive(operation).await
-        }
+        let bundle = match (&operation.import_authority, &operation.native_authority) {
+            (Some(b), None) => PublicProof::from(b.as_ref().clone()),
+            (None, Some(b)) => PublicProof::from(b.as_ref().clone()),
+            (None, None) => {
+                let replica = self.replica.clone();
+                let hosted = tokio::task::spawn_blocking(move || {
+                    Ok::<_, repo::thread_replication::Error>(
+                        replica.hybrid_import_bundle()?.is_some()
+                            || replica.hybrid_native_bundle()?.is_some(),
+                    )
+                })
+                .await??;
+                if hosted {
+                    return Err(Error::HostedTrustRequired);
+                }
+                return self.local.receive(operation).await;
+            }
+            _ => return Err(Error::HostedTrustRequired),
+        };
+        let backend = self
+            .device
+            .hosted_backend(self.local.clone(), self.session.clone(), bundle)
+            .map_err(store_error)?;
+        backend.receive(operation).await
     }
     async fn remember_peer_heads(
         &self,
@@ -457,4 +531,8 @@ impl ReplicaStore for DeviceReplica {
     ) -> Result<Vec<ContentHash>, Error> {
         self.local.needed_from_peer(peer, facets, limit).await
     }
+}
+
+fn store_error(error: impl std::fmt::Display) -> Error {
+    Error::Store(repo::thread_replication::Error::Invalid(error.to_string()))
 }

@@ -295,6 +295,7 @@ mod tests {
         ReplicateThreadRequest {
             body: Some(replicate_thread_request::Body::Operations(
                 ReplicationOperations {
+                    native_authority: None,
                     operations,
                     authority_admissions,
                     boundary_acceptances: vec![],
@@ -337,6 +338,7 @@ mod tests {
             ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        native_authority: None,
                         operations: vec![valid.clone()],
                         authority_admissions: vec![],
                         boundary_acceptances: records,

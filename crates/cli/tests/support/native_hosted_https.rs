@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HTTPS descriptor discovery for the native hosted CLI fixture.
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -81,17 +81,89 @@ pub fn signed_descriptor(
     .expect("encode fixture ephemeral descriptor set")
 }
 
+/// The wire requires a DNS HTTPS origin without a port. A loopback CONNECT
+/// proxy lets these fixtures use that exact origin without privileged binds.
+struct FixtureProxy {
+    uri: String,
+    routes: Arc<Mutex<HashMap<String, SocketAddr>>>,
+}
+fn fixture_proxy() -> &'static FixtureProxy {
+    static PROXY: OnceLock<FixtureProxy> = OnceLock::new();
+    PROXY.get_or_init(|| {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fixture proxy");
+        let uri = format!("http://{}", listener.local_addr().expect("proxy address"));
+        let routes = Arc::new(Mutex::new(HashMap::<String, SocketAddr>::new()));
+        let destinations = Arc::clone(&routes);
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let mut client = incoming.expect("proxy client");
+                let destinations = Arc::clone(&destinations);
+                thread::spawn(move || {
+                    let mut header = Vec::new();
+                    while !header.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        if client.read_exact(&mut byte).is_err() {
+                            return;
+                        }
+                        header.push(byte[0]);
+                        assert!(header.len() < 4096, "bounded CONNECT request");
+                    }
+                    let text = String::from_utf8(header).expect("CONNECT UTF-8");
+                    let authority = text.split_whitespace().nth(1).expect("CONNECT authority");
+                    let destination = destinations
+                        .lock()
+                        .expect("proxy routes")
+                        .get(authority)
+                        .copied()
+                        .expect("registered fixture origin");
+                    let mut upstream = TcpStream::connect(destination).expect("fixture tunnel");
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .expect("CONNECT accepted");
+                    let mut client_read = client.try_clone().expect("client read half");
+                    let mut upstream_write = upstream.try_clone().expect("upstream write half");
+                    thread::spawn(move || {
+                        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+                        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+                    });
+                    let _ = std::io::copy(&mut upstream, &mut client);
+                    let _ = client.shutdown(std::net::Shutdown::Write);
+                });
+            }
+        });
+        // All fixtures in this test process share this immutable proxy. CLI
+        // children receive it explicitly; no production routing knob is added.
+        unsafe {
+            std::env::set_var("HTTPS_PROXY", &uri);
+        }
+        FixtureProxy { uri, routes }
+    })
+}
+
 pub struct TestHttpsServer {
     pub authority: String,
     pub certificate_pem: String,
+    pub proxy_uri: String,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl TestHttpsServer {
-    pub fn start(routes: HashMap<String, VecDeque<Vec<u8>>>) -> Self {
+    pub fn start_with<R>(routes_for: impl FnOnce(&str) -> R) -> Self
+    where
+        R: FnMut(&str) -> Option<Vec<u8>> + Send + 'static,
+    {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fixture HTTPS listener");
+        let address = listener.local_addr().expect("fixture address");
+        let authority = format!("native-{}.test", uuid::Uuid::now_v7().simple());
+        let proxy = fixture_proxy();
+        proxy
+            .routes
+            .lock()
+            .expect("proxy routes")
+            .insert(format!("{authority}:443"), address);
         let CertifiedKey { cert, signing_key } =
-            generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            generate_simple_self_signed(vec![authority.clone()])
                 .expect("generate test TLS certificate");
         let certificate_pem = cert.pem();
         let private_key =
@@ -102,15 +174,12 @@ impl TestHttpsServer {
                 .with_single_cert(vec![cert.der().clone()], private_key)
                 .expect("configure test HTTPS server"),
         );
-        let listener =
-            TcpListener::bind(("127.0.0.1", 0)).expect("bind endpoint descriptor HTTPS server");
         listener
             .set_nonblocking(true)
             .expect("make endpoint descriptor listener nonblocking");
-        let authority = listener.local_addr().expect("HTTPS address").to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
-        let routes = Arc::new(Mutex::new(routes));
+        let routes = Arc::new(Mutex::new(routes_for(&authority)));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
         let thread = thread::spawn(move || {
@@ -132,6 +201,7 @@ impl TestHttpsServer {
         Self {
             authority,
             certificate_pem,
+            proxy_uri: proxy.uri.clone(),
             stop,
             thread: Some(thread),
         }
@@ -140,6 +210,11 @@ impl TestHttpsServer {
 
 impl Drop for TestHttpsServer {
     fn drop(&mut self) {
+        fixture_proxy()
+            .routes
+            .lock()
+            .expect("proxy routes")
+            .remove(&format!("{}:443", self.authority));
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             thread
@@ -149,12 +224,14 @@ impl Drop for TestHttpsServer {
     }
 }
 
-fn serve_https(
+fn serve_https<R>(
     stream: TcpStream,
     tls: Arc<ServerConfig>,
-    routes: Arc<Mutex<HashMap<String, VecDeque<Vec<u8>>>>>,
+    routes: Arc<Mutex<R>>,
     requests: Arc<Mutex<Vec<String>>>,
-) {
+) where
+    R: FnMut(&str) -> Option<Vec<u8>>,
+{
     // Accepted sockets inherit O_NONBLOCK from the listener on macOS, but
     // this synchronous rustls fixture expects blocking handshakes.
     stream
@@ -187,12 +264,7 @@ fn serve_https(
         .lock()
         .expect("record HTTP request")
         .push(path.to_string());
-    let body = routes
-        .lock()
-        .expect("lock endpoint descriptor routes")
-        .get_mut(path)
-        .and_then(VecDeque::pop_front)
-        .unwrap_or_default();
+    let body = routes.lock().expect("lock endpoint descriptor routes")(path).unwrap_or_default();
     let status = if body.is_empty() {
         "404 Not Found"
     } else {

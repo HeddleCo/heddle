@@ -16,6 +16,7 @@ struct EncodedOriginal {
     receipt: Option<wire::SignedRecord>,
     acceptance: Option<(ContentHash, Arc<SignedBoundaryAcceptance>)>,
     import_authority: Option<Arc<wire::ImportPublicProofBundleV1>>,
+    native_authority: Option<Arc<wire::NativePublicProofBundleV1>>,
 }
 /// The bound is the encoded ReplicationOperations body, excluding the caller's
 /// outer stream frame. Reserve that envelope overhead from negotiated budgets.
@@ -84,7 +85,10 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
             // Each carrier has one independently complete closure. Separate
             // different closures instead of dropping or merging signed bytes.
             let candidate_bundle = candidate.import_authority.as_deref();
-            if !batch.operations.is_empty() && batch.import_authority.as_ref() != candidate_bundle {
+            if !batch.operations.is_empty()
+                && (batch.import_authority.as_ref() != candidate_bundle
+                    || batch.native_authority.as_ref() != candidate.native_authority.as_deref())
+            {
                 self.pending = Some(candidate);
                 break;
             }
@@ -118,6 +122,10 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
             });
             let bundle_bytes = if batch.operations.is_empty() {
                 candidate_bundle.map_or(0, |bundle| delimited(bundle.encoded_len()))
+                    + candidate
+                        .native_authority
+                        .as_ref()
+                        .map_or(0, |bundle| delimited(bundle.encoded_len()))
             } else {
                 0
             };
@@ -145,6 +153,7 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
             bytes = required;
             if batch.operations.is_empty() {
                 batch.import_authority = candidate.import_authority.map(|bundle| (*bundle).clone());
+                batch.native_authority = candidate.native_authority.map(|bundle| (*bundle).clone());
             }
             batch.operations.push(candidate.original);
             batch.authority_admissions.extend(candidate.receipt);
@@ -171,7 +180,11 @@ fn delimited(length: usize) -> usize {
     1 + prefix + length
 }
 fn encode(received: ReceivedOperation) -> Result<EncodedOriginal, Error> {
-    crate::hybrid::bundle(received.import_authority.as_deref()).map_err(Error::Protocol)?;
+    crate::hybrid::bundles(
+        received.import_authority.as_deref(),
+        received.native_authority.as_deref(),
+    )
+    .map_err(Error::Protocol)?;
     let original = received
         .original
         .verify()
@@ -223,5 +236,6 @@ fn encode(received: ReceivedOperation) -> Result<EncodedOriginal, Error> {
         receipt,
         acceptance,
         import_authority: received.import_authority,
+        native_authority: received.native_authority,
     })
 }

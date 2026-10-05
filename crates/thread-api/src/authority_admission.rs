@@ -144,6 +144,7 @@ pub fn match_batch(
             None
         };
         output.push(crate::replication::store::ReceivedOperation {
+            native_authority: batch.native_authority.clone().map(std::sync::Arc::new),
             original,
             authority_admission: receipt,
             import_authority: import_authority.clone(),

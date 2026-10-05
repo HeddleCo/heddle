@@ -72,7 +72,14 @@ impl StagedSource {
             &repo::thread_replication::hosted_trust::TrustTransaction<'_>,
         ) -> repo::thread_replication::Result<Vec<u8>>,
     ) -> Result<(StateId, Vec<u8>), Error> {
-        let bundle = self.import_authority().ok_or(Error::HostedTrustRequired)?;
+        crate::hybrid::transfer_ready(&self.ready).map_err(Error::Invalid)?;
+        let imported = self.import_authority();
+        let native = self.native_authority();
+        let (bundle, bundle_owner) = match (imported, native) {
+            (Some(b), None) => (b.encode_to_vec(), b.owner_genesis.as_ref()),
+            (None, Some(b)) => (b.encode_to_vec(), b.owner_genesis.as_ref()),
+            _ => return Err(Error::HostedTrustRequired),
+        };
         let spool = self
             .ready
             .thread
@@ -95,7 +102,7 @@ impl StagedSource {
         let selected =
             repo::verify_spool_owner_observation(owner_genesis, owner, spool, now_seconds)
                 .map_err(preparation)?;
-        if bundle.owner_genesis.as_ref() != Some(selected.owner_genesis().signed()) {
+        if bundle_owner != Some(selected.owner_genesis().signed()) {
             return Err(api::hybrid_codec::Reject::Root.into());
         }
         let _write_lock = repository.locker().write().map_err(preparation)?;
@@ -168,6 +175,11 @@ impl StagedSource {
                 }],
             });
         }
+        if let Some(bundle) = native {
+            for wrapper in std::iter::once(main).chain(&self.dependencies) {
+                require_native_genesis_match(bundle, wrapper)?;
+            }
+        }
         let state = self.state.id();
         let publish = |artifacts: &mut InstallArtifacts<'_>| {
             // An owner/spool update while staging requires fresh preparation.
@@ -186,11 +198,11 @@ impl StagedSource {
             Ok(())
         };
         let (replicas, receipt) = if let Some(publication) = publication {
-            let receipt = publication
-                .replica
-                .publish_hybrid_source(
+            let receipt = if native.is_some() {
+                ThreadReplica::publish_native_source(
+                    publication.replica,
                     trust,
-                    &bundle.encode_to_vec(),
+                    &bundle,
                     &records,
                     authority,
                     staged_repo.store(),
@@ -201,18 +213,46 @@ impl StagedSource {
                         response(context)
                     },
                 )
-                .map_err(preparation)?;
+            } else {
+                ThreadReplica::publish_hybrid_source(
+                    publication.replica,
+                    trust,
+                    &bundle,
+                    &records,
+                    authority,
+                    staged_repo.store(),
+                    publication.prepared,
+                    publication.command,
+                    |context, artifacts| {
+                        publish(artifacts)?;
+                        response(context)
+                    },
+                )
+            }
+            .map_err(preparation)?;
             (Vec::new(), receipt)
         } else {
-            let replicas = ThreadReplica::install_hybrid_import(
-                repository.heddle_dir(),
-                trust,
-                &bundle.encode_to_vec(),
-                &records,
-                authority,
-                staged_repo.store(),
-                publish,
-            )
+            let replicas = if native.is_some() {
+                ThreadReplica::install_hybrid_native(
+                    repository.heddle_dir(),
+                    trust,
+                    &bundle,
+                    &records,
+                    authority,
+                    staged_repo.store(),
+                    publish,
+                )
+            } else {
+                ThreadReplica::install_hybrid_import(
+                    repository.heddle_dir(),
+                    trust,
+                    &bundle,
+                    &records,
+                    authority,
+                    staged_repo.store(),
+                    publish,
+                )
+            }
             .map_err(preparation)?;
             (replicas, Vec::new())
         };
@@ -236,6 +276,66 @@ impl StagedSource {
                 .map_err(preparation)?;
         }
         Ok((state, receipt))
+    }
+}
+
+fn require_native_genesis_match(
+    bundle: &crate::contract::NativePublicProofBundleV1,
+    wrapper: &crate::contract::ThreadGenesisRecord,
+) -> Result<(), Error> {
+    if !bundle.genesis_witnesses.iter().any(|p| {
+        p.original_genesis == wrapper.genesis
+            && p.creator_authority_envelope == wrapper.creator_authority
+            && p.binding == wrapper.native_genesis_authority
+    }) {
+        return Err(api::hybrid_codec::Reject::GenesisBinding.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn native_ready_binding_must_match_the_exact_witnessed_genesis() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/native-host-witness-v1.json"
+        ))
+        .expect("vectors");
+        let bundle: crate::contract::NativePublicProofBundleV1 = api::hybrid_codec::strict_decode(
+            &hex::decode(
+                fixture["wire_vectors"]["start_thread"]["wire_hex"]
+                    .as_str()
+                    .expect("wire"),
+            )
+            .expect("hex"),
+            api::import_authority::MAX_BUNDLE_BYTES,
+        )
+        .expect("bundle");
+        let p = &bundle.genesis_witnesses[0];
+        let control = crate::contract::ThreadGenesisRecord {
+            genesis: p.original_genesis.clone(),
+            creator_authority: p.creator_authority_envelope.clone(),
+            native_genesis_authority: p.binding.clone(),
+            ..Default::default()
+        };
+        require_native_genesis_match(&bundle, &control).expect("exact Ready control");
+        for field in 0..3 {
+            let mut changed = control.clone();
+            match field {
+                0 => changed.genesis = None,
+                1 => changed.creator_authority.push(0),
+                _ => changed.native_genesis_authority = None,
+            }
+            assert!(
+                matches!(
+                    require_native_genesis_match(&bundle, &changed),
+                    Err(Error::Hybrid(api::hybrid_codec::Reject::GenesisBinding))
+                ),
+                "Ready original, envelope and binding must match"
+            );
+        }
+        require_native_genesis_match(&bundle, &control).expect("unchanged Ready control");
     }
 }
 
@@ -471,6 +571,7 @@ pub(crate) mod tests {
             }),
             full_closure_available: true,
             import_authority: Some(bundle),
+            protocol: Some(crate::hybrid::protocol()),
             ..Default::default()
         };
         let staged = super::super::staging::validate_with_receipts(
@@ -749,6 +850,7 @@ pub(crate) mod tests {
         assert!(
             relay
                 .receive(ReceivedOperation {
+                    native_authority: None,
                     original: original.clone(),
                     authority_admission: None,
                     import_authority: None,
@@ -760,6 +862,7 @@ pub(crate) mod tests {
         assert_eq!(
             relay
                 .receive(ReceivedOperation {
+                    native_authority: None,
                     original: original.clone(),
                     authority_admission: None,
                     import_authority: Some(Arc::new(bundle.clone()))

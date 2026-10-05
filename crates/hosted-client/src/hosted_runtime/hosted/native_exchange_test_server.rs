@@ -22,14 +22,18 @@ use prost::Message;
 use tokio::task::JoinHandle;
 
 use super::{CallContextFactory, HostedClient};
+#[path = "../../../../thread-api/tests/support/native_witness.rs"]
+pub(crate) mod witnessing;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PublicationCapture {
+    pub start_failures: usize,
     pub revision: Option<v2::RevisionRef>,
     pub thread_genesis: Option<v2::ThreadGenesisRecord>,
     pub operations: Vec<v2::ReplicationOperations>,
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
+    pub native_authority: Option<v2::NativePublicProofBundleV1>,
 }
 
 #[derive(Clone)]
@@ -39,6 +43,7 @@ struct Fixture {
     thread_id: Vec<u8>,
     owner_genesis: v2::SignedSpoolOwnerGenesis,
     owner: v2::OwnerState,
+    witness_set: api::heddle::api::common::SignedHostedWitnessSetV1,
     captured: Arc<Mutex<PublicationCapture>>,
     scope_path: Option<String>,
 }
@@ -64,52 +69,15 @@ pub(crate) async fn start_with_scope(
         None => (None, None),
     };
     let captured = Arc::new(Mutex::new(PublicationCapture::default()));
-    let owner_signer = Ed25519Signer::generate().expect("hosted test owner");
-    let recovery = Ed25519Signer::generate().expect("hosted test recovery owner");
-    let account = uuid::Uuid::from_bytes([9; 16]);
-    let root =
-        repo::sign_custodial_owner_root(&owner_signer, &recovery, *account.as_bytes(), [98; 32])
-            .expect("hosted test owner root");
-    let binding = repo::sign_custodial_owner_binding(&owner_signer, &root, [99; 32])
-        .expect("hosted test owner binding");
-    let state_hash = binding.root_state_hash.clone();
-    let owner_id = root
-        .root
-        .as_ref()
-        .expect("hosted test owner root body")
-        .owner_id
-        .clone();
-    let owner_genesis = repo::sign_spool_owner_genesis(&owner_signer, *spool.as_bytes())
-        .expect("hosted test owner genesis");
-    let owner = v2::OwnerState {
-        owner: Some(v2::PrincipalRef {
-            id: account.to_string(),
-        }),
-        root: Some(root.clone()),
-        binding: Some(binding),
-        version: state_hash.clone(),
-        resource_keyring: Some(v2::CloneAuthorizationKeyring {
-            format_version: 1,
-            spool_uuid: spool.as_bytes().to_vec(),
-            canonical_spool_path_segments: vec!["acme".into(), "widgets".into()],
-            pin: Some(v2::CloneOwnerPin {
-                kind: v2::CloneOwnerPinKind::CloneTofu as i32,
-                expected_owner_id: owner_id,
-                first_seen_unix_seconds: 1,
-            }),
-            owner_root: Some(root),
-            accepted_state_hash: state_hash,
-            owner_genesis: Some(owner_genesis.clone()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let (owner_genesis, owner) = witnessing::ownership(spool);
+    let witness_set = witnessing::witness_set();
     let fixture = Fixture {
         spool,
         thread_name: thread_name.into(),
         thread_id: thread_id.to_vec(),
         owner_genesis,
         owner,
+        witness_set: witness_set.clone(),
         captured: Arc::clone(&captured),
         scope_path,
     };
@@ -143,18 +111,42 @@ pub(crate) async fn start_with_scope(
         .bind()
         .await
         .expect("hosted client endpoint");
-    let client_signer = Ed25519Signer::generate().expect("hosted test client signer");
+    let client_signer = Ed25519Signer::from_seed(&[71; 32]).expect("hosted test client signer");
+    let token = crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32])
+        .expect("current owner credential");
     let context = client_context.unwrap_or(
         CallContextFactory::default()
+            .with_bearer_capability(token.token.into_bytes())
             .with_signing_key_pem(
                 &client_signer.to_pem().expect("hosted test client key"),
                 "principal:test",
             )
             .expect("hosted test call context"),
     );
-    let client = HostedClient::connect_addr_with_context(endpoint, server_addr, context)
+    let mut client = HostedClient::connect_addr_with_context(endpoint, server_addr, context)
         .await
         .expect("connect hosted test client");
+    let root = Ed25519Signer::from_seed(&[7; 32]).expect("deployment root");
+    client.hosted_root = Some(super::descriptor_trust::HostedRootSelection {
+        authority: "https://weft.example.test".into(),
+        root_id: "descriptor-root-1".into(),
+        public_key: crypto::Signer::public_key(&root)
+            .try_into()
+            .expect("root key"),
+        automatic_store: None,
+    });
+    let mut lookup = super::descriptor_trust::HostedWitnessLookup::new(
+        "https://weft.example.test",
+        &config::UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect("configuration"),
+    )
+    .expect("witness lookup");
+    lookup.test_responses = Some(super::descriptor_trust::TestWitnessResponses {
+        set: Some(witness_set),
+        proofs: vec![],
+    });
+    client.witness_lookup = Some(Arc::new(lookup));
     (client, server_task, captured)
 }
 
@@ -189,7 +181,18 @@ async fn serve_call(
         );
         let operation = method.rsplit('/').next().expect("method name");
         let resource = match operation {
-            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" | "ObserveOwnership" => None,
+            "DescribeEndpoint" | "GetIdentity" | "ObserveIdentity" => None,
+            "ObserveOwnership" => {
+                read_request_body(&mut recv, &mut request).await;
+                let observed = v2::ObserveOwnershipRequest::decode(
+                    decode_request_frame(&request).expect("owner frame").body,
+                )
+                .expect("owner request");
+                observed.spool.map(|spool| {
+                    assert_eq!(spool.id, fixture.spool.to_string());
+                    ("spool", path)
+                })
+            }
             _ => Some(("spool", path)),
         };
         let token = base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability);
@@ -235,6 +238,9 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                         "/heddle.api.v1alpha2.SyncService/Fetch".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
+                        "/heddle.api.v1alpha2.ThreadService/StartThread".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -242,6 +248,12 @@ async fn serve_call(
                         max_snapshot_bytes: 1024 * 1024,
                     }),
                     max_pending_batch_bytes: 1024 * 1024,
+                    understood_signed_record_formats: vec![
+                        objects::object::thread_replication::GENESIS_FORMAT.into(),
+                        objects::object::thread_replication::OPERATION_FORMAT.into(),
+                        objects::object::thread_replication::ownership_claim::FORMAT.into(),
+                    ],
+                    protocol: Some(thread_api::hybrid::protocol()),
                     ..Default::default()
                 };
                 write_unary(&mut send, &response).await;
@@ -292,17 +304,95 @@ async fn serve_call(
                 .await;
             }
             "/heddle.api.v1alpha2.IdentityService/GetIdentity" => {
+                let key = biscuit_verifier::PublicKey::from_bytes(
+                    crypto::Signer::public_key(
+                        &Ed25519Signer::from_seed(&[71; 32]).expect("owner"),
+                    ),
+                    biscuit_auth::Algorithm::Ed25519,
+                )
+                .expect("mint root");
+                let token = biscuit_verifier::parse_token(
+                    &base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability),
+                    &[key],
+                )
+                .expect("current native credential");
+                let envelope = witnessing::envelope(&fixture.owner, &token);
                 write_unary(
                     &mut send,
                     &v2::GetIdentityResponse {
                         identity: Some(v2::PrincipalRecord {
                             id: "principal-test".into(),
-                            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                            account_id: uuid::Uuid::from_u128(2).to_string(),
                             ..Default::default()
                         }),
                         current_credential: Some(v2::CurrentCredentialRecord {
-                            thread_control_authority: vec![7; 32],
-                            acting_agent_id: "scoped-writer".into(),
+                            thread_control_authority: envelope,
+                            acting_agent_id: if fixture.scope_path.is_some() {
+                                "scoped-writer".into()
+                            } else {
+                                String::new()
+                            },
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.ThreadService/StartThread" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = decode_request_frame(&request)
+                    .expect("StartThread frame")
+                    .body;
+                let request = v2::StartThreadRequest::decode(body).expect("StartThread request");
+                api::native_witness::verify_genesis_authority(
+                    request.native_genesis_authority.as_ref().expect("binding"),
+                    request.thread_genesis.as_ref().expect("genesis"),
+                    &request.creator_authority,
+                )
+                .expect("creator signature before request PoP");
+                let reference = thread_ref(&fixture);
+                let observed = thread_api::replication::opening::verify_genesis(
+                    request.thread_genesis.as_ref().expect("genesis"),
+                    &reference,
+                )
+                .expect("exact started Thread");
+                fixture.captured.lock().expect("capture").thread_genesis =
+                    Some(v2::ThreadGenesisRecord {
+                        genesis: request.thread_genesis,
+                        creator_authority: request.creator_authority,
+                        native_genesis_authority: request.native_genesis_authority,
+                        ..Default::default()
+                    });
+                let refuse = {
+                    let mut captured = fixture.captured.lock().expect("capture");
+                    if captured.start_failures > 0 {
+                        captured.start_failures -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if refuse {
+                    let failure = api::heddle::api::common::CallFailure {
+                        code: api::heddle::api::common::CallFailureCode::Unavailable as i32,
+                        message: "StartThread failed before admission".into(),
+                        ..Default::default()
+                    };
+                    let frame =
+                        api::framing::encode_failure_response(&failure).expect("failure frame");
+                    send.write_chunk(bytes::Bytes::from(frame))
+                        .await
+                        .expect("failure response");
+                    send.finish().expect("finish");
+                    return;
+                }
+                write_unary(
+                    &mut send,
+                    &v2::ThreadMutationResponse {
+                        thread: Some(v2::ThreadOverview {
+                            r#ref: Some(reference),
+                            name: observed.name,
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -312,10 +402,12 @@ async fn serve_call(
             }
             other => panic!("unexpected hosted unary method: {other}"),
         },
-        StreamingShape::ServerStreaming => {
-            assert_eq!(method, "/heddle.api.v1alpha2.ThreadService/ObserveThreads");
-            serve_observe_threads(&mut send, server_key, &fixture).await;
-        }
+        StreamingShape::ServerStreaming => match method.as_str() {
+            "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => {
+                serve_observe_threads(&mut send, server_key, &fixture).await
+            }
+            _ => serve_owner_views(&mut send, &method, server_key, &fixture).await,
+        },
         StreamingShape::Bidirectional => {
             let buffered = request.split_off(prelude_len);
             match method.as_str() {
@@ -428,7 +520,128 @@ async fn serve_observe_threads(
         },
     ];
     for event in events {
+        if event.payload.is_some()
+            && fixture
+                .captured
+                .lock()
+                .expect("capture")
+                .thread_genesis
+                .is_none()
+        {
+            continue;
+        }
+        let mut event = event;
+        if event.frame.as_ref().is_some_and(|f| f.sequence > 2)
+            && fixture
+                .captured
+                .lock()
+                .expect("capture")
+                .thread_genesis
+                .is_none()
+        {
+            event.frame.as_mut().expect("frame").sequence -= 1;
+        }
         write_message(send, &event).await;
+    }
+}
+
+async fn serve_owner_views(
+    send: &mut iroh::endpoint::SendStream,
+    method: &str,
+    server_key: Vec<u8>,
+    fixture: &Fixture,
+) {
+    let now = chrono::Utc::now().timestamp();
+    let frames = [
+        v2::StreamFrame {
+            sequence: 1,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                binding_digest: vec![9; 32],
+                accepted_budget: Some(v2::ReadBudget {
+                    max_items: 64,
+                    max_frame_bytes: 64 * 1024,
+                    max_snapshot_bytes: 1024 * 1024,
+                }),
+                authority_valid_until: Some(prost_types::Timestamp {
+                    seconds: now + 240,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            })),
+        },
+        v2::StreamFrame {
+            sequence: 2,
+            body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                kind: v2::StreamDataKind::Snapshot as i32,
+            })),
+        },
+        v2::StreamFrame {
+            sequence: 3,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                ..Default::default()
+            })),
+        },
+        v2::StreamFrame {
+            sequence: 4,
+            body: Some(v2::stream_frame::Body::Complete(v2::StreamComplete {
+                cursor: vec![1],
+            })),
+        },
+    ];
+    for (index, frame) in frames.into_iter().enumerate() {
+        match method {
+            "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
+                let event = v2::SpoolEvent {
+                    frame: Some(frame),
+                    payload: (index == 1).then(|| {
+                        v2::spool_event::Payload::Spool(v2::SpoolOverview {
+                            r#ref: Some(v2::SpoolRef {
+                                id: fixture.spool.to_string(),
+                            }),
+                            version: vec![1; 32],
+                            path_segments: vec!["acme".into(), "widgets".into()],
+                            owner_genesis: Some(fixture.owner_genesis.clone()),
+                            ..Default::default()
+                        })
+                    }),
+                };
+                write_message(send, &event).await;
+            }
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" => {
+                write_message(
+                    send,
+                    &v2::OwnershipEvent {
+                        frame: Some(frame),
+                        payload: (index == 1)
+                            .then(|| v2::ownership_event::Payload::Owner(fixture.owner.clone())),
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.ThreadService/ObserveThread" => {
+                write_message(
+                    send,
+                    &v2::ThreadEvent {
+                        frame: Some(frame),
+                        payload: (index == 1).then(|| {
+                            v2::thread_event::Payload::Overview(v2::ThreadOverview {
+                                r#ref: Some(thread_ref(fixture)),
+                                name: fixture.thread_name.clone(),
+                                ..Default::default()
+                            })
+                        }),
+                    },
+                )
+                .await;
+            }
+            _ => panic!("unexpected observation {method}"),
+        }
     }
 }
 
@@ -471,6 +684,7 @@ async fn serve_publication(
             body: Some(v2::publish_content_server_frame::Body::Ready(
                 v2::TransferReady {
                     endpoint: open.destination.clone(),
+                    protocol: open.protocol.clone(),
                     thread: open.thread.clone(),
                     current: open.revision.clone(),
                     checkpoint: Some(checkpoint.clone()),
@@ -522,6 +736,24 @@ async fn serve_publication(
                 assert!(accepted.thread_genesis.is_some());
                 assert!(!accepted.operations.is_empty());
                 let inventory = inventory_digest(&open.packs);
+                let prior = fixture
+                    .captured
+                    .lock()
+                    .expect("capture")
+                    .native_authority
+                    .clone();
+                let bundle = witnessing::bundle(
+                    &fixture.owner_genesis,
+                    &fixture.owner,
+                    accepted.thread_genesis.as_ref().expect("original genesis"),
+                    &accepted.operations,
+                    &fixture.witness_set,
+                    prior,
+                );
+                for batch in &mut accepted.operations {
+                    batch.native_authority = Some(bundle.clone());
+                }
+                accepted.native_authority = Some(bundle.clone());
                 *fixture
                     .captured
                     .lock()
@@ -531,6 +763,7 @@ async fn serve_publication(
                     &v2::PublishContentServerFrame {
                         body: Some(v2::publish_content_server_frame::Body::Receipt(
                             v2::PublicationReceipt {
+                                native_authority: Some(bundle),
                                 import_authority: None,
                                 client_operation_id: opening.client_operation_id,
                                 destination: open.destination,
@@ -606,6 +839,8 @@ async fn serve_fetch(
                 }),
                 thread: Some(thread_ref(&fixture)),
                 current: Some(revision.clone()),
+                protocol: open.protocol,
+                native_authority: accepted.native_authority.clone(),
                 owner_genesis: Some(fixture.owner_genesis),
                 ownership: Some(fixture.owner),
                 thread_genesis: Some(genesis),

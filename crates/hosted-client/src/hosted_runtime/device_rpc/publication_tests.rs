@@ -144,6 +144,7 @@ pub(super) async fn roundtrip(
         let originals = PublicationOriginals {
             geneses: vec![replica.genesis_record().expect("creator wrapper")],
             operations: vec![ReplicationOperations {
+                native_authority: None,
                 import_authority: None,
                 boundary_acceptances: Vec::new(),
                 operations: vec![super::thread::signed_record(&original).expect("original wire")],
@@ -274,6 +275,7 @@ pub(super) async fn roundtrip(
         let wrong = PublicationOriginals {
             geneses: originals.geneses.clone(),
             operations: vec![ReplicationOperations {
+                native_authority: None,
                 import_authority: None,
                 boundary_acceptances: Vec::new(),
                 operations: vec![super::thread::signed_record(&denied).expect("wire")],
@@ -364,6 +366,7 @@ async fn account_thread(
     remote
         .api
         .call::<thread_api::rpc::ThreadServiceStartThread>(&StartThreadRequest {
+            native_genesis_authority: None,
             client_operation_id: uuid::Uuid::new_v4().to_string(),
             spool: Some(SpoolRef {
                 id: genesis.spool.clone(),

@@ -31,32 +31,6 @@ fn commit_file(path: &Path, body: &str, message: &str) {
     git(path, &["commit", "-m", message]);
 }
 
-/// Installs `home` as this process's `HEDDLE_HOME` until dropped.
-///
-/// Publication and clone run in-process, so they resolve that variable from
-/// this process rather than from a child command. The previous value is
-/// restored so a later test in the same process keeps the runner's home.
-struct ProcessHeddleHome {
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ProcessHeddleHome {
-    fn install(home: &Path) -> Self {
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe { std::env::set_var("HEDDLE_HOME", home) };
-        Self { previous }
-    }
-}
-
-impl Drop for ProcessHeddleHome {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
-        }
-    }
-}
-
 #[test]
 fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     on_large_stack(adopted_history_round_trip);
@@ -108,6 +82,7 @@ async fn adopted_history_round_trip() {
 
     let (mut hosted, server, captured) =
         native_hosted_server::start(spool, "main", thread_id).await;
+    native_hosted_server::enroll_device(spool, &repo::identity::heddle_home_dir());
     let pushed = hosted
         .push_profiled(
             &adopted,
@@ -440,6 +415,7 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         .as_bytes();
     let (mut hosted, server, captured) =
         native_hosted_server::start(spool, "main", thread_id).await;
+    native_hosted_server::enroll_device(spool, &repo::identity::heddle_home_dir());
     let pushed = hosted
         .push_profiled(
             &adopted,
@@ -525,7 +501,15 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         }
     }
     if capture_again {
+        use crypto::Signer;
         use objects::object::{Blob, State, Tree, TreeEntry};
+        let signer = adopted
+            .native_thread_signer(&adopted.native_thread("main").expect("claimed Thread"))
+            .expect("account source signer");
+        native_hosted_server::enroll_source_author(
+            &home,
+            &signer.public_key().try_into().expect("source key"),
+        );
         let blob = Blob::new(b"later capture\n".to_vec());
         adopted.store().put_blob(&blob).expect("later blob");
         let tree = Tree::from_entries(vec![

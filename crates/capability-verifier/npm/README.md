@@ -45,6 +45,7 @@ accepted history. Owner histories use the general 256-transition bound.
 | `verifySpoolOwnerGenesis` | `(genesis: Uint8Array, nowSeconds: bigint): GenesisSummary` | `SignedSpoolOwnerGenesis`, self-signed or with `SpoolCreationProof` |
 | `verifySignedPolicyChain` | `(records: Uint8Array[], keyring, ownerState: Uint8Array, nowSeconds, ttlSeconds: bigint): PolicySummary` | Complete ordered `SpoolEvent.signed_policy` records from the empty head, with transfer-aware authority |
 | `verifyImportDelegation` | `(certificate, permission, keyring, acceptedOwnerHistory, selectedInitialOwnerId, selectedSpoolGenesisDigest: Uint8Array, forbiddenKeysJson, jobAssociationsJson, cancellationsJson, revokedKeysJson: string, nowSeconds, ttlSeconds: bigint): ImportSummary` | Original import certificate and optional member permission; independently selected lineage, current portable permission and certificate digest |
+| `verifyNativeGenesisAuthority` | `(binding, original, envelope, keyring, currentOwner, selectedInitialOwnerId, selectedSpoolGenesisDigest: Uint8Array, revokedKeyIdsJson, revokedCredentialIdsJson: string, nowSeconds, ttlSeconds: bigint): NativeGenesisSummary` | Exact creator binding and selected lineage; account checks StartThread authority, LocalKey still requires a separate hosted ownership claim |
 | `verifyPurgeAuthorization` | `(authorization, operationBody, payload, genesis, currentStateHash, spoolUuid: Uint8Array, path: string[], nowSeconds, ttlSeconds: bigint): PurgeDecision` | Typed Rust purge decision |
 | `verifyTimelineAcceptance` | `(origin, acceptance, acceptedStateHash: Uint8Array, path: string[], requestSha256: Uint8Array, firstPosition: bigint, eventCount: number, revokedCapabilityIds, revokedSubjectIds: string[], nowSeconds, ttlSeconds: bigint): boolean` | Format-3 acceptance; false denies invalid evidence |
 | `verifierVersion` | `(): string` | Exact Cargo/npm version |
@@ -85,3 +86,9 @@ that npm/Cargo/tag versions match, then publishes the tarball to GitHub
 Packages after the stable binary release succeeds. The publish job uses the
 approval-protected release environment and a step-scoped GITHUB_TOKEN.
 Prerelease/manual dry runs build the artifact without publishing it.
+
+`NativeGenesisSummary` is a discriminated union. `owner_kind: "account"` reports
+verified StartThread authority with `requires_hosting_claim: false`.
+`owner_kind: "local_key"` reports only a verified creator binding with
+`requires_hosting_claim: true`; callers must separately verify the hosting claim
+and source cutoff before granting hosted authority.

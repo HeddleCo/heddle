@@ -86,6 +86,7 @@ impl ThreadCreation {
         opening::verify_genesis(&record, &reference)?;
         Ok(Self {
             request: StartThreadRequest {
+                native_genesis_authority: None,
                 client_operation_id: operation_id,
                 spool: reference.spool.clone(),
                 thread_genesis: Some(record),
@@ -93,6 +94,26 @@ impl ThreadCreation {
             },
             reference,
         })
+    }
+
+    /// Attach the original creator's frozen binding before request PoP signing.
+    pub fn with_native_authority(
+        mut self,
+        binding: SignedNativeGenesisAuthorityV1,
+    ) -> Result<Self, Error> {
+        api::native_witness::verify_genesis_authority(
+            &binding,
+            self.request
+                .thread_genesis
+                .as_ref()
+                .ok_or(Error::Protocol("genesis absent"))?,
+            &self.request.creator_authority,
+        )
+        .map_err(|_| {
+            Error::Protocol("native creator binding does not match genesis and authority")
+        })?;
+        self.request.native_genesis_authority = Some(binding);
+        Ok(self)
     }
 
     pub fn request(&self) -> &StartThreadRequest {
@@ -103,6 +124,7 @@ impl ThreadCreation {
     }
     pub fn genesis_record(&self) -> ThreadGenesisRecord {
         ThreadGenesisRecord {
+            native_genesis_authority: self.request.native_genesis_authority.clone(),
             boundary_acceptances: Vec::new(),
             ownership_claims: vec![],
             ownership_claim_admissions: vec![],
@@ -129,6 +151,12 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         &self,
         creation: &ThreadCreation,
     ) -> Result<ThreadMutationResponse, ClientError<Error>> {
+        if creation.request().native_genesis_authority.is_some() {
+            api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())
+                .map_err(|_| {
+                    ClientError::Transport(Error::Protocol("native genesis requires a HYBRID peer"))
+                })?;
+        }
         if !self
             .description
             .understood_signed_record_formats

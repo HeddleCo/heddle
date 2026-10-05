@@ -293,6 +293,7 @@ pub(super) async fn roundtrip(
     temporary_remote
         .api
         .call::<thread_api::rpc::ThreadServiceStartThread>(&StartThreadRequest {
+            native_genesis_authority: None,
             creator_authority: temporary_proof,
             client_operation_id: uuid::Uuid::new_v4().to_string(),
             spool: Some(SpoolRef {

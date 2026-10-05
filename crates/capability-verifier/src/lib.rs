@@ -15,6 +15,7 @@ mod error;
 pub mod import_delegation;
 mod keyring;
 mod limits;
+pub mod native_genesis;
 pub mod observed;
 mod operation;
 mod owner;
@@ -60,7 +61,10 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.21";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.30";
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_genesis_tests;

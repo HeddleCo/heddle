@@ -100,9 +100,66 @@ pub async fn complete_bundle<L: HistoryProofLookup>(
     now_ms: i64,
 ) -> Result<(), Error<L::Error>> {
     api::import_authority::validate_public_bundle(bundle)?;
-    let mut proofs = bundle.history_proofs.clone();
+    let proofs = complete_proofs(
+        lookup,
+        set,
+        &bundle.statements,
+        &bundle.history_proofs,
+        now_ms,
+    )
+    .await?;
+    let mut completed = bundle.clone();
+    completed.history_proofs = proofs;
+    api::import_authority::validate_public_bundle(&completed)?;
+    *bundle = completed;
+    Ok(())
+}
+
+pub fn replace_native_receiver_metadata(
+    original: &mut crate::contract::NativePublicProofBundleV1,
+    refreshed: crate::contract::NativePublicProofBundleV1,
+) -> Result<(), Reject> {
+    api::native_witness::validate_public_bundle(&refreshed)?;
+    let mut unchanged = refreshed.clone();
+    unchanged.witness_set = original.witness_set.clone();
+    unchanged.history_proofs = original.history_proofs.clone();
+    if &unchanged != original {
+        return Err(Reject::Scope);
+    }
+    *original = refreshed;
+    Ok(())
+}
+pub async fn complete_native_bundle<L: HistoryProofLookup>(
+    lookup: &L,
+    set: &VerifiedWitnessSet,
+    bundle: &mut crate::contract::NativePublicProofBundleV1,
+    now_ms: i64,
+) -> Result<(), Error<L::Error>> {
+    api::native_witness::validate_public_bundle(bundle)?;
+    let proofs = complete_proofs(
+        lookup,
+        set,
+        &bundle.statements,
+        &bundle.history_proofs,
+        now_ms,
+    )
+    .await?;
+    let mut completed = bundle.clone();
+    completed.history_proofs = proofs;
+    api::native_witness::validate_public_bundle(&completed)?;
+    *bundle = completed;
+    Ok(())
+}
+async fn complete_proofs<L: HistoryProofLookup>(
+    lookup: &L,
+    set: &VerifiedWitnessSet,
+    statements: &[SignedHostedWitnessStatementV1],
+    original_proofs: &[HostedWitnessHistoryProofV1],
+    now_ms: i64,
+) -> Result<Vec<HostedWitnessHistoryProofV1>, Error<L::Error>> {
+    let mut proofs = original_proofs.to_vec();
     let mut used = std::collections::BTreeSet::new();
-    for signed in &bundle.statements {
+    for signed in statements {
         let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
         match witness_trust::resolve_statement(set, signed, None, false, now_ms) {
             Ok(_) => continue,
@@ -134,9 +191,5 @@ pub async fn complete_bundle<L: HistoryProofLookup>(
     if used.len() != proofs.len() {
         return Err(Reject::Proof.into());
     }
-    let mut completed = bundle.clone();
-    completed.history_proofs = proofs;
-    api::import_authority::validate_public_bundle(&completed)?;
-    *bundle = completed;
-    Ok(())
+    Ok(proofs)
 }

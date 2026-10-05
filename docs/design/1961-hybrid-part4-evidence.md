@@ -1,0 +1,153 @@
+# HYBRID Part 4: native witnessing
+
+[PR #1968](https://github.com/HeddleCo/heddle/pull/1968) implements the native
+arm of #1961 on API `0.31.0-alpha.30`, commit
+`09827252a76d2b3b8509836a32e6fc8723d5ff49`. Both API pins and the standalone
+verifier consumer use that contract. The three native fixture copies match the
+tag byte for byte (SHA-256
+`7609f0012cdb0b6c43251913834f7e82a32a5cff5fe8ef4d91138938182ff015`).
+The corrected owner-chain vectors are enabled; there is no alpha.28 skip.
+
+## Production behavior
+
+- Native genesis keeps its original signature and a second creator signature
+  binding the exact authority envelope, owner identity and history, Spool
+  lineage, and publisher. Account creation verifies StartThread authority with
+  independently selected roots and historical time. LocalKey remains the
+  immutable creator and requires an explicit co-signed hosted ownership claim.
+- Explicit native/import carriers dispatch independently. Dual, malformed,
+  unsupported and unwitnessed hosted evidence rejects. Import delegation is
+  required only by the import arm; neither arm falls back to the other.
+- Native installation, publication, Fetch and relay use Part 1b's artifact
+  transaction and HostedTrust serialization. Current authorization is checked
+  again before and after artifact publication. Durable proofs, creator bindings,
+  admissions, native records and filesystem artifacts share rollback.
+- Account source/control/claim/resolution uses purpose 2. Account-authored
+  LocalIntegration also uses its original source authority and purpose 2.
+  Hosted integration dependencies use their byte-identical purpose-4 execution.
+  LocalKey capture/integration uses native proof and its Thread's witnessed
+  claim. LocalIntegration selects its cross-Thread source operation recursively.
+- The verified LocalKey publisher must equal the immutable genesis local owner.
+  Local work must be an ancestor of the sole claim's signed source frontier or
+  the authorized resolution's frontier. Conflicts need the exact complete claim
+  set and winning claim. Each source Thread has its own ownership cutoff.
+- Complete witness history survives Fetch, Push and device relay. Refresh changes
+  only the public witness set and exact retirement paths, preserves original
+  bytes, and rechecks durable root epoch/high-water/time at commit. Revoked
+  witness keys cannot be refreshed into authority. Refresh samples receiver time
+  after HTTPS lookup, so a newly issued response verifies at arrival and an
+  already expired response cannot borrow the earlier request time. Both native
+  and import carriers exercise that timing rule and preserve originals on refusal.
+- CLI/client StartThread freezes authority and genesis, signs the creator
+  binding as pending, then signs request PoP. Success finalizes the exact binding;
+  failed attempts remain outside public genesis records. Retry reselects owner
+  history and recomputes pending bindings after rotation. Local adopt retains the original local key
+  and publishes its explicit claim. Present bindings require capable peers and
+  advertise protocol 2; `SYNC_MANDATORY_GATE` stays **off**.
+- The production WASM binding exposes `verifyNativeGenesisAuthority` with
+  checked bigint time/TTL inputs and a discriminated `NativeGenesisSummary`.
+  Account verifies StartThread authority; LocalKey verifies only its creator
+  binding and explicitly requires a separate hosting claim. Native/WASM conformance includes native
+  creator-binding, envelope, lineage, expiry and revocation cases.
+
+## Tests and discriminating controls
+
+`thread-api::hybrid::native_tests` executes the published positives and every
+portable negative, plus real atomic installs and durable-state assertions.
+The owner/cutoff negatives independently pass portable signature, claim,
+capability and witness verification before the production native gate refuses
+them. Controls include a cutoff head's ancestors, beyond-cutoff descendants,
+wrong-key integration with a valid claim, and both violations combined.
+Account integration requires purpose 2; competing valid first admissions for
+one subject reject. Late authorization loss restores all artifacts and history.
+
+`hosted-client::native_sync::tests` exercises account StartThread, hosted
+publication and fresh clone. `cli/tests/adopt_hosted_publication.rs` runs local
+Git adoption, hosted push and fresh Fetch, preserving original signatures,
+attribution and claims. `hosted_clone_writes.rs` runs the CLI clone/write flows
+against native witness-producing transports. Device F4 exercises actual relay
+export, expired-set refresh, both exact retirement paths, missing/neighboring
+proofs, revoked keys and unchanged original content.
+
+The publication fixture carries each operation's direct causal dependencies and
+each claim's signed source frontier in its sidecar. Transport retains the full
+closure separately: the 140/1000-state publication tests verify bounded batches,
+fresh-clone ancestry and a later capture without exceeding witness payload bounds.
+The test host renews its root-signed witness set with increasing generations;
+each set keeps the contract's five-minute maximum. Long transport controls retain
+their original admissions when metadata expires, rather than lengthening trust.
+The exact-envelope test also checks the creator binding directly, so an envelope
+commitment regression cannot hide behind the separate witness-payload commitment.
+Multi-head Fetch serves the requested revision's content with the current Thread
+witness history, consistently in Ready and every operation batch. In-process
+publication serializes its temporary HEDDLE_HOME; clone writers enroll their
+original account source proof. Large hosted round-trip futures use the existing
+explicit-stack test harness.
+Endpoint discovery signs a fresh descriptor for each lookup while retaining its
+60-second lifetime, so a slow round trip cannot replay expired routing metadata.
+The capable native host still refuses direct ImportSource without CommitImportJob;
+the CLI import/ref-bound control sends no import request. Old-peer protocol
+refusal remains covered separately by the hosted-client suite.
+
+## Final gates and guard-removal receipts
+
+Final receipts in the PR record the tested SHA, command, exit status, test
+summary and elapsed time. Local command logs use `/tmp/1968-final-*`; their
+machine-readable index is `/tmp/1968-final-results.json`. Gates use a dedicated
+Cargo target and fresh HEDDLE_HOME, with CLI units serialized as in CI:
+
+1. Nightly rustfmt on touched Rust files, including Part 1b's tests.rs drift.
+2. Workspace/all-target clippy and CI-feature clippy with warnings denied.
+3. Workspace tests, serialized CLI units, CI-feature CLI integration and docs.
+4. The Thread API feature, dependency-isolation, test and clippy matrix.
+5. The complete hosted-client suite and CI/preview hosted clone/write tests.
+6. Portable WASM builds, verifier WASM tests, npm build/pack, bigint boundaries,
+   differential parity for every committed seed and forced-divergence rejection.
+7. Native gate-family fail-then-pass controls and Part 2's verify-before-install
+   and durable previous-witness-set guard proofs.
+8. GitHub PR checks watched through completion, including Windows `installation`.
+
+Guard proofs mutate an isolated final-source copy, require the named assertion
+to fail, restore the exact original bytes, then run the same passing test.
+Compilation failure is never a successful guard proof. The proof receipts are
+indexed separately in `/tmp/1968-final-guard-results.json`.
+
+## Applied surfaces
+
+The verb and human/agent surfaces are exercised by CLI clone/write/publication
+tests; there is no new flag or everyday verb. Git adoption keeps sley's native
+conversion and original attribution. Wire fields come from the pinned API;
+no view RPC or server-minted client root is added. Reverse states are exercised
+by atomic rollback, ownership resolution, stale/revoked trust, proof refresh,
+replay and exact-original export.
+
+## PR #1968 review follow-up
+
+The branch plain-merges integration's #1970 Commit admission verifier. Native
+lineage remains job independent; Commit admission retains historical selection,
+key-role and publication gates.
+
+Native and import retention now reject the opposite arm explicitly, independent
+of shared admissions. Publication's settled check requires either the operation's
+own admission or, only for the native arm, a LocalKey original covered by the
+signed ownership decision. The always-refusing `StagedSource::install` entry
+point is deleted; staging tests call the selected hosted install path.
+
+Permanent production guard tests cover requested account captures absent from
+every carrier payload and requested claims without purpose 2, equal-frontier
+ownership conflicts, missing admitted conflict members, orphan resolutions,
+job/authority creator keys, ambiguous owner chains, duplicate genesis admissions,
+both directions of proof exclusivity, exact Ready bindings, and carrier-less
+hosted export. Requested-record tests run the main atomic installer and assert
+unchanged records, claims, resolutions, bindings, witness trust and artifacts.
+The ownership decision and genesis accumulation seams are tested directly where
+portable closure checks or the shared first-admission gate would mask removal.
+
+Run `python3 scripts/prove-native-witness-guards.py` on the committed source.
+The script archives that commit, changes one guard at a time, requires the named
+runtime assertion to fail, restores exact source bytes, and reruns the identical
+filter to pass. It also proves publication cutoff/arm checks, typed native
+summaries, pending/final binding ordering, rotation-aware retries, and the
+version-6 to version-7 pending-table migration. Each receipt includes SHA,
+command, exit, duration and log; compilation failures and empty filters reject.
+The Part 4 and Part 2 guard families remain part of the final gate.

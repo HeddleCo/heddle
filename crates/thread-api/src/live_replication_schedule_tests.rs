@@ -276,6 +276,7 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
             .map(|n| operation(thread, metadata, n as u8))
             .collect();
         let input = Frame::Operations(ReplicationOperations {
+            native_authority: None,
             operations: records,
             authority_admissions: vec![],
             boundary_acceptances: vec![],
@@ -536,6 +537,7 @@ async fn hybrid_relay_preserves_the_complete_bundle_only_after_exact_negotiation
         pending: false,
         receipt_written: Arc::new(AtomicBool::new(false)),
         exported: Some(ReceivedOperation {
+            native_authority: None,
             original,
             authority_admission: None,
             import_authority: Some(Arc::new(bundle.clone())),
@@ -643,6 +645,7 @@ fn retained_acceptance_allocations_include_spare_capacity_once_until_last_user()
     let make_unit = || {
         let record = operation(ContentHash::from_bytes([1; 32]), false, 1);
         InputUnit::Operation(ReceivedOperation {
+            native_authority: None,
             import_authority: None,
             original: SignedOperation {
                 canonical: record.canonical_record,

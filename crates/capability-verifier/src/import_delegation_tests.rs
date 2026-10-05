@@ -641,7 +641,8 @@ fn direct_delegation(
 ) -> SignedImportJobDelegationV1 {
     let mut signed: SignedImportJobDelegationV1 = record(f, "delegation");
     let body = signed.body.as_mut().expect("delegation body");
-    let (identity, chain, _) = expectation(&c.selection, c.now_millis / 1000).expect("selection");
+    let (identity, chain, _) =
+        native_identity(&c.selection, c.now_millis / 1000).expect("selection");
     body.identity = Some(identity);
     body.owner_chain_digest = chain;
     body.delegating_public_key = key(f, role);
@@ -919,7 +920,7 @@ fn historical_import_expiry_uses_owner_state_at_observation() {
         let mut c = context(owner, &ring, &digest, &initial, &[], observation);
         let signed = direct_delegation(&f, &c, role, observation - 1, expiry);
         let (identity, _, bound) =
-            expectation(&c.selection, observation).expect("historical selection");
+            native_identity(&c.selection, observation).expect("historical selection");
         assert_eq!(
             bound,
             if observation < CLAIM_TIME {

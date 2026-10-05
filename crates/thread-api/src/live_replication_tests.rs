@@ -754,6 +754,7 @@ async fn committed_receipt_case(with_successor: bool) {
         None
     };
     let bytes = Frame::Operations(ReplicationOperations {
+        native_authority: None,
         operations: records,
         authority_admissions: vec![],
         boundary_acceptances: vec![],

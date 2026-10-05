@@ -285,7 +285,7 @@ fn retired_import_surfaces_are_not_registered() {
 
 #[cfg(feature = "client")]
 #[tokio::test]
-async fn hosted_import_protocol_gate_and_ref_bound_send_no_import_request() {
+async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
     use hosted_client::hosted_runtime::hosted::{ImportSourceRefError, ImportSourceRefs};
 
     let temp = tempfile::tempdir().expect("source");
@@ -311,8 +311,13 @@ async fn hosted_import_protocol_gate_and_ref_bound_send_no_import_request() {
             uuid::Uuid::now_v7().to_string(),
         )
         .await
-        .expect_err("an old peer cannot ignore mandatory import authority");
-    assert!(error.to_string().contains("incompatible peer"), "{error}");
+        .expect_err("a capable peer still requires an explicit import job");
+    assert!(
+        error
+            .to_string()
+            .contains("ImportSource requires CommitImportJob"),
+        "{error}"
+    );
     assert!(captured.lock().expect("capture").import_requests.is_empty());
     // 3 branches + 510 tags = 513; the annotated tag's peeled line counts once.
     for index in 1..510 {
