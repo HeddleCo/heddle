@@ -644,7 +644,7 @@ if build_job.is_a?(Hash)
   gnu_legs.each do |entry|
     runner = entry.fetch("runner", "").to_s
     target = entry["target"]
-    if runner.start_with?("ubuntu-22.04")
+    if runner == (target.start_with?("aarch64-") ? "blacksmith-4vcpu-ubuntu-2204-arm" : "blacksmith-4vcpu-ubuntu-2204") || runner == (target.start_with?("aarch64-") ? "ubuntu-22.04-arm" : "ubuntu-22.04")
       oks << "#{target} pinned to #{runner} (glibc 2.35 floor)"
     else
       errors << "#{target} builds on '#{runner}', not ubuntu-22.04 - raises the glibc floor above 2.35 (#549)"
@@ -839,7 +839,9 @@ if isinstance(build_job, dict):
     for e in gnu_legs:
         runner = str(e.get("runner", ""))
         target = e.get("target")
-        if runner.startswith("ubuntu-22.04"):
+        if runner in (("ubuntu-22.04-arm", "blacksmith-4vcpu-ubuntu-2204-arm")
+                      if target.startswith("aarch64-")
+                      else ("ubuntu-22.04", "blacksmith-4vcpu-ubuntu-2204")):
             oks.append(f"{target} pinned to {runner} (glibc 2.35 floor)")
         else:
             errors.append(
