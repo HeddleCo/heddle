@@ -409,6 +409,16 @@ async fn serve(mut send: SendStream, mut recv: RecvStream, state: Arc<State>) ->
             let request = ReadContentRequest::decode(request.body)?;
             ensure!(request.thread == Some(thread_ref()), "exact owning Thread");
             ensure!(request.revision == Some(revision()), "exact revision");
+            send_message(
+                &mut send,
+                &ContentEvent {
+                    payload: Some(content_event::Payload::AcceptedBudget(
+                        request.budget.context("read budget")?,
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await?;
             for selection in request.selections {
                 let mut revision = revision();
                 if matches!(state.scenario, Scenario::WrongRevision) {

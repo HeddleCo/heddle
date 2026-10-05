@@ -286,6 +286,17 @@ pub(super) async fn roundtrip(
     let mut entry = false;
     while let Some(event) = stream.next().await.expect("content response") {
         frames += 1;
+        if let Some(content_event::Payload::AcceptedBudget(accepted)) = &event.payload {
+            assert_eq!(frames, 1, "budget echo must be first and unique");
+            assert!(event.selection_id.is_empty());
+            assert_eq!(event.revision.as_ref(), Some(&revision));
+            api::v2::validate_accepted_read_budget(
+                &request.budget.unwrap_or_default(),
+                Some(accepted),
+            )
+            .expect("accepted content budget");
+            continue;
+        }
         assert_eq!(event.revision.as_ref(), Some(&revision));
         match event.payload.expect("payload") {
             content_event::Payload::Blob(chunk) => {
@@ -340,6 +351,15 @@ pub(super) async fn roundtrip(
             .observe::<thread_api::rpc::ContentServiceReadContent>(&denied)
             .await
             .expect("denied stream");
+        assert!(matches!(
+            stream
+                .next()
+                .await
+                .expect("echo")
+                .expect("echo event")
+                .payload,
+            Some(content_event::Payload::AcceptedBudget(_))
+        ));
         assert!(
             stream.next().await.is_err(),
             "unreachable object and invalid path require typed failure"
@@ -382,6 +402,15 @@ pub(super) async fn roundtrip(
         .observe::<thread_api::rpc::ContentServiceReadContent>(&late)
         .await
         .expect("late read");
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("echo")
+            .expect("echo event")
+            .payload,
+        Some(content_event::Payload::AcceptedBudget(_))
+    ));
     assert!(matches!(
         stream
             .next()
