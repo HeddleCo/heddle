@@ -13,10 +13,11 @@ use tokio::{
     sync::Mutex,
 };
 
+#[cfg(unix)]
+use super::hosted_bridge;
 use super::{
     HostedError, Result,
     claim_protocol::{ClaimProtocol, NATIVE_ALPN},
-    hosted_bridge,
     provider_transport::ProviderWebSocketTransport,
 };
 

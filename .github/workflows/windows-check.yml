@@ -30,4 +30,4 @@ jobs:
       - name: Check release binaries with Windows mount and client support
         run: cargo check --release --locked -p heddle-cli --features mount,client --target x86_64-pc-windows-msvc --bins
       - name: Credential helper fallback tests
-        run: cargo test --locked -p heddle-git-projection --lib credential:: -- --test-threads=1
+        run: cargo test --locked -p heddle-git-projection --lib credential -- --test-threads=1
