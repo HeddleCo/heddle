@@ -806,6 +806,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("repository");
+        crate::isolate_test_home();
         let repo = repo::Repository::init_default(root.path()).expect("init repository");
         let target = super::EvaluationTarget::prepare(&repo, None, true).expect("recorded target");
         let context = super::execution_context(&repo, &target, "definition-digest".into());
@@ -1027,6 +1028,7 @@ mod tests {
     #[test]
     fn recording_without_local_spool_identity_fails_closed_without_minting() {
         let root = tempfile::tempdir().expect("repository directory");
+        crate::isolate_test_home();
         let repo = repo::Repository::init(root.path()).expect("unseeded repository");
         let error = check_local_spool(&repo, uuid::Uuid::now_v7()).expect_err("identity required");
         let advice = error
@@ -1042,6 +1044,7 @@ mod tests {
     #[test]
     fn local_spool_identity_must_match_hosted_spool() {
         let root = tempfile::tempdir().expect("repository directory");
+        crate::isolate_test_home();
         let repo = repo::Repository::init_default(root.path()).expect("init repository");
         let local = repo.native_spool_id().expect("local identity");
         check_local_spool(&repo, local).expect("matching Spool");

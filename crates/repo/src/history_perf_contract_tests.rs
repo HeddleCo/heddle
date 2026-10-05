@@ -21,12 +21,8 @@ struct HistoryCounts {
 }
 
 #[test]
-#[ignore = "release-only bounded-history contract; run with `HEDDLE_PROFILE=1 cargo test --release -p heddle-repo bounded_history_reads_release_contract -- --ignored --nocapture`"]
-fn bounded_history_reads_release_contract() {
-    assert!(
-        !std::hint::black_box(cfg!(debug_assertions)),
-        "bounded-history performance contract requires cargo test --release"
-    );
+#[ignore = "counter-based bounded-history contract; run with `HEDDLE_PROFILE=1 cargo test --locked -p heddle-repo --lib bounded_history_reads_contract -- --ignored --nocapture`"]
+fn bounded_history_reads_contract() {
     assert!(
         std::env::var("HEDDLE_PROFILE").is_ok(),
         "bounded-history performance contract requires HEDDLE_PROFILE=1"

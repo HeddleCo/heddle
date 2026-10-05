@@ -102,7 +102,9 @@ initializer once, then use `verifyPurgeAuthorization` with canonical protobuf
 bytes and caller-pinned owner context. The binding also exposes
 production transfer, resource-keyring, self/delegated genesis, policy-chain
 and import-delegation verification. See the [typed binding API](npm/README.md);
-exact generated TypeScript signatures ship in the package.
+exact generated TypeScript signatures ship in the package. Native dependencies
+compile an `rlib`; the npm build explicitly requests `cdylib,rlib` with
+`cargo rustc` to preserve the existing WASM output without native rebuild churn.
 
 For timeline acceptance, the caller supplies a previously verified original
 endorsement, the actual logical request digest and position range, the exact

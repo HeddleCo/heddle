@@ -710,7 +710,7 @@ def step_sizes(doc):
                        ["cargo", "build", "--offline", "--release", "-p", "heddle-cli", "--features", HEDDLE_SHIPPED["features"], "--bin", "heddle"],
                        "release/heddle")
         one_build_size(items, "sizes/capability-verifier-cdylib-release", "heddle", cfg,
-                       ["cargo", "build", "--offline", "--release", "-p", "heddleco-capability-verifier", "--lib"],
+                       ["cargo", "rustc", "--offline", "--release", "-p", "heddleco-capability-verifier", "--lib", "--crate-type", "cdylib,rlib"],
                        "release/libheddleco_capability_verifier.so")
     ws = wd["shipped"]
     for cfg in [wd["baseline_variant"], wd["fork_variant"]]:
@@ -727,7 +727,7 @@ def step_wasm(doc):
     wbg = Path(WBG_DIR) / "wasm-bindgen" if WBG_DIR else None
     for cfg in ["current", "fork"]:
         t = one_build_size(items, "wasm/capability-verifier-release-raw", "heddle", cfg,
-                           ["cargo", "build", "--offline", "--release", "-p", "heddleco-capability-verifier", "--target", "wasm32-unknown-unknown", "--lib"],
+                           ["cargo", "rustc", "--offline", "--release", "-p", "heddleco-capability-verifier", "--target", "wasm32-unknown-unknown", "--lib", "--crate-type", "cdylib,rlib"],
                            "wasm32-unknown-unknown/release/heddleco_capability_verifier.wasm", keep=True)
         raw = target(t) / "wasm32-unknown-unknown/release/heddleco_capability_verifier.wasm"
         idn = "wasm/capability-verifier-wasm-bindgen-web"

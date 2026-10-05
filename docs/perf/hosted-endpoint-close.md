@@ -54,11 +54,11 @@ exists for the WAN drain, not to shave the 0.4 ms local case.
 
 ## Executable contract
 
-The dedicated release workflow runs:
+The performance workflow runs this teardown contract in debug mode:
 
 ```sh
-TMPDIR=/home/scratch cargo test --locked --release -p heddle-hosted-client --lib \
-  hosted_endpoint_close_release_contract -- --ignored --nocapture
+TMPDIR=/home/scratch cargo test --locked -p heddle-hosted-client --features client --lib \
+  hosted_endpoint_close_contract -- --ignored --nocapture
 ```
 
 The test takes 20 samples, prints median/p95/min/max, asserts p95 is
@@ -66,7 +66,7 @@ within 20 ms, and asserts that the endpoint is closed before each
 successful hosted connection is dropped. The workflow also enables Iroh
 error logs and fails if the literal #1143
 `Endpoint dropped without calling Endpoint::close` message appears. The
-test refuses to run as a debug-build gate.
+endpoint-closed assertion and latency bound also apply to debug builds.
 
 Unit tests in `connection.rs` fail if close blocks on a local fixture
 after the QUIC session is already locally closed, or if an injected
@@ -74,6 +74,6 @@ after the QUIC session is already locally closed, or if an injected
 
 ```sh
 TMPDIR=/home/scratch HEDDLE_HOSTED_CLOSE_NEGATIVE_CONTROL=latency \
-  cargo test --locked --release -p heddle-hosted-client --lib \
-  hosted_endpoint_close_release_contract -- --ignored --nocapture
+  cargo test --locked -p heddle-hosted-client --features client --lib \
+  hosted_endpoint_close_contract -- --ignored --nocapture
 ```

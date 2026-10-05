@@ -18,7 +18,8 @@ const metadata = JSON.parse(run("cargo", ["metadata", "--locked", "--no-deps", "
 const crate = metadata.packages.find(p => p.name === "heddleco-capability-verifier");
 const dist = path.join(root, "npm", "dist");
 mkdirSync(dist, { recursive: true });
-run("cargo", ["build", "--locked", "--release", "-p", crate.name, "--target", "wasm32-unknown-unknown", "--lib"]);
+// Native consumers use only the rlib; request the original artifact types only for this WASM build.
+run("cargo", ["rustc", "--locked", "--release", "-p", crate.name, "--target", "wasm32-unknown-unknown", "--lib", "--crate-type", "cdylib,rlib"]);
 run("wasm-bindgen", [path.join(metadata.target_directory, "wasm32-unknown-unknown", "release", "heddleco_capability_verifier.wasm"), "--target", "web", "--out-dir", dist, "--out-name", "capability_verifier"]);
 for (const license of ["LICENSE-APACHE", "LICENSE-MIT"]) copyFileSync(path.join(root, license), path.join(dist, license));
 writeFileSync(path.join(dist, "package.json"), `${JSON.stringify({ name: crate.name, version: crate.version, type: "module" }, null, 2)}\n`);

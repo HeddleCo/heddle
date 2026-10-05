@@ -9,6 +9,7 @@ on:
   pull_request:
     branches:
       - main
+      - integration
   # Branch protection may require fast-check for both PRs and merge groups.
   # Emit the same stable success context in the queue without duplicating the
   # compilation already performed by rust-full-suite.yml.
@@ -111,14 +112,17 @@ jobs:
         if: github.event_name == 'pull_request'
         run: cargo clippy --locked --workspace --all-targets -- -D warnings -D dead-code
 
+      - uses: taiki-e/install-action@nextest
+        if: github.event_name == 'pull_request'
+
       - name: Unit tests (workspace, lib + bins)
         if: github.event_name == 'pull_request'
-        run: cargo test --locked --workspace --exclude heddle-cli --lib --bins
-
-      - name: CLI unit tests
-        if: github.event_name == 'pull_request'
-        # CLI tests temporarily change HOME/HEDDLE_HOME; avoid process-global races.
-        run: cargo test --locked -p heddle-cli --lib --bins -- --test-threads=1
+        # One workspace graph preserves feature-unified unit coverage. nextest
+        # gives each test a process; CLI fixture helpers isolate its home.
+        run: |
+          test_home=$(mktemp -d)
+          trap 'rm -rf "$test_home"' EXIT
+          HEDDLE_HOME="$test_home" cargo nextest run --locked --workspace --lib --bins
 
       - name: sccache stats
         if: ${{ always() && github.event_name == 'pull_request' }}
@@ -166,13 +170,15 @@ jobs:
       # targets exercise contracts that cli_basics alone does not cover.
       - name: Full CLI test suite
         run: |
-          export HEDDLE_HOME=$(mktemp -d)
-          cargo nextest run --locked -p heddle-cli --features client --test-threads 4
+          test_home=$(mktemp -d)
+          trap 'rm -rf "$test_home"' EXIT
+          HEDDLE_HOME="$test_home" cargo nextest run --locked -p heddle-cli --features client --test-threads 4
 
       - name: Hosted-client tests
         run: |
-          export HEDDLE_HOME=$(mktemp -d)
-          cargo nextest run --locked -p heddle-hosted-client --features client
+          test_home=$(mktemp -d)
+          trap 'rm -rf "$test_home"' EXIT
+          HEDDLE_HOME="$test_home" cargo nextest run --locked -p heddle-hosted-client --features client
 
       - name: sccache stats
         if: always()

@@ -4,15 +4,8 @@ use super::*;
 #[test]
 fn test_shallow_clone_depth_1() {
     let remote_temp = TempDir::new().unwrap();
-    let local_path = remote_temp
-        .path()
-        .parent()
-        .unwrap()
-        .join("shallow_clone_test_1");
-
-    if local_path.exists() {
-        fs::remove_dir_all(&local_path).ok();
-    }
+    let clones = TempDir::new().unwrap();
+    let local_path = clones.path().join("clone");
 
     heddle(&["init"], Some(remote_temp.path())).unwrap();
 
@@ -46,22 +39,13 @@ fn test_shallow_clone_depth_1() {
 
     let shallow_path = local_path.join(".heddle").join("shallow");
     assert!(shallow_path.exists(), "shallow file should exist");
-
-    fs::remove_dir_all(&local_path).ok();
 }
 
 #[test]
 fn test_shallow_clone_depth_0() {
     let remote_temp = TempDir::new().unwrap();
-    let local_path = remote_temp
-        .path()
-        .parent()
-        .unwrap()
-        .join("shallow_clone_test_0");
-
-    if local_path.exists() {
-        fs::remove_dir_all(&local_path).ok();
-    }
+    let clones = TempDir::new().unwrap();
+    let local_path = clones.path().join("clone");
 
     heddle(&["init"], Some(remote_temp.path())).unwrap();
 
@@ -92,8 +76,6 @@ fn test_shallow_clone_depth_0() {
     let states = parsed["states"].as_array().expect("states should be array");
     // 2 user snapshots. `init` does not create a persisted bootstrap state.
     assert_eq!(states.len(), 2, "depth 0 should behave like a full clone");
-
-    fs::remove_dir_all(&local_path).ok();
 }
 
 /// Performance characterization for partial (shallow) clone — issue #238 AC4.
@@ -111,14 +93,10 @@ fn test_partial_clone_copies_fewer_objects_than_full() {
     const HISTORY_DEPTH: usize = 25;
 
     let remote_temp = TempDir::new().unwrap();
-    let base = remote_temp.path().parent().unwrap();
+    let clones = TempDir::new().unwrap();
+    let base = clones.path();
     let full_path = base.join("partial_clone_full");
     let shallow_path = base.join("partial_clone_shallow");
-    for path in [&full_path, &shallow_path] {
-        if path.exists() {
-            fs::remove_dir_all(path).ok();
-        }
-    }
 
     heddle(&["init"], Some(remote_temp.path())).unwrap();
     // Each commit rewrites the same file with distinct content, so every
@@ -179,24 +157,13 @@ fn test_partial_clone_copies_fewer_objects_than_full() {
         shallow_objects <= 24,
         "depth-1 clone should copy only the tip + immediate parents (plus the tip's semantic index), got {shallow_objects} objects"
     );
-
-    for path in [&full_path, &shallow_path] {
-        fs::remove_dir_all(path).ok();
-    }
 }
 
 #[test]
 fn test_normal_clone_no_depth() {
     let remote_temp = TempDir::new().unwrap();
-    let local_path = remote_temp
-        .path()
-        .parent()
-        .unwrap()
-        .join("normal_clone_test");
-
-    if local_path.exists() {
-        fs::remove_dir_all(&local_path).ok();
-    }
+    let clones = TempDir::new().unwrap();
+    let local_path = clones.path().join("clone");
 
     heddle(&["init"], Some(remote_temp.path())).unwrap();
 
@@ -228,6 +195,4 @@ fn test_normal_clone_no_depth() {
     let states = parsed["states"].as_array().expect("states should be array");
     // 3 user snapshots. `init` does not create a persisted bootstrap state.
     assert_eq!(states.len(), 3, "normal clone should have all 3 states");
-
-    fs::remove_dir_all(&local_path).ok();
 }

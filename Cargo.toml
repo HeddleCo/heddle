@@ -219,6 +219,11 @@ lto = true
 codegen-units = 1
 strip = true
 
+[profile.perf]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 [patch.crates-io]
 heddleco-capability-verifier = { path = "crates/capability-verifier" }
 heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "09827252a76d2b3b8509836a32e6fc8723d5ff49", version = "=0.31.0-alpha.30" }

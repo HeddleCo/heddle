@@ -2894,6 +2894,7 @@ mod tests {
     #[test]
     fn heddle_clone_output_uses_native_repository_capability() {
         let temp = tempfile::TempDir::new().expect("temp");
+        crate::isolate_test_home();
         let repo = Repository::init(temp.path()).expect("init native repo");
 
         let output = heddle_clone_output(
