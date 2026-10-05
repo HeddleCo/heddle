@@ -20,9 +20,13 @@ API = 'heddle-thread-api'
 HOSTED = 'heddle-hosted-client'
 VERIFIER = 'heddleco-capability-verifier'
 CRYPTO = 'heddle-crypto'
+CLI = 'heddle-cli'
 TIP = 'crates/object-model/src/object/thread_replication.rs'
 # name, file, exact old bytes, replacement, crate, filter, expected assertion
 MUTATIONS = [
+    ('native-fetch-stack', 'crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs',
+     '        Box::pin(async move {', '        async move {', CLI,
+     'fresh_clone_capture_push_main', 'overflowed its stack'),
     ('import-tip', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
      '.validate_parents_inner(genesis, parents, true)',
      '.validate_parents_inner(genesis, parents, false)', CRYPTO,
@@ -247,6 +251,10 @@ MUTATIONS = [
 # The import composition helper also enforces the durable witness checkpoint.
 # Remove both checks to prove the family; removing one leaves the other active.
 EXTRA_MUTATIONS = {
+    'native-fetch-stack': [
+        ('crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs',
+         '        })\n        .await\n    }', '        }\n        .await\n    }'),
+    ],
     'publication-live-p1': [
         ('crates/capability-verifier/src/import_delegation.rs',
          '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', ''),
@@ -294,7 +302,11 @@ def main():
             changes.append((extra_path, extra_original, before, after))
         for red in [True, False]:
             label = name + ('-red' if red else '-green')
-            command = ['cargo', 'test', '--locked', '-p', crate, '--lib']
+            command = ['cargo', 'test', '--locked', '-p', crate]
+            if crate == CLI:
+                command += ['--features', 'ci', '--test', 'hosted_clone_writes']
+            else:
+                command += ['--lib']
             if crate == HOSTED:
                 command += ['--features', 'client']
             elif crate == CRYPTO:

@@ -59,41 +59,47 @@ impl HostedClient {
         limits: Limits,
         scratch: &Path,
     ) -> anyhow::Result<StagedSource> {
-        let delivery = fetch_open::Delivery::try_from(open.delivery)
-            .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
-        let remote = self.native().await?;
-        if delivery != fetch_open::Delivery::ProviderPreferred
-            || validate_routes(&open.routes).is_err()
-        {
-            let open = if delivery == fetch_open::Delivery::ProviderPreferred {
-                direct_fetch_open(&open)
-            } else {
-                open
-            };
-            let download = remote.fetch_content(open, limits).await?;
-            return self
-                .stage_native_download(repository, download, scratch)
-                .await;
-        }
-
-        let routes = open.routes.clone();
-        match self
-            .fetch_preferred_source(repository, &remote, open.clone(), limits, scratch, &routes)
-            .await
-        {
-            Ok(staged) => Ok(staged),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "preferred provider Fetch failed; using direct source transfer"
-                );
-                let download = remote
-                    .fetch_content(direct_fetch_open(&open), limits)
-                    .await?;
-                self.stage_native_download(repository, download, scratch)
-                    .await
+        // Provider negotiation and authenticated import staging both retain large
+        // typed RPC futures. Keep that transfer frame off callers' stacks,
+        // including the CLI's current-thread runtime.
+        Box::pin(async move {
+            let delivery = fetch_open::Delivery::try_from(open.delivery)
+                .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
+            let remote = self.native().await?;
+            if delivery != fetch_open::Delivery::ProviderPreferred
+                || validate_routes(&open.routes).is_err()
+            {
+                let open = if delivery == fetch_open::Delivery::ProviderPreferred {
+                    direct_fetch_open(&open)
+                } else {
+                    open
+                };
+                let download = remote.fetch_content(open, limits).await?;
+                return self
+                    .stage_native_download(repository, download, scratch)
+                    .await;
             }
-        }
+
+            let routes = open.routes.clone();
+            match self
+                .fetch_preferred_source(repository, &remote, open.clone(), limits, scratch, &routes)
+                .await
+            {
+                Ok(staged) => Ok(staged),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "preferred provider Fetch failed; using direct source transfer"
+                    );
+                    let download = remote
+                        .fetch_content(direct_fetch_open(&open), limits)
+                        .await?;
+                    self.stage_native_download(repository, download, scratch)
+                        .await
+                }
+            }
+        })
+        .await
     }
 
     async fn fetch_preferred_source(

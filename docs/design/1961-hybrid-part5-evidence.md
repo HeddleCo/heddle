@@ -125,6 +125,11 @@ executor equality; host window bounds; and typed Commit wire refusals. Part 2
 and Part 4's guard families run at the same final commit. Receipts require
 named runtime failures and unchanged passing controls, never compile failures.
 
+The first full tag gate exposed a real CLI clone stack overflow in the combined
+provider/import staging future. `fetch_native_source` keeps that transfer frame
+on the heap; the existing fresh-clone CLI process test fails with stack overflow
+when this boundary is removed and passes with it restored.
+
 The previous CI publication test sent a valid imported root through carrierless
 staging. It now authenticates the enclosing bundle with
 `authenticate_import_carriers` before calling
