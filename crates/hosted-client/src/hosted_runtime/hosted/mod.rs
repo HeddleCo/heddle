@@ -17,6 +17,7 @@ pub(crate) mod descriptor_trust;
 mod error;
 mod evidence;
 pub(crate) mod helpers;
+#[cfg(unix)]
 pub(crate) mod hosted_bridge;
 mod human;
 mod hydration;

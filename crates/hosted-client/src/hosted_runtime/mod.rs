@@ -18,6 +18,7 @@ pub mod auth_requests;
 mod claim_authorization;
 #[cfg(test)]
 mod claim_authorization_tests;
+#[cfg(unix)]
 pub(crate) mod claim_bridge;
 mod claim_native;
 pub mod claim_offer;
