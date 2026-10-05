@@ -46,7 +46,7 @@ fn record<T: Message + Default>(f: &Value, name: &str) -> Result<T, String> {
     let v = f["signed_vectors"]
         .get(name)
         .or_else(|| f["wire_vectors"].get(name))
-        .ok_or("missing vector")?;
+        .ok_or_else(|| format!("missing vector: {name}"))?;
     let bytes = hex::decode(v["wire_hex"].as_str().ok_or("missing wire bytes")?)
         .map_err(|e| e.to_string())?;
     hybrid_codec::strict_decode(&bytes, contract::MAX_BUNDLE_BYTES).map_err(|e| e.to_string())
@@ -278,10 +278,17 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         max_ttl: "3600".into(),
     };
     add("u64-max-total", c.clone(), None)?;
-    let signed: SignedImportJobDelegationV1 = record(f, "alpha32_large_owner")?;
+    let mut signed = direct;
+    let body = signed.body.as_mut().ok_or("large owner certificate")?;
+    body.scope.as_mut().ok_or("scope")?.max_result_bytes = 9_007_199_254_741_247;
+    signed.delegating_signature = Some(sign(f, "owner", contract::DELEGATION_DOMAIN, body)?);
     c.certificate_hex = hex::encode(signed.encode_to_vec());
     c.permission_hex.clear();
     add("large-owner-total", c, None)?;
+    let scope: ImportPermissionScopeV1 = record(f, "scope")?;
+    let partial: ImportResultManifestV1 = record(f, "partial_manifest")?;
+    let remaining =
+        contract::remaining_import_scope(&scope, &partial).map_err(|e| e.to_string())?;
     for (id, scope, manifest) in [
         (
             "empty",
@@ -300,7 +307,7 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         ),
         (
             "removed-not-recharged",
-            record(f, "alpha32_remaining")?,
+            remaining,
             record(f, "partial_manifest")?,
         ),
     ] {
@@ -309,29 +316,18 @@ pub fn cases(f: &Value) -> Result<Value, String> {
             "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,
         }).to_string()}));
     }
-    for (id, request, manifest) in [
-        ("large", "alpha32_commit_large", "alpha32_manifest_large"),
-        (
-            "u64-max",
-            "alpha32_commit_u64_max",
-            "alpha32_manifest_u64_max",
-        ),
+    for (id, total, used) in [
+        ("large", 9_007_199_254_741_247, 9_007_199_254_740_999),
+        ("u64-max", u64::MAX, u64::MAX - 7),
     ] {
-        let request: CommitImportJobRequest = record(f, request)?;
-        let scope = request
-            .proof
-            .as_ref()
-            .ok_or("proof")?
-            .delegations
-            .last()
-            .ok_or("delegation")?
-            .body
-            .as_ref()
-            .ok_or("body")?
-            .scope
-            .as_ref()
-            .ok_or("scope")?;
-        let manifest: ImportResultManifestV1 = record(f, manifest)?;
+        let mut scope: ImportPermissionScopeV1 = record(f, "scope")?;
+        scope.max_result_bytes = total;
+        let mut manifest: ImportResultManifestV1 = record(f, "partial_manifest")?;
+        manifest
+            .slots
+            .first_mut()
+            .ok_or("published slot")?
+            .result_bytes = used;
         out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
             "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
             "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,

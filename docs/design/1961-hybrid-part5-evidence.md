@@ -2,8 +2,10 @@
 
 The workspace and standalone conformance adapter pin API
 `9697e97538607ec922595468205dea6d99d3d358`, version `=0.31.0-alpha.33`.
+Biscuit verifier dependencies select the same pin through the workspace patch.
 Crate/npm versions are unchanged; `SYNC_MANDATORY_GATE` remains off.
-PR #1972 targets integration. Final release gates depend on the published tag.
+PR #1972 targets integration and stays draft. The alpha.33 tag lookup returned
+no tag; the full release gate and CI watch have not run.
 
 ## Atomic publication admission
 
@@ -28,6 +30,9 @@ pinned; size estimates allocate signed per-job totals without per-branch budgets
 Deleted artifacts include the three retired consumer/control/review corpora,
 `ImportRenewalSubmission`, the unused `receive_witnessed` API and its evidence
 wrappers, and the entire `HostedImport` body/kind and legacy installer test.
+The first adoption commit removes 2,742 Rust lines and adds 1,280 (net −1,462).
+The job lifecycle loses 1,110 lines, receiver code 301, old receiver tests 424,
+and the retired HostedImport file 526; 141 empty-base lines are retained separately.
 The deterministic empty-base functions move to `thread_replication/initial_base`.
 Weft integration/W2b have no `receive_witnessed` callers. Weft's old HostedImport
 references belong to its separate hard-cut migration; no weft/API code is edited.

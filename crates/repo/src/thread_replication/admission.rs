@@ -20,8 +20,8 @@ pub struct StoredOperation {
 }
 impl ThreadReplica {
     /// Current delivery authorization remains the endpoint's separate gate.
-    /// A bare receipt now fails closed. Use `receive_witnessed` with an
-    /// independently selected fresh set and the complete original authority.
+    /// A bare receipt fails closed. Use `install_hybrid_native` with the
+    /// independently selected fresh set and complete original authority bundle.
     pub fn receive_with_authority_admission(
         &self,
         original: &SignedOperation,
