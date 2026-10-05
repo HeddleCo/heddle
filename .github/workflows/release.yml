@@ -75,7 +75,7 @@ jobs:
   # and would let a tagged rewrite replace the gate — forbidden.
   validate-tag:
     name: validate tag
-    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@e847f41b146e42e5bd688039469ed0a5ab9eff21
+    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@4516db75170834d507641e3aa1e8b321bc496280
     permissions:
       contents: read
 
@@ -158,7 +158,7 @@ jobs:
           if npm view "$package" version --json > /tmp/npm-probe.json 2>/tmp/npm-probe.log; then
             echo "$package already published"
           elif node -e 'const e = require("/tmp/npm-probe.json"); process.exit(e.error?.code === "E404" ? 0 : 1)'; then
-            npm publish "package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts
+            npm publish "./package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts
           else
             cat /tmp/npm-probe.log >&2
             exit 1

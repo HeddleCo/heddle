@@ -195,7 +195,11 @@ if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" <<<"$npm_publish_bl
    && grep -F 'packages: write' <<<"$npm_publish_block" >/dev/null \
    && grep -F 'NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' <<<"$npm_publish_block" >/dev/null \
    && grep -F 'name: capability-verifier-npm' <<<"$npm_publish_block" >/dev/null \
-   && grep -F 'npm publish "package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'registry-url: https://npm.pkg.github.com' <<<"$npm_publish_block" >/dev/null \
+   && grep -F "scope: '@heddleco'" <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'package="@heddleco/capability-verifier-wasm@${version}"' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'npm view "$package" version --json' <<<"$npm_publish_block" >/dev/null \
+   && grep -F 'npm publish "./package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts' <<<"$npm_publish_block" >/dev/null \
    && ! grep -E '^    env:' <<<"$npm_publish_block" >/dev/null; then
   ok "capability-verifier npm publishes the stable validated artifact with step-scoped package credentials"
 else
