@@ -1,31 +1,43 @@
-# HYBRID Parts 5–6: alpha.33
+# HYBRID Parts 5–7: alpha.33
 
 The workspace and standalone conformance adapter pin API
-`9697e97538607ec922595468205dea6d99d3d358`, version `=0.31.0-alpha.33`.
+tag `c9bd6ba26bc5e028e064b725419cfb702ccc559c`, version `=0.31.0-alpha.33`.
 Biscuit verifier dependencies select the same pin through the workspace patch.
 Crate/npm versions are unchanged; `SYNC_MANDATORY_GATE` remains off.
-PR #1972 targets integration and stays draft. The alpha.33 tag lookup returned
-no tag; the full release gate and CI watch have not run.
+PR #1972 targets integration. Its final gate receipts and CI status are reported
+on the PR against the tested commit; publication readiness requires every gate.
 
 ## Atomic publication admission
 
 Commit validates its exact stored preparation and permits bounded scheduling;
 it grants no genesis admission. `verify_publication_admission` requires a P1
 and its exact branch-result P3, equal witnessed milliseconds and transaction ID,
-with P1's admission order strictly before P3. Both must be inside the sole
+with P1's admission order strictly before P3 and the same executor ID. Heddle
+uses API `check_import_genesis_publication_pair` for these checks. Both must be inside the sole
 signed delegation's exclusive window, with owner authority and revocations live
 at their own authenticated observations. P3 verifies the exact operation and
 cumulative manifest through the API helper. Receivers additionally compose the
 whole history through API `verify_import_bundle_witnesses`; Heddle does not
-implement another composition verifier.
+implement another composition verifier. That helper selects the unique P3 consumed
+by each progressive manifest, rejects duplicate/unused P3s and a second P1 for
+one genesis, and pairs P1 with that exact consumed publication.
 
 Renewal submission/preparation/RPC/validation, control availability and original
 window refusals are removed. The state read is alpha.33's bounded writer-only
-snapshot; retry uses its exact typed target and a fresh host operation UUID.
+snapshot; retry uses its exact typed target and a fresh host operation UUID. All
+35 status/retry-refusal pairs exercise the API agreement matrix.
 Single-delegation converter pairing replaces successor/original pairing.
 Advertised 24-hour windows and disjoint sequential/concurrent siblings are
-covered by maintained API vectors and client tests. Known discovered OIDs stay
+covered by maintained API vectors and client tests. Both the signed duration and
+host-advertised D are bounded by API `MAX_DELEGATION_WINDOW_SECONDS` (604800);
+a shorter certificate cannot excuse an excessive advertisement. Known discovered OIDs stay
 pinned; size estimates allocate signed per-job totals without per-branch budgets.
+
+Commit maps `ALREADY_EXISTS` / `IMPORT_DESTINATION_CONFLICT` to
+`HostedError::Hybrid(Reject::PreparationRefused(DestinationConflict))`, and
+`ABORTED` / `VERSION_CONFLICT` to `HostedError::Hybrid(Reject::StaleContext)`.
+Both fields must match; unrelated failures preserve structured detail. These
+admission refusals have no accepted receipt and are not replay-frozen.
 
 Deleted artifacts include the three retired consumer/control/review corpora,
 `ImportRenewalSubmission`, the unused `receive_witnessed` API and its evidence
@@ -98,51 +110,35 @@ noncanonical genesis base now isolates the canonical-base check.
 maintained generators and frozen-vector continuity check, then regenerates
 Heddle's imported-root positives and every dependent signature. The claimed-owner
 fixture uses Heddle's maintained signed generator. No signature is hand-edited.
-The upstream continuity result was 272 changed, 51 added, 304 retired, 322
-unchanged records, 54 identical files and three retired corpora.
+The tag continuity result is 272 changed, 65 added, 304 retired and 322
+unchanged records, 54 identical files and three retired corpora. The tag import
+corpus contains 150 signed and 233 wire records before Heddle root generation.
 
 Affected tests use fresh `HEDDLE_HOME`. Guard proofs run on isolated committed
 sources, require a named runtime assertion failure, restore bytes, and require
 passing controls. Compile failures and empty test selections cannot count.
-All 16 fail-then-pass pairs passed on code revision
-`9791386302fc2d3d36724651408e8c23a01ab2af`: the three imported-tip positives,
-strict default, seed/frontier/carrier/base guards, import/native genesis policy,
-direct signed-zero-record predicates, claim/transfer intervals, per-publication
-revocation, missing P3/Commit-only admission, atomic transaction/time/order, and
-P1 liveness. The final proof-script correction composes multiple mutations to
-one file; the P1 liveness pair then removes both overlapping enforcement checks.
-The remaining diff changes that controller, conformance inputs and receipts,
-not the guarded production Rust. Receipts: `/tmp/heddle-alpha33-final-guards/results.json`
-(15 pairs) and `/tmp/heddle-alpha33-window-guard/results.json` (one pair).
+The maintained proof script covers imported tip roots/linear history/disjoint-root
+merges; strict carrier/base/frontier rules; import/native genesis policy; direct
+signed-zero-record predicates; claim and transfer owner intervals; each
+publication's revocations; Commit-only/P3 refusal; live and atomic P1/P3 pairs;
+executor equality; host window bounds; and typed Commit wire refusals. Part 2
+and Part 4's guard families run at the same final commit. Receipts require
+named runtime failures and unchanged passing controls, never compile failures.
 
-Actual affected outputs:
+The previous CI publication test sent a valid imported root through carrierless
+staging. It now authenticates the enclosing bundle with
+`authenticate_import_carriers` before calling
+`validate_source_artifacts_with_import_carriers`, exactly as a production host
+must. The carrierless entry point keeps its strict verdict. Receiver tests use
+a live witness set and check typed pairing/window refusals, including duplicate
+and unconsumed publications, executor mismatch and statement-array reordering.
 
-```text
-crypto import_authority: 33 passed; frozen old-parentless/retired-kind: 1 passed
-capability import_delegation: 23 passed; 1 ignored (fixture printer)
-object-model thread_replication: 26 passed
-repo owner_interval_tests: 2 passed
-repo hosted_trust_tests: 26 passed; crash child rerun: 1 passed; 1 ignored child entry
-Thread API hybrid: 47 passed
-Thread API fetch: 29 passed; corrected hosted selection: 3 passed
-hosted import_source: 28 passed
-CLI import_cli_contract (ci): 11 passed
-Biscuit verifier: 63 unit + 1 conformance passed; native-provider: 1 passed
-WASM build: passed; checked bigint boundary: 374 passed
-OWNER_AUTH_DIFFERENTIAL=PASS seed=38322398 fuzz_cases_per_fixture=24 corpus_cases=272
-ALL 16 FAIL-THEN-PASS PAIRS VERIFIED (15 + 1 receipts)
-```
-
-The repository crash control initially lost its executable during a concurrent
-build; its independent rerun passed. Fetch controls now authenticate carriers
-before staging imported roots. No compilation failure is counted as proof.
-Default and CI-feature clippy pass for all touched crates with warnings/dead
-code denied; the standalone conformance adapter also passes. Nightly rustfmt
-and diff checks pass. Logs: `/tmp/heddle-alpha33-*.log`.
-
-The final tag lookup still returned no `v0.31.0-alpha.33`. Consequently the
-workspace release gate, complete feature matrix, four-seed release parity,
-Part 2/4 release proofs and CI watch have NOT run. PR #1972 remains draft.
+The complete final gate includes nightly formatting, workspace and CI-feature
+clippy, fresh-home workspace tests with serialized CLI units, CI CLI integration,
+Thread API feature/dependency matrix, hosted-client tests, portable WASM builds
+and tests, npm packaging, checked bigint boundaries, four differential seeds and
+forced divergence, and the Part 2/4 guard-removal proofs. Exact commands, counts,
+commit SHA and GitHub CI (including Windows) belong in the final PR receipt.
 
 Applied surfaces: wire evidence, import/native content, durable receiver,
 staging, replica export/ingest and WASM refusal/bigint bindings. No verb, flag,

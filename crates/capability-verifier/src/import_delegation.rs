@@ -457,13 +457,10 @@ pub fn verify_publication_admission(
         .body
         .as_ref()
         .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
-    if body.genesis_digest != operation.genesis_digest
-        || s.observed_at_unix_millis != p.observed_at_unix_millis
-        || s.host_transaction_id != p.host_transaction_id
-        || s.admission_order >= p.admission_order
-    {
+    if body.genesis_digest != operation.genesis_digest {
         return Err(Error::Hybrid(contract::Reject::Transition));
     }
+    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;
     let resolved_publication = contract::verify_publication(
         publication.operation,
         &verified.verified,

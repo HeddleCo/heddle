@@ -115,10 +115,20 @@ MUTATIONS = [
     };""", VERIFIER,
      'publication_admission_requires_p3_after_commit_only_preflight', 'Commit and a lone P1 must confer no genesis admission'),
     ('publication-atomic-pair', 'crates/capability-verifier/src/import_delegation.rs',
-     """        || s.observed_at_unix_millis != p.observed_at_unix_millis
-        || s.host_transaction_id != p.host_transaction_id
-        || s.admission_order >= p.admission_order""", '', VERIFIER,
+     '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', '', VERIFIER,
      'publication_admission_requires_equal_transaction_time_and_p1_first', 'P1/P3 must share the transaction and time with P1 first'),
+    ('publication-same-executor', 'crates/capability-verifier/src/import_delegation.rs',
+     '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', '', VERIFIER,
+     'publication_admission_requires_the_same_authenticated_executor',
+     'different authenticated P1/P3 executors must refuse'),
+    ('host-window-ceiling', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
+     '        || prepared.response.max_validity_duration_seconds\n            > authority::MAX_DELEGATION_WINDOW_SECONDS\n', '', HOSTED,
+     'alpha33_preflight_refuses_host_windows_above_seven_days',
+     'even a shorter signed window cannot accept an excessive host D'),
+    ('commit-conflict-wire', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
+     'detail.reason == ErrorReason::ImportDestinationConflict as i32', 'detail.reason == ErrorReason::AlreadyExists as i32', HOSTED,
+     'alpha33_commit_conflicts_have_distinct_typed_outcomes',
+     'Commit wire failures must preserve their typed distinction'),
     ('publication-live-p1', 'crates/capability-verifier/src/import_delegation.rs',
      """        s.observed_at_unix_millis / 1000,
         |r| is_revoked_at_accepted_order(s, r),""",
@@ -239,7 +249,7 @@ MUTATIONS = [
 EXTRA_MUTATIONS = {
     'publication-live-p1': [
         ('crates/capability-verifier/src/import_delegation.rs',
-         '        || s.observed_at_unix_millis != p.observed_at_unix_millis\n', ''),
+         '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', ''),
     ],
     'part2-durable-witness': [
         ('crates/repo/src/thread_replication/delegated_import.rs',

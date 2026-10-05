@@ -1643,3 +1643,79 @@ fn publication_admission_requires_equal_transaction_time_and_p1_first() {
     }
     atomic_admission(|_| {}, true).expect("atomic publication control");
 }
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn publication_admission_requires_the_same_authenticated_executor() {
+    let f = fixture();
+    let (owner, ring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let c = context(&owner, &ring, &digest, &initial, &[], 1200);
+    let bundle: crate::wire::ImportPublicProofBundleV1 = record(&f, "executor_mismatch");
+    let set = witness_trust::verify_set(
+        bundle
+            .witness_set
+            .as_ref()
+            .expect("two authentic executors"),
+        &witness_trust::SetExpectation {
+            authority: "https://weft.example.test",
+            root_id: "descriptor-root-1",
+            root_public_key: &key(&f, "root"),
+            root_epoch: 1,
+            now_unix_millis: 1200000,
+            clock_floor_unix_millis: 0,
+            known_job_keys: &[],
+        },
+        None,
+    )
+    .expect("root-authenticated executor set");
+    let p1 = &bundle.statements[0];
+    let resolved =
+        witness_trust::resolve_statement(&set, p1, bundle.history_proofs.first(), false, 1200000)
+            .expect("authentic retired P1 executor and inclusion proof");
+    let p3 = &bundle.statements[2];
+    witness_trust::resolve_statement(&set, p3, None, false, 1200000)
+        .expect("authentic P3 executor");
+    let result = verify_publication_admission(
+        &bundle.delegations[0],
+        Some(&record(&f, "permission")),
+        &c,
+        &bundle.genesis_witnesses[0],
+        p1,
+        &resolved,
+        Some(&PublicationWitness {
+            operation: &bundle.operations[0],
+            manifest: &record(&f, "partial_manifest"),
+            statement: p3,
+            proof: None,
+        }),
+        &set,
+        |_, _| false,
+    );
+    assert!(
+        matches!(result, Err(Error::Hybrid(contract::Reject::Transition))),
+        "different authenticated P1/P3 executors must refuse"
+    );
+    atomic_admission(|_| {}, true).expect("one executor control");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn signed_import_windows_enforce_the_seven_day_ceiling() {
+    let f = fixture();
+    let (owner, ring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let c = context(&owner, &ring, &digest, &initial, &[], 1100);
+    for name in ["window_24h", "window_7d"] {
+        verify_current(&record(&f, name), None, &c, |_| false).expect("valid signed window");
+    }
+    for name in ["window_over_7d", "window_extreme"] {
+        assert!(
+            matches!(
+                verify_current(&record(&f, name), None, &c, |_| false),
+                Err(Error::Hybrid(contract::Reject::ValidityBounds))
+            ),
+            "signed window {name} must refuse without overflow"
+        );
+    }
+}

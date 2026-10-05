@@ -933,8 +933,43 @@ mod tests {
                 .await
                 .expect("exact uploaded bytes");
         }
-        let validated = validate_source_artifacts(received, open, prepared.originals().clone())
-            .expect("signed originals and actual closure");
+        let authority = crate::hybrid::authority::SelectedAuthority::new(
+            history,
+            bundle.clone(),
+            |_: &ImportPublicProofBundleV1,
+             _: i64,
+             _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha33.json"))
+                .expect("tagged vectors");
+        let carriers = repo::thread_replication::delegated_import::authenticate_import_carriers(
+            &bundle,
+            &authority,
+            &api::import_authority::ImportWitnessRootPin {
+                authority: "https://weft.example.test".into(),
+                root_id: "descriptor-root-1".into(),
+                public_key: hex::decode(
+                    fixture["keys"]["root"]["public_key_hex"]
+                        .as_str()
+                        .expect("root"),
+                )
+                .expect("root key"),
+                epoch: 1,
+            },
+            1_350_000,
+            &[],
+            &[],
+            |_| Ok(()),
+        )
+        .expect("independently authenticated import carriers");
+        let validated = validate_source_artifacts_with_import_carriers(
+            received,
+            open,
+            prepared.originals().clone(),
+            carriers,
+        )
+        .expect("signed originals and actual closure");
         assert_eq!(validated.import_authority(), Some(&bundle));
         let received = validated
             .into_hosted_source(staged.ready().clone())

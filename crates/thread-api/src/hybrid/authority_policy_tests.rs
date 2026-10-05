@@ -58,10 +58,10 @@ fn resign_observations(bundle: &mut wire::ImportPublicProofBundleV1) {
     }
     bundle.history_proofs.clear();
 }
-struct ReceiverClock;
+struct ReceiverClock(i64);
 impl Clock for ReceiverClock {
     fn now_millis(&self) -> repo::thread_replication::Result<i64> {
-        Ok(1_350_000)
+        Ok(self.0)
     }
     fn elapsed_millis(&self) -> repo::thread_replication::Result<u64> {
         Ok(0)
@@ -70,9 +70,15 @@ impl Clock for ReceiverClock {
 fn install(
     bundle: wire::ImportPublicProofBundleV1,
 ) -> repo::thread_replication::Result<Vec<ThreadReplica>> {
+    install_at(bundle, 1_350_000)
+}
+fn install_at(
+    bundle: wire::ImportPublicProofBundleV1,
+    now: i64,
+) -> repo::thread_replication::Result<Vec<ThreadReplica>> {
     let limits = VerificationLimits::new(30 * 24 * 60 * 60).expect("limits");
     let pinned = tests::selected(&bundle, limits);
-    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
+    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, now / 1000, limits)
         .map_err(authority_error)?;
     let directory = tempfile::tempdir().expect("fresh receiver");
     let repository = repo::Repository::init_default(directory.path()).expect("repository");
@@ -95,7 +101,7 @@ fn install(
         *history.genesis(),
         *history.initial_owner(),
     )?;
-    let trust = HostedTrust::open(repository.heddle_dir(), &root.authority, ReceiverClock)?;
+    let trust = HostedTrust::open(repository.heddle_dir(), &root.authority, ReceiverClock(now))?;
     let authority = SelectedAuthority::new(
         history,
         bundle.clone(),
@@ -127,6 +133,42 @@ fn published_import_at_genesis_policy_installs_on_fresh_receiver() {
     let replicas = install(genesis_policy())
         .expect("authenticated genesis policy must install published import evidence");
     assert_eq!(replicas.len(), 2);
+}
+
+#[test]
+fn receiver_requires_unique_consumed_publications_and_atomic_genesis_pairs() {
+    for name in [
+        "duplicate_p1",
+        "duplicate_p3",
+        "unconsumed_p3",
+        "executor_mismatch",
+        "p1_foreign_transaction",
+        "p1_time_mismatch",
+        "p1_order_after_p3",
+        "p1_without_publication",
+        "p1_p3_outside_window",
+    ] {
+        let result = install_at(record(name), 1_200_000);
+        let expected = if name == "p1_p3_outside_window" {
+            Reject::Expired
+        } else {
+            Reject::Transition
+        };
+        assert!(
+            matches!(result, Err(repo::thread_replication::Error::Hybrid(ref rejection)) if rejection == &expected),
+            "receiver must refuse {name} for its pairing/window violation: {:?}",
+            result.as_ref().err()
+        );
+    }
+    // Array order cannot choose a different publication to pair with P1.
+    let mut control: wire::ImportPublicProofBundleV1 = record("current_export");
+    control.statements.reverse();
+    assert_eq!(
+        install_at(control, 1_200_000)
+            .expect("exact consumed P3s in any array order")
+            .len(),
+        2
+    );
 }
 #[test]
 fn positive_policy_missing_chain_rejects() {

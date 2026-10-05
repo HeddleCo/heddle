@@ -3,7 +3,7 @@
 use api::{heddle::api::v1alpha2 as wire, hybrid_codec::Reject, import_authority as authority};
 use prost::Message;
 
-use super::super::{HostedClient, Result};
+use super::super::{HostedClient, HostedError, Result};
 
 /// Authenticated destination-writer discovery. Options are exact advertised
 /// octets; the host rechecks support and budgets when preparing the job.
@@ -103,7 +103,7 @@ impl ImportJobState {
         &self,
         client_operation_id: String,
     ) -> Result<wire::RetryImportSourceRequest> {
-        use wire::get_import_job_state_response::RetryAvailability;
+        use self::wire::get_import_job_state_response::RetryAvailability;
         authority::validate_job_state_response(&self.request, &self.response)?;
         let Some(RetryAvailability::EligibleRetryTarget(target)) =
             &self.response.retry_availability
@@ -362,7 +362,8 @@ impl HostedClient {
                 "/heddle.api.v1alpha2.IntegrationService/CommitImportJob",
                 request,
             )
-            .await?;
+            .await
+            .map_err(commit_failure)?;
         authority::validate_commit_response(request, &response)?;
         let endpoint = self
             .native()
@@ -394,6 +395,29 @@ impl HostedClient {
             request,
         )
         .await
+    }
+}
+
+// Commit admission refusals have no accepted receipt and are not replay-frozen.
+// Match both wire fields so unrelated ALREADY_EXISTS/ABORTED failures keep their
+// original detail. Callers can distinguish a reserved destination from stale CAS.
+fn commit_failure(error: HostedError) -> HostedError {
+    use api::heddle::api::common::{CallFailureCode, ErrorReason};
+    match &error {
+        HostedError::Call {
+            code: CallFailureCode::AlreadyExists,
+            error: Some(detail),
+            ..
+        } if detail.reason == ErrorReason::ImportDestinationConflict as i32 => {
+            Reject::PreparationRefused(wire::ImportPreparationRefusalReason::DestinationConflict)
+                .into()
+        }
+        HostedError::Call {
+            code: CallFailureCode::Aborted,
+            error: Some(detail),
+            ..
+        } if detail.reason == ErrorReason::VersionConflict as i32 => Reject::StaleContext.into(),
+        _ => error,
     }
 }
 
@@ -522,6 +546,7 @@ fn validate_preparation(
         || i128::from(response.reservation_expires_at_unix_seconds) != at + 3600
         || response.reservation_expires_at_unix_seconds <= now
         || response.max_validity_duration_seconds == 0
+        || response.max_validity_duration_seconds > authority::MAX_DELEGATION_WINDOW_SECONDS
     {
         return Err(Reject::Expired.into());
     }
@@ -584,6 +609,8 @@ fn exact_signed_delegation(
         || end <= start
         || end <= i128::from(now)
         || prepared.response.max_validity_duration_seconds == 0
+        || prepared.response.max_validity_duration_seconds
+            > authority::MAX_DELEGATION_WINDOW_SECONDS
         || end - start > i128::from(prepared.response.max_validity_duration_seconds)
     {
         return Err(Reject::ValidityBounds.into());
@@ -1372,5 +1399,93 @@ mod tests {
             exact_signed_delegation(&too_short, &signed, 1100).is_err(),
             "duration stays bounded by the advertisement"
         );
+    }
+
+    #[test]
+    fn alpha33_preflight_refuses_host_windows_above_seven_days() {
+        let mut prepared = prepared("window_24h_preparation");
+        let signed: wire::SignedImportJobDelegationV1 = wire("signed_vectors", "window_24h");
+        prepared.response.max_validity_duration_seconds = authority::MAX_DELEGATION_WINDOW_SECONDS;
+        exact_signed_delegation(&prepared, &signed, 1100).expect("seven-day advertised ceiling");
+        prepared.response.max_validity_duration_seconds += 1;
+        assert!(
+            matches!(
+                exact_signed_delegation(&prepared, &signed, 1100),
+                Err(HostedError::Hybrid(Reject::ValidityBounds))
+            ),
+            "even a shorter signed window cannot accept an excessive host D"
+        );
+    }
+
+    #[test]
+    fn alpha33_commit_conflicts_have_distinct_typed_outcomes() {
+        use api::heddle::api::common::{CallFailure, CallFailureCode, ErrorDetail, ErrorReason};
+        for (name, expected) in [
+            (
+                "commit_destination_conflict",
+                Reject::PreparationRefused(
+                    wire::ImportPreparationRefusalReason::DestinationConflict,
+                ),
+            ),
+            ("commit_stale_destination", Reject::StaleContext),
+        ] {
+            let failure: CallFailure = wire("wire_vectors", name);
+            assert_eq!(
+                authority::import_commit_conflict_failure(&expected),
+                Some(failure.clone())
+            );
+            assert!(
+                matches!(commit_failure(failure.into()), HostedError::Hybrid(ref actual) if actual == &expected),
+                "Commit wire failures must preserve their typed distinction"
+            );
+        }
+        // Neither a generic code nor the import reason on a different code
+        // authorizes this mapping. Keep the original structured failure.
+        for (code, reason) in [
+            (CallFailureCode::AlreadyExists, ErrorReason::AlreadyExists),
+            (
+                CallFailureCode::Aborted,
+                ErrorReason::ImportDestinationConflict,
+            ),
+            (CallFailureCode::AlreadyExists, ErrorReason::VersionConflict),
+        ] {
+            let failure = CallFailure {
+                code: code as i32,
+                error: Some(ErrorDetail {
+                    reason: reason as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                matches!(commit_failure(failure.into()), HostedError::Call { code: actual, .. } if actual == code)
+            );
+        }
+    }
+
+    #[test]
+    fn alpha33_job_state_requires_status_and_retry_reason_agreement() {
+        use self::wire::get_import_job_state_response::RetryAvailability;
+        let original = ImportJobState {
+            request: wire("wire_vectors", "job_state_request"),
+            response: wire("wire_vectors", "job_state"),
+        };
+        for status in 1..=5 {
+            for reason in 1..=7 {
+                let mut state = original.clone();
+                state.response.status = status;
+                state.response.retry_availability =
+                    Some(RetryAvailability::RetryUnavailable(reason));
+                let agrees = matches!(
+                    (status, reason),
+                    (1, 1 | 2 | 6) | (2, 3) | (3, 4) | (4, 5) | (5, 7)
+                );
+                assert_eq!(
+                    authority::validate_job_state_response(&state.request, &state.response).is_ok(),
+                    agrees,
+                    "status {status} and retry refusal {reason}"
+                );
+            }
+        }
     }
 }
