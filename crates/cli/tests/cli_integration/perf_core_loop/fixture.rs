@@ -42,6 +42,7 @@ impl PerfFixture {
 
         let repo = Repository::open(&root).expect("open perf fixture");
         let mut config = repo.config().clone();
+        config.set_principal("Performance Contract", "perf-contract@heddle.test");
         config.worktree.fsmonitor.mode = FsMonitorMode::Native;
         config
             .save(&repo.heddle_dir().join("config.toml"))

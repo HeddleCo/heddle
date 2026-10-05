@@ -43,13 +43,13 @@ rendering.
 Sley-backed Git engine work should show up inside the command-specific phases
 rather than as a hidden subprocess floor.
 
-## Release Regression Contract
+## Performance Regression Contract
 
-Run the Wave 0 release contract with:
+Run the Wave 0 performance contract with:
 
 ```sh
 TMPDIR=/home/scratch \
-cargo test --release -p heddle-cli --test cli_integration \
+cargo test --profile perf -p heddle-cli --test cli_basics \
   core_loop_release_contract -- --ignored --nocapture
 ```
 

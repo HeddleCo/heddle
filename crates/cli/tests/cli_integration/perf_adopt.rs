@@ -12,11 +12,11 @@ const RETAINED_MIRROR_PATH_BUDGET: u64 = 0;
 const RETAINED_MIRROR_BYTE_BUDGET: u64 = 0;
 
 #[test]
-#[ignore = "release-only adopt structural contract; run with `HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-cli --test cli_integration adopt_no_eager_mirror_release_contract -- --ignored --nocapture`"]
+#[ignore = "optimized adopt structural contract; run with `HEDDLE_PROFILE=1 cargo test --locked --profile perf -p heddle-cli --test cli_basics adopt_no_eager_mirror_release_contract -- --ignored --nocapture`"]
 fn adopt_no_eager_mirror_release_contract() {
     assert!(
         !std::hint::black_box(cfg!(debug_assertions)),
-        "adopt performance contract requires cargo test --release"
+        "adopt performance contract requires cargo test --profile perf"
     );
     assert!(
         std::env::var("HEDDLE_PROFILE").is_ok(),

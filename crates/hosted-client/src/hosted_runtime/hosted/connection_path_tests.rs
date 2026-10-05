@@ -87,11 +87,6 @@ impl Drop for HeddleHomeEnvGuard {
     }
 }
 
-fn require_release_build() {
-    #[cfg(debug_assertions)]
-    panic!("hosted endpoint close contract must run with --release");
-}
-
 async fn connect_loopback(address: iroh::EndpointAddr) -> std::sync::Arc<HostedConnection> {
     let client = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -104,17 +99,16 @@ async fn connect_loopback(address: iroh::EndpointAddr) -> std::sync::Arc<HostedC
 }
 
 #[tokio::test]
-#[ignore = "release-only hosted endpoint close performance contract"]
+#[ignore = "hosted endpoint close contract; run with `RUST_LOG=iroh=error cargo test --locked -p heddle-hosted-client --features client --lib hosted_endpoint_close_contract -- --ignored --nocapture`"]
 // reason: `lock_test_env` is a process-global serialization mutex (payload
 // `()`) held across the whole async scenario so no other test mutates
 // HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
 // runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
-async fn hosted_endpoint_close_release_contract() {
+async fn hosted_endpoint_close_contract() {
     let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
-    require_release_build();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()

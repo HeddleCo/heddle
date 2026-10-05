@@ -15,11 +15,11 @@ use super::*;
 
 const DEFAULT_SAMPLES: usize = 20;
 
-#[ignore = "release-only instant core-loop contract; run with `TMPDIR=/home/scratch cargo test --release -p heddle-cli --test cli_integration core_loop_release_contract -- --ignored --nocapture`"]
+#[ignore = "optimized instant core-loop contract; run with `TMPDIR=/home/scratch cargo test --profile perf -p heddle-cli --test cli_basics core_loop_release_contract -- --ignored --nocapture`"]
 #[test]
 fn core_loop_release_contract() {
     if std::hint::black_box(cfg!(debug_assertions)) {
-        panic!("core-loop performance contract requires cargo test --release");
+        panic!("core-loop performance contract requires cargo test --profile perf");
     }
     let samples = env_usize("HEDDLE_PERF_SAMPLES", DEFAULT_SAMPLES);
     assert!(samples >= 5, "HEDDLE_PERF_SAMPLES must be at least 5");

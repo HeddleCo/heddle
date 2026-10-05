@@ -55,47 +55,51 @@ jobs:
           shared-key: perf-core-loop-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
 
-      - name: Compile release harness (out of band)
+      - name: Compile perf harness (out of band)
         run: |
           set -o pipefail
-          /usr/bin/time -f 'release_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo build --locked --release -p heddle-cli \
+          /usr/bin/time -f 'perf_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo build --locked --profile perf -p heddle-cli \
               --bin heddle --bin heddle-fsmonitor-worker 2>&1 | tee release-compile.txt
-          /usr/bin/time -f 'release_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo test --locked --release -p heddle-cli --test cli_basics \
+          /usr/bin/time -f 'perf_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked --profile perf -p heddle-cli --test cli_basics \
               --no-run 2>&1 | tee -a release-compile.txt
-          /usr/bin/time -f 'release_history_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo test --locked --release -p heddle-repo --lib \
+
+      - name: Compile counter contract harnesses (debug)
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'debug_history_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked -p heddle-repo --lib \
               --no-run 2>&1 | tee -a release-compile.txt
-          /usr/bin/time -f 'release_hosted_close_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo test --locked --release -p heddle-hosted-client --features client --lib \
+          /usr/bin/time -f 'debug_hosted_close_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked -p heddle-hosted-client --features client --lib \
               --no-run 2>&1 | tee -a release-compile.txt
 
       - name: Enforce instant core-loop contract
         run: |
           set -o pipefail
-          cargo test --locked --release -p heddle-cli --test cli_basics \
+          cargo test --locked --profile perf -p heddle-cli --test cli_basics \
             perf_core_loop::core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
 
       - name: Enforce bounded-history contract
         run: |
           set -o pipefail
-          HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-repo --lib \
-            bounded_history_reads_release_contract -- --ignored --nocapture \
+          HEDDLE_PROFILE=1 cargo test --locked -p heddle-repo --lib \
+            bounded_history_reads_contract -- --ignored --nocapture \
             2>&1 | tee history-contract.txt
 
       - name: Enforce adopt no-eager-mirror contract
         run: |
           set -o pipefail
-          HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-cli \
+          HEDDLE_PROFILE=1 cargo test --locked --profile perf -p heddle-cli \
             --test cli_basics perf_adopt::adopt_no_eager_mirror_release_contract \
             -- --ignored --nocapture 2>&1 | tee adopt-contract.txt
 
       - name: Enforce hosted endpoint close contract
         run: |
           set -o pipefail
-          RUST_LOG=iroh=error cargo test --locked --release -p heddle-hosted-client --features client --lib \
-            hosted_endpoint_close_release_contract -- --ignored --nocapture \
+          RUST_LOG=iroh=error cargo test --locked -p heddle-hosted-client --features client --lib \
+            hosted_endpoint_close_contract -- --ignored --nocapture \
             2>&1 | tee hosted-close-contract.txt
           if ! grep -Fq 'HOSTED_CLOSE_GATES green' hosted-close-contract.txt; then
             echo 'HOSTED CLOSE GATE red: contract test did not execute to completion'
@@ -112,7 +116,7 @@ jobs:
         if: always()
         run: |
           {
-            echo '## Instant core-loop release contract'
+            echo '## Instant core-loop perf contract'
             echo
             echo 'Compilation and fixture construction are reported separately from command samples.'
             echo
@@ -121,21 +125,21 @@ jobs:
               core-loop-contract.txt 2>/dev/null || true
             echo '```'
             echo
-            echo '## Bounded-history release contract'
+            echo '## Bounded-history counter contract (debug)'
             echo
             echo '```text'
             grep -E '^(HISTORY_GATE|HISTORY_NEGATIVE_CONTROL|HISTORY GATE)' \
               history-contract.txt 2>/dev/null || true
             echo '```'
             echo
-            echo '## Hosted endpoint close release contract'
+            echo '## Hosted endpoint close contract (debug)'
             echo
             echo '```text'
             grep -E '^(HOSTED_CLOSE|HOSTED CLOSE GATE)' \
               hosted-close-contract.txt 2>/dev/null || true
             echo '```'
             echo
-            echo '## Adopt no-eager-mirror release contract'
+            echo '## Adopt no-eager-mirror perf contract'
             echo
             echo '```text'
             grep -E '^(ADOPT_GATE|ADOPT GATE)' adopt-contract.txt 2>/dev/null || true
