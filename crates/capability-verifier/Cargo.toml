@@ -21,7 +21,7 @@ include = [
 ]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.8" }
