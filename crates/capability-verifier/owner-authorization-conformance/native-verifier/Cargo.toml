@@ -17,4 +17,4 @@ heddle-api = "=0.31.0-alpha.32"
 [workspace]
 
 [patch.crates-io]
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "2e238de4bf334fa6950af756d574c29a3948bca0", version = "=0.31.0-alpha.32" }
+heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "77f73219b72f02c6fcef21cf11e7c37ec2da2ff7", version = "=0.31.0-alpha.32" }

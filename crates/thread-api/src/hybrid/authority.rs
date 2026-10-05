@@ -344,6 +344,25 @@ impl<F, B: PublicEvidence> SelectedAuthority<F, B> {
                 .ok()?;
         Some((envelope, keys))
     }
+
+    fn policy_revocations(&self, statement: &host::HostedWitnessStatementV1) -> Option<&[Vec<u8>]> {
+        if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32] {
+            // Exactly this authenticated head denotes no policy. A signed
+            // record cannot stand in for the implicit genesis policy.
+            if self.bundle.policies().iter().any(|record| {
+                record.body.as_ref().is_some_and(|body| {
+                    body.spool_uuid == statement.spool_uuid
+                        && body.sequence == 0
+                        && body.policy_state_hash == [0; 32]
+                })
+            }) {
+                return None;
+            }
+            return Some(&[]);
+        }
+        self.policy(statement)
+            .map(|policy| policy.revoked_key_ids.as_slice())
+    }
 }
 impl<
     B: PublicEvidence,
@@ -414,9 +433,10 @@ impl<
         statement: &host::HostedWitnessStatementV1,
         revocation: permission::import_delegation::Revocation<'_>,
     ) -> bool {
-        let (Ok(selected), Some(policy)) =
-            (self.history.for_witness(statement), self.policy(statement))
-        else {
+        let (Ok(selected), Some(revoked)) = (
+            self.history.for_witness(statement),
+            self.policy_revocations(statement),
+        ) else {
             return true;
         };
         match revocation {
@@ -435,7 +455,7 @@ impl<
                             }),
                     )
                     .any(|key| api::hybrid_codec::key_id(&key).as_slice() == id);
-                !known || policy.revoked_key_ids.iter().any(|key| key == id)
+                !known || revoked.iter().any(|key| key == id)
             }
             permission::import_delegation::Revocation::Cancellation(namespace, id) => {
                 // Cancellation status is attested at exact accepted order by
@@ -462,23 +482,21 @@ impl<
         statement: &host::HostedWitnessStatementV1,
         revocation: permission::thread_control_authority::Revocation<'_>,
     ) -> bool {
-        let (Some(policy), Some((envelope, publishers))) =
-            (self.policy(statement), self.native_envelope(statement))
-        else {
+        let (Ok(_), Some(revoked), Some((envelope, publishers))) = (
+            self.history.for_witness(statement),
+            self.policy_revocations(statement),
+            self.native_envelope(statement),
+        ) else {
             return true;
         };
         match revocation {
             permission::thread_control_authority::Revocation::MintRoot(key) => {
                 key != envelope.mint_root_public_key
-                    || policy
-                        .revoked_key_ids
-                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+                    || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Publisher(key) => {
                 !publishers.iter().any(|p| p == key)
-                    || policy
-                        .revoked_key_ids
-                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+                    || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Credential(id) => {
                 let keys = biscuit_verifier::parse_ed25519_public_keys_hex(
@@ -794,6 +812,10 @@ impl AcceptedHistory {
         self.limits
     }
 }
+
+#[cfg(test)]
+#[path = "authority_policy_tests.rs"]
+mod policy_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

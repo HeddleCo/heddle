@@ -5,6 +5,9 @@ use serde_json::Value;
 use super::*;
 use crate::Signer;
 
+#[path = "import_ancestry_tests.rs"]
+mod ancestry;
+
 fn fixture() -> Value {
     serde_json::from_str(include_str!(
         "../tests/fixtures/import-authority-host-witness-v1.json"
@@ -96,6 +99,37 @@ fn delegation_record(
         false
     })
     .expect("portable authority")
+}
+
+fn fixture_carriers(f: &Value) -> VerifiedImportCarriers {
+    let original = delegation(f, 1100);
+    let signed: wire::SignedImportJobDelegationV1 = record(f, "renewed_delegation");
+    let identity: wire::ImportIdentityV1 = record(f, "identity");
+    let chain = hex::decode(
+        f["context"]["owner_chain_digest_hex"]
+            .as_str()
+            .expect("chain"),
+    )
+    .expect("hex");
+    let renewed = contract::verify_delegation(
+        &signed,
+        Some(&record(f, "renewed_permission")),
+        &contract::ImportOwnerExpectation {
+            identity: &identity,
+            owner_public_key: &key(f, "owner"),
+            owner_chain_digest: &chain,
+            authority_expires_at_seconds: 2000,
+            now_unix_seconds: 1250,
+            forbidden_job_keys: &[key(f, "root"), key(f, "witness")],
+            known_job_associations: &[],
+        },
+    )
+    .expect("renewed certificate");
+    VerifiedImportCarriers::new(
+        record(f, "complete_renewed_export"),
+        vec![original.scope().clone(), renewed],
+    )
+    .expect("signed import carriers")
 }
 
 #[test]
@@ -469,7 +503,14 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
     originals.extend(landing.execution.iter().cloned());
     originals.extend(landing.source_operation.iter().cloned());
     originals.extend(landing.review_evidence.iter().cloned());
-    let closure = NativeClosure::verify(&originals).expect("native causal and claim closure");
+    assert!(
+        NativeClosure::verify(&originals).is_err(),
+        "ordinary native closure cannot claim import ancestry"
+    );
+    let imports = fixture_carriers(&f);
+    let closure =
+        NativeClosure::verify_with_imports(&originals, &[], |g, o, p| imports.bind(g, o, p))
+            .expect("authenticated import causal and claim closure");
     let history: wire::OwnerHistory = record(&f, "owner_history");
     let owner =
         heddleco_capability_verifier::verify_owner_root(history.root.as_ref().expect("root"))

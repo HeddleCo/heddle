@@ -27,6 +27,7 @@ native = [
 # Exact bounded source packs and download validation without a local repo or identity manager.
 source-transfer = [
     "replication",
+    "crypto/owner-root",
     "dep:heddle-pack",
     "dep:tempfile",
     "dep:wire",

@@ -654,7 +654,6 @@ fn witnessed_native_control_commits_its_exact_original_and_invalidates_replay() 
     let proof = record(&f, "authority_proof");
     let policy = record(&f, "signed_policy");
     let mut originals = bundle.original_geneses;
-    originals.extend(conversions);
     originals.extend(payload.original.iter().cloned());
     originals.extend(payload.dependencies.clone());
     let input = NativeEvidence {
@@ -666,6 +665,21 @@ fn witnessed_native_control_commits_its_exact_original_and_invalidates_replay() 
         genesis_witnesses: &bundle.genesis_witnesses,
         subject: NativeSubject::Authority(&payload),
     };
+    let mut unbound_originals = originals.clone();
+    unbound_originals.extend(conversions);
+    let unbound = NativeEvidence {
+        originals: &unbound_originals,
+        ..input
+    };
+    assert!(
+        matches!(
+            replica.receive_witnessed(&trust, &unbound, &a, repo.store(), |_, _| Ok(())),
+            Err(Error::HybridEvidence(
+                crypto::import_authority::Error::Object(_)
+            ))
+        ),
+        "native-only evidence cannot borrow ancestry from already installed imported tips"
+    );
     assert_eq!(
         replica
             .receive_witnessed(&trust, &input, &a, repo.store(), |_, _| Ok(()))

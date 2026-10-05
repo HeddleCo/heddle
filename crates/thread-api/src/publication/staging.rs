@@ -18,6 +18,27 @@ pub fn validate_source_artifacts(
     opening: &PublishContentOpen,
     originals: PublicationOriginals,
 ) -> Result<ValidatedSourceArtifacts, Error> {
+    validate_source_artifacts_inner(directory, opening, originals, None)
+}
+/// Imported Git roots need independently authenticated enclosing certificates.
+/// The ordinary entry point remains strict when that evidence is unavailable.
+pub fn validate_source_artifacts_with_import_carriers(
+    directory: tempfile::TempDir,
+    opening: &PublishContentOpen,
+    originals: PublicationOriginals,
+    carriers: crypto::import_authority::VerifiedImportCarriers,
+) -> Result<ValidatedSourceArtifacts, Error> {
+    if opening.import_authority.as_ref() != Some(carriers.bundle()) {
+        return Err(Error::HostedTrustRequired);
+    }
+    validate_source_artifacts_inner(directory, opening, originals, Some(carriers))
+}
+fn validate_source_artifacts_inner(
+    directory: tempfile::TempDir,
+    opening: &PublishContentOpen,
+    originals: PublicationOriginals,
+    carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+) -> Result<ValidatedSourceArtifacts, Error> {
     originals.validate_bounds().map_err(preparation)?;
     crate::hybrid::publish_open(opening).map_err(Error::Invalid)?;
     let thread = opening
@@ -113,6 +134,7 @@ pub fn validate_source_artifacts(
         operations,
         dependencies,
         receipts,
+        carriers,
     )?;
     validated.import_authority = opening.import_authority.clone();
     validated.native_authority = opening.native_authority.clone();

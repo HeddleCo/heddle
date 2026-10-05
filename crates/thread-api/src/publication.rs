@@ -25,6 +25,7 @@ pub use source::{PublicationOptions, SourceBudget, SourcePack, VisibleSourcePack
 #[cfg(feature = "source-transfer")]
 pub use staging::{
     ProposedSourceArtifacts, validate_proposed_source_artifacts, validate_source_artifacts,
+    validate_source_artifacts_with_import_carriers,
 };
 
 /// Exact original creator wrappers and signed source operations, including

@@ -36,7 +36,6 @@ impl DelegatedImport {
         parents: &[ThreadOperation],
     ) -> Result<Self> {
         import_authority::verify_operation(signed, delegation).map_err(invalid)?;
-        converted.validate_parents(genesis, parents)?;
         let body = signed
             .body
             .as_ref()
@@ -53,7 +52,8 @@ impl DelegatedImport {
                 "delegated import requires converted Capture content",
             ));
         };
-        // Native captures are retained conversion closure, not account grants.
+        // One native Capture selects the branch tip; Git ancestors are States
+        // in its content closure, not additional native operations or grants.
         // The API job signature authorizes their exact content/frontier. A
         // renewal retains those converter bytes rather than re-signing them
         // with the successor job key and changing their native operation IDs.
@@ -101,10 +101,21 @@ impl DelegatedImport {
                 "import content or complete frontier commitment differs",
             ));
         }
-        Ok(Self {
+        let bound = Self {
             signed: signed.clone(),
             converted: converted.clone(),
-        })
+        };
+        bound.validate_parents(genesis, parents)?;
+        Ok(bound)
+    }
+    /// Recheck only this exact authenticated, carrier-bound operation.
+    pub fn validate_parents(
+        &self,
+        genesis: &ThreadGenesis,
+        parents: &[ThreadOperation],
+    ) -> Result<()> {
+        self.converted
+            .validate_parents_inner(genesis, parents, true)
     }
     /// Original API certificate signature and typed operation bytes.
     pub fn signed(&self) -> &SignedDelegatedImportOperationV1 {

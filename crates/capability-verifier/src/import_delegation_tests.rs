@@ -95,10 +95,25 @@ fn portable_import_permission_scope_and_current_expiry() {
     let forbidden = vec![key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")];
     let c = context(&owner, &keyring, &digest, &initial, &forbidden, 1100);
     let verified = verify_current(&d, Some(&p), &c, |_| false).expect("owner-device-job control");
-    verify_new_operation(&o, &verified, Some(&p), &c, |_| false).expect("in-window control");
+    verify_new_operation(
+        &o,
+        &verified,
+        Some(&p),
+        &c,
+        &record(&f, "empty_manifest"),
+        |_| false,
+    )
+    .expect("in-window control");
     let bad = record(&f, "scope_violation");
     assert_eq!(
-        verify_new_operation(&bad, &verified, Some(&p), &c, |_| false),
+        verify_new_operation(
+            &bad,
+            &verified,
+            Some(&p),
+            &c,
+            &record(&f, "empty_manifest"),
+            |_| false
+        ),
         Err(Error::Hybrid(contract::Reject::Scope))
     );
     assert!(matches!(
@@ -146,13 +161,27 @@ fn commit_admission_future_within_skew_preserves_execution_start() {
         Err(Error::Hybrid(contract::Reject::Expired))
     ));
     assert_eq!(
-        verify_new_operation(&operation, &admitted, Some(&parent), &c, |_| false),
+        verify_new_operation(
+            &operation,
+            &admitted,
+            Some(&parent),
+            &c,
+            &record(&f, "empty_manifest"),
+            |_| false
+        ),
         Err(Error::Hybrid(contract::Reject::Expired))
     );
     c.now_millis = 1200000;
     verify_current(&signed, Some(&parent), &c, |_| false).expect("execution starts at N");
-    verify_new_operation(&operation, &admitted, Some(&parent), &c, |_| false)
-        .expect("frozen job-signed operation at N");
+    verify_new_operation(
+        &operation,
+        &admitted,
+        Some(&parent),
+        &c,
+        &record(&f, "empty_manifest"),
+        |_| false,
+    )
+    .expect("frozen job-signed operation at N");
     c.now_millis = signed.body.as_ref().expect("body").expires_at_unix_seconds * 1000;
     assert!(matches!(
         verify_current(&signed, Some(&parent), &c, |_| false),
@@ -1049,8 +1078,15 @@ fn genuine_job_signatures_cannot_widen_any_operation_binding() {
     let p = record(&f, "permission");
     let verified = verify_current(&d, Some(&p), &c, |_| false).expect("current control");
     let original: SignedDelegatedImportOperationV1 = record(&f, "operation_main");
-    verify_new_operation(&original, &verified, Some(&p), &c, |_| false)
-        .expect("unmodified genuine control");
+    verify_new_operation(
+        &original,
+        &verified,
+        Some(&p),
+        &c,
+        &record(&f, "empty_manifest"),
+        |_| false,
+    )
+    .expect("unmodified genuine control");
     for field in 0..15 {
         let mut changed = original.clone();
         let b = changed.body.as_mut().expect("body");
@@ -1076,7 +1112,14 @@ fn genuine_job_signatures_cannot_widen_any_operation_binding() {
         };
         changed.job_signature = Some(sign_changed(&f, "job", contract::OPERATION_DOMAIN, b));
         assert_eq!(
-            verify_new_operation(&changed, &verified, Some(&p), &c, |_| false),
+            verify_new_operation(
+                &changed,
+                &verified,
+                Some(&p),
+                &c,
+                &record(&f, "empty_manifest"),
+                |_| false
+            ),
             Err(Error::Hybrid(contract::Reject::Scope)),
             "operation binding {field}"
         );
@@ -1102,6 +1145,7 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
                 &staged,
                 Some(&p),
                 &c,
+                &record(&f, "empty_manifest"),
                 |r| matches!(r,Revocation::Key(k) if k==id)
             ),
             Err(Error::Hybrid(contract::Reject::Revoked)),
@@ -1110,7 +1154,14 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
     }
     let expired = context(&owner, &ring, &digest, &initial, &forbidden, 1300);
     assert_eq!(
-        verify_new_operation(&op, &staged, Some(&p), &expired, |_| false),
+        verify_new_operation(
+            &op,
+            &staged,
+            Some(&p),
+            &expired,
+            &record(&f, "empty_manifest"),
+            |_| false
+        ),
         Err(Error::Hybrid(contract::Reject::Expired))
     );
     for field in 0..9 {
@@ -1166,8 +1217,15 @@ fn permission_attenuation_and_staged_current_revocations_are_rechecked() {
         verify_current(&child, Some(&p), &c, |_| false),
         Err(Error::Hybrid(contract::Reject::Scope))
     ));
-    verify_new_operation(&op, &staged, Some(&p), &c, |_| false)
-        .expect("unchanged accepted context control");
+    verify_new_operation(
+        &op,
+        &staged,
+        Some(&p),
+        &c,
+        &record(&f, "empty_manifest"),
+        |_| false,
+    )
+    .expect("unchanged accepted context control");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

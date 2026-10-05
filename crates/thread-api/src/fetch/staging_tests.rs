@@ -9,6 +9,10 @@ use objects::{
 use super::*;
 use crate::replication;
 
+#[cfg(feature = "native")]
+#[path = "import_staging_tests.rs"]
+mod imported;
+
 #[test]
 fn partial_source_staging_retains_proof_without_complete_availability() {
     let scratch = tempfile::tempdir().expect("scratch");

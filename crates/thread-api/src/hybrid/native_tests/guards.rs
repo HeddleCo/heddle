@@ -8,6 +8,65 @@ use objects::object::thread_replication::{
 
 use super::*;
 
+#[test]
+fn native_genesis_policy_accepts_empty_revocations_on_fresh_receiver() {
+    let mut bundle: wire::NativePublicProofBundleV1 = record(&fixture(), "account_source");
+    bundle.policies.clear();
+    for signed in &mut bundle.statements {
+        let body = signed.body.as_mut().expect("witness statement");
+        body.policy_sequence = 0;
+        body.policy_state_hash = vec![0; 32];
+        let entry = bundle
+            .witness_set
+            .as_ref()
+            .expect("set")
+            .body
+            .as_ref()
+            .expect("set body")
+            .entries
+            .iter()
+            .find(|entry| entry.executor_id == body.executor_id)
+            .expect("witness key");
+        signed.signature = signer(&entry.public_key)
+            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+            .expect("witness signature");
+    }
+    sort(&mut bundle);
+    verify_semantics(&bundle, 1_100_000).expect("genesis policy has no native revocations");
+    let originals = bundle
+        .authority_witnesses
+        .iter()
+        .filter_map(|p| p.original.clone())
+        .collect::<Vec<_>>();
+    local_work::install_bundle("native genesis policy", bundle.clone(), &originals, None);
+    for hash in [Vec::new(), vec![1; 32]] {
+        let mut unknown = bundle.clone();
+        for signed in &mut unknown.statements {
+            let body = signed.body.as_mut().expect("statement");
+            body.policy_state_hash = hash.clone();
+            let entry = unknown
+                .witness_set
+                .as_ref()
+                .expect("set")
+                .body
+                .as_ref()
+                .expect("body")
+                .entries
+                .iter()
+                .find(|entry| entry.executor_id == body.executor_id)
+                .expect("key");
+            signed.signature = signer(&entry.public_key)
+                .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+                .expect("signature");
+        }
+        sort(&mut unknown);
+        assert!(
+            verify_semantics(&unknown, 1_100_000).is_err(),
+            "unknown/absent native policy observation is not genesis"
+        );
+    }
+}
+
 fn genesis(bundle: &wire::NativePublicProofBundleV1) -> Vec<wire::SignedRecord> {
     bundle
         .genesis_witnesses

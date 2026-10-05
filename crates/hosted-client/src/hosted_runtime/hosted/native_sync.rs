@@ -1618,7 +1618,12 @@ impl HostedClient {
             .tempdir()
             .map_err(native_error)?;
         let staged = self
-            .fetch_native_source(open, thread_api::fetch::Limits::default(), scratch.path())
+            .fetch_native_source(
+                repo,
+                open,
+                thread_api::fetch::Limits::default(),
+                scratch.path(),
+            )
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let imported = staged.import_authority().is_some();

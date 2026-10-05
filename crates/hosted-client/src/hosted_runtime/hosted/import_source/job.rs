@@ -189,6 +189,30 @@ impl ImportJobState {
         Ok(())
     }
 
+    fn original_admitted(&self) -> Result<bool> {
+        let verified = self.verified_history.as_ref().ok_or(Reject::Scope)?;
+        Ok(verified
+            .owner_check_times_unix_seconds
+            .first()
+            .is_some_and(Option::is_some))
+    }
+
+    fn original_admission(
+        &self,
+        now_unix_seconds: i64,
+    ) -> Result<authority::ImportOriginalAdmission<'_>> {
+        Ok(authority::ImportOriginalAdmission {
+            original: self
+                .response
+                .retained_proof
+                .as_ref()
+                .and_then(|b| b.delegations.first())
+                .ok_or(Reject::Canonical)?,
+            admitted: self.original_admitted()?,
+            now_unix_seconds,
+        })
+    }
+
     fn logical_job_terminal(&self) -> Result<bool> {
         let cancel = self
             .response
@@ -204,12 +228,16 @@ impl ImportJobState {
     /// Verify retained signatures and witness history before reviewing remaining
     /// authority. The API derives historical times and distinguishes recovery.
     /// Persist its optional snapshot under the receiver's existing trust lock.
-    pub fn verify_witnesses(
+    pub fn verify_witnesses<'a>(
         &mut self,
         pin: &authority::ImportWitnessRootPin,
         snapshot: Option<&authority::ImportWitnessSnapshot>,
         now_millis: i64,
-        owners: &[authority::ImportBundleOwnerExpectation<'_>],
+        owner_at: impl FnMut(
+            usize,
+            Option<i64>,
+        )
+            -> std::result::Result<authority::ImportBundleOwnerExpectation<'a>, Reject>,
         verify_policy: impl FnMut(
             &wire::ImportPublicProofBundleV1,
             Option<&api::heddle::api::common::HostedWitnessStatementV1>,
@@ -225,7 +253,7 @@ impl ImportJobState {
             pin,
             snapshot,
             now_millis,
-            owners,
+            owner_at,
             verify_policy,
         )?;
         if self.response.state.as_ref() != Some(&verified.accepted_history) {
@@ -522,6 +550,9 @@ impl HostedClient {
                 ))
             })
             .transpose()?;
+        let original_admission = read
+            .map(|read| read.original_admission(chrono::Utc::now().timestamp()))
+            .transpose()?;
         // Empty explicitly asks Prepare for the current opaque CAS token.
         // Source format/custody are checked before RPC; the complete prepared
         // scope is checked against the issued token before it reaches signing.
@@ -532,6 +563,7 @@ impl HostedClient {
                 source.source.connection.as_ref().map(|_| source.provider),
                 &configuration.response,
                 &proposed.destination_version,
+                original_admission.as_ref(),
                 retained_state,
             )?;
         } else if retained_state.is_none() {
@@ -558,6 +590,7 @@ impl HostedClient {
             source.source.connection.as_ref().map(|_| source.provider),
             &configuration.response,
             &returned.destination_version,
+            original_admission.as_ref(),
             retained_state,
         )?;
         Ok(PreparedImportJob {
@@ -803,6 +836,7 @@ fn validate_renewal(
         predecessor_context,
         current_context,
         read.logical_job_terminal()?,
+        read.original_admitted()?,
     )?;
     Ok(())
 }
@@ -996,6 +1030,8 @@ mod tests {
                 owner_public_key: expected.owner_public_key,
                 owner_chain_digest: expected.owner_chain_digest,
                 authority_expires_at_seconds: expected.authority_expires_at_seconds,
+                effective_from_unix_seconds: 1000,
+                effective_until_unix_seconds: None,
                 forbidden_job_keys: expected.forbidden_job_keys,
                 known_job_associations: expected.known_job_associations,
             }];
@@ -1019,7 +1055,7 @@ mod tests {
                 },
                 None,
                 1_350_000,
-                &owners,
+                |index, _| owners.get(index).copied().ok_or(Reject::Root),
                 |bundle, _| {
                     for policy in &bundle.policies {
                         heddleco_capability_verifier::import_delegation::verify_policy_record(
@@ -1340,6 +1376,7 @@ mod tests {
                     &configuration().response,
                     &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
                         .destination_version,
+                    Some(&read.original_admission(1350).expect("original admission")),
                     Some((
                         &predecessor,
                         read.response.state.as_ref().expect("state"),
@@ -1465,7 +1502,7 @@ mod tests {
             assert!(validate_source_selection(&request, &discovered, None).is_err());
             validate_source_selection(&request, &discovered, Some(&predecessor))
                 .expect("retained commit selection is independent of this ref page");
-            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some((&predecessor, read.response.state.as_ref().expect("state"), read.response.retained_source.as_ref().expect("retained source")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
+            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some(&read.original_admission(1350).expect("original admission")), Some((&predecessor, read.response.state.as_ref().expect("state"), read.response.retained_source.as_ref().expect("retained source")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
         });
     }
 
@@ -1553,6 +1590,7 @@ mod tests {
                     &configuration,
                     &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
                         .destination_version,
+                    Some(&read.original_admission(1350).expect("original admission")),
                     retained,
                 );
                 assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
@@ -2222,6 +2260,8 @@ mod tests {
                         owner_public_key: expected.owner_public_key,
                         owner_chain_digest: expected.owner_chain_digest,
                         authority_expires_at_seconds: expected.authority_expires_at_seconds,
+                        effective_from_unix_seconds: 1000,
+                        effective_until_unix_seconds: None,
                         forbidden_job_keys: expected.forbidden_job_keys,
                         known_job_associations: &[],
                     })
@@ -2231,16 +2271,22 @@ mod tests {
                     history.root.as_ref().expect("root"),
                 )
                 .expect("independent owner");
-                read.verify_witnesses(pin, snapshot, now, &owners, |b, _| {
-                    for p in &b.policies {
-                        heddleco_capability_verifier::import_delegation::verify_policy_record(
-                            p,
-                            &[&owner],
-                        )
-                        .map_err(|_| Reject::Signature)?;
-                    }
-                    Ok(())
-                })
+                read.verify_witnesses(
+                    pin,
+                    snapshot,
+                    now,
+                    |index, _| owners.get(index).copied().ok_or(Reject::Root),
+                    |b, _| {
+                        for p in &b.policies {
+                            heddleco_capability_verifier::import_delegation::verify_policy_record(
+                                p,
+                                &[&owner],
+                            )
+                            .map_err(|_| Reject::Signature)?;
+                        }
+                        Ok(())
+                    },
+                )
                 .expect("verified recovery")
                 .clone()
             })

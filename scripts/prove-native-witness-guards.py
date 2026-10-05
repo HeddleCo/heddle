@@ -19,8 +19,46 @@ REPO = 'heddle-repo'
 API = 'heddle-thread-api'
 HOSTED = 'heddle-hosted-client'
 VERIFIER = 'heddleco-capability-verifier'
+CRYPTO = 'heddle-crypto'
+TIP = 'crates/object-model/src/object/thread_replication.rs'
 # name, file, exact old bytes, replacement, crate, filter, expected assertion
 MUTATIONS = [
+    ('import-tip', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
+     '.validate_parents_inner(genesis, parents, true)',
+     '.validate_parents_inner(genesis, parents, false)', CRYPTO,
+     'import_authority::tests::ancestry', 'one carrier-bound tip operation'),
+    ('import-tip-strict-default', TIP,
+     'self.validate_parents_inner(genesis, parents, false)',
+     'self.validate_parents_inner(genesis, parents, true)', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', 'carrierless and ordinary parentless Captures remain strict'),
+    ('import-tip-seed', TIP, 'state.parents.contains(&genesis.base)', 'false', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', 'even a genuine carrier cannot introduce the seed'),
+    ('import-tip-causal-frontier', TIP, '(!imported || !self.parents.is_empty())', '!imported', CRYPTO,
+     'imported_capture_with_nonempty_frontier_keeps_exact_native_ancestry', 'nonempty frontier cannot drop or invent source ancestry'),
+    ('import-tip-carrier-binding', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
+     '''        if import_authority::frontier_digest(&expected).map_err(invalid)?
+            != body.expected_frontier_digest
+            || import_authority::frontier_digest(&resulting).map_err(invalid)?
+                != body.resulting_frontier_digest
+            || import_authority::content_digest(&content).map_err(invalid)?
+                != body.resulting_content_digest''', '        if false', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', "a valid imported root cannot borrow another operation's carrier"),
+    ('genesis-import-policy', 'crates/thread-api/src/hybrid/authority.rs',
+     'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
+     'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
+     'published_import_at_genesis_policy_installs_on_fresh_receiver', 'authenticated genesis policy must install published import evidence'),
+    ('genesis-native-policy', 'crates/thread-api/src/hybrid/authority.rs',
+     'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
+     'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
+     'native_genesis_policy_accepts_empty_revocations_on_fresh_receiver', 'genesis policy has no native revocations'),
+    ('owner-effective-interval', 'crates/repo/src/thread_replication/delegated_import.rs',
+     '''                from: owner.valid_from_unix_seconds(),
+                until: timeline
+                    .get(i + 1)
+                    .map(|next| next.valid_from_unix_seconds()),''',
+     '''                from: 0,
+                until: None,''', REPO,
+     'owner_at_before_claim_returns_prior_authority_and_true_interval', 'assertion `left == right` failed'),
     ('unwitnessed-capture', NATIVE, '''        if !admissions
             .get(id)
             .is_some_and(|(original, _)| original == record)
@@ -188,6 +226,8 @@ def main():
             command = ['cargo', 'test', '--locked', '-p', crate, '--lib']
             if crate == HOSTED:
                 command += ['--features', 'client']
+            elif crate == CRYPTO:
+                command += ['--features', 'owner-root']
             command += [test, '--', '--nocapture', '--test-threads', '1']
             log = args.output / (label + '.log')
             env = {**os.environ, 'CARGO_TARGET_DIR': target,

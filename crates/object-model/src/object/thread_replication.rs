@@ -370,6 +370,16 @@ impl ThreadOperation {
     /// Called after every parent is present. A peer cannot relabel a private
     /// dependency as public or attach an operation to a different Thread.
     pub fn validate_parents(&self, genesis: &ThreadGenesis, parents: &[Self]) -> Result<()> {
+        self.validate_parents_inner(genesis, parents, false)
+    }
+
+    // Only an authenticated DelegatedImport can select imported ancestry.
+    fn validate_parents_inner(
+        &self,
+        genesis: &ThreadGenesis,
+        parents: &[Self],
+        imported: bool,
+    ) -> Result<()> {
         if self.thread != genesis.id()? || parents.len() != self.parents.len() {
             return Err(invalid("Thread or causal parent set mismatch"));
         }
@@ -423,8 +433,14 @@ impl ThreadOperation {
                     .copied()
                     .filter(|id| *id != genesis.base)
                     .collect();
-                if declared != source_parents
-                    || state.parents.is_empty()
+                // A first import has one native tip operation. Its converted
+                // Git ancestors travel as State closure, attested by the
+                // converter witness, rather than causal native operations.
+                if ((!imported || !self.parents.is_empty()) && declared != source_parents)
+                    || (!imported && state.parents.is_empty())
+                    || (imported
+                        && (state.parents.contains(&genesis.base)
+                            || genesis.base != hosted_import::synthetic_initial_base()?.id()))
                     || state.parents.len() != state.parents.iter().collect::<BTreeSet<_>>().len()
                 {
                     return Err(invalid(

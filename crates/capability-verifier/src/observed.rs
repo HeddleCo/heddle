@@ -461,6 +461,8 @@ pub enum VerificationErrorCode {
     HybridJobAsWitness,
     /// Hybrid Key Role.
     HybridKeyRole,
+    /// The original native admission window ended.
+    HybridOriginalWindowEnded,
     /// Hybrid Expired.
     HybridExpired,
     /// Hybrid Scope.
@@ -522,6 +524,7 @@ fn hybrid_error_code(reason: heddle_api::hybrid_codec::Reject) -> VerificationEr
         R::Transition => C::HybridTransition,
         R::JobAsWitness => C::HybridJobAsWitness,
         R::KeyRole => C::HybridKeyRole,
+        R::OriginalWindowEnded => C::HybridOriginalWindowEnded,
         R::Expired => C::HybridExpired,
         R::Scope => C::HybridScope,
         R::PreparedFields => C::HybridPreparedFields,

@@ -442,10 +442,16 @@ pub fn verify_new_operation(
     delegation: &VerifiedImportDelegation,
     member: Option<&SignedImportMemberPermissionV1>,
     context: &CurrentContext<'_>,
+    committed_before: &crate::wire::ImportResultManifestV1,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<()> {
     let current = verify_current(&delegation.signed, member, context, is_revoked)?;
-    contract::verify_new_operation(operation, &current.verified, context.now_millis / 1000)?;
+    contract::verify_new_operation(
+        operation,
+        &current.verified,
+        context.now_millis / 1000,
+        committed_before,
+    )?;
     Ok(())
 }
 

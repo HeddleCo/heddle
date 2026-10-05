@@ -168,6 +168,85 @@ pub fn verify_delegated_import(
     )?)
 }
 
+/// Bind only originals selected by an authenticated import signature. Other
+/// originals retain strict native ancestry; no caller-supplied kind grants it.
+pub fn bind_import_original(
+    bundle: &wire::ImportPublicProofBundleV1,
+    delegations: &[&contract::VerifiedImportDelegation],
+    genesis: &ThreadGenesis,
+    operation: &ThreadOperation,
+    parents: &[ThreadOperation],
+) -> Result<Option<DelegatedImport>> {
+    let frontier = contract::frontier_digest(&wire::ImportFrontierV1 {
+        format_version: 1,
+        thread_id: operation.thread.as_bytes().to_vec(),
+        operation_ids: vec![operation.id()?.as_bytes().to_vec()],
+    })?;
+    let Some(signed) = bundle.operations.iter().find(|signed| {
+        signed
+            .body
+            .as_ref()
+            .is_some_and(|body| body.resulting_frontier_digest == frontier)
+    }) else {
+        return Ok(None);
+    };
+    let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
+    let delegation = delegations
+        .iter()
+        .find(|d| d.digest() == body.delegation_digest)
+        .ok_or(Reject::Scope)?;
+    let genesis_id = genesis.id()?;
+    let binding = bundle
+        .genesis_authorities
+        .iter()
+        .find(|g| {
+            g.body
+                .as_ref()
+                .is_some_and(|g| g.genesis_digest == genesis_id.as_bytes())
+        })
+        .ok_or(Reject::GenesisBinding)?;
+    let identity = binding
+        .body
+        .as_ref()
+        .and_then(|g| g.identity.as_ref())
+        .ok_or(Reject::GenesisBinding)?;
+    Ok(Some(DelegatedImport::bind(
+        signed, delegation, genesis, identity, operation, parents,
+    )?))
+}
+
+/// Authenticated certificates awaiting exact native content. This grants only
+/// structural import binding; durable installation rechecks owner/witness trust.
+#[derive(Clone)]
+pub struct VerifiedImportCarriers {
+    bundle: wire::ImportPublicProofBundleV1,
+    delegations: Vec<contract::VerifiedImportDelegation>,
+}
+impl VerifiedImportCarriers {
+    pub fn new(
+        bundle: wire::ImportPublicProofBundleV1,
+        delegations: Vec<contract::VerifiedImportDelegation>,
+    ) -> Result<Self> {
+        contract::validate_public_bundle(&bundle)?;
+        Ok(Self {
+            bundle,
+            delegations,
+        })
+    }
+    pub fn bind(
+        &self,
+        genesis: &ThreadGenesis,
+        operation: &ThreadOperation,
+        parents: &[ThreadOperation],
+    ) -> Result<Option<DelegatedImport>> {
+        let scopes = self.delegations.iter().collect::<Vec<_>>();
+        bind_import_original(&self.bundle, &scopes, genesis, operation, parents)
+    }
+    pub fn bundle(&self) -> &wire::ImportPublicProofBundleV1 {
+        &self.bundle
+    }
+}
+
 /// Opaque original creation authority. Later owner transfers/renewals do not
 /// replace its creator, account, native signature or first signed binding.
 #[derive(Clone, Debug)]
@@ -325,6 +404,20 @@ impl NativeClosure {
         records: &[wire::SignedRecord],
         boundaries: &[wire::ImportBoundaryAcceptanceV1],
     ) -> Result<Self> {
+        Self::verify_with_imports(records, boundaries, |_, _, _| Ok(None))
+    }
+
+    /// Import ancestry requires an opaque carrier bound to the exact original.
+    /// Without one this retains ordinary native validation, including roots.
+    pub fn verify_with_imports(
+        records: &[wire::SignedRecord],
+        boundaries: &[wire::ImportBoundaryAcceptanceV1],
+        import: impl Fn(
+            &ThreadGenesis,
+            &ThreadOperation,
+            &[ThreadOperation],
+        ) -> Result<Option<DelegatedImport>>,
+    ) -> Result<Self> {
         for boundary in boundaries {
             contract::verify_boundary_acceptance(boundary)?;
         }
@@ -394,7 +487,14 @@ impl NativeClosure {
                 .iter()
                 .map(|id| result.operations.get(id).cloned().ok_or(Reject::Scope))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            op.validate_parents(genesis, &parents)?;
+            if let Some(bound) = import(genesis, op, &parents)? {
+                if bound.converted() != op {
+                    return Err(Reject::Scope.into());
+                }
+                bound.validate_parents(genesis, &parents)?;
+            } else {
+                op.validate_parents(genesis, &parents)?;
+            }
         }
         for c in result.claims.values() {
             c.validate_genesis(result.geneses.get(&c.thread).ok_or(Reject::Scope)?)?;

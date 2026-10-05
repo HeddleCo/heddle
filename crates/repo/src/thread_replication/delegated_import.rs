@@ -369,6 +369,92 @@ impl ThreadReplica {
             .transpose()
     }
 }
+struct ImportOwnerFacts {
+    identity: wire::ImportIdentityV1,
+    chain: Vec<u8>,
+    expiry: i64,
+    key: Vec<u8>,
+    forbidden: Vec<Vec<u8>>,
+    from: i64,
+    until: Option<i64>,
+}
+fn owner_fact_at<'a>(
+    timeline: &'a [ImportOwnerFacts],
+    identity: &wire::ImportIdentityV1,
+    time: Option<i64>,
+) -> std::result::Result<&'a ImportOwnerFacts, Reject> {
+    timeline
+        .iter()
+        .rev()
+        .find(|fact| match time {
+            Some(t) => t >= fact.from && fact.until.is_none_or(|end| t < end),
+            None => fact.identity == *identity,
+        })
+        .ok_or(Reject::Scope)
+}
+
+#[cfg(test)]
+#[path = "import_owner_interval_tests.rs"]
+mod owner_interval_tests;
+impl ImportOwnerFacts {
+    fn expectation<'a>(
+        &'a self,
+        associations: &'a [(Vec<u8>, Vec<u8>)],
+    ) -> contract::ImportBundleOwnerExpectation<'a> {
+        contract::ImportBundleOwnerExpectation {
+            identity: &self.identity,
+            owner_public_key: &self.key,
+            owner_chain_digest: &self.chain,
+            authority_expires_at_seconds: self.expiry,
+            effective_from_unix_seconds: self.from,
+            effective_until_unix_seconds: self.until,
+            forbidden_job_keys: &self.forbidden,
+            known_job_associations: associations,
+        }
+    }
+}
+// Public states were replayed and authenticated against the independently selected
+// root. Use the next accepted state as the end, including claims clearing deferral.
+fn import_owner_facts(
+    states: &BTreeMap<[u8; 32], heddleco_capability_verifier::VerifiedOwnerState>,
+    selection: Selection<'_>,
+    forbidden: Vec<Vec<u8>>,
+) -> Result<Vec<ImportOwnerFacts>> {
+    let mut timeline = states
+        .values()
+        .filter(|s| s.signed_root() == selection.owner.signed_root())
+        .collect::<Vec<_>>();
+    timeline.sort_by_key(|s| s.sequence());
+    if timeline
+        .windows(2)
+        .any(|w| w[0].sequence() == w[1].sequence())
+    {
+        return Err(Reject::Root.into());
+    }
+    timeline
+        .iter()
+        .enumerate()
+        .map(|(i, owner)| {
+            let (identity, chain, expiry) =
+                permission::native_lineage(&Selection { owner, ..selection })?;
+            let mut forbidden = forbidden.clone();
+            forbidden.extend(owner.authority_public_keys());
+            forbidden.extend(selection.keyring.authority_public_keys().cloned());
+            Ok(ImportOwnerFacts {
+                identity,
+                chain,
+                expiry,
+                key: owner.authority_key().public_key.clone(),
+                forbidden,
+                from: owner.valid_from_unix_seconds(),
+                until: timeline
+                    .get(i + 1)
+                    .map(|next| next.valid_from_unix_seconds()),
+            })
+        })
+        .collect()
+}
+
 /// Compose API-owned admission order, renewal CAS, narrowing and cumulative
 /// budgets with independently verified owner/policy/native contexts.
 fn verify_import_history(
@@ -376,54 +462,110 @@ fn verify_import_history(
     authority: &impl AcceptedAuthority,
     context: &TrustTransaction<'_>,
 ) -> Result<()> {
+    let snapshot = context.import_witness_snapshot()?;
+    verify_witnessed_import_bundle(
+        bundle,
+        authority,
+        &context.import_witness_pin(),
+        snapshot.as_ref(),
+        context.now_millis(),
+        context.job_associations(),
+        &context.forbidden_job_keys(),
+        |selection| context.require_spool_selection(selection),
+    )?;
+    if let Some(snapshot) = snapshot.as_ref() {
+        let current = bundle.encode_to_vec();
+        for old in import_job_history(snapshot, bundle) {
+            context.sql().execute(
+                "UPDATE hosted_import_proofs SET bundle=?3 WHERE authority=?1 AND bundle=?2",
+                params![
+                    context.set().body().deployment_authority,
+                    old.encode_to_vec(),
+                    current
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn import_job_history<'a>(
+    snapshot: &'a contract::ImportWitnessSnapshot,
+    bundle: &wire::ImportPublicProofBundleV1,
+) -> Vec<&'a wire::ImportPublicProofBundleV1> {
+    let terminal = bundle.terminal_manifest.as_ref();
+    let spool = bundle
+        .delegations
+        .first()
+        .and_then(|d| d.body.as_ref())
+        .and_then(|d| d.identity.as_ref())
+        .map(|id| &id.spool_uuid);
+    snapshot
+        .accepted_history
+        .iter()
+        .filter(|old| {
+            old.terminal_manifest.as_ref().is_some_and(|m| {
+                terminal.is_some_and(|terminal| m.logical_job_id == terminal.logical_job_id)
+            }) && old
+                .delegations
+                .first()
+                .and_then(|d| d.body.as_ref())
+                .and_then(|d| d.identity.as_ref())
+                .map(|id| &id.spool_uuid)
+                == spool
+        })
+        .collect::<Vec<_>>()
+}
+
+/// Authenticate a witnessed bundle using receiver-selected root and owner facts.
+/// Staging uses this without persistence; installation repeats it under the lock.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_witnessed_import_bundle(
+    bundle: &wire::ImportPublicProofBundleV1,
+    authority: &impl AcceptedAuthority,
+    pin: &contract::ImportWitnessRootPin,
+    snapshot: Option<&contract::ImportWitnessSnapshot>,
+    now_millis: i64,
+    associations: &[(Vec<u8>, Vec<u8>)],
+    forbidden: &[Vec<u8>],
+    require_selection: impl Fn(&Selection<'_>) -> Result<()>,
+) -> Result<contract::VerifiedImportBundleWitnesses> {
+    let states = public_owners(bundle.into(), now_millis / 1000)?;
     let mut facts = Vec::new();
     for signed in &bundle.delegations {
-        let body = signed.body.as_ref().ok_or(Reject::Canonical)?;
-        let id = body.identity.as_ref().ok_or(Reject::Root)?;
-        let selector = host::HostedWitnessStatementV1 {
+        let id = signed
+            .body
+            .as_ref()
+            .and_then(|b| b.identity.as_ref())
+            .ok_or(Reject::Root)?;
+        let selection = authority.for_witness(&host::HostedWitnessStatementV1 {
             spool_uuid: id.spool_uuid.clone(),
             spool_genesis_digest: id.spool_genesis_digest.clone(),
             owner_id: id.owner_id.clone(),
             owner_state_hash: id.owner_state_hash.clone(),
             ownership_transfer_sequence: id.ownership_transfer_sequence,
             ..Default::default()
-        };
-        // This selects verified lineage facts, without inventing an observation.
-        let selection = authority.for_witness(&selector)?;
-        context.require_spool_selection(&selection)?;
-        let (identity, chain, expiry) = permission::native_lineage(&selection)?;
-        let mut forbidden = context.forbidden_job_keys();
-        forbidden.extend(selection.owner.authority_public_keys());
-        forbidden.extend(selection.keyring.authority_public_keys().cloned());
-        facts.push((
-            identity,
-            chain,
-            expiry,
-            selection.owner.authority_key().public_key.clone(),
-            forbidden,
-        ));
+        })?;
+        require_selection(&selection)?;
+        facts.push(import_owner_facts(&states, selection, forbidden.to_vec())?);
     }
-    let owners = facts
-        .iter()
-        .map(
-            |(identity, chain, expiry, key, forbidden)| contract::ImportBundleOwnerExpectation {
-                identity,
-                owner_public_key: key,
-                owner_chain_digest: chain,
-                authority_expires_at_seconds: *expiry,
-                forbidden_job_keys: forbidden,
-                known_job_associations: context.job_associations(),
-            },
-        )
-        .collect::<Vec<_>>();
-    let snapshot = context.import_witness_snapshot()?;
+    let mut owner_at = |index: usize, time: Option<i64>| {
+        let timeline = facts.get(index).ok_or(Reject::Root)?;
+        let id = bundle.delegations[index]
+            .body
+            .as_ref()
+            .and_then(|b| b.identity.as_ref())
+            .ok_or(Reject::Root)?;
+        let fact = owner_fact_at(timeline, id, time)?;
+        Ok(fact.expectation(associations))
+    };
     let mut verify_policy =
         |bundle: &wire::ImportPublicProofBundleV1,
          statement: Option<&host::HostedWitnessStatementV1>| {
             let verify = || -> Result<()> {
                 let statement = statement.ok_or(Reject::Scope)?;
                 let selection = authority.for_witness(statement)?;
-                context.require_spool_selection(&selection)?;
+                require_selection(&selection)?;
                 selection.keyring.verify_current_owner(
                     selection.owner,
                     statement.observed_at_unix_millis / 1000,
@@ -482,39 +624,17 @@ fn verify_import_history(
         };
     let verified = contract::verify_import_bundle_witnesses(
         bundle,
-        &context.import_witness_pin(),
-        snapshot.as_ref(),
-        context.now_millis(),
-        &owners,
+        pin,
+        snapshot,
+        now_millis,
+        &mut owner_at,
         &mut verify_policy,
     )?;
     if verified.evidence != contract::ImportBundleEvidence::Witnessed {
         return Err(Reject::Scope.into());
     }
     if let Some(snapshot) = snapshot {
-        let terminal = bundle.terminal_manifest.as_ref().ok_or(Reject::Canonical)?;
-        let spool = bundle
-            .delegations
-            .first()
-            .and_then(|d| d.body.as_ref())
-            .and_then(|d| d.identity.as_ref())
-            .map(|id| &id.spool_uuid);
-        let histories = snapshot
-            .accepted_history
-            .iter()
-            .filter(|old| {
-                old.terminal_manifest
-                    .as_ref()
-                    .is_some_and(|m| m.logical_job_id == terminal.logical_job_id)
-                    && old
-                        .delegations
-                        .first()
-                        .and_then(|d| d.body.as_ref())
-                        .and_then(|d| d.identity.as_ref())
-                        .map(|id| &id.spool_uuid)
-                        == spool
-            })
-            .collect::<Vec<_>>();
+        let histories = import_job_history(snapshot, bundle);
         // A Thread projection can retain an older version of this same job.
         // The API checks its first matching history; check every other version
         // too, then advance all those projections together under this lock.
@@ -523,28 +643,17 @@ fn verify_import_history(
             previous.accepted_history = vec![(*old).clone()];
             contract::verify_import_bundle_witnesses(
                 bundle,
-                &context.import_witness_pin(),
+                pin,
                 Some(&previous),
-                context.now_millis(),
-                &owners,
+                now_millis,
+                &mut owner_at,
                 &mut verify_policy,
-            )?;
-        }
-        let current = bundle.encode_to_vec();
-        for old in histories {
-            context.sql().execute(
-                "UPDATE hosted_import_proofs SET bundle=?3 WHERE authority=?1 AND bundle=?2",
-                params![
-                    context.set().body().deployment_authority,
-                    old.encode_to_vec(),
-                    current
-                ],
             )?;
         }
     }
     // Original bundles, job associations and fresh witness trust commit with
     // the installed records; rejection rolls every projection back together.
-    Ok(())
+    Ok(verified)
 }
 
 fn install_in(
@@ -622,7 +731,6 @@ fn install_in(
                 .flat_map(|p| p.boundary_acceptances.clone()),
         )
         .collect();
-    let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
     let forbidden = context.forbidden_job_keys();
     for policy in &bundle.policies {
         let p = policy.body.as_ref().ok_or(Reject::Canonical)?;
@@ -678,6 +786,15 @@ fn install_in(
         )?;
         delegations.insert(body.delegation_digest.clone(), d);
     }
+    let scopes = delegations.values().map(|d| d.scope()).collect::<Vec<_>>();
+    let closure = NativeClosure::verify_with_imports(
+        &originals,
+        &boundaries,
+        |genesis, operation, parents| {
+            verification::bind_import_original(bundle, &scopes, genesis, operation, parents)
+        },
+    )?;
+    let mut imports = BTreeMap::new();
     let mut admissions = BTreeMap::new();
     let mut geneses = BTreeMap::new();
     for payload in &bundle.genesis_witnesses {
@@ -1020,6 +1137,7 @@ fn install_in(
             context.set(),
             context.now_millis(),
         )?;
+        imports.insert(native_operation.id()?, content);
         admissions.insert(native_operation.id()?, (converted.clone(), evidence));
     }
     let selected = selected_originals(native_records, &originals)?;
@@ -1051,10 +1169,106 @@ fn install_in(
         &geneses,
         &admissions,
         &closure,
+        &imports,
         store,
         context,
         |id| retain_bundle(context, id, bundle),
     )
+}
+
+/// Authenticate enclosing import certificates before source staging. Original
+/// content is still bound on arrival, and installation repeats durable checks.
+#[allow(clippy::too_many_arguments)]
+pub fn authenticate_import_carriers(
+    bundle: &wire::ImportPublicProofBundleV1,
+    authority: &impl AcceptedAuthority,
+    pin: &contract::ImportWitnessRootPin,
+    now_millis: i64,
+    associations: &[(Vec<u8>, Vec<u8>)],
+    forbidden: &[Vec<u8>],
+    require_selection: impl Fn(&Selection<'_>) -> Result<()>,
+) -> Result<verification::VerifiedImportCarriers> {
+    verify_witnessed_import_bundle(
+        bundle,
+        authority,
+        pin,
+        None,
+        now_millis,
+        associations,
+        forbidden,
+        &require_selection,
+    )?;
+    let set = api::witness_trust::verify_set(
+        bundle.witness_set.as_ref().ok_or(Reject::Canonical)?,
+        &api::witness_trust::SetExpectation {
+            authority: &pin.authority,
+            root_id: &pin.root_id,
+            root_public_key: &pin.public_key,
+            root_epoch: pin.epoch,
+            now_unix_millis: now_millis,
+            clock_floor_unix_millis: 0,
+            known_job_keys: &associations
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>(),
+        },
+        None,
+    )?;
+    let mut verified = BTreeMap::new();
+    for operation in &bundle.operations {
+        let digest = &operation
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .delegation_digest;
+        if verified.contains_key(digest) {
+            continue;
+        }
+        let signed = bundle
+            .delegations
+            .iter()
+            .find(|d| contract::signed_delegation_digest(d).is_ok_and(|d| &d == digest))
+            .ok_or(Reject::Scope)?;
+        let (_, statement) = find_publication(bundle, operation)?;
+        let mut evidence = None;
+        for proof in std::iter::once(None).chain(bundle.history_proofs.iter().map(Some)) {
+            if let Ok(found) = WitnessEvidence::resolve(&set, statement, proof, false, now_millis) {
+                evidence = Some(found);
+                break;
+            }
+        }
+        let evidence = evidence.ok_or(Reject::Proof)?;
+        let observation = statement.body.as_ref().ok_or(Reject::Canonical)?;
+        let selection = authority.for_witness(observation)?;
+        require_selection(&selection)?;
+        let member = contract::resolve_bundle_permission(
+            bundle,
+            &signed
+                .body
+                .as_ref()
+                .ok_or(Reject::Canonical)?
+                .parent_permission_digest,
+        )?;
+        let certificate = permission::verify_historical(
+            signed,
+            member,
+            &CurrentContext {
+                selection,
+                now_millis,
+                forbidden_job_keys: forbidden,
+                known_job_associations: associations,
+            },
+            statement,
+            evidence.resolved(),
+            &set,
+            |r| authority.import_revoked(observation, r),
+        )?;
+        verified.insert(digest.clone(), certificate.scope().clone());
+    }
+    Ok(verification::VerifiedImportCarriers::new(
+        bundle.clone(),
+        verified.into_values().collect(),
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1064,6 +1278,10 @@ pub(super) fn install_selected_in(
     geneses: &BTreeMap<ContentHash, (crypto::thread_operation::SignedGenesis, Vec<u8>)>,
     admissions: &BTreeMap<ContentHash, (wire::SignedRecord, WitnessEvidence)>,
     closure: &NativeClosure,
+    imports: &BTreeMap<
+        ContentHash,
+        objects::object::thread_replication::delegated_import::DelegatedImport,
+    >,
     store: &impl ObjectStore,
     context: &TrustTransaction<'_>,
     retain: impl Fn(&ContentHash) -> Result<()>,
@@ -1134,12 +1352,13 @@ pub(super) fn install_selected_in(
                     &operation,
                     store,
                 )?;
-                if replica.receive_verified_in(
+                if replica.receive_verified_content_in(
                     context.sql(),
                     &signed,
                     &operation,
                     store,
                     false,
+                    imports.get(&id),
                     None,
                     false,
                 )? != Admission::Accepted
