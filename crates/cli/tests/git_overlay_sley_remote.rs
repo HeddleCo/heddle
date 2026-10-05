@@ -133,6 +133,68 @@ fn link_overlay_to_hosted(checkout: &Path) {
 }
 
 #[test]
+fn overlay_recapture_after_undo_keeps_git_authority_through_push_pull() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+    let invoke = |args: &[&str]| {
+        let output = run(&temp, &checkout, args);
+        assert!(
+            output.status.success(),
+            "{args:?} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    std::fs::write(checkout.join("tracked.txt"), "undone\n").expect("first edit");
+    invoke(&["capture", "-m", "undone capture"]);
+    invoke(&["undo", "--hard"]);
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    assert_eq!(ref_oid(&local, "refs/heads/main"), first);
+    std::fs::write(checkout.join("tracked.txt"), "published\n").expect("second edit");
+    invoke(&["capture", "-m", "published capture"]);
+
+    let repository = repo::Repository::open(&checkout).expect("open sidecar");
+    assert_eq!(
+        repository.source_authority(),
+        repo::RepositorySourceAuthority::GitOverlay
+    );
+    // Undo retains the old capture for history/redo. Its native operation and
+    // the recapture diverge before any transport, but Git has one branch tip.
+    let replica = repository.native_thread("main").expect("capture replica");
+    let before = replica.source_head_revisions().expect("retained captures");
+    assert_eq!(before.len(), 2);
+    let tip = ref_oid(&local, "refs/heads/main");
+    invoke(&["push", "origin"]);
+    invoke(&["pull", "origin"]);
+    assert_eq!(ref_oid(&local, "refs/heads/main"), tip);
+    assert_eq!(ref_oid(&source, "refs/heads/main"), tip);
+    assert_eq!(replica.source_head_revisions().expect("after pull"), before);
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("tracked.txt")).expect("published work"),
+        "published\n"
+    );
+    for (command, heads_field) in [
+        (&["status"][..], "alternative_heads"),
+        (&["resolve", "--heads"][..], "source_heads"),
+    ] {
+        let args = [vec!["--output", "json"], command.to_vec()].concat();
+        let output = invoke(&args);
+        let report: Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+        assert!(
+            report.get(heads_field).is_none_or(Value::is_null),
+            "{report}"
+        );
+        assert_ne!(report["next_action"], "heddle resolve --heads");
+    }
+    invoke(&["ready", "--output", "text"]);
+    invoke(&["ready", "--output", "json"]);
+}
+
+#[test]
 fn embedded_credential_store_runs_without_git_on_path() {
     let temp = TempDir::new().expect("tempdir");
     let credentials = temp.path().join("credentials");

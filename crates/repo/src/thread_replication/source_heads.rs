@@ -25,7 +25,7 @@ use objects::{
 };
 
 use super::{Error, Result};
-use crate::{CommitGraphIndex, Repository};
+use crate::{CommitGraphIndex, Repository, RepositorySourceAuthority};
 
 /// Why a clone or pull materialized its head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,9 +139,13 @@ pub fn default_source_head(
 
 impl Repository {
     /// Current source heads of a named local Thread, from the indexed
-    /// frontier. `None` when the Thread has no native identity (a Git
-    /// overlay checkout, or a Thread never captured natively).
+    /// frontier. `None` under Git Overlay authority or when the Thread has
+    /// no native identity. Overlay captures retain native operations for
+    /// provenance and undo, but the Git branch owns their source tip.
     pub fn native_source_heads(&self, name: &str) -> Result<Option<BTreeSet<StateId>>> {
+        if self.source_authority() == RepositorySourceAuthority::GitOverlay {
+            return Ok(None);
+        }
         let replica = match self.native_thread(name) {
             Ok(replica) => replica,
             Err(error) if super::local::is_missing_native_identity(&error) => return Ok(None),
