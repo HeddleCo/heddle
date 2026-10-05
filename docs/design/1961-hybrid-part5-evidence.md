@@ -73,11 +73,13 @@ LocalIntegration stay strict. Heddle creates no per-commit ancestor Captures:
 | Receiver install | `crates/repo/src/thread_replication/delegated_import.rs:690`, carrier binding at 825 and dual verification at 1094 |
 | Replica admission | `crates/repo/src/thread_replication/mod.rs:1006`, exact bound value checked before `admit_ready` at 1120 |
 | Current authority | `crates/capability-verifier/src/import_delegation.rs:325`, operation scope/budget at 489; native ancestry goes through dual verification |
-| Hosted export and ingest | `crates/thread-api/src/replication/native/hosted.rs:135`, re-installs evidence before export; missing carrier refuses at 278 and 298 |
+| Hosted export and ingest | `crates/thread-api/src/replication/native/hosted.rs:188`, re-installs evidence before export; missing carrier refuses at 331 and 351 |
+| Receiver staging authentication | `crates/thread-api/src/replication/native/hosted.rs:124`, independently selected root/history and durable set snapshot |
 | Generic peer export/receive | `crates/thread-api/src/replication/native.rs:103` and 117 require hosted trust for imported evidence |
 | Direct staging | `crates/thread-api/src/fetch/staging.rs:99`, exact operation binding/parents at 696 |
 | Provider staging | `crates/thread-api/src/fetch/provider.rs:321`, same source validator |
 | Publication staging | `crates/thread-api/src/publication/staging.rs:25`, exact enclosing bundle and same validator |
+| Device publication | `crates/hosted-client/src/hosted_runtime/device_rpc/publication.rs:297`, selected backend authenticates staging before transactional publication |
 | Client source download | `crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs:151`, independent root/owner and authenticated carriers |
 | Native-only install | `crates/repo/src/thread_replication/native_witness.rs:230`, strict closure without an import carrier |
 
@@ -137,6 +139,15 @@ staging. It now authenticates the enclosing bundle with
 must. The carrierless entry point keeps its strict verdict. Receiver tests use
 a live witness set and check typed pairing/window refusals, including duplicate
 and unconsumed publications, executor mismatch and statement-array reordering.
+
+The full hosted-client feature suite also exposed carrierless staging in the
+real DeviceRpc publication receiver and its late-rejection fixture. Both now use
+`HostedReplica::authenticate_import_carriers`, which authenticates the incoming
+bundle against receiver-selected root/history, durable set generation/clock floor
+and known job associations without changing durable state. Publication rechecks
+current access and authority inside its existing transaction. The complete signed
+device publication/replay and late rollback tests fail before this change and
+pass after it; a maintained guard-removal pair exercises the real receiver path.
 
 The complete final gate includes nightly formatting, workspace and CI-feature
 clippy, fresh-home workspace tests with serialized CLI units, CI CLI integration,

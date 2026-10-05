@@ -27,6 +27,13 @@ MUTATIONS = [
     ('native-fetch-stack', 'crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs',
      '        Box::pin(async move {', '        async move {', CLI,
      'fresh_clone_capture_push_main', 'overflowed its stack'),
+    ('device-publication-carrier', 'crates/hosted-client/src/hosted_runtime/device_rpc/publication.rs',
+     '''                thread_api::publication::validate_source_artifacts_with_import_carriers(
+                    scratch, &opening, originals, carriers,
+                )?''',
+     '''                thread_api::publication::validate_source_artifacts(scratch, &opening, originals)?''', HOSTED,
+     'security_f2_complete_device_publication_commits_and_replays_receipt',
+     'complete witnessed DeviceRpc publication'),
     ('import-tip', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
      '.validate_parents_inner(genesis, parents, true)',
      '.validate_parents_inner(genesis, parents, false)', CRYPTO,

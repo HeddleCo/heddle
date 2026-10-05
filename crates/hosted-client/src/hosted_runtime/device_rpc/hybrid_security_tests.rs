@@ -1325,24 +1325,40 @@ impl Fixture {
             import_authority: Some(self.bundle.clone()),
             ..Default::default()
         };
-        thread_api::publication::validate_source_artifacts(directory, &opening, self.originals())
-            .expect("valid actual artifacts")
-            .into_hosted_source(TransferReady {
-                thread: Some(self.reference()),
-                current: Some(revision),
-                owner_genesis: self.bundle.owner_genesis.clone(),
-                ownership: Some(
-                    self.repository
-                        .pinned_owner_observation(chrono::Utc::now().timestamp())
-                        .expect("independent pin")
-                        .0,
-                ),
-                protocol: opening.protocol,
-                import_authority: Some(self.bundle.clone()),
-                full_closure_available: true,
-                ..Default::default()
-            })
-            .expect("actual hosted staging")
+        let backend = self
+            .device()
+            .hosted_backend(
+                self.local(),
+                Arc::new(self.session().await),
+                self.bundle.clone(),
+            )
+            .expect("independently selected receiver");
+        let carriers = backend
+            .authenticate_import_carriers(&self.bundle, chrono::Utc::now().timestamp_millis())
+            .expect("authenticated staging carriers");
+        thread_api::publication::validate_source_artifacts_with_import_carriers(
+            directory,
+            &opening,
+            self.originals(),
+            carriers,
+        )
+        .expect("valid actual artifacts")
+        .into_hosted_source(TransferReady {
+            thread: Some(self.reference()),
+            current: Some(revision),
+            owner_genesis: self.bundle.owner_genesis.clone(),
+            ownership: Some(
+                self.repository
+                    .pinned_owner_observation(chrono::Utc::now().timestamp())
+                    .expect("independent pin")
+                    .0,
+            ),
+            protocol: opening.protocol,
+            import_authority: Some(self.bundle.clone()),
+            full_closure_available: true,
+            ..Default::default()
+        })
+        .expect("actual hosted staging")
     }
     fn change_control(&self, sharing: bool) {
         use objects::object::thread_replication::{
