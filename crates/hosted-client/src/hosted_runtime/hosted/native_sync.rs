@@ -25,7 +25,7 @@ use objects::{
         CollaborationActor, ContentHash, StateId, ThreadName,
         thread_replication::{
             AuthoredCapture, GenesisOwner, ThreadGenesis, ThreadOperation, ThreadOperationBody,
-            hosted_import::synthetic_initial_base,
+            initial_base::synthetic_initial_base,
         },
     },
     store::ObjectStore,
@@ -1618,7 +1618,12 @@ impl HostedClient {
             .tempdir()
             .map_err(native_error)?;
         let staged = self
-            .fetch_native_source(open, thread_api::fetch::Limits::default(), scratch.path())
+            .fetch_native_source(
+                repo,
+                open,
+                thread_api::fetch::Limits::default(),
+                scratch.path(),
+            )
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let imported = staged.import_authority().is_some();
@@ -2353,7 +2358,7 @@ mod tests {
         object::{
             Attribution, Principal, State, StateId, Tree,
             thread_replication::{
-                GenesisOwner, ThreadGenesis, hosted_import::synthetic_initial_base,
+                GenesisOwner, ThreadGenesis, initial_base::synthetic_initial_base,
             },
         },
         store::ObjectStore,

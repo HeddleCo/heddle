@@ -413,7 +413,7 @@ pub(super) fn prepare(
     let (selected, _, redactions) =
         checkout::admitted_source_ids(session, &repository, thread, revision)?;
     let genesis = selected.genesis()?;
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()?;
     if revision == genesis.base && revision == seed.id() {
         let state = repository
             .store()

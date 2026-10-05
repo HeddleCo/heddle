@@ -46,7 +46,7 @@ fn record<T: Message + Default>(f: &Value, name: &str) -> Result<T, String> {
     let v = f["signed_vectors"]
         .get(name)
         .or_else(|| f["wire_vectors"].get(name))
-        .ok_or("missing vector")?;
+        .ok_or_else(|| format!("missing vector: {name}"))?;
     let bytes = hex::decode(v["wire_hex"].as_str().ok_or("missing wire bytes")?)
         .map_err(|e| e.to_string())?;
     hybrid_codec::strict_decode(&bytes, contract::MAX_BUNDLE_BYTES).map_err(|e| e.to_string())
@@ -139,7 +139,7 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         let mut child = d.clone();
         let b = child.body.as_mut().ok_or("delegation")?;
         b.delegating_public_key = key(f, role)?;
-        b.job_public_key = key(f, "renew_job")?;
+        b.job_public_key = key(f, "device")?;
         b.job_key_id = hybrid_codec::key_id(&b.job_public_key);
         b.parent_permission_digest =
             contract::signed_permission_digest(&parent).map_err(|e| e.to_string())?;
@@ -237,11 +237,103 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         )?;
         if case["id"] == "claimed-human-after-deadline" {
             let mut revoked = c;
-            revoked.revoked_json =
-                serde_json::to_string(&[hex::encode(hybrid_codec::key_id(&key(f, "device")?))])
-                    .map_err(|e| e.to_string())?;
+            let certificate: SignedImportJobDelegationV1 = hybrid_codec::strict_decode(
+                &hex::decode(&revoked.certificate_hex).map_err(|e| e.to_string())?,
+                contract::MAX_BUNDLE_BYTES,
+            )
+            .map_err(|e| e.to_string())?;
+            revoked.revoked_json = serde_json::to_string(&[hex::encode(
+                &certificate
+                    .body
+                    .as_ref()
+                    .ok_or("claimed certificate")?
+                    .job_key_id,
+            )])
+            .map_err(|e| e.to_string())?;
             add("claimed-human-revoked", revoked, Some("witness is revoked"))?;
         }
+    }
+    let mut large = d.clone();
+    let large_body = large.body.as_mut().ok_or("body")?;
+    large_body.scope.as_mut().ok_or("scope")?.max_result_bytes = u64::MAX;
+    let mut parent = p.clone();
+    let parent_body = parent.body.as_mut().ok_or("parent")?;
+    parent_body.scope.as_mut().ok_or("scope")?.max_result_bytes = u64::MAX;
+    parent.owner_signature = Some(sign(f, "owner", contract::PERMISSION_DOMAIN, parent_body)?);
+    large_body.parent_permission_digest =
+        contract::signed_permission_digest(&parent).map_err(|e| e.to_string())?;
+    large.delegating_signature = Some(sign(f, "device", contract::DELEGATION_DOMAIN, large_body)?);
+    let mut c = Inputs {
+        certificate_hex: hex::encode(large.encode_to_vec()),
+        permission_hex: hex::encode(parent.encode_to_vec()),
+        keyring_hex: hex::encode(ring.encode_to_vec()),
+        owner_history_hex: hex::encode(h.encode_to_vec()),
+        initial_owner_hex: hex::encode(owner.owner_id()),
+        spool_genesis_hex: hex::encode(digest),
+        forbidden_json: "[]".into(),
+        associations_json: "[]".into(),
+        cancellations_json: "[]".into(),
+        revoked_json: "[]".into(),
+        now: "1100".into(),
+        max_ttl: "3600".into(),
+    };
+    add("u64-max-total", c.clone(), None)?;
+    let mut signed = direct;
+    let body = signed.body.as_mut().ok_or("large owner certificate")?;
+    body.scope.as_mut().ok_or("scope")?.max_result_bytes = 9_007_199_254_741_247;
+    signed.delegating_signature = Some(sign(f, "owner", contract::DELEGATION_DOMAIN, body)?);
+    c.certificate_hex = hex::encode(signed.encode_to_vec());
+    c.permission_hex.clear();
+    add("large-owner-total", c, None)?;
+    let scope: ImportPermissionScopeV1 = record(f, "scope")?;
+    let partial: ImportResultManifestV1 = record(f, "partial_manifest")?;
+    let remaining =
+        contract::remaining_import_scope(&scope, &partial).map_err(|e| e.to_string())?;
+    for (id, scope, manifest) in [
+        (
+            "empty",
+            record::<ImportPermissionScopeV1>(f, "scope")?,
+            record::<ImportResultManifestV1>(f, "empty_manifest")?,
+        ),
+        (
+            "partial",
+            record(f, "scope")?,
+            record(f, "partial_manifest")?,
+        ),
+        (
+            "complete",
+            record(f, "scope")?,
+            record(f, "terminal_manifest")?,
+        ),
+        (
+            "reused-remainder-refuses",
+            remaining,
+            record(f, "partial_manifest")?,
+        ),
+    ] {
+        out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
+            "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
+            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100",
+            "expected_accept":id != "reused-remainder-refuses",
+            "expected_code":if id == "reused-remainder-refuses" {Some("hybrid_scope")} else {None},
+        }).to_string()}));
+    }
+    for (id, total, used) in [
+        ("large", 9_007_199_254_741_247, 9_007_199_254_740_999),
+        ("u64-max", u64::MAX, u64::MAX - 7),
+    ] {
+        let mut scope: ImportPermissionScopeV1 = record(f, "scope")?;
+        scope.max_result_bytes = total;
+        let mut manifest: ImportResultManifestV1 = record(f, "partial_manifest")?;
+        manifest
+            .slots
+            .first_mut()
+            .ok_or("published slot")?
+            .result_bytes = used;
+        out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
+            "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
+            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,
+        }).to_string()}));
     }
     Ok(Value::Array(out))
 }

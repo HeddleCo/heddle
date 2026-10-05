@@ -1,9 +1,9 @@
 //! Explicit job lifecycle. Preparation carries a proposal; only a caller-signed
-//! commit/renewal can authorize execution. Never sign or renew automatically.
+//! Commit can authorize execution. Never sign automatically.
 use api::{heddle::api::v1alpha2 as wire, hybrid_codec::Reject, import_authority as authority};
 use prost::Message;
 
-use super::super::{HostedClient, Result};
+use super::super::{HostedClient, HostedError, Result};
 
 /// Authenticated destination-writer discovery. Options are exact advertised
 /// octets; the host rechecks support and budgets when preparing the job.
@@ -25,6 +25,50 @@ impl ImportConfiguration {
             .iter()
             .find(|c| &c.converter_version == version)
     }
+
+    /// Plan independently signed sibling jobs in this destination. Discovery
+    /// estimates Git storage, so allow twice that size for converted results.
+    /// Ref counts weight the allocation; they are not branch size estimates.
+    /// Every job gets a positive total bounded only by the current host maximum.
+    pub fn sibling_scopes(
+        &self,
+        source: &ResolvedImportSource,
+        selected: &wire::ImportPermissionScopeV1,
+    ) -> Result<Vec<wire::ImportPermissionScopeV1>> {
+        authority::validate_import_configuration(&self.response)?;
+        authority::validate_repository_size_estimate(&source.source)?;
+        let limits = self.response.limits.as_ref().ok_or(Reject::Canonical)?;
+        let count = selected.branches.len();
+        if count == 0
+            || selected
+                .branches
+                .windows(2)
+                .any(|b| b[0].ref_name >= b[1].ref_name)
+        {
+            return Err(Reject::Scope.into());
+        }
+        let per_job = limits.max_branches.min(limits.max_operations) as usize;
+        let estimate = match source.source.size_estimate_state {
+            0 => None,
+            1 => Some(u128::from(source.source.git_size_kib) * 1024 * 2),
+            _ => return Err(Reject::Canonical.into()),
+        };
+        selected
+            .branches
+            .chunks(per_job)
+            .map(|branches| {
+                let mut scope = selected.clone();
+                scope.branches = branches.to_vec();
+                scope.max_operations = branches.len() as u32;
+                scope.max_result_bytes = estimate.map_or(limits.max_result_bytes, |bytes| {
+                    let allocated = (bytes * branches.len() as u128).div_ceil(count as u128);
+                    allocated.max(1).min(u128::from(limits.max_result_bytes)) as u64
+                });
+                authority::validate_discovered_import_scope(&scope, &source.source)?;
+                Ok(scope)
+            })
+            .collect()
+    }
 }
 
 /// Caller-bound source discovery, obtained only from ResolveImportSource.
@@ -44,8 +88,8 @@ impl ResolvedImportSource {
     }
 }
 
-/// Authenticated destination-writer snapshot for reviewing the remaining scope.
-/// Prepare must return this exact snapshot before the caller signs a renewal.
+/// Authenticated writer-only job snapshot. Public Fetch/export evidence carries
+/// its own proof bundle; a state read grants no native admission.
 #[derive(Clone, Debug)]
 pub struct ImportJobState {
     request: wire::GetImportJobStateRequest,
@@ -55,56 +99,44 @@ impl ImportJobState {
     pub fn response(&self) -> &wire::GetImportJobStateResponse {
         &self.response
     }
-
-    /// Exact custody retained by the host, including after loss of client state.
-    pub fn retained_source(&self) -> Result<&wire::ImportSourceSelectionV1> {
-        Ok(self
-            .response
-            .retained_source
-            .as_ref()
-            .ok_or(Reject::SourceSelection)?)
-    }
-
-    fn validate_preparation(&self, request: &wire::PrepareImportJobRequest) -> Result<()> {
-        if self.request.destination != request.destination
-            || self.request.logical_job_id != request.renew_logical_job_id
-        {
-            return Err(Reject::StaleContext.into());
-        }
-        if request.source.as_ref() != Some(self.retained_source()?) {
-            return Err(Reject::SourceSelection.into());
-        }
-        Ok(())
-    }
-
-    /// An expired predecessor is a CAS handle, never executable permission.
-    pub fn predecessor(
+    pub(super) fn retry_request(
         &self,
-        expected: &authority::ImportOwnerExpectation<'_>,
-    ) -> Result<authority::VerifiedImportRenewalPredecessor> {
-        let state = self.response.state.as_ref().ok_or(Reject::StaleContext)?;
-        let signed = state.active_predecessor.as_ref().ok_or(Reject::Canonical)?;
-        let proof = self
-            .response
-            .retained_proof
-            .as_ref()
-            .ok_or(Reject::Canonical)?;
-        Ok(authority::verify_renewal_predecessor(
-            state,
-            member_permission(proof, signed)?,
-            expected,
-        )?)
+        client_operation_id: String,
+    ) -> Result<wire::RetryImportSourceRequest> {
+        use self::wire::get_import_job_state_response::RetryAvailability;
+        authority::validate_job_state_response(&self.request, &self.response)?;
+        let Some(RetryAvailability::EligibleRetryTarget(target)) =
+            &self.response.retry_availability
+        else {
+            return Err(Reject::Transition.into());
+        };
+        Ok(wire::RetryImportSourceRequest {
+            client_operation_id,
+            original_operation: target.operation_ref.as_ref().map(|r| wire::RecordRef {
+                spool: r.spool.clone(),
+                id: r.id.clone(),
+            }),
+            expected_operation_version: target.operation_version.clone(),
+            logical_job_id: self.request.logical_job_id.clone(),
+            active_delegation_digest: self.response.active_delegation_digest.clone(),
+            expected_authority_epoch: self.response.authority_epoch,
+        })
     }
-}
-
-/// Complete validated request bytes. Replays retain this body, including its
-/// operation ID; the transport signs a fresh request PoP outside the body.
-pub struct ImportRenewalSubmission {
-    bytes: Vec<u8>,
-}
-impl ImportRenewalSubmission {
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub(super) fn validate_retry_response(
+        &self,
+        request: &wire::RetryImportSourceRequest,
+        response: &wire::MutationResponse,
+        observed: Option<&wire::RecordRef>,
+    ) -> Result<()> {
+        let mut prior = Vec::new();
+        if let Some(original) = &request.original_operation {
+            prior.push(original.id.clone());
+        }
+        if let Some(observed) = observed {
+            prior.push(observed.id.clone());
+        }
+        authority::validate_retry_response(request, response, &prior)?;
+        Ok(())
     }
 }
 
@@ -114,7 +146,6 @@ impl ImportRenewalSubmission {
 pub struct PreparedImportJob {
     destination: wire::SpoolRef,
     response: wire::PrepareImportJobResponse,
-    renewal_read: Option<ImportJobState>,
     configuration: ImportConfiguration,
     source: ResolvedImportSource,
 }
@@ -124,18 +155,6 @@ impl PreparedImportJob {
     }
     pub fn destination(&self) -> &wire::SpoolRef {
         &self.destination
-    }
-
-    pub fn renewal_submission(
-        &self,
-        request: &wire::RenewImportJobRequest,
-        predecessor_context: &authority::ImportOwnerExpectation<'_>,
-        current_context: &authority::ImportOwnerExpectation<'_>,
-    ) -> Result<ImportRenewalSubmission> {
-        validate_renewal(self, request, predecessor_context, current_context)?;
-        Ok(ImportRenewalSubmission {
-            bytes: request.encode_to_vec(),
-        })
     }
 
     /// The owner context must come from independent owner/keyring verification.
@@ -268,52 +287,12 @@ impl HostedClient {
         source: &ResolvedImportSource,
         request: &wire::PrepareImportJobRequest,
     ) -> Result<PreparedImportJob> {
-        self.prepare_import_job_from_read(configuration, source, request, None)
-            .await
-    }
-
-    pub async fn prepare_import_renewal(
-        &self,
-        configuration: &ImportConfiguration,
-        source: &ResolvedImportSource,
-        request: &wire::PrepareImportJobRequest,
-        read: &ImportJobState,
-        predecessor_context: &authority::ImportOwnerExpectation<'_>,
-    ) -> Result<PreparedImportJob> {
-        let predecessor = read.predecessor(predecessor_context)?;
-        self.prepare_import_job_from_read(
-            configuration,
-            source,
-            request,
-            Some((read, &predecessor)),
-        )
-        .await
-    }
-
-    async fn prepare_import_job_from_read(
-        &self,
-        configuration: &ImportConfiguration,
-        source: &ResolvedImportSource,
-        request: &wire::PrepareImportJobRequest,
-        retained: Option<(
-            &ImportJobState,
-            &authority::VerifiedImportRenewalPredecessor,
-        )>,
-    ) -> Result<PreparedImportJob> {
-        let read = retained.map(|(read, _)| read);
-        match read {
-            Some(read) => read.validate_preparation(request)?,
-            None if request.renew_logical_job_id.is_empty() => {}
-            None => return Err(Reject::StaleContext.into()),
-        }
         let destination = request.destination.as_ref().ok_or(Reject::Canonical)?;
         let identity = request.identity.as_ref().ok_or(Reject::Canonical)?;
         let spool = uuid::Uuid::parse_str(&destination.id).map_err(|_| Reject::Canonical)?;
         if destination != &configuration.destination
             || identity.spool_uuid != spool.as_bytes()
             || request.retry_lineage_id.len() != 16
-            || (!request.renew_logical_job_id.is_empty()
-                && request.renew_logical_job_id.len() != 16)
         {
             return Err(Reject::Scope.into());
         }
@@ -322,23 +301,7 @@ impl HostedClient {
         }
         authority::initial_operation_id(&request.retry_lineage_id, false)?;
         let proposed = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
-        validate_source_selection(
-            request,
-            source,
-            retained.map(|(_, predecessor)| predecessor),
-        )?;
-        let retained_state = retained
-            .map(|(read, predecessor)| {
-                Ok::<_, Reject>((
-                    predecessor,
-                    read.response.state.as_ref().ok_or(Reject::StaleContext)?,
-                    read.response
-                        .retained_source
-                        .as_ref()
-                        .ok_or(Reject::SourceSelection)?,
-                ))
-            })
-            .transpose()?;
+        validate_source_selection(request, source)?;
         // Empty explicitly asks Prepare for the current opaque CAS token.
         // Source format/custody are checked before RPC; the complete prepared
         // scope is checked against the issued token before it reaches signing.
@@ -349,9 +312,8 @@ impl HostedClient {
                 source.source.connection.as_ref().map(|_| source.provider),
                 &configuration.response,
                 &proposed.destination_version,
-                retained_state,
             )?;
-        } else if retained_state.is_none() {
+        } else {
             authority::validate_discovered_import_scope(proposed, &source.source)?;
         }
         let response: wire::PrepareImportJobResponse = self
@@ -361,9 +323,6 @@ impl HostedClient {
             )
             .await?;
         validate_preparation(request, &response, chrono::Utc::now().timestamp())?;
-        if let Some(read) = read {
-            authority::validate_renewal_preparation_from_read(request, &response, &read.response)?;
-        }
         let returned = response
             .proposal
             .as_ref()
@@ -375,12 +334,10 @@ impl HostedClient {
             source.source.connection.as_ref().map(|_| source.provider),
             &configuration.response,
             &returned.destination_version,
-            retained_state,
         )?;
         Ok(PreparedImportJob {
             destination: destination.clone(),
             response,
-            renewal_read: read.cloned(),
             configuration: configuration.clone(),
             source: source.clone(),
         })
@@ -405,7 +362,8 @@ impl HostedClient {
                 "/heddle.api.v1alpha2.IntegrationService/CommitImportJob",
                 request,
             )
-            .await?;
+            .await
+            .map_err(commit_failure)?;
         authority::validate_commit_response(request, &response)?;
         let endpoint = self
             .native()
@@ -424,21 +382,8 @@ impl HostedClient {
         Ok(response)
     }
 
-    /// Recover an expired predecessor only as a non-executable authenticated
-    /// CAS handle, then independently check current replacement authority.
-    pub async fn renew_import_job(
-        &self,
-        submission: &ImportRenewalSubmission,
-    ) -> Result<wire::MutationResponse> {
-        self.call_unary_encoded(
-            "/heddle.api.v1alpha2.IntegrationService/RenewImportJob",
-            submission.bytes(),
-        )
-        .await
-    }
-
     /// Select the active delegation's host-issued cancellation ID, not a
-    /// parent permission or predecessor. The host resolves stored replay first.
+    /// parent permission. The host resolves stored replay first.
     pub async fn cancel_import_job(
         &self,
         request: &wire::CancelImportJobRequest,
@@ -450,6 +395,29 @@ impl HostedClient {
             request,
         )
         .await
+    }
+}
+
+// Commit admission refusals have no accepted receipt and are not replay-frozen.
+// Match both wire fields so unrelated ALREADY_EXISTS/ABORTED failures keep their
+// original detail. Callers can distinguish a reserved destination from stale CAS.
+fn commit_failure(error: HostedError) -> HostedError {
+    use api::heddle::api::common::{CallFailureCode, ErrorReason};
+    match &error {
+        HostedError::Call {
+            code: CallFailureCode::AlreadyExists,
+            error: Some(detail),
+            ..
+        } if detail.reason == ErrorReason::ImportDestinationConflict as i32 => {
+            Reject::PreparationRefused(wire::ImportPreparationRefusalReason::DestinationConflict)
+                .into()
+        }
+        HostedError::Call {
+            code: CallFailureCode::Aborted,
+            error: Some(detail),
+            ..
+        } if detail.reason == ErrorReason::VersionConflict as i32 => Reject::StaleContext.into(),
+        _ => error,
     }
 }
 
@@ -476,7 +444,6 @@ fn resolved_source(
 fn validate_source_selection(
     request: &wire::PrepareImportJobRequest,
     source: &ResolvedImportSource,
-    retained: Option<&authority::VerifiedImportRenewalPredecessor>,
 ) -> Result<()> {
     let selector = request.source.as_ref().ok_or(Reject::SourceSelection)?;
     let scope = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
@@ -495,7 +462,7 @@ fn validate_source_selection(
         return Err(Reject::SourceSelection.into());
     }
     // Known selected OIDs need only their page. Missing refs require complete
-    // coverage; an authenticated retained pin selects its original commit.
+    // coverage; unknown OIDs require complete discovery.
     let complete = source
         .request
         .page
@@ -510,12 +477,11 @@ fn validate_source_selection(
         });
     if !complete
         && !scope.branches.iter().all(|branch| {
-            (retained.is_some() && branch.ref_mode == 1)
-                || source
-                    .source
-                    .refs
-                    .iter()
-                    .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
+            source
+                .source
+                .refs
+                .iter()
+                .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
         })
     {
         return Err(Reject::SourceSelection.into());
@@ -529,9 +495,7 @@ fn validate_commit(
     resolved_provider: &str,
     expected: &authority::ImportOwnerExpectation<'_>,
 ) -> Result<()> {
-    if request.destination.as_ref() != Some(&prepared.destination)
-        || prepared.response.renewal_state.is_some()
-    {
+    if request.destination.as_ref() != Some(&prepared.destination) {
         return Err(Reject::StaleContext.into());
     }
     if resolved_provider != prepared.source.provider {
@@ -546,36 +510,6 @@ fn validate_commit(
     prepared.preflight(request.proof.as_ref().ok_or(Reject::Canonical)?, expected)
 }
 
-fn validate_renewal(
-    prepared: &PreparedImportJob,
-    request: &wire::RenewImportJobRequest,
-    predecessor_context: &authority::ImportOwnerExpectation<'_>,
-    current_context: &authority::ImportOwnerExpectation<'_>,
-) -> Result<()> {
-    if request.destination.as_ref() != Some(&prepared.destination) {
-        return Err(Reject::Scope.into());
-    }
-    let read = prepared.renewal_read.as_ref().ok_or(Reject::StaleContext)?;
-    if prepared.response.renewal_state != read.response.state {
-        return Err(Reject::StaleContext.into());
-    }
-    authority::validate_renewal_preparation(&prepared.response)?;
-    let replacement = request
-        .renewal
-        .as_ref()
-        .and_then(|r| r.body.as_ref())
-        .and_then(|r| r.replacement.as_ref())
-        .ok_or(Reject::Canonical)?;
-    exact_signed_delegation(prepared, replacement, current_context.now_unix_seconds)?;
-    authority::verify_renew_submission(
-        request,
-        &read.response,
-        predecessor_context,
-        current_context,
-    )?;
-    Ok(())
-}
-
 fn member_permission<'a>(
     proof: &'a wire::ImportPublicProofBundleV1,
     signed: &wire::SignedImportJobDelegationV1,
@@ -585,11 +519,6 @@ fn member_permission<'a>(
         .as_ref()
         .ok_or(Reject::Canonical)?
         .parent_permission_digest;
-    if let Some(parent) = proof.member_permission.as_ref()
-        && authority::signed_permission_digest(parent)? == *digest
-    {
-        return Ok(Some(parent));
-    }
     Ok(authority::resolve_bundle_permission(proof, digest)?)
 }
 
@@ -617,6 +546,7 @@ fn validate_preparation(
         || i128::from(response.reservation_expires_at_unix_seconds) != at + 3600
         || response.reservation_expires_at_unix_seconds <= now
         || response.max_validity_duration_seconds == 0
+        || response.max_validity_duration_seconds > authority::MAX_DELEGATION_WINDOW_SECONDS
     {
         return Err(Reject::Expired.into());
     }
@@ -631,7 +561,9 @@ fn exact_signed_proposal<'a>(
     if proof.format_version != 1 || proof.encoded_len() > authority::MAX_BUNDLE_BYTES {
         return Err(Reject::Bounds.into());
     }
-    let signed = proof.delegations.last().ok_or(Reject::ImportPermission)?;
+    let [signed] = proof.delegations.as_slice() else {
+        return Err(Reject::ImportPermission.into());
+    };
     exact_signed_delegation(prepared, signed, now)?;
     Ok(signed)
 }
@@ -677,6 +609,8 @@ fn exact_signed_delegation(
         || end <= start
         || end <= i128::from(now)
         || prepared.response.max_validity_duration_seconds == 0
+        || prepared.response.max_validity_duration_seconds
+            > authority::MAX_DELEGATION_WINDOW_SECONDS
         || end - start > i128::from(prepared.response.max_validity_duration_seconds)
     {
         return Err(Reject::ValidityBounds.into());
@@ -705,56 +639,17 @@ mod tests {
     use super::*;
 
     fn wire<T: Message + Default>(section: &str, name: &str) -> T {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
-        )))
-        .expect("alpha.25 fixed vectors");
-        let bytes = hex::decode(
-            fixture[section][name]["wire_hex"]
-                .as_str()
-                .expect("wire bytes"),
-        )
-        .expect("hex bytes");
-        T::decode(bytes.as_slice()).expect("fixed protobuf")
-    }
-
-    #[test]
-    fn renewal_preparation_binds_the_exact_destination_scope_and_cas() {
-        let response: wire::PrepareImportJobResponse = wire("wire_vectors", "renewal_preparation");
-        let proposal = response.proposal.as_ref().expect("proposal");
-        let request = wire::PrepareImportJobRequest {
-            identity: proposal.identity.clone(),
-            proposed_scope: proposal.scope.clone(),
-            retry_lineage_id: proposal.retry_lineage_id.clone(),
-            renew_logical_job_id: proposal.logical_job_id.clone(),
-            ..Default::default()
-        };
-        let now = response.reservation_expires_at_unix_seconds - 3600;
-        validate_preparation(&request, &response, now).expect("exact prepared renewal");
-        let mut changed = response.clone();
-        changed
-            .proposal
-            .as_mut()
-            .expect("proposal")
-            .retry_lineage_id[0] ^= 1;
-        assert!(validate_preparation(&request, &changed, now).is_err());
-        let mut changed = response.clone();
-        changed
-            .renewal_state
-            .as_mut()
-            .expect("current CAS")
-            .authority_epoch = 0;
-        assert!(validate_preparation(&request, &changed, now).is_err());
-        assert!(
-            validate_preparation(
-                &request,
-                &response,
-                response.reservation_expires_at_unix_seconds
-            )
-            .is_err()
-        );
-        validate_preparation(&request, &response, now).expect("unchanged proposal remains usable");
+        let fixtures = [
+            include_str!("../../../../../thread-api/tests/fixtures/hybrid-alpha33.json"),
+            include_str!("../../../../tests/fixtures/import-sibling-jobs-alpha32.json"),
+        ];
+        for fixture in fixtures {
+            let f: serde_json::Value = serde_json::from_str(fixture).expect("alpha.33 vectors");
+            if let Some(bytes) = f[section][name]["wire_hex"].as_str() {
+                return T::decode(hex::decode(bytes).expect("hex").as_slice()).expect("fixed wire");
+            }
+        }
+        panic!("missing vector {name}");
     }
 
     #[test]
@@ -777,7 +672,7 @@ mod tests {
         let prepared = PreparedImportJob {
             destination: wire::SpoolRef::default(),
             response,
-            renewal_read: None,
+
             configuration: configuration(),
             source: source("source_connected"),
         };
@@ -826,12 +721,15 @@ mod tests {
     fn fixture() -> serde_json::Value {
         serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("published alpha.25 vectors")
     }
 
-    fn with_context(now: i64, check: impl FnOnce(&authority::ImportOwnerExpectation<'_>)) {
+    fn with_context<T>(
+        now: i64,
+        check: impl FnOnce(&authority::ImportOwnerExpectation<'_>) -> T,
+    ) -> T {
         let f = fixture();
         let identity: wire::ImportIdentityV1 = wire("wire_vectors", "identity");
         let key = |name: &str| {
@@ -853,7 +751,7 @@ mod tests {
             now_unix_seconds: now,
             forbidden_job_keys: &forbidden,
             known_job_associations: &[],
-        });
+        })
     }
 
     fn prepared(response: &str) -> PreparedImportJob {
@@ -862,10 +760,6 @@ mod tests {
                 .destination
                 .expect("destination"),
             response: wire("wire_vectors", response),
-            renewal_read: (response == "renewal_preparation").then(|| ImportJobState {
-                request: wire("wire_vectors", "job_state_request"),
-                response: wire("wire_vectors", "job_state_partial"),
-            }),
             configuration: configuration(),
             source: source("source_connected"),
         }
@@ -918,16 +812,16 @@ mod tests {
             resolved_source(&request, &response).expect("authenticated public discovery");
         assert_eq!(resolved.provider(), "public-git");
         let prepare: wire::PrepareImportJobRequest = wire("wire_vectors", "prepare_public_sha256");
-        validate_source_selection(&prepare, &resolved, None).expect("independent SHA-256 format");
+        validate_source_selection(&prepare, &resolved).expect("independent SHA-256 format");
         let unknown = wire("wire_vectors", "resolve_unknown_response");
         let unknown = resolved_source(&request, &unknown).expect("unknown is valid discovery");
         assert!(matches!(
-            validate_source_selection(&prepare, &unknown, None),
+            validate_source_selection(&prepare, &unknown),
             Err(super::super::super::HostedError::Hybrid(Reject::Version))
         ));
         let mut changed = resolved.clone();
         changed.source.connection = source("source_connected").source.connection;
-        assert!(validate_source_selection(&prepare, &changed, None).is_err());
+        assert!(validate_source_selection(&prepare, &changed).is_err());
         let mut partial = resolved.clone();
         partial
             .source
@@ -938,8 +832,8 @@ mod tests {
             .as_mut()
             .expect("page")
             .exhausted = false;
-        assert!(validate_source_selection(&prepare, &partial, None).is_err());
-        validate_source_selection(&prepare, &resolved, None).expect("unchanged complete discovery");
+        assert!(validate_source_selection(&prepare, &partial).is_err());
+        validate_source_selection(&prepare, &resolved).expect("unchanged complete discovery");
     }
 
     #[test]
@@ -969,68 +863,6 @@ mod tests {
                 _ => assert!(result.is_err(), "malformed metadata: {row}"),
             }
         }
-    }
-
-    #[test]
-    fn resolve_preserves_exact_selected_identity_and_allows_changed_observations() {
-        for row in fixture()["custody_vectors"]["resolve"]
-            .as_array()
-            .expect("vectors")
-        {
-            let request = wire("wire_vectors", row["request"].as_str().expect("request"));
-            let response = wire("wire_vectors", row["response"].as_str().expect("response"));
-            let result = resolved_source(&request, &response);
-            assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
-        }
-    }
-
-    #[test]
-    fn recovered_renewal_uses_retained_custody_even_with_replacement_grants() {
-        let read = prepared("renewal_preparation")
-            .renewal_read
-            .expect("authenticated read");
-        for row in fixture()["custody_vectors"]["read"]
-            .as_array()
-            .expect("read vectors")
-        {
-            let response = wire("wire_vectors", row["response"].as_str().expect("response"));
-            let result = authority::validate_job_state_response(&read.request, &response);
-            assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
-        }
-        with_context(1350, |expected| {
-            let predecessor = read.predecessor(expected).expect("predecessor");
-            for row in fixture()["custody_vectors"]["prepare"]
-                .as_array()
-                .expect("prepare vectors")
-            {
-                // Revocation of the current grant is checked by the host.
-                if row["revoked"] == true {
-                    continue;
-                }
-                let request = wire("wire_vectors", row["request"].as_str().expect("request"));
-                let current = source(row["source"].as_str().expect("source"));
-                let result = read.validate_preparation(&request);
-                assert_eq!(
-                    result.is_ok(),
-                    row["expected"] == "OK",
-                    "pre-RPC {row}: {result:?}"
-                );
-                let result = authority::prepare_import_source_scope(
-                    &request,
-                    &current.source,
-                    Some("github"),
-                    &configuration().response,
-                    &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
-                        .destination_version,
-                    Some((
-                        &predecessor,
-                        read.response.state.as_ref().expect("state"),
-                        read.retained_source().expect("custody"),
-                    )),
-                );
-                assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
-            }
-        });
     }
 
     #[test]
@@ -1077,7 +909,7 @@ mod tests {
             &discovered.source,
         )
         .expect("every discovered selected OID remains exactly pinned");
-        validate_source_selection(&request, &discovered, None)
+        validate_source_selection(&request, &discovered)
             .expect("selected refs and their OIDs are already on this page");
 
         let mut unknown = request.clone();
@@ -1093,7 +925,7 @@ mod tests {
         branch.pinned_commit_oid.clear();
         branch.ref_disclosure = 1;
         assert!(
-            validate_source_selection(&unknown, &discovered, None).is_err(),
+            validate_source_selection(&unknown, &discovered).is_err(),
             "an omitted ref is not evidence that its OID is unavailable"
         );
         discovered
@@ -1105,7 +937,7 @@ mod tests {
             .as_mut()
             .expect("page")
             .exhausted = true;
-        validate_source_selection(&unknown, &discovered, None)
+        validate_source_selection(&unknown, &discovered)
             .expect("complete coverage can establish an unavailable OID");
         authority::validate_discovered_import_scope(
             unknown.proposed_scope.as_ref().expect("scope"),
@@ -1117,38 +949,9 @@ mod tests {
             after_page: b"later-page".to_vec(),
         });
         assert!(
-            validate_source_selection(&unknown, &discovered, None).is_err(),
+            validate_source_selection(&unknown, &discovered).is_err(),
             "the final page does not establish absence from earlier pages"
         );
-    }
-
-    #[test]
-    fn a_verified_retained_pin_does_not_require_an_unrelated_ref_page() {
-        let read = prepared("renewal_preparation")
-            .renewal_read
-            .expect("authenticated read");
-        with_context(1350, |expected| {
-            let predecessor = read
-                .predecessor(expected)
-                .expect("authenticated predecessor");
-            let request: wire::PrepareImportJobRequest =
-                wire("wire_vectors", "renew_prepare_request");
-            let mut discovered = source("renew_source_moved_head");
-            discovered.source.refs.clear();
-            discovered
-                .source
-                .refs_status
-                .as_mut()
-                .expect("status")
-                .page
-                .as_mut()
-                .expect("page")
-                .exhausted = false;
-            assert!(validate_source_selection(&request, &discovered, None).is_err());
-            validate_source_selection(&request, &discovered, Some(&predecessor))
-                .expect("retained commit selection is independent of this ref page");
-            authority::prepare_import_source_scope(&request, &discovered.source, Some("github"), &configuration().response, &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope").destination_version, Some((&predecessor, read.response.state.as_ref().expect("state"), read.response.retained_source.as_ref().expect("retained source")))).expect("the exact signed predecessor and retained CAS still authorize only the original pin");
-        });
     }
 
     #[test]
@@ -1196,49 +999,6 @@ mod tests {
             let control = wire("wire_vectors", "commit_request");
             validate_commit(&current, &control, "github", expected)
                 .expect("unchanged current source and support");
-        });
-    }
-
-    #[test]
-    fn renewal_prepare_retains_authorized_pins_across_head_movement_and_exact_cas() {
-        let read = prepared("renewal_preparation")
-            .renewal_read
-            .expect("authenticated read");
-        with_context(1350, |expected| {
-            let predecessor = read
-                .predecessor(expected)
-                .expect("expired predecessor CAS handle");
-            let state = read.response.state.as_ref().expect("state");
-            for row in fixture()["source_vectors"]["renewal_prepare"]
-                .as_array()
-                .expect("vectors")
-            {
-                let request = wire("wire_vectors", row["request"].as_str().expect("request"));
-                let current_source = source(row["source"].as_str().expect("source"));
-                let configuration = row["configuration"]
-                    .as_str()
-                    .map(|name| wire("wire_vectors", name))
-                    .unwrap_or_else(|| configuration().response);
-                let changed_state = row["state"].as_str().map(|name| wire("wire_vectors", name));
-                let retained = row["retained"].as_bool().expect("retained").then_some((
-                    &predecessor,
-                    changed_state.as_ref().unwrap_or(state),
-                    read.response
-                        .retained_source
-                        .as_ref()
-                        .expect("retained source"),
-                ));
-                let result = authority::prepare_import_source_scope(
-                    &request,
-                    &current_source.source,
-                    Some("github"),
-                    &configuration,
-                    &wire::<wire::ImportPermissionScopeV1>("wire_vectors", "scope")
-                        .destination_version,
-                    retained,
-                );
-                assert_eq!(result.is_ok(), row["expected"] == "OK", "{row}: {result:?}");
-            }
         });
     }
 
@@ -1324,6 +1084,10 @@ mod tests {
                     "{row}"
                 );
             }
+            let mut multiple = control.clone();
+            let proof = multiple.proof.as_mut().expect("proof");
+            proof.delegations.push(proof.delegations[0].clone());
+            assert!(validate_commit(&prepared, &multiple, "github", expected).is_err());
             let mut unsigned = control.clone();
             unsigned.proof.as_mut().expect("proof").delegations[0].delegating_signature = None;
             assert!(validate_commit(&prepared, &unsigned, "github", expected).is_err());
@@ -1339,17 +1103,25 @@ mod tests {
             .proof
             .expect("proof");
         let prepared = prepared("commit_preparation");
-        for row in fixture()["amendment_vectors"]["preflight"]
-            .as_array()
-            .expect("rows")
-        {
-            with_context(row["now"].as_i64().expect("clock"), |expected| {
-                let actual = prepared.preflight(&proof, expected);
+        let start = proof.delegations[0]
+            .body
+            .as_ref()
+            .expect("delegation")
+            .not_before_unix_seconds;
+        let skew = i64::try_from(prepared.response.clock_skew_allowance_seconds).expect("skew");
+        for (now, accepted) in [
+            (start - skew - 1, false),
+            (start - skew, true),
+            (start - 1, true),
+            (1100, true),
+            (1300, false),
+        ] {
+            with_context(now, |expected| {
                 assert_eq!(
-                    actual.is_ok(),
-                    row["preflight"] == "OK",
-                    "{row}: {actual:?}"
-                );
+                    prepared.preflight(&proof, expected).is_ok(),
+                    accepted,
+                    "advertised skew or exclusive expiry at {now}"
+                )
             });
         }
         with_context(1100, |expected| {
@@ -1365,7 +1137,13 @@ mod tests {
         let response: wire::MutationResponse = wire("wire_vectors", "commit_response");
         authority::validate_commit_response(&request, &response)
             .expect("reserved first physical operation");
-        let other: wire::MutationResponse = wire("wire_vectors", "commit_wrong_lineage_response");
+        let mut other = response.clone();
+        let Some(wire::mutation_receipt::Outcome::PendingOperation(operation)) =
+            other.receipt.as_mut().expect("receipt").outcome.as_mut()
+        else {
+            panic!("pending operation");
+        };
+        operation.id = uuid::Uuid::from_u128(7).to_string();
         assert_eq!(
             authority::validate_commit_response(&request, &other),
             Err(Reject::PendingOperation)
@@ -1387,124 +1165,327 @@ mod tests {
 
     #[test]
     fn cancel_selects_the_active_host_issued_id_and_resolves_exact_replay() {
-        let active = wire("signed_vectors", "delegation");
-        let request: wire::CancelImportJobRequest = wire("wire_vectors", "cancel_active");
-        authority::check_cancel_request(&request, &active, 1, false).expect("active selector");
-        for row in fixture()["amendment_vectors"]["cancel_negatives"]
-            .as_array()
-            .expect("rows")
-        {
-            let request = wire("wire_vectors", row["request"].as_str().expect("request"));
-            let active = wire("signed_vectors", row["active"].as_str().expect("active"));
-            assert!(
-                authority::check_cancel_request(
-                    &request,
-                    &active,
-                    row["epoch"].as_u64().expect("epoch"),
-                    row["cancelled"].as_bool().expect("terminal")
-                )
-                .is_err(),
-                "{row}"
-            );
-        }
-        authority::check_cancel_replay(&request, &request)
-            .expect("stored replay before epoch/terminal checks");
-        let changed = wire("wire_vectors", "cancel_changed_replay");
+        let active: wire::SignedImportJobDelegationV1 = wire("signed_vectors", "delegation");
+        let body = active.body.as_ref().expect("delegation");
+        let request = wire::CancelImportJobRequest {
+            client_operation_id: "cancel-request".into(),
+            destination: Some(configuration().destination),
+            logical_job_id: body.logical_job_id.clone(),
+            cancellation_id: body.cancellation_id.clone(),
+            expected_authority_epoch: 1,
+        };
+        authority::check_cancel_request(&request, &active, 1, false)
+            .expect("sole active delegation");
+        let mut changed = request.clone();
+        changed.cancellation_id[0] ^= 1;
+        assert!(authority::check_cancel_request(&changed, &active, 1, false).is_err());
+        assert!(authority::check_cancel_request(&request, &active, 2, false).is_err());
+        authority::check_cancel_replay(&request, &request).expect("exact replay");
         assert_eq!(
             authority::check_cancel_replay(&changed, &request),
             Err(Reject::OperationIdReused)
         );
-        authority::check_cancel_request(&request, &active, 1, false).expect("unchanged selector");
     }
 
     #[test]
-    fn renewal_recovers_expired_predecessor_without_turning_it_into_execution_authority() {
-        let prepared = prepared("renewal_preparation");
-        let request: wire::RenewImportJobRequest = wire("wire_vectors", "renew_request_partial");
-        with_context(1350, |expected| {
-            validate_renewal(&prepared, &request, expected, expected)
-                .expect("expired predecessor with current narrower replacement");
-            let mut stale = request.clone();
-            stale
-                .renewal
-                .as_mut()
-                .expect("renewal")
-                .body
-                .as_mut()
-                .expect("body")
-                .expected_authority_epoch += 1;
-            assert!(validate_renewal(&prepared, &stale, expected, expected).is_err());
-            let mut changed = request.clone();
-            changed
-                .renewal
-                .as_mut()
-                .expect("renewal")
-                .delegating_signature = None;
-            assert!(validate_renewal(&prepared, &changed, expected, expected).is_err());
-            validate_renewal(&prepared, &request, expected, expected)
-                .expect("unchanged renewal/CAS");
+    fn alpha33_sibling_preparations_survive_independent_commits() {
+        let configuration_response: wire::GetImportConfigurationResponse =
+            wire("wire_vectors", "configuration");
+        let mut resolved = source("source_connected");
+        resolved.source = wire("wire_vectors", "source");
+        let prepare = |name| {
+            let request: wire::CommitImportJobRequest =
+                wire("wire_vectors", &format!("commit_{name}"));
+            let destination = request.destination.clone().expect("destination");
+            let prepared = PreparedImportJob {
+                destination: destination.clone(),
+                response: wire("wire_vectors", &format!("prepared_{name}")),
+
+                configuration: ImportConfiguration {
+                    destination,
+                    response: configuration_response.clone(),
+                },
+                source: resolved.clone(),
+            };
+            (prepared, request)
+        };
+        let a = prepare("a");
+        let b = prepare("b");
+        let a_id =
+            &a.0.response
+                .proposal
+                .as_ref()
+                .expect("proposal")
+                .logical_job_id;
+        let b_id =
+            &b.0.response
+                .proposal
+                .as_ref()
+                .expect("proposal")
+                .logical_job_id;
+        assert_ne!(a_id, b_id);
+        assert_eq!(a.0.destination, b.0.destination);
+        let retained_a = a.0.response.clone();
+        let retained_b = b.0.response.clone();
+        with_context(1100, |expected| {
+            for jobs in [[&a, &b], [&b, &a]] {
+                for (prepared, request) in jobs {
+                    validate_commit(prepared, request, "github", expected)
+                        .expect("each disjoint signed job can activate in either order");
+                }
+            }
+            assert!(validate_commit(&a.0, &b.1, "github", expected).is_err());
+            assert!(validate_commit(&b.0, &a.1, "github", expected).is_err());
         });
+        assert_eq!(a.0.response, retained_a);
+        assert_eq!(b.0.response, retained_b);
     }
 
     #[test]
-    fn renewal_read_fences_prepare_and_frozen_submission_preserves_accepted_history() {
-        let read: wire::GetImportJobStateResponse = wire("wire_vectors", "job_state_partial");
-        let request: wire::PrepareImportJobRequest = wire("wire_vectors", "renew_prepare_request");
-        let response: wire::PrepareImportJobResponse = wire("wire_vectors", "renewal_preparation");
-        authority::validate_renewal_preparation_from_read(&request, &response, &read)
-            .expect("exact authenticated CAS");
-        let before_publication = wire("wire_vectors", "job_state_empty");
-        assert_eq!(
-            authority::validate_renewal_preparation_from_read(
-                &request,
-                &response,
-                &before_publication
-            ),
-            Err(Reject::StaleContext)
+    fn alpha33_discovery_plans_disjoint_jobs_with_one_positive_total_each() {
+        let mut configuration = configuration();
+        let limits = configuration.response.limits.as_mut().expect("limits");
+        limits.max_branches = 256;
+        limits.max_operations = 256;
+        limits.max_result_bytes = u64::MAX;
+        let mut source = source("source_connected");
+        let mut scope: wire::ImportPermissionScopeV1 = wire("wire_vectors", "scope");
+        let base = scope.branches[0].clone();
+        scope.branches = (0..512)
+            .map(|i: u16| {
+                let mut b = base.clone();
+                b.ref_name = format!("refs/heads/branch-{i:04}");
+                b.genesis_digest[..2].copy_from_slice(&i.to_be_bytes());
+                b.target_thread_id = b.genesis_digest.clone();
+                b
+            })
+            .collect();
+        source.source.refs.clear();
+        source.source.size_estimate_state = 1;
+        source.source.git_size_kib = 300 * 1024;
+        let jobs = configuration
+            .sibling_scopes(&source, &scope)
+            .expect("whole repository");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs.iter().map(|s| s.branches.len()).sum::<usize>(), 512);
+        assert!(
+            jobs.iter()
+                .all(|s| s.max_operations == 256 && s.max_result_bytes == 300 * 1024 * 1024)
         );
-        let prepared = prepared("renewal_preparation");
-        let request: wire::RenewImportJobRequest = wire("wire_vectors", "renew_request_partial");
-        with_context(1350, |expected| {
-            let frozen = prepared
-                .renewal_submission(&request, expected, expected)
-                .expect("submission with candidate outside accepted history");
-            assert_eq!(frozen.bytes(), request.encode_to_vec());
-            authority::check_renew_replay(frozen.bytes(), frozen.bytes()).expect("exact replay");
-            let mut candidate_in_history = request.clone();
-            candidate_in_history
-                .proof
-                .as_mut()
-                .expect("proof")
-                .delegations
-                .push(
-                    request
-                        .renewal
-                        .as_ref()
-                        .expect("renewal")
-                        .body
-                        .as_ref()
-                        .expect("body")
-                        .replacement
-                        .clone()
-                        .expect("candidate"),
-                );
+        assert!(jobs[0].branches.last().expect("last").ref_name < jobs[1].branches[0].ref_name);
+        assert!(
+            jobs.iter()
+                .all(|s| s.destination_version == scope.destination_version)
+        );
+        configuration
+            .response
+            .limits
+            .as_mut()
+            .expect("limits")
+            .max_result_bytes = 123;
+        let capped = configuration
+            .sibling_scopes(&source, &scope)
+            .expect("current host cap");
+        assert!(capped.iter().all(|s| s.max_result_bytes == 123));
+        source.source.git_size_kib = 0;
+        assert!(
+            configuration
+                .sibling_scopes(&source, &scope)
+                .expect("empty estimate")
+                .iter()
+                .all(|s| s.max_result_bytes == 1)
+        );
+        source.source.size_estimate_state = 0;
+        assert!(
+            configuration
+                .sibling_scopes(&source, &scope)
+                .expect("unknown")
+                .iter()
+                .all(|s| s.max_result_bytes == 123)
+        );
+        source.source.git_size_kib = 1;
+        assert!(
+            configuration.sibling_scopes(&source, &scope).is_err(),
+            "UNKNOWN cannot carry a size"
+        );
+        source.source.size_estimate_state = 1;
+        source.source.git_size_kib = u64::MAX;
+        configuration
+            .response
+            .limits
+            .as_mut()
+            .expect("limits")
+            .max_result_bytes = u64::MAX;
+        assert!(
+            configuration
+                .sibling_scopes(&source, &scope)
+                .expect("widened arithmetic")
+                .iter()
+                .all(|s| s.max_result_bytes == u64::MAX)
+        );
+        scope.branches[256].ref_name = scope.branches[255].ref_name.clone();
+        assert!(
+            configuration.sibling_scopes(&source, &scope).is_err(),
+            "cross-job duplicate ref"
+        );
+    }
+
+    #[test]
+    fn alpha33_writer_snapshot_selects_retry_and_rejects_reused_attempts() {
+        let read = ImportJobState {
+            request: wire("wire_vectors", "job_state_request"),
+            response: wire("wire_vectors", "job_state"),
+        };
+        let request = read
+            .retry_request("retry-alpha33".into())
+            .expect("writer Retry target");
+        assert_eq!(request, wire("wire_vectors", "retry_request"));
+        let mut response: wire::MutationResponse = wire("wire_vectors", "commit_response");
+        response
+            .receipt
+            .as_mut()
+            .expect("receipt")
+            .client_operation_id = request.client_operation_id.clone();
+        let Some(wire::mutation_receipt::Outcome::PendingOperation(operation)) =
+            response.receipt.as_mut().expect("receipt").outcome.as_mut()
+        else {
+            panic!("pending");
+        };
+        operation.id = uuid::Uuid::from_u128(99).to_string();
+        read.validate_retry_response(&request, &response, None)
+            .expect("fresh host attempt UUID");
+        let original = request.original_operation.as_ref().expect("original");
+        let observed = wire::RecordRef {
+            spool: original.spool.clone(),
+            id: uuid::Uuid::from_u128(98).to_string(),
+        };
+        for id in [&original.id, &observed.id] {
+            let mut reused = response.clone();
+            let Some(wire::mutation_receipt::Outcome::PendingOperation(operation)) =
+                reused.receipt.as_mut().expect("receipt").outcome.as_mut()
+            else {
+                panic!("pending");
+            };
+            operation.id = id.clone();
             assert!(
-                prepared
-                    .renewal_submission(&candidate_in_history, expected, expected)
-                    .is_err()
+                read.validate_retry_response(&request, &reused, Some(&observed))
+                    .is_err(),
+                "Retry must not reuse a known physical attempt"
             );
-            assert_eq!(
-                authority::check_renew_replay(
-                    &candidate_in_history.encode_to_vec(),
-                    frozen.bytes()
+        }
+        let mut expired = read.clone();
+        expired.response.status = wire::ImportJobStatus::Expired as i32;
+        expired.response.retry_availability = Some(
+            wire::get_import_job_state_response::RetryAvailability::RetryUnavailable(
+                wire::ImportRetryUnavailableReason::AuthorityExpired as i32,
+            ),
+        );
+        authority::validate_job_state_response(&expired.request, &expired.response)
+            .expect("typed expired snapshot");
+        assert!(expired.retry_request("retry-expired".into()).is_err());
+        let mut missing = read.clone();
+        missing.response.retry_availability = None;
+        assert!(missing.retry_request("retry-missing".into()).is_err());
+    }
+
+    #[test]
+    fn alpha33_preflight_accepts_the_advertised_24_hour_window() {
+        let prepared = prepared("window_24h_preparation");
+        let signed: wire::SignedImportJobDelegationV1 = wire("signed_vectors", "window_24h");
+        exact_signed_delegation(&prepared, &signed, 1100).expect("host-advertised 24 hours");
+        let mut too_short = prepared.clone();
+        too_short.response.max_validity_duration_seconds = 86399;
+        assert!(
+            exact_signed_delegation(&too_short, &signed, 1100).is_err(),
+            "duration stays bounded by the advertisement"
+        );
+    }
+
+    #[test]
+    fn alpha33_preflight_refuses_host_windows_above_seven_days() {
+        let mut prepared = prepared("window_24h_preparation");
+        let signed: wire::SignedImportJobDelegationV1 = wire("signed_vectors", "window_24h");
+        prepared.response.max_validity_duration_seconds = authority::MAX_DELEGATION_WINDOW_SECONDS;
+        exact_signed_delegation(&prepared, &signed, 1100).expect("seven-day advertised ceiling");
+        prepared.response.max_validity_duration_seconds += 1;
+        assert!(
+            matches!(
+                exact_signed_delegation(&prepared, &signed, 1100),
+                Err(HostedError::Hybrid(Reject::ValidityBounds))
+            ),
+            "even a shorter signed window cannot accept an excessive host D"
+        );
+    }
+
+    #[test]
+    fn alpha33_commit_conflicts_have_distinct_typed_outcomes() {
+        use api::heddle::api::common::{CallFailure, CallFailureCode, ErrorDetail, ErrorReason};
+        for (name, expected) in [
+            (
+                "commit_destination_conflict",
+                Reject::PreparationRefused(
+                    wire::ImportPreparationRefusalReason::DestinationConflict,
                 ),
-                Err(Reject::OperationIdReused)
-            );
+            ),
+            ("commit_stale_destination", Reject::StaleContext),
+        ] {
+            let failure: CallFailure = wire("wire_vectors", name);
             assert_eq!(
-                frozen.bytes(),
-                request.encode_to_vec(),
-                "caller edits cannot change replay"
+                authority::import_commit_conflict_failure(&expected),
+                Some(failure.clone())
             );
-        });
+            assert!(
+                matches!(commit_failure(failure.into()), HostedError::Hybrid(ref actual) if actual == &expected),
+                "Commit wire failures must preserve their typed distinction"
+            );
+        }
+        // Neither a generic code nor the import reason on a different code
+        // authorizes this mapping. Keep the original structured failure.
+        for (code, reason) in [
+            (CallFailureCode::AlreadyExists, ErrorReason::AlreadyExists),
+            (
+                CallFailureCode::Aborted,
+                ErrorReason::ImportDestinationConflict,
+            ),
+            (CallFailureCode::AlreadyExists, ErrorReason::VersionConflict),
+        ] {
+            let failure = CallFailure {
+                code: code as i32,
+                error: Some(ErrorDetail {
+                    reason: reason as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                matches!(commit_failure(failure.into()), HostedError::Call { code: actual, .. } if actual == code)
+            );
+        }
+    }
+
+    #[test]
+    fn alpha33_job_state_requires_status_and_retry_reason_agreement() {
+        use self::wire::get_import_job_state_response::RetryAvailability;
+        let original = ImportJobState {
+            request: wire("wire_vectors", "job_state_request"),
+            response: wire("wire_vectors", "job_state"),
+        };
+        for status in 1..=5 {
+            for reason in 1..=7 {
+                let mut state = original.clone();
+                state.response.status = status;
+                state.response.retry_availability =
+                    Some(RetryAvailability::RetryUnavailable(reason));
+                let agrees = matches!(
+                    (status, reason),
+                    (1, 1 | 2 | 6) | (2, 3) | (3, 4) | (4, 5) | (5, 7)
+                );
+                assert_eq!(
+                    authority::validate_job_state_response(&state.request, &state.response).is_ok(),
+                    agrees,
+                    "status {status} and retry refusal {reason}"
+                );
+            }
+        }
     }
 }

@@ -116,7 +116,7 @@ impl VerifiedImportDelegation {
     pub fn spool_path(&self) -> &str {
         &self.spool_path
     }
-    /// Exact original certificate and signature for export and renewal.
+    /// Exact original certificate and signature for export.
     pub fn signed(&self) -> &SignedImportJobDelegationV1 {
         &self.signed
     }
@@ -194,6 +194,16 @@ pub fn native_lineage(selection: &Selection<'_>) -> Result<(ImportIdentityV1, Ve
         contract::owner_chain_digest(&chain)?,
         owner.authority_expires_at_seconds(),
     ))
+}
+
+/// Compute remaining per-job authority from exact alpha.33 protobuf records.
+/// Uint64 totals stay in encoded bytes at the JS boundary. The result can be
+/// empty for completed work; it grants no new permission or execution authority.
+pub fn remaining_scope_bytes(scope: &[u8], manifest: &[u8]) -> Result<Vec<u8>> {
+    use prost::Message;
+    let scope = crate::canonical::canonical_message(scope, contract::MAX_RECORD_BYTES)?;
+    let manifest = crate::canonical::canonical_message(manifest, contract::MAX_BUNDLE_BYTES)?;
+    Ok(contract::remaining_import_scope(&scope, &manifest)?.encode_to_vec())
 }
 
 fn verify_at(
@@ -291,16 +301,10 @@ fn verify_with(
     })
 }
 
-/// Verify Commit admission eligibility against the host-stored preparation and
-/// signed genesis bindings, using owner selection and revocations at actual T.
-/// A child may start within the advertised skew after T; its parent must be
-/// valid at T and contain the child window, without owner or expiry grace.
-///
-/// Success permits admission only. Execution must still call `verify_current`
-/// at its actual start time. Hosts must independently verify native originals,
-/// creator signatures/envelopes and retained renewal genesis contexts, then
-/// enforce current policy, custody and activation gates in their transaction.
-pub fn verify_commit_admission(
+/// Check the signed Commit against its host-stored preparation. Bounded future
+/// eligibility permits scheduling, but grants no genesis admission. Only a
+/// branch's authenticated atomic P1/P3 publication admits its genesis.
+pub fn verify_commit_preflight(
     prepared: &crate::wire::PrepareImportJobResponse,
     signed: &SignedImportJobDelegationV1,
     member: Option<&SignedImportMemberPermissionV1>,
@@ -382,18 +386,35 @@ pub fn verify_historical(
     )
 }
 
-/// Verify the original genesis certificate at its own exact authenticated first
-/// admission. Renewal certificates do not rewrite the original binding.
+/// A branch publication paired with its genesis receipt. The API verifies the
+/// publication signature, exact slot and cumulative manifest; both receipts
+/// must describe one atomic transaction before genesis can be admitted.
+pub struct PublicationWitness<'a> {
+    /// Exact job-signed branch result.
+    pub operation: &'a SignedDelegatedImportOperationV1,
+    /// Cumulative post-publication result manifest.
+    pub manifest: &'a crate::wire::ImportResultManifestV1,
+    /// Authenticated P3 publication testimony.
+    pub statement: &'a SignedHostedWitnessStatementV1,
+    /// Retired witness inclusion proof when required.
+    pub proof: Option<&'a heddle_api::heddle::api::common::HostedWitnessHistoryProofV1>,
+}
+
+/// Admit genesis only with its exact P3, at live owner/window/revocation time.
 #[allow(clippy::too_many_arguments)]
-pub fn verify_historical_genesis(
+pub fn verify_publication_admission(
     signed: &SignedImportJobDelegationV1,
     member: Option<&SignedImportMemberPermissionV1>,
     context: &CurrentContext<'_>,
     payload: &crate::wire::ImportGenesisWitnessV1,
     statement: &SignedHostedWitnessStatementV1,
     resolved: &ResolvedWitnessStatement,
+    publication: Option<&PublicationWitness<'_>>,
     set: &VerifiedWitnessSet,
-    is_revoked_at_accepted_order: impl Fn(Revocation<'_>) -> bool,
+    is_revoked_at_accepted_order: impl Fn(
+        &heddle_api::heddle::api::common::HostedWitnessStatementV1,
+        Revocation<'_>,
+    ) -> bool,
 ) -> Result<VerifiedImportDelegation> {
     witness_trust::recheck_context(resolved, set, statement, context.now_millis)?;
     let s = statement
@@ -406,7 +427,7 @@ pub fn verify_historical_genesis(
         member,
         context,
         s.observed_at_unix_millis / 1000,
-        is_revoked_at_accepted_order,
+        |r| is_revoked_at_accepted_order(s, r),
     )?;
     let binding = payload
         .binding
@@ -423,6 +444,41 @@ pub fn verify_historical_genesis(
         &body.original_creator_signature,
         &heddle_api::hybrid_codec::hash(&[&payload.creator_authority_envelope]),
     )?;
+    let Some(publication) = publication else {
+        return Err(Error::Hybrid(contract::Reject::Transition));
+    };
+    let p = publication
+        .statement
+        .body
+        .as_ref()
+        .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
+    let operation = publication
+        .operation
+        .body
+        .as_ref()
+        .ok_or(Error::Hybrid(contract::Reject::Canonical))?;
+    if body.genesis_digest != operation.genesis_digest {
+        return Err(Error::Hybrid(contract::Reject::Transition));
+    }
+    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;
+    let resolved_publication = contract::verify_publication(
+        publication.operation,
+        &verified.verified,
+        publication.manifest,
+        publication.statement,
+        set,
+        publication.proof,
+        context.now_millis,
+    )?;
+    verify_historical(
+        signed,
+        member,
+        context,
+        publication.statement,
+        &resolved_publication,
+        set,
+        |r| is_revoked_at_accepted_order(p, r),
+    )?;
     Ok(verified)
 }
 
@@ -432,10 +488,16 @@ pub fn verify_new_operation(
     delegation: &VerifiedImportDelegation,
     member: Option<&SignedImportMemberPermissionV1>,
     context: &CurrentContext<'_>,
+    committed_before: &crate::wire::ImportResultManifestV1,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<()> {
     let current = verify_current(&delegation.signed, member, context, is_revoked)?;
-    contract::verify_new_operation(operation, &current.verified, context.now_millis / 1000)?;
+    contract::verify_new_operation(
+        operation,
+        &current.verified,
+        context.now_millis / 1000,
+        committed_before,
+    )?;
     Ok(())
 }
 

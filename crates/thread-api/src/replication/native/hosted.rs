@@ -116,6 +116,59 @@ impl<C: Clock + 'static, A: AcceptedAuthority + Send + Sync + 'static> HostedRep
         )
     }
 
+    /// Authenticate import parents for read-only source staging under the
+    /// receiver's selected root/history and trusted current time. Publication
+    /// rechecks the newest durable authority inside its commit transaction.
+    pub fn authenticate_import_carriers(
+        &self,
+        bundle: &crate::contract::ImportPublicProofBundleV1,
+        now_millis: i64,
+    ) -> repo::thread_replication::Result<crypto::import_authority::VerifiedImportCarriers> {
+        let snapshot = self.trust.snapshot()?;
+        let keys = snapshot
+            .known_job_associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let set = api::witness_trust::verify_set(
+            bundle
+                .witness_set
+                .as_ref()
+                .ok_or(api::hybrid_codec::Reject::Canonical)?,
+            &api::witness_trust::SetExpectation {
+                authority: &snapshot.root.authority,
+                root_id: &snapshot.root.root_id,
+                root_public_key: &snapshot.root.public_key,
+                root_epoch: snapshot.root_epoch,
+                now_unix_millis: now_millis,
+                clock_floor_unix_millis: snapshot.clock_floor_millis,
+                known_job_keys: &keys,
+            },
+            snapshot.previous.as_ref(),
+        )?;
+        let mut forbidden = vec![snapshot.root.public_key.to_vec()];
+        forbidden.extend(
+            set.body()
+                .entries
+                .iter()
+                .map(|entry| entry.public_key.clone()),
+        );
+        repo::thread_replication::delegated_import::authenticate_import_carriers(
+            bundle,
+            self.authority.as_ref(),
+            &api::import_authority::ImportWitnessRootPin {
+                authority: snapshot.root.authority,
+                root_id: snapshot.root.root_id,
+                public_key: snapshot.root.public_key.to_vec(),
+                epoch: snapshot.root_epoch,
+            },
+            now_millis,
+            &snapshot.known_job_associations,
+            &forbidden,
+            |_| Ok(()),
+        )
+    }
+
     /// Recheck retained originals before a source relay. Run this blocking
     /// operation on the caller's storage worker, with its current access gate.
     pub fn recheck_selected(

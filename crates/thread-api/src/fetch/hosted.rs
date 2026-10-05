@@ -131,7 +131,7 @@ impl StagedSource {
         self.install_source_objects(&staged_repo)?;
         // Native checkout comparison needs the immutable empty base. Keep its
         // tree/state in staging so every imported artifact shares the journal.
-        let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
             .map_err(preparation)?;
         staged_repo
             .store()
@@ -454,14 +454,14 @@ pub(crate) mod tests {
         heddleco_capability_verifier::VerifiedCloneKeyring,
     ) {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("release fixture");
         let mut bundle = bundle();
         bundle.history_proofs = [
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .map(|name| record(&fixture, name))
         .to_vec();
@@ -491,7 +491,7 @@ pub(crate) mod tests {
         .verify()
         .expect("genesis signature");
         let state: State = if seed_only {
-            objects::object::thread_replication::hosted_import::synthetic_initial_base()
+            objects::object::thread_replication::initial_base::synthetic_initial_base()
                 .expect("empty seed")
         } else {
             operation.source_state().expect("source").expect("State")
@@ -521,6 +521,34 @@ pub(crate) mod tests {
             id: genesis.spool.clone(),
         };
         let owner = pinned.owner_state();
+        let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
+            .expect("verified import owner history");
+        let authority = SelectedAuthority::new(
+            history,
+            bundle.clone(),
+            |_: &ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+        );
+        let pin = api::import_authority::ImportWitnessRootPin {
+            authority: "https://weft.example.test".into(),
+            root_id: "descriptor-root-1".into(),
+            public_key: hex::decode(
+                fixture["keys"]["root"]["public_key_hex"]
+                    .as_str()
+                    .expect("root"),
+            )
+            .expect("hex"),
+            epoch: 1,
+        };
+        let carriers = repo::thread_replication::delegated_import::authenticate_import_carriers(
+            &bundle,
+            &authority,
+            &pin,
+            1_350_000,
+            &[],
+            &[],
+            |_| Ok(()),
+        )
+        .expect("independently authenticated import carriers");
         let ready = TransferReady {
             thread: Some(ThreadRef {
                 spool: Some(spool.clone()),
@@ -574,12 +602,13 @@ pub(crate) mod tests {
             protocol: Some(crate::hybrid::protocol()),
             ..Default::default()
         };
-        let staged = super::super::staging::validate_with_receipts(
+        let staged = super::super::staging::validate_with_receipts_and_carriers(
             directory,
             ready,
             if seed_only { vec![] } else { vec![signed] },
             vec![],
             vec![],
+            Some(carriers),
         )
         .expect("selected structural source");
         let root = RootSelection {
@@ -833,7 +862,7 @@ pub(crate) mod tests {
             .install_hosted(&repo, &trust, authority.as_ref(), 1350)
             .expect("genesis-only receiver");
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("vectors");
         let original = crate::replication::decode_record(record(&fixture, "converted_main"))
             .expect("original conversion");

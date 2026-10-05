@@ -5,7 +5,7 @@ pub mod capture_visibility;
 pub mod delegated_import;
 pub mod git_import_converter;
 pub mod git_import_graph;
-pub mod hosted_import;
+pub mod initial_base;
 pub mod integration;
 pub mod local_integration;
 pub mod metadata;
@@ -118,7 +118,6 @@ pub enum Admission {
 pub enum ThreadOperationBody {
     Capture(AuthoredCapture),
     Integration(Vec<u8>),
-    HostedImport(Vec<u8>),
     LocalIntegration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
@@ -186,7 +185,6 @@ impl ThreadOperation {
         match self.body {
             ThreadOperationBody::Capture(_)
             | ThreadOperationBody::Integration(_)
-            | ThreadOperationBody::HostedImport(_)
             | ThreadOperationBody::LocalIntegration(_) => ThreadFacet::Source,
             ThreadOperationBody::Metadata(_) => ThreadFacet::Metadata,
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
@@ -212,9 +210,6 @@ impl ThreadOperation {
             ThreadOperationBody::Integration(bytes) => {
                 Ok(Some(integration::HostedIntegration::decode(bytes)?.result))
             }
-            ThreadOperationBody::HostedImport(bytes) => {
-                Ok(Some(hosted_import::HostedImport::decode(bytes)?.result))
-            }
             ThreadOperationBody::LocalIntegration(bytes) => Ok(Some(
                 local_integration::LocalIntegration::decode(bytes)?.result,
             )),
@@ -236,9 +231,6 @@ impl ThreadOperation {
                     .resulting_state()
                     .map(Some)
             }
-            ThreadOperationBody::HostedImport(bytes) => hosted_import::HostedImport::decode(bytes)?
-                .resulting_state()
-                .map(Some),
             _ => Ok(None),
         }
     }
@@ -254,15 +246,6 @@ impl ThreadOperation {
         match &self.body {
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes).map(Some)
-            }
-            _ => Ok(None),
-        }
-    }
-
-    pub fn hosted_import(&self) -> Result<Option<hosted_import::HostedImport>> {
-        match &self.body {
-            ThreadOperationBody::HostedImport(bytes) => {
-                hosted_import::HostedImport::decode(bytes).map(Some)
             }
             _ => Ok(None),
         }
@@ -302,9 +285,6 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?.validate_operation(self)?;
-            }
-            ThreadOperationBody::HostedImport(bytes) => {
-                hosted_import::HostedImport::decode(bytes)?.validate_operation(self)?
             }
             ThreadOperationBody::LocalIntegration(bytes) => {
                 local_integration::LocalIntegration::decode(bytes)?.validate_operation(self)?;
@@ -370,6 +350,16 @@ impl ThreadOperation {
     /// Called after every parent is present. A peer cannot relabel a private
     /// dependency as public or attach an operation to a different Thread.
     pub fn validate_parents(&self, genesis: &ThreadGenesis, parents: &[Self]) -> Result<()> {
+        self.validate_parents_inner(genesis, parents, false)
+    }
+
+    // Only an authenticated DelegatedImport can select imported ancestry.
+    fn validate_parents_inner(
+        &self,
+        genesis: &ThreadGenesis,
+        parents: &[Self],
+        imported: bool,
+    ) -> Result<()> {
         if self.thread != genesis.id()? || parents.len() != self.parents.len() {
             return Err(invalid("Thread or causal parent set mismatch"));
         }
@@ -423,8 +413,14 @@ impl ThreadOperation {
                     .copied()
                     .filter(|id| *id != genesis.base)
                     .collect();
-                if declared != source_parents
-                    || state.parents.is_empty()
+                // A first import has one native tip operation. Its converted
+                // Git ancestors travel as State closure, attested by the
+                // converter witness, rather than causal native operations.
+                if ((!imported || !self.parents.is_empty()) && declared != source_parents)
+                    || (!imported && state.parents.is_empty())
+                    || (imported
+                        && (state.parents.contains(&genesis.base)
+                            || genesis.base != initial_base::synthetic_initial_base()?.id()))
                     || state.parents.len() != state.parents.iter().collect::<BTreeSet<_>>().len()
                 {
                     return Err(invalid(
@@ -434,11 +430,6 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 let receipt = integration::HostedIntegration::decode(bytes)?;
-                receipt.validate_operation(self)?;
-                receipt.validate_parents(genesis, parents)?;
-            }
-            ThreadOperationBody::HostedImport(bytes) => {
-                let receipt = hosted_import::HostedImport::decode(bytes)?;
                 receipt.validate_operation(self)?;
                 receipt.validate_parents(genesis, parents)?;
             }

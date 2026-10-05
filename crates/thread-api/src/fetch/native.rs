@@ -330,7 +330,7 @@ impl StagedSource {
         if self.operations.is_empty() {
             let genesis = selected.genesis().map_err(preparation)?;
             let canonical = self.state.encode_current_msgpack().map_err(preparation)?;
-            objects::object::thread_replication::hosted_import::initial_base_state(
+            objects::object::thread_replication::initial_base::initial_base_state(
                 &genesis, &canonical,
             )
             .map_err(preparation)?;

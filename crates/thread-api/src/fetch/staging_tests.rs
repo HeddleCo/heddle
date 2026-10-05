@@ -9,6 +9,10 @@ use objects::{
 use super::*;
 use crate::replication;
 
+#[cfg(feature = "native")]
+#[path = "import_staging_tests.rs"]
+mod imported;
+
 #[test]
 fn partial_source_staging_retains_proof_without_complete_availability() {
     let scratch = tempfile::tempdir().expect("scratch");
@@ -101,7 +105,7 @@ fn only_exact_portable_empty_seed_stages_without_source_operation() {
         ready.thread.as_ref().expect("Thread"),
     )
     .expect("genesis");
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
         .expect("canonical seed");
     genesis.base = seed.id();
     let signed =

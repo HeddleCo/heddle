@@ -54,50 +54,57 @@ impl HostedClient {
     /// missing routes or a failed negotiation still complete over direct Fetch.
     pub async fn fetch_native_source(
         &self,
+        repository: &repo::Repository,
         open: FetchOpen,
         limits: Limits,
         scratch: &Path,
     ) -> anyhow::Result<StagedSource> {
-        let delivery = fetch_open::Delivery::try_from(open.delivery)
-            .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
-        let remote = self.native().await?;
-        if delivery != fetch_open::Delivery::ProviderPreferred
-            || validate_routes(&open.routes).is_err()
-        {
-            let open = if delivery == fetch_open::Delivery::ProviderPreferred {
-                direct_fetch_open(&open)
-            } else {
-                open
-            };
-            return Ok(remote
-                .fetch_content(open, limits)
-                .await?
-                .stage(scratch)
-                .await?);
-        }
-
-        let routes = open.routes.clone();
-        match self
-            .fetch_preferred_source(&remote, open.clone(), limits, scratch, &routes)
-            .await
-        {
-            Ok(staged) => Ok(staged),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "preferred provider Fetch failed; using direct source transfer"
-                );
-                Ok(remote
-                    .fetch_content(direct_fetch_open(&open), limits)
-                    .await?
-                    .stage(scratch)
-                    .await?)
+        // Provider negotiation and authenticated import staging both retain large
+        // typed RPC futures. Keep that transfer frame off callers' stacks,
+        // including the CLI's current-thread runtime.
+        Box::pin(async move {
+            let delivery = fetch_open::Delivery::try_from(open.delivery)
+                .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
+            let remote = self.native().await?;
+            if delivery != fetch_open::Delivery::ProviderPreferred
+                || validate_routes(&open.routes).is_err()
+            {
+                let open = if delivery == fetch_open::Delivery::ProviderPreferred {
+                    direct_fetch_open(&open)
+                } else {
+                    open
+                };
+                let download = remote.fetch_content(open, limits).await?;
+                return self
+                    .stage_native_download(repository, download, scratch)
+                    .await;
             }
-        }
+
+            let routes = open.routes.clone();
+            match self
+                .fetch_preferred_source(repository, &remote, open.clone(), limits, scratch, &routes)
+                .await
+            {
+                Ok(staged) => Ok(staged),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "preferred provider Fetch failed; using direct source transfer"
+                    );
+                    let download = remote
+                        .fetch_content(direct_fetch_open(&open), limits)
+                        .await?;
+                    self.stage_native_download(repository, download, scratch)
+                        .await
+                }
+            }
+        })
+        .await
     }
 
     async fn fetch_preferred_source(
         &self,
+        repository: &repo::Repository,
         remote: &Remote<IrohTransport<Credentials>>,
         open: FetchOpen,
         limits: Limits,
@@ -105,16 +112,143 @@ impl HostedClient {
         routes: &[ProviderDialRoute],
     ) -> anyhow::Result<StagedSource> {
         match remote.begin_provider_fetch(open, limits).await? {
-            ProviderFetch::Direct(download) => Ok((*download).stage(scratch).await?),
+            ProviderFetch::Direct(download) => {
+                self.stage_native_download(repository, *download, scratch)
+                    .await
+            }
             ProviderFetch::Provider(download) => {
                 let signer = self.provider_consent()?;
                 let mut session = (*download).negotiate(&signer).await?;
+                let carriers = self.import_carriers(repository, session.ready()).await?;
                 session.receive_inline(scratch).await?;
                 let providers = self.native_provider_remotes(session.plan(), routes).await?;
                 session.receive_provider_ranges(&providers).await?;
-                Ok(session.complete(scratch).await?)
+                Ok(match carriers {
+                    Some(carriers) => {
+                        session
+                            .complete_with_import_carriers(scratch, carriers)
+                            .await?
+                    }
+                    None => session.complete(scratch).await?,
+                })
             }
         }
+    }
+
+    async fn stage_native_download<
+        R: api::v2::client::MessageReader<Error = thread_api::transport::Error>,
+    >(
+        &self,
+        repository: &repo::Repository,
+        download: thread_api::fetch::Download<R>,
+        scratch: &Path,
+    ) -> anyhow::Result<StagedSource> {
+        let carriers = self.import_carriers(repository, download.ready()).await?;
+        Ok(match carriers {
+            Some(carriers) => {
+                download
+                    .stage_with_import_carriers(scratch, carriers)
+                    .await?
+            }
+            None => download.stage(scratch).await?,
+        })
+    }
+
+    async fn import_carriers(
+        &self,
+        repository: &repo::Repository,
+        ready: &api::heddle::api::v1alpha2::TransferReady,
+    ) -> anyhow::Result<Option<crypto::import_authority::VerifiedImportCarriers>> {
+        use repo::thread_replication::{
+            delegated_import,
+            hosted_trust::{HostedTrust, SystemClock},
+        };
+        use thread_api::hybrid::authority::{AcceptedHistory, SelectedAuthority};
+        let Some(mut bundle) = ready.import_authority.clone() else {
+            return Ok(None);
+        };
+        let root = self.hosted_root().ok_or(api::hybrid_codec::Reject::Root)?;
+        root.require_current()?;
+        let snapshot =
+            match HostedTrust::open(repository.heddle_dir(), root.authority(), SystemClock) {
+                Ok(trust) => Some(trust.snapshot()?),
+                Err(repo::thread_replication::Error::Hybrid(api::hybrid_codec::Reject::Root)) => {
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            };
+        if snapshot.as_ref().is_some_and(|s| {
+            s.root.root_id != root.root_id() || &s.root.public_key != root.public_key()
+        }) {
+            return Err(api::hybrid_codec::Reject::Root.into());
+        }
+        let epoch = snapshot.as_ref().map_or(1, |s| s.root_epoch);
+        let associations = snapshot
+            .as_ref()
+            .map_or(&[][..], |s| s.known_job_associations.as_slice());
+        let keys = associations
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let set = self
+            .refresh_import_proofs(
+                &mut bundle,
+                snapshot.as_ref().and_then(|s| s.previous.as_ref()),
+                epoch,
+                snapshot.as_ref().map_or(0, |s| s.clock_floor_millis),
+                &keys,
+            )
+            .await?;
+        let spool = ready
+            .thread
+            .as_ref()
+            .and_then(|t| t.spool.as_ref())
+            .ok_or(api::hybrid_codec::Reject::Scope)?
+            .id
+            .parse()?;
+        let now = chrono::Utc::now().timestamp();
+        let pinned = repo::verify_spool_owner_observation(
+            ready
+                .owner_genesis
+                .as_ref()
+                .ok_or(api::hybrid_codec::Reject::Root)?,
+            ready
+                .ownership
+                .as_ref()
+                .ok_or(api::hybrid_codec::Reject::Root)?,
+            spool,
+            now,
+        )?;
+        let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)?;
+        let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, now, limits)?;
+        let authority = SelectedAuthority::new(
+            history,
+            bundle.clone(),
+            |_: &api::heddle::api::v1alpha2::ImportPublicProofBundleV1,
+             _: i64,
+             _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
+        );
+        let mut forbidden = vec![root.public_key().to_vec()];
+        forbidden.extend(set.body().entries.iter().map(|e| e.public_key.clone()));
+        Ok(Some(delegated_import::authenticate_import_carriers(
+            &bundle,
+            &authority,
+            &api::import_authority::ImportWitnessRootPin {
+                authority: root.authority().into(),
+                root_id: root.root_id().into(),
+                public_key: root.public_key().to_vec(),
+                epoch,
+            },
+            chrono::Utc::now().timestamp_millis(),
+            associations,
+            &forbidden,
+            |selection| {
+                if selection.keyring.owner_genesis().signed() != pinned.owner_genesis().signed() {
+                    return Err(api::hybrid_codec::Reject::Root.into());
+                }
+                Ok(())
+            },
+        )?))
     }
 
     pub(super) fn provider_consent(&self) -> Result<NativeProviderConsent<'_>> {

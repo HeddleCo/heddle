@@ -12,9 +12,9 @@ serde_json = "1"
 hex = "0.4"
 prost = "0.14"
 ed25519-dalek = "3"
-heddle-api = "=0.31.0-alpha.30"
+heddle-api = "=0.31.0-alpha.33"
 
 [workspace]
 
 [patch.crates-io]
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "09827252a76d2b3b8509836a32e6fc8723d5ff49", version = "=0.31.0-alpha.30" }
+heddle-api = { git = "https://github.com/HeddleCo/api", rev = "c9bd6ba26bc5e028e064b725419cfb702ccc559c", version = "=0.31.0-alpha.33" }

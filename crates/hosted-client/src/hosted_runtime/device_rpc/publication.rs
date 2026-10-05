@@ -294,8 +294,22 @@ impl DeviceRpc {
         let receipt = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             admitted.check_current(&home)?;
-            let validated =
-                thread_api::publication::validate_source_artifacts(scratch, &opening, originals)?;
+            let carriers =
+                match (&opening.import_authority, &hosted) {
+                    (Some(bundle), Some(hosted)) => Some(hosted.authenticate_import_carriers(
+                        bundle,
+                        chrono::Utc::now().timestamp_millis(),
+                    )?),
+                    (Some(_), None) => bail!("import staging requires selected hosted authority"),
+                    _ => None,
+                };
+            let validated = if let Some(carriers) = carriers {
+                thread_api::publication::validate_source_artifacts_with_import_carriers(
+                    scratch, &opening, originals, carriers,
+                )?
+            } else {
+                thread_api::publication::validate_source_artifacts(scratch, &opening, originals)?
+            };
             let repository = repo::Repository::open(&admitted.spool.root)?;
             let mut guards = Vec::new();
             for wrapper in validated.geneses() {

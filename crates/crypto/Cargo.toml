@@ -35,6 +35,7 @@ x25519-dalek.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rmp-serde.workspace = true
 heddle-fs-prims.workspace = true
 tempfile.workspace = true
 

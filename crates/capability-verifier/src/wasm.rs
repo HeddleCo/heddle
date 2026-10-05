@@ -200,10 +200,15 @@ pub fn verify_signed_policy_chain_binding(
 
 use crate::canonical::{canonical_message, fixed};
 
-/// Verify typed import delegation against independently selected owner/Spool
-/// pins and actual current time. No incoming keyring enrolls its carried root.
-/// Key-role exclusions and job associations use bounded canonical JSON arrays
-/// of hex keys and [key, logical-job] pairs respectively.
+/// Compute an alpha.33 remaining scope from exact protobuf bytes. This is
+/// recovery arithmetic, with no signature or execution authority claim.
+#[wasm_bindgen(js_name = remainingImportScope)]
+pub fn remaining_import_scope_binding(scope: &[u8], manifest: &[u8]) -> Result<Vec<u8>, JsValue> {
+    crate::import_delegation::remaining_scope_bytes(scope, manifest).map_err(verification_error)
+}
+
+/// Verify exact alpha.33 import authority. All uint64 scope values remain in
+/// encoded bytes; verification clocks use the checked bigint boundary.
 #[wasm_bindgen(js_name = verifyImportDelegation, unchecked_return_type = "ImportSummary")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_import_delegation_binding(
@@ -525,7 +530,6 @@ export type VerificationErrorCode =
   "hybrid_validity_bounds" |
   "hybrid_genesis_binding" |
   "hybrid_import_permission" |
-  "hybrid_renewal_fork" |
   "hybrid_stale_manifest" |
   "hybrid_committed_slot" |
   "hybrid_stale_context" |

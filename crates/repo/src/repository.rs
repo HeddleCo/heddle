@@ -858,7 +858,7 @@ impl Repository {
         let main_thread = ThreadName::from("main");
         if self.refs.get_thread(&main_thread)?.is_none() {
             let state =
-                objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+                objects::object::thread_replication::initial_base::synthetic_initial_base()?;
             self.store.put_tree(&Tree::new())?;
             self.store.put_state(&state)?;
             self.refs.set_thread(&main_thread, &state.id())?;

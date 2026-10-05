@@ -74,7 +74,7 @@ fn import_graph_fixture(side_branches: usize, partial: bool) {
     let mut original_states = std::collections::BTreeMap::new();
     let mut original_geneses = std::collections::BTreeMap::new();
     if partial {
-        use objects::object::{Tree, thread_replication::hosted_import::synthetic_initial_base};
+        use objects::object::{Tree, thread_replication::initial_base::synthetic_initial_base};
 
         // Reproduce the failed initial registration, retaining its sidecar,
         // converted graph, original geneses, and already admitted branches.

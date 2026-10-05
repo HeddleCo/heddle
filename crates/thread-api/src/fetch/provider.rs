@@ -315,7 +315,21 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
     /// Finalize exact pack integrity and signed source closure before sending
     /// the provider result. A terminal Complete must acknowledge the same
     /// transfer, plan and verified output length before staging is returned.
-    pub async fn complete(mut self, scratch: &Path) -> Result<StagedSource, Error> {
+    pub async fn complete(self, scratch: &Path) -> Result<StagedSource, Error> {
+        self.complete_inner(scratch, None).await
+    }
+    pub async fn complete_with_import_carriers(
+        self,
+        scratch: &Path,
+        carriers: crypto::import_authority::VerifiedImportCarriers,
+    ) -> Result<StagedSource, Error> {
+        self.complete_inner(scratch, Some(carriers)).await
+    }
+    async fn complete_inner(
+        mut self,
+        scratch: &Path,
+        carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+    ) -> Result<StagedSource, Error> {
         let spool = self
             .spool
             .take()
@@ -349,14 +363,23 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                 }
             }
         }
-        let ready = self.ready.clone();
+        let mut ready = self.ready.clone();
+        if let Some(carriers) = &carriers {
+            let original = ready
+                .import_authority
+                .as_mut()
+                .ok_or(Error::HostedTrustRequired)?;
+            crate::hybrid::history::replace_receiver_metadata(original, carriers.bundle().clone())
+                .map_err(|e| Error::Preparation(e.to_string()))?;
+        }
         let staged = tokio::task::spawn_blocking(move || {
-            super::staging::validate_with_receipts(
+            super::staging::validate_with_receipts_and_carriers(
                 directory,
                 ready,
                 operations,
                 dependencies,
                 receipt_records,
+                carriers,
             )
         })
         .await
