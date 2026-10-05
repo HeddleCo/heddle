@@ -132,6 +132,11 @@ MUTATIONS = [
      '    if false {', REPO,
      'review_transfer_preserves_original_genesis_and_exact_historical_prefixes',
      'a transferred owner must select its own accepted policy phase'),
+    ('retry-known-history', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
+     '        for operation in &proof.operations {',
+     '        for operation in proof.operations.iter().take(0) {', HOSTED,
+     'alpha31_renew_is_authority_only_and_retry_has_an_independent_fresh_uuid',
+     'retry must not reuse a retained publication attempt'),
 ]
 
 # The import composition helper also enforces the durable witness checkpoint.

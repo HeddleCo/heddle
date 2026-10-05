@@ -143,6 +143,36 @@ impl ImportJobState {
         })
     }
 
+    pub(super) fn validate_retry_response(
+        &self,
+        request: &wire::RetryImportSourceRequest,
+        response: &wire::MutationResponse,
+        observed: Option<&wire::RecordRef>,
+    ) -> Result<()> {
+        let state = self.response.state.as_ref().ok_or(Reject::Canonical)?;
+        let mut prior = vec![authority::initial_operation_id(
+            &state.retry_lineage_id,
+            false,
+        )?];
+        if let Some(observed) = observed {
+            prior.push(observed.id.clone());
+        }
+        let proof = self
+            .response
+            .retained_proof
+            .as_ref()
+            .ok_or(Reject::Canonical)?;
+        for operation in &proof.operations {
+            let body = operation.body.as_ref().ok_or(Reject::Canonical)?;
+            prior.push(authority::initial_operation_id(
+                &body.physical_operation_id,
+                false,
+            )?);
+        }
+        authority::validate_retry_response(request, response, &prior)?;
+        Ok(())
+    }
+
     /// Refresh public witness metadata after proof lookup, preserving every
     /// retained original, authority and accepted CAS byte. Reverify afterwards.
     pub fn refresh_receiver_metadata(
@@ -2055,13 +2085,55 @@ mod tests {
             &wire("wire_vectors", "control_renew_applied"),
         )
         .expect("Applied without scheduling");
-        let retry = wire("wire_vectors", "control_retry_connected");
+        let retry: wire::RetryImportSourceRequest = wire("wire_vectors", "control_retry_connected");
+        let read = ImportJobState {
+            request: wire("wire_vectors", "job_state_request"),
+            response: wire("wire_vectors", "control_connected_state"),
+            verified_history: None,
+        };
+        let observed = wire::RecordRef {
+            spool: retry
+                .original_operation
+                .as_ref()
+                .expect("target")
+                .spool
+                .clone(),
+            id: prior[1].clone(),
+        };
         authority::validate_retry_response(
             &retry,
             &wire("wire_vectors", "control_retry_pending"),
             &prior,
         )
         .expect("independent UUID");
+        read.validate_retry_response(&retry, &wire("wire_vectors", "control_retry_pending"), None)
+            .expect("fresh UUID without ordinary operation visibility");
+        let mut reused: wire::MutationResponse = wire("wire_vectors", "control_retry_pending");
+        let Some(wire::mutation_receipt::Outcome::PendingOperation(operation)) =
+            &mut reused.receipt.as_mut().expect("receipt").outcome
+        else {
+            panic!("pending");
+        };
+        operation.id = authority::initial_operation_id(
+            &read
+                .response
+                .retained_proof
+                .as_ref()
+                .expect("proof")
+                .operations[0]
+                .body
+                .as_ref()
+                .expect("operation")
+                .physical_operation_id,
+            false,
+        )
+        .expect("retained publication UUID");
+        authority::validate_retry_response(&retry, &reused, &prior)
+            .expect("first and observed IDs alone do not detect this reuse");
+        assert!(
+            read.validate_retry_response(&retry, &reused, None).is_err(),
+            "retry must not reuse a retained publication attempt"
+        );
         for row in corpus["receipt_negatives"].as_array().expect("negatives") {
             let response = wire("wire_vectors", row["response"].as_str().expect("response"));
             if row["kind"] == "Renew" {
@@ -2079,17 +2151,17 @@ mod tests {
                 .expect("Renew control");
             } else {
                 assert!(
-                    authority::validate_retry_response(
+                    read.validate_retry_response(
                         &wire("wire_vectors", row["request"].as_str().expect("request")),
                         &response,
-                        &prior
+                        Some(&observed)
                     )
                     .is_err()
                 );
-                authority::validate_retry_response(
+                read.validate_retry_response(
                     &retry,
                     &wire("wire_vectors", "control_retry_pending"),
-                    &prior,
+                    Some(&observed),
                 )
                 .expect("Retry control");
             }

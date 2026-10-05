@@ -29,6 +29,8 @@ Renew checks current control availability and returns authority-only Applied.
 Retry selects the writer-only retry target and validates a fresh host attempt
 UUID, independent of its request identity and known prior attempts. Source
 custody and `ORIGINAL_WINDOW_ENDED` remain typed control refusals.
+Retry freshness includes physical attempts in retained signed publications,
+even when ordinary operation visibility omits those rows.
 
 The WASM `remainingImportScope` binding exchanges exact protobuf bytes, including
 large and `u64::MAX` totals. Verification’s time and TTL arguments keep their

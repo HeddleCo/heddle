@@ -357,20 +357,8 @@ impl HostedClient {
             .call_unary(RETRY_IMPORT_SOURCE, &request)
             .await
             .map_err(super::helpers::hosted_to_protocol_error)?;
-        let state = read
-            .response()
-            .state
-            .as_ref()
-            .ok_or_else(|| ProtocolError::InvalidState("import state absent".into()))?;
-        let first_attempt =
-            api::import_authority::initial_operation_id(&state.retry_lineage_id, false)
-                .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
-        let mut prior_attempts = vec![first_attempt, original_ref.id.clone()];
-        if let Some(observed) = &original.r#ref {
-            prior_attempts.push(observed.id.clone());
-        }
-        api::import_authority::validate_retry_response(&request, &response, &prior_attempts)
-            .map_err(|error| super::helpers::hosted_to_protocol_error(error.into()))?;
+        read.validate_retry_response(&request, &response, original.r#ref.as_ref())
+            .map_err(super::helpers::hosted_to_protocol_error)?;
         let pending_operation = require_pending_receipt(
             response.receipt,
             operation_id.as_str(),
