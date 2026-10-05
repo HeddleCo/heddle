@@ -6,6 +6,7 @@ use repo::thread_replication::delegated_import::AcceptedAuthority;
 use super::authority::{AcceptedHistory, SelectedAuthority};
 
 mod admissions;
+mod boundary_revocations;
 mod guards;
 mod local_work;
 
