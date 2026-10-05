@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.28.9: content readers handle the mandatory alpha.22 AcceptedBudget echo first, exactly once, validated and budget-accounted (#1979).
+
 - Adopt heddle-api 0.31.0-alpha.21 and its exact HYBRID boundary-acceptance binding (api#319). Native verification checks complete selection and accepting authority; original formats stay unchanged. Fix commit-time disclosure expiry, ownership-transfer histories, permanent key roles, process-wide clock rollback protection and millisecond freshness. Release 0.28.8 for the dependency contract change (#1961, #1964). Alpha.21 (api#322) revises undeployed Prepare/Commit in place; completed signing layouts and the alpha.20 boundary binding are unchanged. Part 2 owns the client/RPC integration.
 
 - Adopt heddle-api 0.31.0-alpha.19: PlatformAdminService checks, the notification contract (effective delivery, `next_digest_at`, in-app on/off validation, locked security kinds) and identity account management (RemovePasskey, passkey metadata, current-session passkey id, session state filter and user agent, SetDisplayName, SetPrimaryHandle/RemoveHandle, held-name notification kinds). All are additive and the new RPCs are Weft-only, so the daemon inventory needs no new exemption. The daemon refuses an unknown `ObserveIdentityRequest.session_state` instead of ignoring it; it never serves the hosted sessions page, whose coverage stays Unavailable. The workspace moves to 0.28.7: the dependency-version guard requires a bump for the new pin.
