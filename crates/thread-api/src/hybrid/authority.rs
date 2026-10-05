@@ -9,6 +9,68 @@ use api::{
 use heddleco_capability_verifier::{
     self as permission, VerificationLimits, VerifiedCloneKeyring, VerifiedOwnerState,
 };
+
+/// Identities whose revocations the native verifier evaluates at statement time.
+pub struct NativeAuthority {
+    envelope: wire::ThreadControlAuthority,
+    publishers: Vec<Vec<u8>>,
+}
+
+fn native_authorities(
+    statement: &host::HostedWitnessStatementV1,
+    original_envelope: &[u8],
+    original_publishers: Vec<Vec<u8>>,
+    boundaries: &[wire::ImportBoundaryAcceptanceV1],
+) -> Option<Vec<NativeAuthority>> {
+    let decode = |bytes: &[u8]| {
+        api::mint_root_association::decode_thread_control_authority_for_verification(bytes).ok()
+    };
+    let mut authorities = match statement.basis {
+        1 => vec![NativeAuthority {
+            envelope: decode(original_envelope)?,
+            publishers: original_publishers,
+        }],
+        2 if boundaries
+            .iter()
+            .any(|e| e.binding.as_ref() == statement.boundary_acceptance.as_ref())
+            && statement.boundary_acceptance.is_some() =>
+        {
+            Vec::new()
+        }
+        _ => return None,
+    };
+    // Boundary originals retain their own provenance/signature gates. Only the
+    // separately signed acceptors (including dependency acceptances) supply
+    // current revocation identities; no original is relabeled as an acceptor.
+    for evidence in boundaries {
+        let signed = evidence.signed_acceptance.as_ref()?;
+        if signed.format != objects::object::original_boundary_acceptance::FORMAT
+            || signed.signatures.len() != 1
+        {
+            return None;
+        }
+        let acceptance = crypto::original_boundary_acceptance::SignedBoundaryAcceptance {
+            canonical: signed.canonical_record.clone(),
+            signature: signed.signatures[0].signature.clone(),
+        }
+        .verify_signature()
+        .ok()?;
+        if signed.signatures[0].public_key != acceptance.accepting_publisher {
+            return None;
+        }
+        let objects::object::thread_replication::SourceAuthor::Account { authority, .. } =
+            acceptance.accepting_author
+        else {
+            return None;
+        };
+        authorities.push(NativeAuthority {
+            envelope: decode(&authority)?,
+            publishers: vec![acceptance.accepting_publisher.to_vec()],
+        });
+    }
+    Some(authorities)
+}
+
 /// Typed native and import bundles share verified lineage selection, while
 /// retaining their separate validators and disclosure contracts.
 pub trait PublicEvidence {
@@ -31,21 +93,22 @@ pub trait PublicEvidence {
     fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
         None
     }
-    fn native_envelope(
+    fn native_authorities(
         &self,
         statement: &host::HostedWitnessStatementV1,
-    ) -> Option<(&[u8], Vec<Vec<u8>>)>;
+    ) -> Option<Vec<NativeAuthority>>;
 }
-fn authority_envelope<'a>(
+fn authority_envelopes(
     statement: &host::HostedWitnessStatementV1,
-    authorities: &'a [wire::ImportAuthorityWitnessV1],
-    landings: &'a [wire::HostedLandingWitnessV1],
-) -> Option<(&'a [u8], Vec<Vec<u8>>)> {
+    authorities: &[wire::ImportAuthorityWitnessV1],
+    landings: &[wire::HostedLandingWitnessV1],
+) -> Option<Vec<NativeAuthority>> {
     if statement.purpose == 2 {
         let p = authorities.iter().find(|p| {
             api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
         })?;
-        Some((
+        native_authorities(
+            statement,
             &p.authority_envelope,
             p.original
                 .as_ref()?
@@ -53,15 +116,18 @@ fn authority_envelope<'a>(
                 .iter()
                 .map(|s| s.public_key.clone())
                 .collect(),
-        ))
+            &p.boundary_acceptances,
+        )
     } else if statement.purpose == 4 {
         let p = landings.iter().find(|p| {
             api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
         })?;
-        Some((
+        native_authorities(
+            statement,
             &p.authority_envelope,
             vec![p.request.as_ref()?.signature.as_ref()?.public_key.clone()],
-        ))
+            &[],
+        )
     } else {
         None
     }
@@ -88,12 +154,12 @@ impl PublicEvidence for wire::ImportPublicProofBundleV1 {
     fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
         self.member_permission.as_ref()
     }
-    fn native_envelope(
+    fn native_authorities(
         &self,
         statement: &host::HostedWitnessStatementV1,
-    ) -> Option<(&[u8], Vec<Vec<u8>>)> {
+    ) -> Option<Vec<NativeAuthority>> {
         if statement.purpose != 1 {
-            return authority_envelope(
+            return authority_envelopes(
                 statement,
                 &self.authority_witnesses,
                 &self.landing_witnesses,
@@ -102,7 +168,8 @@ impl PublicEvidence for wire::ImportPublicProofBundleV1 {
         let p = self.genesis_witnesses.iter().find(|p| {
             api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
         })?;
-        Some((
+        native_authorities(
+            statement,
             &p.creator_authority_envelope,
             p.original_genesis
                 .as_ref()?
@@ -110,7 +177,8 @@ impl PublicEvidence for wire::ImportPublicProofBundleV1 {
                 .iter()
                 .map(|s| s.public_key.clone())
                 .collect(),
-        ))
+            p.boundary_acceptance.as_slice(),
+        )
     }
 }
 impl PublicEvidence for wire::NativePublicProofBundleV1 {
@@ -136,12 +204,12 @@ impl PublicEvidence for wire::NativePublicProofBundleV1 {
             .map(|id| (id.owner_state_hash.clone(), id.ownership_transfer_sequence))
             .collect()
     }
-    fn native_envelope(
+    fn native_authorities(
         &self,
         statement: &host::HostedWitnessStatementV1,
-    ) -> Option<(&[u8], Vec<Vec<u8>>)> {
+    ) -> Option<Vec<NativeAuthority>> {
         if statement.purpose != 1 {
-            return authority_envelope(
+            return authority_envelopes(
                 statement,
                 &self.authority_witnesses,
                 &self.landing_witnesses,
@@ -150,7 +218,8 @@ impl PublicEvidence for wire::NativePublicProofBundleV1 {
         let p = self.genesis_witnesses.iter().find(|p| {
             api::hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload)
         })?;
-        Some((
+        native_authorities(
+            statement,
             &p.creator_authority_envelope,
             p.original_genesis
                 .as_ref()?
@@ -158,7 +227,8 @@ impl PublicEvidence for wire::NativePublicProofBundleV1 {
                 .iter()
                 .map(|s| s.public_key.clone())
                 .collect(),
-        ))
+            p.boundary_acceptance.as_slice(),
+        )
     }
 }
 
@@ -257,10 +327,13 @@ impl PublicEvidence for PublicProof {
             _ => None,
         }
     }
-    fn native_envelope(&self, s: &host::HostedWitnessStatementV1) -> Option<(&[u8], Vec<Vec<u8>>)> {
+    fn native_authorities(
+        &self,
+        s: &host::HostedWitnessStatementV1,
+    ) -> Option<Vec<NativeAuthority>> {
         match self {
-            Self::Import(b) => b.native_envelope(s),
-            Self::Native(b) => b.native_envelope(s),
+            Self::Import(b) => b.native_authorities(s),
+            Self::Native(b) => b.native_authorities(s),
         }
     }
 }
@@ -334,17 +407,6 @@ impl<F, B: PublicEvidence> SelectedAuthority<F, B> {
                 .flatten()
         })
     }
-    fn native_envelope(
-        &self,
-        statement: &host::HostedWitnessStatementV1,
-    ) -> Option<(wire::ThreadControlAuthority, Vec<Vec<u8>>)> {
-        let (bytes, keys) = self.bundle.native_envelope(statement)?;
-        let envelope =
-            api::mint_root_association::decode_thread_control_authority_for_verification(bytes)
-                .ok()?;
-        Some((envelope, keys))
-    }
-
     fn policy_revocations(&self, statement: &host::HostedWitnessStatementV1) -> Option<&[Vec<u8>]> {
         if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32] {
             // Exactly this authenticated head denotes no policy. A signed
@@ -482,39 +544,46 @@ impl<
         statement: &host::HostedWitnessStatementV1,
         revocation: permission::thread_control_authority::Revocation<'_>,
     ) -> bool {
-        let (Ok(_), Some(revoked), Some((envelope, publishers))) = (
+        let (Ok(_), Some(revoked), Some(authorities)) = (
             self.history.for_witness(statement),
             self.policy_revocations(statement),
-            self.native_envelope(statement),
+            self.bundle.native_authorities(statement),
         ) else {
             return true;
         };
         match revocation {
             permission::thread_control_authority::Revocation::MintRoot(key) => {
-                key != envelope.mint_root_public_key
+                !authorities
+                    .iter()
+                    .any(|a| key == a.envelope.mint_root_public_key)
                     || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Publisher(key) => {
-                !publishers.iter().any(|p| p == key)
+                !authorities
+                    .iter()
+                    .any(|a| a.publishers.iter().any(|p| p == key))
                     || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Credential(id) => {
-                let keys = biscuit_verifier::parse_ed25519_public_keys_hex(
-                    &hex::encode(&envelope.mint_root_public_key),
-                    1,
-                );
-                let inspected = keys.ok().and_then(|keys| {
-                    let key = *keys.first()?;
-                    let token =
-                        biscuit_verifier::signature_v1::verify(&envelope.sealed_biscuit, key)
-                            .ok()?;
-                    biscuit_verifier::inspect_verified_credential(&token, &key).ok()
-                });
-                // The authenticated witness attests this exact original's
-                // session and signed-block status at first admission. Current
-                // delivery credentials never answer historical revocations.
-                inspected
-                    .is_none_or(|facts| !facts.revocation_identities().any(|known| known == id))
+                !authorities.iter().any(|authority| {
+                    let envelope = &authority.envelope;
+                    let keys = biscuit_verifier::parse_ed25519_public_keys_hex(
+                        &hex::encode(&envelope.mint_root_public_key),
+                        1,
+                    );
+                    let inspected = keys.ok().and_then(|keys| {
+                        let key = *keys.first()?;
+                        let token =
+                            biscuit_verifier::signature_v1::verify(&envelope.sealed_biscuit, key)
+                                .ok()?;
+                        biscuit_verifier::inspect_verified_credential(&token, &key).ok()
+                    });
+                    // The authenticated witness attests these exact authorization
+                    // credentials at statement time: original for OriginalAuthority,
+                    // acceptor for BoundaryAcceptance, never the delivery credential.
+                    inspected
+                        .is_some_and(|facts| facts.revocation_identities().any(|known| known == id))
+                })
             }
         }
     }
