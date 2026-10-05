@@ -43,7 +43,7 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
         .expect("init_default must seed the main ref");
     assert_eq!(
         main_state,
-        objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        objects::object::thread_replication::initial_base::synthetic_initial_base()
             .expect("canonical system seed")
             .id(),
         "native init and hosted import share the exact system base"

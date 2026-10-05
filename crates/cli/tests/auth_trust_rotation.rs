@@ -21,7 +21,7 @@ fn auth_trust_replace_command_cas_preserves_enrolled_repository_checkpoint() {
     };
     hosted_trust::select_root(repository.heddle_dir(), &root).expect("enrolled root");
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../thread-api/tests/fixtures/hybrid-alpha27.json"
+        "../../thread-api/tests/fixtures/hybrid-alpha33.json"
     ))
     .expect("release fixture");
     let bytes = hex::decode(

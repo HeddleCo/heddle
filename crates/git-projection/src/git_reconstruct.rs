@@ -79,7 +79,7 @@ pub fn mapped_git_parents(
     mapping: &SyncMapping,
 ) -> GitProjectionResult<Vec<ObjectId>> {
     let hosted_seed =
-        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
+        objects::object::thread_replication::initial_base::synthetic_initial_base()?.id();
     state
         .parents
         .iter()

@@ -989,6 +989,33 @@ impl ThreadReplica {
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
         defer_references: bool,
     ) -> Result<Admission> {
+        self.receive_verified_content_in(
+            tx,
+            signed,
+            operation,
+            store,
+            compare_frontier,
+            None,
+            authority_receipt,
+            defer_references,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receive_verified_content_in(
+        &self,
+        tx: &Transaction<'_>,
+        signed: &SignedOperation,
+        operation: &ThreadOperation,
+        store: &impl ObjectStore,
+        compare_frontier: bool,
+        imported: Option<&objects::object::thread_replication::delegated_import::DelegatedImport>,
+        authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        defer_references: bool,
+    ) -> Result<Admission> {
+        if imported.is_some_and(|bound| bound.converted() != operation) {
+            return Err(Error::Hybrid(api::hybrid_codec::Reject::Scope));
+        }
         let id = operation.id()?;
         let already_accepted: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND canonical=?2 AND signature=?3 AND status=1)",
@@ -1026,9 +1053,7 @@ impl ThreadReplica {
             ThreadOperationBody::Capture(bytes) => {
                 Some(State::decode_current_msgpack(&bytes.result.state)?.id())
             }
-            ThreadOperationBody::Integration(_)
-            | ThreadOperationBody::HostedImport(_)
-            | ThreadOperationBody::LocalIntegration(_) => {
+            ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
             ThreadOperationBody::Discussion(_)
@@ -1088,11 +1113,16 @@ impl ThreadReplica {
             )?;
         }
         collaboration::index_operation(tx, operation)?;
-        self.admit_ready(tx, store)?;
+        self.admit_ready(tx, store, imported)?;
         status(tx, &id)
     }
 
-    fn admit_ready(&self, tx: &Transaction<'_>, store: &impl ObjectStore) -> Result<()> {
+    fn admit_ready(
+        &self,
+        tx: &Transaction<'_>,
+        store: &impl ObjectStore,
+        imported: Option<&objects::object::thread_replication::delegated_import::DelegatedImport>,
+    ) -> Result<()> {
         let genesis_bytes: Vec<u8> = tx.query_row(
             "SELECT genesis FROM threads WHERE id=?1",
             [self.thread.as_bytes()],
@@ -1144,7 +1174,11 @@ impl ThreadReplica {
                     )?;
                     continue;
                 }
-                match operation.validate_parents(&genesis, &parents) {
+                let ancestry = match imported.filter(|bound| bound.converted() == &operation) {
+                    Some(bound) => bound.validate_parents(&genesis, &parents),
+                    None => operation.validate_parents(&genesis, &parents),
+                };
+                match ancestry {
                     Ok(()) => {
                         if let Some(state) = operation.source_state()? {
                             if let Some(receipt) = operation.local_integration()? {

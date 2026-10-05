@@ -1,12 +1,12 @@
 #![cfg(feature = "replication")]
 
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedGenesis};
-use heddle_object_model::object::thread_replication::{GenesisOwner, ThreadGenesis, hosted_import};
+use heddle_object_model::object::thread_replication::{GenesisOwner, ThreadGenesis, initial_base};
 
 #[test]
 fn account_thread_genesis_matches_browser_fixture() {
     let signer = Ed25519Signer::from_seed(&[42; 32]).expect("fixed test creator");
-    let seed = hosted_import::synthetic_initial_base().expect("system pre-history");
+    let seed = initial_base::synthetic_initial_base().expect("system pre-history");
     let genesis = ThreadGenesis {
         version: 1,
         spool: "123e4567-e89b-12d3-a456-426614174000".into(),

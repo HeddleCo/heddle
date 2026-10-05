@@ -592,7 +592,7 @@ fn export_scoped(
     // state reachable from no copied ref.
     let mut newly_minted: HashSet<ObjectId> = HashSet::new();
     let hosted_seed =
-        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
+        objects::object::thread_replication::initial_base::synthetic_initial_base()?.id();
 
     for state_id in sorted_states {
         // Already mapped to a git object — the common case for git-imported

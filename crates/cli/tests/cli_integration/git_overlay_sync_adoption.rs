@@ -475,7 +475,7 @@ fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captu
         .get_commit(&head_git)
         .expect("read adopted head mapping")
         .expect("adopted head mapping");
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
         .expect("canonical hosted seed");
     let root_state = adopted
         .store()
@@ -611,7 +611,7 @@ fn adopt_deep_linear_history_registers_a_publishable_native_thread() {
         .get_commit(&git_tip)
         .expect("read tip mapping")
         .expect("tip state mapping");
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
         .expect("canonical hosted seed");
     let root_state = adopted
         .store()

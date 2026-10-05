@@ -19,8 +19,133 @@ REPO = 'heddle-repo'
 API = 'heddle-thread-api'
 HOSTED = 'heddle-hosted-client'
 VERIFIER = 'heddleco-capability-verifier'
+CRYPTO = 'heddle-crypto'
+CLI = 'heddle-cli'
+TIP = 'crates/object-model/src/object/thread_replication.rs'
 # name, file, exact old bytes, replacement, crate, filter, expected assertion
 MUTATIONS = [
+    ('native-fetch-stack', 'crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs',
+     '        Box::pin(async move {', '        async move {', CLI,
+     'fresh_clone_capture_push_main', 'overflowed its stack'),
+    ('device-publication-carrier', 'crates/hosted-client/src/hosted_runtime/device_rpc/publication.rs',
+     '''                thread_api::publication::validate_source_artifacts_with_import_carriers(
+                    scratch, &opening, originals, carriers,
+                )?''',
+     '''                thread_api::publication::validate_source_artifacts(scratch, &opening, originals)?''', HOSTED,
+     'security_f2_complete_device_publication_commits_and_replays_receipt',
+     'complete witnessed DeviceRpc publication'),
+    ('import-tip', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
+     '.validate_parents_inner(genesis, parents, true)',
+     '.validate_parents_inner(genesis, parents, false)', CRYPTO,
+     'import_authority::tests::ancestry', 'one carrier-bound tip operation'),
+    ('import-tip-strict-default', TIP,
+     'self.validate_parents_inner(genesis, parents, false)',
+     'self.validate_parents_inner(genesis, parents, true)', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', 'carrierless and ordinary parentless Captures remain strict'),
+    ('import-tip-seed', TIP, 'state.parents.contains(&genesis.base)', 'false', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', 'even a genuine carrier cannot introduce the seed'),
+    ('import-tip-causal-frontier', TIP, '(!imported || !self.parents.is_empty())', '!imported', CRYPTO,
+     'imported_capture_with_nonempty_frontier_keeps_exact_native_ancestry', 'nonempty frontier cannot drop or invent source ancestry'),
+    ('import-tip-carrier-binding', 'crates/object-model/src/object/thread_replication/delegated_import.rs',
+     '''        if import_authority::frontier_digest(&expected).map_err(invalid)?
+            != body.expected_frontier_digest
+            || import_authority::frontier_digest(&resulting).map_err(invalid)?
+                != body.resulting_frontier_digest
+            || import_authority::content_digest(&content).map_err(invalid)?
+                != body.resulting_content_digest''', '        if false', CRYPTO,
+     'imported_capture_cannot_use_seed_or_a_foreign_carrier', "a valid imported root cannot borrow another operation's carrier"),
+    ('genesis-import-policy', 'crates/thread-api/src/hybrid/authority.rs',
+     'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
+     'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
+     'published_import_at_genesis_policy_installs_on_fresh_receiver', 'authenticated genesis policy must install published import evidence'),
+    ('genesis-native-policy', 'crates/thread-api/src/hybrid/authority.rs',
+     'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
+     'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
+     'native_genesis_policy_accepts_empty_revocations_on_fresh_receiver', 'genesis policy has no native revocations'),
+    ('import-tip-canonical-base', TIP,
+     'genesis.base != initial_base::synthetic_initial_base()?.id()', 'false', CRYPTO,
+     'valid_import_carrier_cannot_unlock_noncanonical_genesis_base', 'a valid carrier must still require the canonical synthetic base'),
+    ('genesis-import-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+     """            }) {
+                return None;
+            }
+            return Some(&[]);""",
+     """            }) {
+                return Some(&[]);
+            }
+            return Some(&[]);""", API,
+     'selected_authority_zero_policy_record_refuses_import_revocations', 'local genesis guard must reject a signed zero record for imports'),
+    ('genesis-native-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+     """            }) {
+                return None;
+            }
+            return Some(&[]);""",
+     """            }) {
+                return Some(&[]);
+            }
+            return Some(&[]);""", API,
+     'selected_authority_zero_policy_record_refuses_native_revocations', 'local native genesis guard must reject a signed zero record'),
+    ('owner-effective-interval', 'crates/repo/src/thread_replication/delegated_import.rs',
+     """                from: owner.valid_from_unix_seconds().max(transfer_from),
+                until: match (
+                    timeline
+                        .get(i + 1)
+                        .map(|next| next.valid_from_unix_seconds()),
+                    transfer_until,
+                ) {
+                    (Some(next), Some(transfer)) => Some(next.min(transfer)),
+                    (next, transfer) => next.or(transfer),
+                },""",
+     """                from: 0,
+                until: None,""", REPO,
+     'owner_at_before_claim_returns_prior_authority_and_true_interval', 'assertion `left == right` failed'),
+    ('owner-transfer-interval', 'crates/repo/src/thread_replication/delegated_import.rs',
+     '    for record in transfers {', '    for record in transfers.iter().take(0) {', REPO,
+     'owner_at_transfer_caps_prior_root_and_starts_new_owner_at_acceptance', 'prior root ends at accepted transfer'),
+    ('staging-each-publication', 'crates/repo/src/thread_replication/delegated_import.rs',
+     """        let digest = &operation
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .delegation_digest;
+        let signed = bundle""",
+     """        let digest = &operation
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .delegation_digest;
+        if verified.contains_key(digest) { continue; }
+        let signed = bundle""", API,
+     'staging_checks_each_publication_after_job_key_revocation', "each operation must check its own publication's job revocation"),
+    ('publication-needs-p3', 'crates/capability-verifier/src/import_delegation.rs',
+     """    let Some(publication) = publication else {
+        return Err(Error::Hybrid(contract::Reject::Transition));
+    };""",
+     """    let Some(publication) = publication else {
+        return Ok(verified);
+    };""", VERIFIER,
+     'publication_admission_requires_p3_after_commit_only_preflight', 'Commit and a lone P1 must confer no genesis admission'),
+    ('publication-atomic-pair', 'crates/capability-verifier/src/import_delegation.rs',
+     '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', '', VERIFIER,
+     'publication_admission_requires_equal_transaction_time_and_p1_first', 'P1/P3 must share the transaction and time with P1 first'),
+    ('publication-same-executor', 'crates/capability-verifier/src/import_delegation.rs',
+     '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', '', VERIFIER,
+     'publication_admission_requires_the_same_authenticated_executor',
+     'different authenticated P1/P3 executors must refuse'),
+    ('host-window-ceiling', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
+     '        || prepared.response.max_validity_duration_seconds\n            > authority::MAX_DELEGATION_WINDOW_SECONDS\n', '', HOSTED,
+     'alpha33_preflight_refuses_host_windows_above_seven_days',
+     'even a shorter signed window cannot accept an excessive host D'),
+    ('commit-conflict-wire', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
+     'detail.reason == ErrorReason::ImportDestinationConflict as i32', 'detail.reason == ErrorReason::AlreadyExists as i32', HOSTED,
+     'alpha33_commit_conflicts_have_distinct_typed_outcomes',
+     'Commit wire failures must preserve their typed distinction'),
+    ('publication-live-p1', 'crates/capability-verifier/src/import_delegation.rs',
+     """        s.observed_at_unix_millis / 1000,
+        |r| is_revoked_at_accepted_order(s, r),""",
+     """        signed.body.as_ref().ok_or(Error::Hybrid(contract::Reject::Canonical))?.not_before_unix_seconds,
+        |r| is_revoked_at_accepted_order(s, r),""", VERIFIER,
+     'publication_admission_refuses_p1_outside_delegation_window', 'P1 outside the single delegation window must refuse'),
     ('unwitnessed-capture', NATIVE, '''        if !admissions
             .get(id)
             .is_some_and(|(original, _)| original == record)
@@ -100,7 +225,52 @@ MUTATIONS = [
     ('pending-migration', 'crates/repo/src/local_metadata.rs', 'pub const SCHEMA_VERSION: i64 = 7;',
      'pub const SCHEMA_VERSION: i64 = 6;', REPO,
      'version_six_migrates_pending_native_bindings_without_touching_final_bindings', 'new pending table'),
+    ('part2-install', 'crates/thread-api/src/fetch/hosted.rs',
+     '        crate::hybrid::transfer_ready(&self.ready).map_err(Error::Invalid)?;',
+     '''        repository.install_native_spool_id(
+            self.ready.thread.as_ref().and_then(|t| t.spool.as_ref())
+                .ok_or(Error::Invalid("Spool absent"))?.id.parse::<uuid::Uuid>()
+                .map_err(preparation)?
+        ).map_err(preparation)?;
+        crate::hybrid::transfer_ready(&self.ready).map_err(Error::Invalid)?;''', API,
+     'verify_before_install_rejects_without_partial_repository_mutation', 'rejection must precede Spool mutation'),
+    ('part2-durable-witness', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     'verify_set(signed, &expected, previous.as_ref())?', 'verify_set(signed, &expected, None)?', API,
+     'staged_context_rechecks_concurrent_durable_revocation_before_install',
+     'staged N must never authorize install after durable N+1 revocation'),
+    ('same-job-history', 'crates/repo/src/thread_replication/delegated_import.rs',
+     '        for old in histories.iter().skip(1) {',
+     '        for old in histories.iter().skip(histories.len()) {', REPO,
+     'hybrid_job_history_advances_unselected_threads_and_rejects_every_older_projection',
+     "same job must not lose another Thread's admitted originals"),
+    ('same-job-projections', 'crates/repo/src/thread_replication/delegated_import.rs',
+     'UPDATE hosted_import_proofs SET bundle=?3 WHERE authority=?1 AND bundle=?2',
+     'UPDATE hosted_import_proofs SET bundle=?3 WHERE 0 AND authority=?1 AND bundle=?2', REPO,
+     'hybrid_job_history_advances_unselected_threads_and_rejects_every_older_projection',
+     'unselected Thread history advances atomically'),
+    ('root-checkpoint', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     ' AND (signed_set IS NULL OR (root_id=history_root_id AND root_key=history_root_key))',
+     '', REPO, 'cached_context_concurrent_revocation_and_root_replacement',
+     'a retained checkpoint cannot skip an unadmitted root epoch'),
+
 ]
+
+# The import composition helper also enforces the durable witness checkpoint.
+# Remove both checks to prove the family; removing one leaves the other active.
+EXTRA_MUTATIONS = {
+    'native-fetch-stack': [
+        ('crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs',
+         '        })\n        .await\n    }', '        }\n        .await\n    }'),
+    ],
+    'publication-live-p1': [
+        ('crates/capability-verifier/src/import_delegation.rs',
+         '    contract::check_import_genesis_publication_pair(&verified.verified, s, p)?;', ''),
+    ],
+    'part2-durable-witness': [
+        ('crates/repo/src/thread_replication/delegated_import.rs',
+         '        snapshot.as_ref(),', '        None,'),
+    ],
+}
 
 
 def main():
@@ -131,11 +301,23 @@ def main():
         path = source / file
         original = path.read_text()
         assert original.count(old) == 1, (name, original.count(old))
+        changes = [(path, original, old, new)]
+        for file, before, after in EXTRA_MUTATIONS.get(name, []):
+            extra_path = source / file
+            extra_original = extra_path.read_text()
+            assert extra_original.count(before) == 1, (name, file, extra_original.count(before))
+            changes.append((extra_path, extra_original, before, after))
         for red in [True, False]:
             label = name + ('-red' if red else '-green')
-            command = ['cargo', 'test', '--locked', '-p', crate, '--lib']
+            command = ['cargo', 'test', '--locked', '-p', crate]
+            if crate == CLI:
+                command += ['--features', 'ci', '--test', 'hosted_clone_writes']
+            else:
+                command += ['--lib']
             if crate == HOSTED:
                 command += ['--features', 'client']
+            elif crate == CRYPTO:
+                command += ['--features', 'owner-root']
             command += [test, '--', '--nocapture', '--test-threads', '1']
             log = args.output / (label + '.log')
             env = {**os.environ, 'CARGO_TARGET_DIR': target,
@@ -144,11 +326,18 @@ def main():
             print('RUN', label, flush=True)
             try:
                 if red:
-                    path.write_text(original.replace(old, new))
+                    edited = {}
+                    for changed_path, contents, before, after in changes:
+                        contents = edited.get(changed_path, contents)
+                        assert contents.count(before) == 1, (name, changed_path)
+                        edited[changed_path] = contents.replace(before, after)
+                    for changed_path, contents in edited.items():
+                        changed_path.write_text(contents)
                 with log.open('w') as output:
                     result = subprocess.run(command, cwd=source, env=env, stdout=output, stderr=subprocess.STDOUT)
             finally:
-                path.write_text(original)
+                for changed_path, contents, _, _ in changes:
+                    changed_path.write_text(contents)
             output = log.read_text(errors='replace')
             assert 'could not compile' not in output and 'running 0 tests' not in output, output[-6000:]
             if red:
@@ -160,7 +349,7 @@ def main():
             receipts.append(receipt)
             (args.output / 'results.json').write_text(json.dumps(receipts, indent=2)+'\n')
             print('PASS', label, receipt['seconds'], flush=True)
-            assert path.read_text() == original
+            assert all(changed_path.read_text() == contents for changed_path, contents, _, _ in changes)
     print('ALL', len(selected), 'FAIL-THEN-PASS PAIRS VERIFIED', flush=True)
 
 

@@ -76,22 +76,20 @@ if matches!(decision, Decision::Deny(_)) {
 # }
 ```
 
-### Import Commit admission
+### Import publication admission
 
-Hosts call `import_delegation::verify_commit_admission` with their stored
-`PrepareImportJobResponse`, signed child, exact typed parent (when required),
-signed genesis bindings, independently selected `CurrentContext` and current
-revocation lookup. It checks owner lineage and effective owner expiry at the
-actual host time T, then composes the API's `verify_prepared_delegation`.
-A child with `T < N <= T+S` can be admitted; its parent must already be valid
-at T and contain the entire child window. Expiry remains exclusive.
+`import_delegation::verify_commit_preflight` checks a signed Commit against the
+host-stored preparation, verified owner context and revocations. Bounded future
+starts permit scheduling; Commit grants no genesis admission.
 
-Success establishes admission eligibility only. `verify_current` and
-`verify_new_operation` still require execution time `N <= T < E`; historical
-verification retains its exact authenticated observation. Hosts must also
-verify native originals, creator signatures/envelopes and retained renewal
-genesis contexts, and enforce policy, custody and activation gates atomically.
-Commit admission is a native Rust API with no browser binding.
+`verify_publication_admission` admits a branch only with its exact P1 genesis
+witness and P3 publication: equal witnessed milliseconds and transaction ID,
+P1 ordered first, both live inside the single delegation window. It verifies
+the signed result and cumulative manifest through the API helper and rechecks
+owner, policy and revocations at each observation. Native originals, creator
+signatures, envelopes and custody remain independently verified. The complete
+receiver uses the API's `verify_import_bundle_witnesses` composition helper.
+These admission functions are native Rust APIs; browser signing is preflight.
 
 ### Browser and TypeScript consumers
 

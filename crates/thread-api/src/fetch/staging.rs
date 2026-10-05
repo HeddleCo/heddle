@@ -91,7 +91,36 @@ impl StagedSource {
 impl<R: MessageReader<Error = transport::Error>> Download<R> {
     /// Consume one complete source download into bounded temporary files and
     /// validate its original causal ancestry and exact selected source closure.
-    pub async fn stage(mut self, scratch: &Path) -> Result<StagedSource, Error> {
+    pub async fn stage(self, scratch: &Path) -> Result<StagedSource, Error> {
+        self.stage_inner(scratch, None).await
+    }
+    /// Use independently authenticated import certificates for original Git
+    /// ancestry. Exact native binding is checked after the originals arrive.
+    pub async fn stage_with_import_carriers(
+        self,
+        scratch: &Path,
+        carriers: crypto::import_authority::VerifiedImportCarriers,
+    ) -> Result<StagedSource, Error> {
+        self.stage_inner(scratch, Some(carriers)).await
+    }
+    async fn stage_inner(
+        mut self,
+        scratch: &Path,
+        carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+    ) -> Result<StagedSource, Error> {
+        if let Some(carriers) = &carriers {
+            let mut original = self
+                .state
+                .ready
+                .import_authority
+                .clone()
+                .ok_or(Error::HostedTrustRequired)?;
+            crate::hybrid::history::replace_receiver_metadata(
+                &mut original,
+                carriers.bundle().clone(),
+            )
+            .map_err(preparation)?;
+        }
         if self.state.facets != [SharedFacet::Source as i32] {
             return Err(Error::Invalid("staging requires the source facet alone"));
         }
@@ -166,9 +195,19 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
             file.sync_all().await?;
         }
         drop(files);
-        let ready = self.state.ready;
+        let mut ready = self.state.ready;
+        if let Some(carriers) = &carriers {
+            ready.import_authority = Some(carriers.bundle().clone());
+        }
         tokio::task::spawn_blocking(move || {
-            validate_with_receipts(directory, ready, operations, dependencies, receipt_records)
+            validate_with_receipts_and_carriers(
+                directory,
+                ready,
+                operations,
+                dependencies,
+                receipt_records,
+                carriers,
+            )
         })
         .await
         .map_err(|error| Error::Preparation(error.to_string()))?
@@ -190,8 +229,10 @@ struct DisclosureInput {
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
     allow_partial: bool,
+    carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
 }
 
+#[cfg(test)]
 pub(super) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -199,6 +240,29 @@ pub(super) fn validate_with_receipts(
     dependencies: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<StagedSource, Error> {
+    validate_with_receipts_and_carriers(
+        directory,
+        ready,
+        operations,
+        dependencies,
+        receipt_records,
+        None,
+    )
+}
+pub(super) fn validate_with_receipts_and_carriers(
+    directory: tempfile::TempDir,
+    ready: TransferReady,
+    operations: Vec<SignedOperation>,
+    dependencies: Vec<ThreadGenesisRecord>,
+    receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+) -> Result<StagedSource, Error> {
+    if carriers
+        .as_ref()
+        .is_some_and(|c| ready.import_authority.as_ref() != Some(c.bundle()))
+    {
+        return Err(Error::HostedTrustRequired);
+    }
     let value = validate_disclosure_artifacts(
         ready
             .thread
@@ -218,6 +282,7 @@ pub(super) fn validate_with_receipts(
             dependency_records: dependencies,
             receipt_records,
             allow_partial: !ready.full_closure_available,
+            carriers,
         },
     )?;
     Ok(StagedSource {
@@ -316,6 +381,7 @@ impl ValidatedSourceArtifacts {
         &self.authority_admissions
     }
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_artifacts(
     directory: tempfile::TempDir,
     thread: &ThreadRef,
@@ -324,6 +390,7 @@ pub(crate) fn validate_artifacts(
     operations: Vec<SignedOperation>,
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     validate_disclosure_artifacts(
         thread,
@@ -335,6 +402,7 @@ pub(crate) fn validate_artifacts(
             dependency_records,
             receipt_records,
             allow_partial: false,
+            carriers,
         },
     )
 }
@@ -351,6 +419,7 @@ fn validate_disclosure_artifacts(
         dependency_records,
         receipt_records,
         allow_partial,
+        carriers,
     } = input;
     if operations.len() > 10_000
         || dependency_records.len() >= 128
@@ -415,11 +484,10 @@ fn validate_disclosure_artifacts(
             ));
         }
         let state =
-            heddle_object_model::object::thread_replication::hosted_import::synthetic_initial_base(
-            )
-            .map_err(preparation)?;
+            heddle_object_model::object::thread_replication::initial_base::synthetic_initial_base()
+                .map_err(preparation)?;
         let canonical = state.encode_current_msgpack().map_err(preparation)?;
-        heddle_object_model::object::thread_replication::hosted_import::initial_base_state(
+        heddle_object_model::object::thread_replication::initial_base::initial_base_state(
             &genesis, &canonical,
         )
         .map_err(preparation)?;
@@ -618,9 +686,17 @@ fn validate_disclosure_artifacts(
             }
             pending.extend(frontier);
         }
-        operation
-            .validate_parents(genesis, &parents)
-            .map_err(preparation)?;
+        let imported = carriers
+            .as_ref()
+            .map(|c| c.bind(genesis, operation, &parents))
+            .transpose()
+            .map_err(preparation)?
+            .flatten();
+        match imported {
+            Some(bound) => bound.validate_parents(genesis, &parents),
+            None => operation.validate_parents(genesis, &parents),
+        }
+        .map_err(preparation)?;
         let mut required = operation.parents.clone();
         if let Some(receipt) = operation.local_integration().map_err(preparation)? {
             let source = decoded

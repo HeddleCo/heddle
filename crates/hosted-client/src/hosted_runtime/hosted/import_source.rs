@@ -10,10 +10,7 @@ use wire::ProtocolError;
 use super::{HostedClient, operation_id::ClientOperationId};
 
 mod job;
-pub use job::{
-    ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob,
-    ResolvedImportSource,
-};
+pub use job::{ImportConfiguration, ImportJobState, PreparedImportJob, ResolvedImportSource};
 
 #[cfg(test)]
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
@@ -336,7 +333,16 @@ impl HostedClient {
     ) -> Result<ImportOperationStart, ProtocolError> {
         let operation_id =
             ClientOperationId::caller_or_fresh(RETRY_IMPORT_SOURCE, caller_operation_id);
-        let request = retry_import_source_request(original, operation_id.to_wire())?;
+        let read = self
+            .get_import_job_state_from_operation(original)
+            .await
+            .map_err(super::helpers::hosted_to_protocol_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("import logical job is unavailable".into())
+            })?;
+        let request = read
+            .retry_request(operation_id.to_wire())
+            .map_err(super::helpers::hosted_to_protocol_error)?;
         let original_ref = request.original_operation.as_ref().ok_or_else(|| {
             ProtocolError::InvalidState("original import operation reference is absent".into())
         })?;
@@ -347,6 +353,8 @@ impl HostedClient {
         let response: contract::MutationResponse = self
             .call_unary(RETRY_IMPORT_SOURCE, &request)
             .await
+            .map_err(super::helpers::hosted_to_protocol_error)?;
+        read.validate_retry_response(&request, &response, original.r#ref.as_ref())
             .map_err(super::helpers::hosted_to_protocol_error)?;
         let pending_operation = require_pending_receipt(
             response.receipt,
@@ -426,29 +434,6 @@ impl HostedClient {
     }
 }
 
-fn retry_import_source_request(
-    original: &contract::OperationRecord,
-    client_operation_id: String,
-) -> Result<contract::RetryImportSourceRequest, ProtocolError> {
-    let original_operation = original.r#ref.clone().ok_or_else(|| {
-        ProtocolError::InvalidState("original import operation reference is absent".into())
-    })?;
-    if original.version.is_empty() {
-        return Err(ProtocolError::InvalidState(
-            "original import operation version is absent".into(),
-        ));
-    }
-    Ok(contract::RetryImportSourceRequest {
-        client_operation_id,
-        original_operation: Some(original_operation),
-        expected_operation_version: original.version.clone(),
-        // No HYBRID import authority is claimed; no job binding.
-        logical_job_id: Vec::new(),
-        active_delegation_digest: Vec::new(),
-        expected_authority_epoch: 0,
-    })
-}
-
 fn is_terminal_state(state: i32) -> bool {
     matches!(
         contract::operation_record::State::try_from(state),
@@ -492,7 +477,7 @@ fn protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use api::v2::client::Rpc as _;
-    use objects::object::thread_replication::hosted_import;
+    use objects::object::thread_replication::initial_base;
     use prost::Message;
 
     use super::*;
@@ -500,11 +485,11 @@ mod tests {
     fn signed_proof() -> contract::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
-            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+            fixture["wire_vectors"]["complete_export"]["wire_hex"]
                 .as_str()
                 .expect("wire"),
         )
@@ -579,7 +564,7 @@ mod tests {
     fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("vectors");
         let bytes = hex::decode(
@@ -621,7 +606,7 @@ mod tests {
     fn unavailable_oids_require_explicit_signed_observe_disclosure() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha27.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("fixture");
         let decode = |name: &str| {
@@ -694,6 +679,8 @@ mod tests {
             refs: Vec::new(),
             refs_status: None,
             hash_algorithm: 0,
+            size_estimate_state: 0,
+            git_size_kib: 0,
         };
         assert!(source.connection.is_none());
         assert_eq!(source.provider_repository_id, source.clone_url);
@@ -704,7 +691,7 @@ mod tests {
     #[test]
     fn canonical_initial_base_fits_the_import_bootstrap_bound() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
-        let state = hosted_import::synthetic_initial_base().expect("stable initial base");
+        let state = initial_base::synthetic_initial_base().expect("stable initial base");
         let bytes = state.encode_current_msgpack().expect("canonical state");
         assert!(bytes.len() <= 4096);
     }
@@ -747,28 +734,6 @@ mod tests {
             operation
         );
     }
-
-    #[test]
-    fn retry_request_uses_the_observed_record_and_version() {
-        let _process_env_guard = crate::test_process_env::shared_blocking();
-        let original = contract::OperationRecord {
-            r#ref: Some(contract::RecordRef {
-                spool: Some(contract::SpoolRef {
-                    id: "spool-1".into(),
-                }),
-                id: "durable-operation".into(),
-            }),
-            version: vec![7; 32],
-            state: contract::operation_record::State::Failed as i32,
-            ..Default::default()
-        };
-        let request = retry_import_source_request(&original, "request-id".into())
-            .expect("valid retry request");
-        assert_eq!(request.client_operation_id, "request-id");
-        assert_eq!(request.original_operation, original.r#ref);
-        assert_eq!(request.expected_operation_version, vec![7; 32]);
-    }
-
     #[tokio::test]
     async fn import_source_rejects_an_old_peer_before_sending_unsigned_authority() {
         let _process_env_guard = crate::test_process_env::shared().await;

@@ -90,9 +90,9 @@ impl VerifiedOwnerState {
         &self.authority_key
     }
 
-    // Admission cannot use a state folded at a later clock. Retain every
-    // transition's time floor, even if a later signed transition is backdated.
-    pub(crate) const fn valid_from_unix_seconds(&self) -> i64 {
+    /// Earliest effective time of this accepted state, including every prior
+    /// transition's time floor when a later transition is backdated.
+    pub const fn valid_from_unix_seconds(&self) -> i64 {
         self.valid_from_unix_seconds
     }
 

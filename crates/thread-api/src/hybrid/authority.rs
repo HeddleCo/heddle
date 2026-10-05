@@ -28,8 +28,8 @@ pub trait PublicEvidence {
     fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
         &[]
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
-        &[]
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
+        None
     }
     fn native_envelope(
         &self,
@@ -85,8 +85,8 @@ impl PublicEvidence for wire::ImportPublicProofBundleV1 {
     fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
         &self.delegations
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
-        &self.member_permissions
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
+        self.member_permission.as_ref()
     }
     fn native_envelope(
         &self,
@@ -251,10 +251,10 @@ impl PublicEvidence for PublicProof {
             _ => &[],
         }
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
         match self {
-            Self::Import(b) => &b.member_permissions,
-            _ => &[],
+            Self::Import(b) => b.member_permission.as_ref(),
+            _ => None,
         }
     }
     fn native_envelope(&self, s: &host::HostedWitnessStatementV1) -> Option<(&[u8], Vec<Vec<u8>>)> {
@@ -344,6 +344,25 @@ impl<F, B: PublicEvidence> SelectedAuthority<F, B> {
                 .ok()?;
         Some((envelope, keys))
     }
+
+    fn policy_revocations(&self, statement: &host::HostedWitnessStatementV1) -> Option<&[Vec<u8>]> {
+        if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32] {
+            // Exactly this authenticated head denotes no policy. A signed
+            // record cannot stand in for the implicit genesis policy.
+            if self.bundle.policies().iter().any(|record| {
+                record.body.as_ref().is_some_and(|body| {
+                    body.spool_uuid == statement.spool_uuid
+                        && body.sequence == 0
+                        && body.policy_state_hash == [0; 32]
+                })
+            }) {
+                return None;
+            }
+            return Some(&[]);
+        }
+        self.policy(statement)
+            .map(|policy| policy.revoked_key_ids.as_slice())
+    }
 }
 impl<
     B: PublicEvidence,
@@ -414,9 +433,10 @@ impl<
         statement: &host::HostedWitnessStatementV1,
         revocation: permission::import_delegation::Revocation<'_>,
     ) -> bool {
-        let (Ok(selected), Some(policy)) =
-            (self.history.for_witness(statement), self.policy(statement))
-        else {
+        let (Ok(selected), Some(revoked)) = (
+            self.history.for_witness(statement),
+            self.policy_revocations(statement),
+        ) else {
             return true;
         };
         match revocation {
@@ -435,7 +455,7 @@ impl<
                             }),
                     )
                     .any(|key| api::hybrid_codec::key_id(&key).as_slice() == id);
-                !known || policy.revoked_key_ids.iter().any(|key| key == id)
+                !known || revoked.iter().any(|key| key == id)
             }
             permission::import_delegation::Revocation::Cancellation(namespace, id) => {
                 // Cancellation status is attested at exact accepted order by
@@ -450,8 +470,8 @@ impl<
                         .any(|d| d.cancellation_id == id)
                         && !self
                             .bundle
-                            .member_permissions()
-                            .iter()
+                            .member_permission()
+                            .into_iter()
                             .filter_map(|p| p.body.as_ref())
                             .any(|p| p.cancellation_id == id)
             }
@@ -462,23 +482,21 @@ impl<
         statement: &host::HostedWitnessStatementV1,
         revocation: permission::thread_control_authority::Revocation<'_>,
     ) -> bool {
-        let (Some(policy), Some((envelope, publishers))) =
-            (self.policy(statement), self.native_envelope(statement))
-        else {
+        let (Ok(_), Some(revoked), Some((envelope, publishers))) = (
+            self.history.for_witness(statement),
+            self.policy_revocations(statement),
+            self.native_envelope(statement),
+        ) else {
             return true;
         };
         match revocation {
             permission::thread_control_authority::Revocation::MintRoot(key) => {
                 key != envelope.mint_root_public_key
-                    || policy
-                        .revoked_key_ids
-                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+                    || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Publisher(key) => {
                 !publishers.iter().any(|p| p == key)
-                    || policy
-                        .revoked_key_ids
-                        .contains(&api::hybrid_codec::key_id(key).to_vec())
+                    || revoked.contains(&api::hybrid_codec::key_id(key).to_vec())
             }
             permission::thread_control_authority::Revocation::Credential(id) => {
                 let keys = biscuit_verifier::parse_ed25519_public_keys_hex(
@@ -796,6 +814,10 @@ impl AcceptedHistory {
 }
 
 #[cfg(test)]
+#[path = "authority_policy_tests.rs"]
+mod policy_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use prost::Message;
 
@@ -803,10 +825,10 @@ pub(crate) mod tests {
 
     pub(crate) fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("fixed vectors");
         let bytes = hex::decode(
-            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+            fixture["wire_vectors"]["complete_export"]["wire_hex"]
                 .as_str()
                 .expect("wire bytes"),
         )
@@ -889,7 +911,7 @@ pub(crate) mod tests {
         };
         use repo::thread_replication::delegated_import::AcceptedAuthority as _;
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("published vectors");
         let decode = |name: &str, signed: bool| {
             hex::decode(
@@ -1057,7 +1079,7 @@ pub(crate) mod tests {
             }
         }
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha27.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("published fixture");
         fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
             let vector = fixture["wire_vectors"]
@@ -1076,7 +1098,7 @@ pub(crate) mod tests {
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .map(|name| record(&fixture, name))
         .to_vec();

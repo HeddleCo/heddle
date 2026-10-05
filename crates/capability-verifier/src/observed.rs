@@ -461,6 +461,7 @@ pub enum VerificationErrorCode {
     HybridJobAsWitness,
     /// Hybrid Key Role.
     HybridKeyRole,
+    /// The original native admission window ended.
     /// Hybrid Expired.
     HybridExpired,
     /// Hybrid Scope.
@@ -488,8 +489,6 @@ pub enum VerificationErrorCode {
     HybridGenesisBinding,
     /// Hybrid Import Permission.
     HybridImportPermission,
-    /// Hybrid Renewal Fork.
-    HybridRenewalFork,
     /// Hybrid Stale Manifest.
     HybridStaleManifest,
     /// Hybrid Committed Slot.
@@ -536,7 +535,6 @@ fn hybrid_error_code(reason: heddle_api::hybrid_codec::Reject) -> VerificationEr
         R::ValidityBounds => C::HybridValidityBounds,
         R::GenesisBinding => C::HybridGenesisBinding,
         R::ImportPermission => C::HybridImportPermission,
-        R::RenewalFork => C::HybridRenewalFork,
         R::StaleManifest => C::HybridStaleManifest,
         R::CommittedSlot => C::HybridCommittedSlot,
         R::StaleContext => C::HybridStaleContext,

@@ -100,7 +100,7 @@ pub fn note_for_state(
     mut parents_rewritten: bool,
 ) -> GitProjectionResult<HeddleNote> {
     let hosted_seed =
-        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
+        objects::object::thread_replication::initial_base::synthetic_initial_base()?.id();
     let omits_hosted_seed = state.parents.contains(&hosted_seed);
     let tree = repo
         .store()

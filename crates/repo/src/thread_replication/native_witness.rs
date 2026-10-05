@@ -445,6 +445,7 @@ fn install_in(
         &geneses,
         &admissions,
         &closure,
+        &BTreeMap::new(),
         store,
         context,
         |thread| retain_bundle(context, *thread, bundle),

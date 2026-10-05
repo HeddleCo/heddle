@@ -188,7 +188,6 @@ pub struct HostedExecutionBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostedExecutionKind {
     Integration,
-    Import,
 }
 impl ThreadOperation {
     pub fn hosted_execution_binding(&self) -> Result<Option<HostedExecutionBinding>> {
@@ -201,18 +200,6 @@ impl ThreadOperation {
                 executor: value.executor,
                 initiating_request_proof: value.initiating_request_proof,
                 review_policy_version: Some(value.review_policy_version),
-                executed_at_ms: value.executed_at_ms,
-            }));
-        }
-        if let Some(value) = self.hosted_import()? {
-            value.validate_operation(self)?;
-            return Ok(Some(HostedExecutionBinding {
-                kind: HostedExecutionKind::Import,
-                spool: value.spool,
-                spool_genesis: value.spool_genesis,
-                executor: value.executor,
-                initiating_request_proof: value.initiating_request_proof,
-                review_policy_version: None,
                 executed_at_ms: value.executed_at_ms,
             }));
         }

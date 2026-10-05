@@ -10,7 +10,7 @@ use heddle_cli_contract::cli::commands::wire::bridge::SkippedRefOutput;
 pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
 use objects::{
     lock::RepositoryLockExt,
-    object::{StateId, Tree, thread_replication::hosted_import::synthetic_initial_base},
+    object::{StateId, Tree, thread_replication::initial_base::synthetic_initial_base},
     store::ObjectStore as _,
 };
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};

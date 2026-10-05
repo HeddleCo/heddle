@@ -501,7 +501,7 @@ pub(super) async fn initial_base_roundtrip(
     replica: &repo::thread_replication::ThreadReplica,
 ) {
     let genesis = replica.genesis().expect("fresh Thread genesis");
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
         .expect("canonical seed");
     assert_eq!(
         genesis.base,

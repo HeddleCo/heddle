@@ -171,11 +171,12 @@ for (const definition of fixtureDefinitions) {
   }
 }
 
-const importCases = JSON.parse(execFileSync(nativeVerifier, [
+const allImportCases = JSON.parse(execFileSync(nativeVerifier, [
   "--import-corpus",
   path.join(repositoryRoot, "conformance", "hybrid", "import-authority-host-witness-v1.json"),
 ], { encoding: "utf8" })) as CorpusCase[];
-corpusCases.push(...importCases);
+const importCases = allImportCases.filter((c: CorpusCase) => c.fixture_kind === "import");
+corpusCases.push(...allImportCases);
 for (let mutation = 0; mutation < FUZZ_CASE_COUNT; mutation += 1) {
   const selected = importCases[random.int(importCases.length)];
   const inputs = asRecord(JSON.parse(selected.fixture_json), "import inputs");
@@ -271,6 +272,7 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
     try {
       let value: unknown;
       switch (c.api) {
+        case "import-scope": value = Buffer.from(wasm.remainingImportScope(bytes("scope_hex"), bytes("manifest_hex"))).toString("hex"); break;
         case "native-genesis": value = wasm.verifyNativeGenesisAuthority(bytes("binding_hex"), bytes("original_hex"), bytes("envelope_hex"), bytes("keyring_hex"), bytes("current_owner_hex"), bytes("initial_owner_hex"), bytes("spool_genesis_hex"), String(c.revoked_keys_json), String(c.revoked_credentials_json), now, ttl); break;
         case "owner-root": value = wasm.verifyOwnerRoot(bytes("root_hex")); break;
         case "resource-keyring": value = wasm.verifyResourceKeyring(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
@@ -427,6 +429,15 @@ for (const c of importCases) {
   const actual = nativeById.get(c.id);
   if (c.expected_error === null ? typeof actual?.ok !== "string" : actual?.error !== c.expected_error) {
     divergences.push(`${c.id}: expected import gate ${c.expected_error ?? "success digest"}, actual=${JSON.stringify(actual)}`);
+  }
+}
+
+for (const c of allImportCases.filter((c: CorpusCase) => c.fixture_kind === "production")) {
+  const envelope = asRecord(nativeById.get(c.id)?.ok, "import scope outcome");
+  const definition = asRecord(JSON.parse(c.fixture_json), "import scope definition");
+  if (("ok" in envelope) !== definition.expected_accept ||
+      (definition.expected_code && asRecord(envelope.error, "import scope error").code !== definition.expected_code)) {
+    divergences.push(`${c.id}: expected intended scope verdict, actual=${JSON.stringify(envelope)}`);
   }
 }
 
