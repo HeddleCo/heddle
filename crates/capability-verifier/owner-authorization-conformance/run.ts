@@ -434,7 +434,11 @@ for (const c of importCases) {
 
 for (const c of allImportCases.filter((c: CorpusCase) => c.fixture_kind === "production")) {
   const envelope = asRecord(nativeById.get(c.id)?.ok, "import scope outcome");
-  if (!("ok" in envelope)) divergences.push(`${c.id}: expected remaining scope, actual=${JSON.stringify(envelope)}`);
+  const definition = asRecord(JSON.parse(c.fixture_json), "import scope definition");
+  if (("ok" in envelope) !== definition.expected_accept ||
+      (definition.expected_code && asRecord(envelope.error, "import scope error").code !== definition.expected_code)) {
+    divergences.push(`${c.id}: expected intended scope verdict, actual=${JSON.stringify(envelope)}`);
+  }
 }
 
 for (const c of productionFixture.cases) {

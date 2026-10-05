@@ -297,8 +297,13 @@ def main():
             print('RUN', label, flush=True)
             try:
                 if red:
+                    edited = {}
                     for changed_path, contents, before, after in changes:
-                        changed_path.write_text(contents.replace(before, after))
+                        contents = edited.get(changed_path, contents)
+                        assert contents.count(before) == 1, (name, changed_path)
+                        edited[changed_path] = contents.replace(before, after)
+                    for changed_path, contents in edited.items():
+                        changed_path.write_text(contents)
                 with log.open('w') as output:
                     result = subprocess.run(command, cwd=source, env=env, stdout=output, stderr=subprocess.STDOUT)
             finally:

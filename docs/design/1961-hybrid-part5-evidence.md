@@ -104,9 +104,45 @@ unchanged records, 54 identical files and three retired corpora.
 Affected tests use fresh `HEDDLE_HOME`. Guard proofs run on isolated committed
 sources, require a named runtime assertion failure, restore bytes, and require
 passing controls. Compile failures and empty test selections cannot count.
-Proof commands and receipts live in `scripts/prove-native-witness-guards.py`
-and `/tmp/heddle-alpha33-guards/results.json`. Verification receipts are added
-after the remaining affected checks; full release gates await the tag check.
+All 16 fail-then-pass pairs passed on code revision
+`9791386302fc2d3d36724651408e8c23a01ab2af`: the three imported-tip positives,
+strict default, seed/frontier/carrier/base guards, import/native genesis policy,
+direct signed-zero-record predicates, claim/transfer intervals, per-publication
+revocation, missing P3/Commit-only admission, atomic transaction/time/order, and
+P1 liveness. The final proof-script correction composes multiple mutations to
+one file; the P1 liveness pair then removes both overlapping enforcement checks.
+The remaining diff changes that controller, conformance inputs and receipts,
+not the guarded production Rust. Receipts: `/tmp/heddle-alpha33-final-guards/results.json`
+(15 pairs) and `/tmp/heddle-alpha33-window-guard/results.json` (one pair).
+
+Actual affected outputs:
+
+```text
+crypto import_authority: 33 passed; frozen old-parentless/retired-kind: 1 passed
+capability import_delegation: 23 passed; 1 ignored (fixture printer)
+object-model thread_replication: 26 passed
+repo owner_interval_tests: 2 passed
+repo hosted_trust_tests: 26 passed; crash child rerun: 1 passed; 1 ignored child entry
+Thread API hybrid: 47 passed
+Thread API fetch: 29 passed; corrected hosted selection: 3 passed
+hosted import_source: 28 passed
+CLI import_cli_contract (ci): 11 passed
+Biscuit verifier: 63 unit + 1 conformance passed; native-provider: 1 passed
+WASM build: passed; checked bigint boundary: 374 passed
+OWNER_AUTH_DIFFERENTIAL=PASS seed=38322398 fuzz_cases_per_fixture=24 corpus_cases=272
+ALL 16 FAIL-THEN-PASS PAIRS VERIFIED (15 + 1 receipts)
+```
+
+The repository crash control initially lost its executable during a concurrent
+build; its independent rerun passed. Fetch controls now authenticate carriers
+before staging imported roots. No compilation failure is counted as proof.
+Default and CI-feature clippy pass for all touched crates with warnings/dead
+code denied; the standalone conformance adapter also passes. Nightly rustfmt
+and diff checks pass. Logs: `/tmp/heddle-alpha33-*.log`.
+
+The final tag lookup still returned no `v0.31.0-alpha.33`. Consequently the
+workspace release gate, complete feature matrix, four-seed release parity,
+Part 2/4 release proofs and CI watch have NOT run. PR #1972 remains draft.
 
 Applied surfaces: wire evidence, import/native content, durable receiver,
 staging, replica export/ingest and WASM refusal/bigint bindings. No verb, flag,

@@ -306,14 +306,16 @@ pub fn cases(f: &Value) -> Result<Value, String> {
             record(f, "terminal_manifest")?,
         ),
         (
-            "removed-not-recharged",
+            "reused-remainder-refuses",
             remaining,
             record(f, "partial_manifest")?,
         ),
     ] {
         out.push(json!({"id":format!("import-scope-{id}"), "fixture_kind":"production", "fixture_json":json!({
             "api":"import-scope", "scope_hex":hex::encode(scope.encode_to_vec()),
-            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100", "expected_accept":true,
+            "manifest_hex":hex::encode(manifest.encode_to_vec()), "now":"1100",
+            "expected_accept":id != "reused-remainder-refuses",
+            "expected_code":if id == "reused-remainder-refuses" {Some("hybrid_scope")} else {None},
         }).to_string()}));
     }
     for (id, total, used) in [
