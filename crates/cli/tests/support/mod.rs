@@ -13,6 +13,8 @@ pub use std::{
     str,
 };
 
+mod test_home;
+
 const TEST_PRINCIPAL_NAME: &str = "Heddle Test";
 const TEST_PRINCIPAL_EMAIL: &str = "test@heddle.dev";
 
@@ -43,6 +45,10 @@ pub fn heddle_output_env(
         .env("HEDDLE_PRINCIPAL_NAME", TEST_PRINCIPAL_NAME)
         .env("HEDDLE_PRINCIPAL_EMAIL", TEST_PRINCIPAL_EMAIL)
         .env("HEDDLE_FSMONITOR", "off")
+        .env(
+            "HEDDLE_HOME",
+            default_test_home_path(cwd.unwrap_or_else(|| Path::new("."))).join(".heddle"),
+        )
         .envs(envs.iter().copied());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -108,6 +114,7 @@ pub use tempfile::TempDir;
 /// Initialize a repository used directly by integration tests with an explicit
 /// principal, since library snapshot paths do not load CLI user config.
 pub fn init_test_repository(path: &Path) -> objects::error::Result<Repository> {
+    test_home::isolate_test_home();
     Repository::init_default(path)?;
     seed_test_repo_principal(path)?;
     Repository::open(path)
@@ -510,6 +517,7 @@ pub fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Out
     seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_HOME", default_test_home_path(&dir).join(".heddle"));
     cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
     cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
@@ -568,6 +576,7 @@ pub fn heddle_output_with_env_removed(
     seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_HOME", default_test_home_path(&dir).join(".heddle"));
     cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.env_remove("NO_COLOR");
     for key in remove_envs {
@@ -592,6 +601,7 @@ pub fn heddle_output_with_stdin(
     seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(cwd));
+    cmd.env("HEDDLE_HOME", default_test_home_path(cwd).join(".heddle"));
     cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -888,6 +898,7 @@ pub struct ProcessHeddleHome {
 
 impl ProcessHeddleHome {
     pub fn install(home: &Path) -> Self {
+        test_home::isolate_test_home();
         let guard = PROCESS_HOME.lock().expect("exclusive process home");
         let previous = std::env::var_os("HEDDLE_HOME");
         unsafe { std::env::set_var("HEDDLE_HOME", home) };

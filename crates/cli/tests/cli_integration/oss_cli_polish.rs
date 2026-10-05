@@ -3318,7 +3318,7 @@ fn sibling_checkout_path(repo: &std::path::Path, suffix: &str) -> std::path::Pat
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("repo");
-    repo.with_file_name(format!("{repo_name}-{suffix}"))
+    track_test_temp_path(repo.with_file_name(format!("{repo_name}-{suffix}")), true)
 }
 
 fn assert_schema_declares_runtime_top_level(verb: &[&str], runtime: &Value) {
@@ -4191,7 +4191,8 @@ fn start_path_inside_repo_refuses_before_creating_dirty_nested_checkout() {
 
 #[test]
 fn start_relative_sibling_path_outside_repo_is_accepted_after_normalization() {
-    let temp = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let temp = TempDir::new_in(parent.path()).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     git_commit_all_for_json_contract(temp.path(), "base");
@@ -7281,7 +7282,8 @@ fn cd_hint_quotes_paths_with_spaces() {
 
 #[test]
 fn start_absolute_parent_path_is_normalized_in_text_and_cd_output() {
-    let temp = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let temp = TempDir::new_in(parent.path()).unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed").unwrap();
     heddle(

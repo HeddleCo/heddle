@@ -1685,10 +1685,8 @@ fn git_overlay_push_all_threads_does_not_promote_remote_tracking_threads() {
 #[test]
 fn git_overlay_push_all_threads_skips_threads_dropped_before_push() {
     let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
-    let checkout = work.path().parent().unwrap().join(format!(
-        "{}-heddle-cleaned-thread",
-        work.path().file_name().unwrap().to_string_lossy()
-    ));
+    let checkouts = TempDir::new().unwrap();
+    let checkout = checkouts.path().join("heddle-cleaned-thread");
     let checkout_arg = checkout.to_str().expect("checkout path utf8");
 
     heddle(

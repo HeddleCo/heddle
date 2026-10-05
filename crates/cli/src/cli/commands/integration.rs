@@ -1304,6 +1304,8 @@ mod tests {
     use super::*;
     use crate::cli::Commands;
 
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct HomeEnvGuard(Option<std::ffi::OsString>);
 
     impl HomeEnvGuard {
@@ -1405,7 +1407,6 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn claude_user_install_discovers_workspace_at_runtime() {
-        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
         let home = tempfile::TempDir::new().unwrap();
@@ -1699,7 +1700,6 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn opencode_user_install_discovers_workspace_at_runtime() {
-        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
         let home = tempfile::TempDir::new().unwrap();
@@ -1744,7 +1744,6 @@ mod tests {
         // Serialize env-var access across tests. The credential store
         // (in CLI-owned hosted runtime when the client feature is enabled) has its own mutex; this is
         // a local fallback for cli-only builds.
-        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
         let home = tempfile::TempDir::new().unwrap();

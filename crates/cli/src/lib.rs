@@ -37,7 +37,14 @@ pub use repo::{Repository, remote};
 pub type StoreResult<T> = objects::error::Result<T>;
 
 #[cfg(test)]
+#[path = "../tests/support/test_home.rs"]
+mod test_home;
+#[cfg(test)]
+pub(crate) use test_home::isolate_test_home;
+
+#[cfg(test)]
 pub(crate) fn init_test_repository(path: impl AsRef<std::path::Path>) -> StoreResult<Repository> {
+    isolate_test_home();
     let repo = Repository::init_default(path.as_ref())?;
     let mut config = repo.config().clone();
     config.set_principal("Heddle Test", "test@heddle.dev");
