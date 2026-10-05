@@ -104,9 +104,8 @@ pub use evidence::active_evidence_author;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
 pub use import_source::{
-    ImportConfiguration, ImportJobState, ImportOperationStart, ImportRenewalSubmission,
-    ImportSourceRefError, ImportSourceRefs, ImportSourceStart, PreparedImportJob,
-    ResolvedImportSource,
+    ImportConfiguration, ImportJobState, ImportOperationStart, ImportSourceRefError,
+    ImportSourceRefs, ImportSourceStart, PreparedImportJob, ResolvedImportSource,
 };
 use iroh::{Endpoint, EndpointAddr};
 use objects::{NoopWarnings, Warning, WarningSink};

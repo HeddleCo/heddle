@@ -51,14 +51,80 @@ MUTATIONS = [
      'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
      'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
      'native_genesis_policy_accepts_empty_revocations_on_fresh_receiver', 'genesis policy has no native revocations'),
+    ('import-tip-canonical-base', TIP,
+     'genesis.base != initial_base::synthetic_initial_base()?.id()', 'false', CRYPTO,
+     'valid_import_carrier_cannot_unlock_noncanonical_genesis_base', 'a valid carrier must still require the canonical synthetic base'),
+    ('genesis-import-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+     """            }) {
+                return None;
+            }
+            return Some(&[]);""",
+     """            }) {
+                return Some(&[]);
+            }
+            return Some(&[]);""", API,
+     'selected_authority_zero_policy_record_refuses_import_revocations', 'local genesis guard must reject a signed zero record for imports'),
+    ('genesis-native-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+     """            }) {
+                return None;
+            }
+            return Some(&[]);""",
+     """            }) {
+                return Some(&[]);
+            }
+            return Some(&[]);""", API,
+     'selected_authority_zero_policy_record_refuses_native_revocations', 'local native genesis guard must reject a signed zero record'),
     ('owner-effective-interval', 'crates/repo/src/thread_replication/delegated_import.rs',
-     '''                from: owner.valid_from_unix_seconds(),
-                until: timeline
-                    .get(i + 1)
-                    .map(|next| next.valid_from_unix_seconds()),''',
-     '''                from: 0,
-                until: None,''', REPO,
+     """                from: owner.valid_from_unix_seconds().max(transfer_from),
+                until: match (
+                    timeline
+                        .get(i + 1)
+                        .map(|next| next.valid_from_unix_seconds()),
+                    transfer_until,
+                ) {
+                    (Some(next), Some(transfer)) => Some(next.min(transfer)),
+                    (next, transfer) => next.or(transfer),
+                },""",
+     """                from: 0,
+                until: None,""", REPO,
      'owner_at_before_claim_returns_prior_authority_and_true_interval', 'assertion `left == right` failed'),
+    ('owner-transfer-interval', 'crates/repo/src/thread_replication/delegated_import.rs',
+     '    for record in transfers {', '    for record in transfers.iter().take(0) {', REPO,
+     'owner_at_transfer_caps_prior_root_and_starts_new_owner_at_acceptance', 'prior root ends at accepted transfer'),
+    ('staging-each-publication', 'crates/repo/src/thread_replication/delegated_import.rs',
+     """        let digest = &operation
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .delegation_digest;
+        let signed = bundle""",
+     """        let digest = &operation
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .delegation_digest;
+        if verified.contains_key(digest) { continue; }
+        let signed = bundle""", API,
+     'staging_checks_each_publication_after_job_key_revocation', "each operation must check its own publication's job revocation"),
+    ('publication-needs-p3', 'crates/capability-verifier/src/import_delegation.rs',
+     """    let Some(publication) = publication else {
+        return Err(Error::Hybrid(contract::Reject::Transition));
+    };""",
+     """    let Some(publication) = publication else {
+        return Ok(verified);
+    };""", VERIFIER,
+     'publication_admission_requires_p3_after_commit_only_preflight', 'Commit and a lone P1 must confer no genesis admission'),
+    ('publication-atomic-pair', 'crates/capability-verifier/src/import_delegation.rs',
+     """        || s.observed_at_unix_millis != p.observed_at_unix_millis
+        || s.host_transaction_id != p.host_transaction_id
+        || s.admission_order >= p.admission_order""", '', VERIFIER,
+     'publication_admission_requires_equal_transaction_time_and_p1_first', 'P1/P3 must share the transaction and time with P1 first'),
+    ('publication-live-p1', 'crates/capability-verifier/src/import_delegation.rs',
+     """        s.observed_at_unix_millis / 1000,
+        |r| is_revoked_at_accepted_order(s, r),""",
+     """        signed.body.as_ref().ok_or(Error::Hybrid(contract::Reject::Canonical))?.not_before_unix_seconds,
+        |r| is_revoked_at_accepted_order(s, r),""", VERIFIER,
+     'publication_admission_refuses_p1_outside_delegation_window', 'P1 outside the single delegation window must refuse'),
     ('unwitnessed-capture', NATIVE, '''        if !admissions
             .get(id)
             .is_some_and(|(original, _)| original == record)
@@ -165,21 +231,16 @@ MUTATIONS = [
      ' AND (signed_set IS NULL OR (root_id=history_root_id AND root_key=history_root_key))',
      '', REPO, 'cached_context_concurrent_revocation_and_root_replacement',
      'a retained checkpoint cannot skip an unadmitted root epoch'),
-    ('post-transfer-policy', 'crates/capability-verifier/src/policy.rs',
-     '    if !saw_k_max || tip.ownership_transfer_sequence != k_max {',
-     '    if false {', REPO,
-     'review_transfer_preserves_original_genesis_and_exact_historical_prefixes',
-     'a transferred owner must select its own accepted policy phase'),
-    ('retry-known-history', 'crates/hosted-client/src/hosted_runtime/hosted/import_source/job.rs',
-     '        for operation in &proof.operations {',
-     '        for operation in proof.operations.iter().take(0) {', HOSTED,
-     'alpha31_renew_is_authority_only_and_retry_has_an_independent_fresh_uuid',
-     'retry must not reuse a retained publication attempt'),
+
 ]
 
 # The import composition helper also enforces the durable witness checkpoint.
 # Remove both checks to prove the family; removing one leaves the other active.
 EXTRA_MUTATIONS = {
+    'publication-live-p1': [
+        ('crates/capability-verifier/src/import_delegation.rs',
+         '        || s.observed_at_unix_millis != p.observed_at_unix_millis\n', ''),
+    ],
     'part2-durable-witness': [
         ('crates/repo/src/thread_replication/delegated_import.rs',
          '        snapshot.as_ref(),', '        None,'),

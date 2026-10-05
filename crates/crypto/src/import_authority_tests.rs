@@ -38,7 +38,7 @@ fn trusted_set(f: &Value, name: &str, now: i64) -> VerifiedWitnessSet {
             root_epoch: 1,
             now_unix_millis: now,
             clock_floor_unix_millis: 1000000,
-            known_job_keys: &[key(f, "job"), key(f, "renew_job")],
+            known_job_keys: &[key(f, "job"), key(f, "device")],
         },
         None,
     )
@@ -103,33 +103,8 @@ fn delegation_record(
 
 fn fixture_carriers(f: &Value) -> VerifiedImportCarriers {
     let original = delegation(f, 1100);
-    let signed: wire::SignedImportJobDelegationV1 = record(f, "renewed_delegation");
-    let identity: wire::ImportIdentityV1 = record(f, "identity");
-    let chain = hex::decode(
-        f["context"]["owner_chain_digest_hex"]
-            .as_str()
-            .expect("chain"),
-    )
-    .expect("hex");
-    let renewed = contract::verify_delegation(
-        &signed,
-        Some(&record(f, "renewed_permission")),
-        &contract::ImportOwnerExpectation {
-            identity: &identity,
-            owner_public_key: &key(f, "owner"),
-            owner_chain_digest: &chain,
-            authority_expires_at_seconds: 2000,
-            now_unix_seconds: 1250,
-            forbidden_job_keys: &[key(f, "root"), key(f, "witness")],
-            known_job_associations: &[],
-        },
-    )
-    .expect("renewed certificate");
-    VerifiedImportCarriers::new(
-        record(f, "complete_renewed_export"),
-        vec![original.scope().clone(), renewed],
-    )
-    .expect("signed import carriers")
+    VerifiedImportCarriers::new(record(f, "complete_export"), original.scope().clone())
+        .expect("signed import carriers")
 }
 
 #[test]
@@ -252,7 +227,7 @@ fn proof_substitution_shape_and_bounds_reject_before_native_authority() {
 #[test]
 fn canonical_wire_and_size_limits_reject_before_any_trusted_installation() {
     let f = fixture();
-    let bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     let mut bytes = bundle.encode_to_vec();
     let decoded: wire::ImportPublicProofBundleV1 =
         hybrid_codec::strict_decode(&bytes, contract::MAX_BUNDLE_BYTES)
@@ -279,7 +254,7 @@ fn canonical_wire_and_size_limits_reject_before_any_trusted_installation() {
 fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     let f = fixture();
     let d = delegation(&f, 1100);
-    let b: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let b: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     let p: wire::ImportGenesisWitnessV1 = record(&f, "genesis_payload");
     verify_native_genesis(p.original_genesis.as_ref().expect("genesis"))
         .expect("native genesis signature control");
@@ -297,7 +272,6 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     let converted: wire::SignedRecord = record(&f, "converted_main");
     let content = verify_delegated_import(
         &record(&f, "operation_main"),
-        &d,
         &d,
         &original,
         &converted,
@@ -345,7 +319,7 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     contract::verify_operation(&job, d.scope())
         .expect("valid job scope/signature surrounding control");
     assert!(matches!(
-        verify_delegated_import(&job, &d, &d, &original, &wrong_role, &[]),
+        verify_delegated_import(&job, &d, &original, &wrong_role, &[]),
         Err(Error::Contract(Reject::KeyRole))
     ));
     let set = trusted_set(&f, "retired_set", 1350000);
@@ -381,7 +355,6 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
         verify_delegated_import(
             &record(&f, "scope_violation"),
             &d,
-            &d,
             &original,
             &converted,
             &[]
@@ -396,14 +369,7 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
     let mut altered = converted.clone();
     altered.signatures[0].signature[0] ^= 1;
     assert!(matches!(
-        verify_delegated_import(
-            &record(&f, "operation_main"),
-            &d,
-            &d,
-            &original,
-            &altered,
-            &[]
-        ),
+        verify_delegated_import(&record(&f, "operation_main"), &d, &original, &altered, &[]),
         Err(Error::Native(crate::thread_operation::Error::Signature(_)))
     ));
 }
@@ -421,7 +387,14 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     verify_genesis_payload(&payload, &evidence, &d, |_| false)
         .expect("independent native genesis control");
     let mut changed = payload.clone();
-    let other: wire::SignedImportMemberPermissionV1 = record(&f, "renewed_permission");
+    let mut other: wire::SignedImportMemberPermissionV1 = record(&f, "permission");
+    other.body.as_mut().expect("permission").cancellation_id = vec![99; 32];
+    other.owner_signature = Some(sign_fixture(
+        &f,
+        "owner",
+        contract::PERMISSION_DOMAIN,
+        other.body.as_ref().expect("body"),
+    ));
     changed.creator_authority_envelope = b"heddle-signed-import-member-permission-v1\0".to_vec();
     changed
         .creator_authority_envelope
@@ -487,7 +460,7 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
 fn native_authority_ownership_and_landing_preserve_original_closure() {
     let f = fixture();
     let set = trusted_set(&f, "retired_set", 1350000);
-    let b: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let b: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     let mut originals = b.original_geneses.clone();
     originals.extend([record(&f, "converted_main"), record(&f, "converted_dev")]);
     for name in [
@@ -712,7 +685,7 @@ fn boundary_vector(
     let proof_name = statement_name.replace("_statement", "_proof");
     let proof = retired.then(|| record(f, &proof_name));
     let evidence = WitnessEvidence::resolve(&set, &statement, proof.as_ref(), false, now)?;
-    let b: wire::ImportPublicProofBundleV1 = record(f, "complete_renewed_export");
+    let b: wire::ImportPublicProofBundleV1 = record(f, "complete_export");
     let base: wire::ImportAuthorityWitnessV1 = record(f, "authority_admission_payload");
     let mut originals = b.original_geneses.clone();
     originals.extend(base.original);

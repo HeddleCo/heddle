@@ -484,11 +484,10 @@ fn validate_disclosure_artifacts(
             ));
         }
         let state =
-            heddle_object_model::object::thread_replication::hosted_import::synthetic_initial_base(
-            )
-            .map_err(preparation)?;
+            heddle_object_model::object::thread_replication::initial_base::synthetic_initial_base()
+                .map_err(preparation)?;
         let canonical = state.encode_current_msgpack().map_err(preparation)?;
-        heddle_object_model::object::thread_replication::hosted_import::initial_base_state(
+        heddle_object_model::object::thread_replication::initial_base::initial_base_state(
             &genesis, &canonical,
         )
         .map_err(preparation)?;

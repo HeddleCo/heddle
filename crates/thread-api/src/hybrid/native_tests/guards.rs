@@ -512,3 +512,98 @@ async fn native_hosted_export_refuses_a_carrierless_local_original() {
         "carrierless hosted export must reject"
     );
 }
+
+#[test]
+fn selected_authority_zero_policy_record_refuses_native_revocations() {
+    use heddleco_capability_verifier::{self as permission, VerificationLimits};
+    use repo::thread_replication::hosted_trust::TrustTransaction;
+    let mut clean: wire::NativePublicProofBundleV1 = record(&fixture(), "account_source");
+    let mut zero = clean.policies[0].clone();
+    clean.policies.clear();
+    for signed in &mut clean.statements {
+        let body = signed.body.as_mut().expect("statement");
+        body.policy_sequence = 0;
+        body.policy_state_hash = vec![0; 32];
+        let entry = clean
+            .witness_set
+            .as_ref()
+            .expect("set")
+            .body
+            .as_ref()
+            .expect("body")
+            .entries
+            .iter()
+            .find(|e| e.executor_id == body.executor_id)
+            .expect("executor");
+        signed.signature = signer(&entry.public_key)
+            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
+            .expect("signature");
+    }
+    sort(&mut clean);
+    let body = zero.body.as_mut().expect("policy");
+    body.sequence = 0;
+    body.policy_state_hash = vec![0; 32];
+    let f = fixture();
+    let owner = Ed25519Signer::from_seed(
+        &hex::decode(f["keys"]["owner"]["seed_hex"].as_str().expect("seed")).expect("hex"),
+    )
+    .expect("owner");
+    zero.owner_signature = Some(wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(owner.public_key()),
+        signature: owner
+            .sign(&permission::policy::policy_signature_digest(body).expect("digest"))
+            .expect("signature"),
+    });
+    let statement = clean
+        .statements
+        .iter()
+        .find_map(|s| s.body.as_ref().filter(|s| s.purpose == 1))
+        .expect("genesis");
+    let original = clean
+        .genesis_witnesses
+        .iter()
+        .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == statement.canonical_payload))
+        .expect("original")
+        .original_genesis
+        .as_ref()
+        .expect("genesis");
+    let publisher = &original.signatures[0].public_key;
+    let limits = VerificationLimits::new(30 * 24 * 60 * 60).expect("limits");
+    let pinned =
+        super::super::authority::tests::selected(&super::super::authority::tests::bundle(), limits);
+    for poisoned in [false, true] {
+        // Build accepted history before injecting the zero record. The assertion
+        // calls the local predicate without portable policy-chain validation.
+        let history =
+            AcceptedHistory::from_native_spool(&clean, &pinned, 1100, limits).expect("history");
+        let mut carried = clean.clone();
+        if poisoned {
+            carried.policies.push(zero.clone());
+        }
+        let authority = SelectedAuthority::new_native(
+            history,
+            carried,
+            |_: &wire::NativePublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+        );
+        let revoked = authority.native_revoked(
+            statement,
+            permission::thread_control_authority::Revocation::Publisher(publisher),
+        );
+        assert_eq!(
+            revoked, poisoned,
+            "local native genesis guard must reject a signed zero record"
+        );
+        for (sequence, hash) in [(0, Vec::new()), (0, vec![1; 32]), (1, vec![1; 32])] {
+            let mut unknown = statement.clone();
+            unknown.policy_sequence = sequence;
+            unknown.policy_state_hash = hash;
+            assert!(
+                authority.native_revoked(
+                    &unknown,
+                    permission::thread_control_authority::Revocation::Publisher(publisher)
+                ),
+                "unknown or absent native policy fails closed directly"
+            );
+        }
+    }
+}

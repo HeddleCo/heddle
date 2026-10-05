@@ -120,27 +120,17 @@ pub fn verify_native_operation(
 
 /// Job signature + owner-authorized scope + exact native content/ancestry. A
 /// publication witness is independently required before durable installation.
-/// `converter` is the original verified delegation whose job key signed the
-/// retained native conversion; renewal never re-signs those original bytes.
+/// The sole verified delegation also binds the native converter job key.
 pub fn verify_delegated_import(
     signed: &wire::SignedDelegatedImportOperationV1,
     delegation: &VerifiedImportDelegation,
-    converter: &VerifiedImportDelegation,
     genesis: &VerifiedImportGenesis,
     converted: &wire::SignedRecord,
     parents: &[ThreadOperation],
 ) -> Result<DelegatedImport> {
     let (_, operation) = verify_native_operation(converted)?;
     let active = delegation.scope().body();
-    let original = converter.scope().body();
-    let active_id = active.identity.as_ref().ok_or(Reject::Canonical)?;
-    let converter_id = original.identity.as_ref().ok_or(Reject::Canonical)?;
-    if operation.publisher.as_slice() != original.job_public_key
-        || active.logical_job_id != original.logical_job_id
-        || active.retry_lineage_id != original.retry_lineage_id
-        || active_id.spool_uuid != converter_id.spool_uuid
-        || active_id.spool_genesis_digest != converter_id.spool_genesis_digest
-    {
+    if operation.publisher.as_slice() != active.job_public_key {
         return Err(Reject::KeyRole.into());
     }
     let binding = genesis.payload.binding.as_ref().ok_or(Reject::Canonical)?;
@@ -220,18 +210,21 @@ pub fn bind_import_original(
 #[derive(Clone)]
 pub struct VerifiedImportCarriers {
     bundle: wire::ImportPublicProofBundleV1,
-    delegations: Vec<contract::VerifiedImportDelegation>,
+    delegation: contract::VerifiedImportDelegation,
 }
 impl VerifiedImportCarriers {
     pub fn new(
         bundle: wire::ImportPublicProofBundleV1,
-        delegations: Vec<contract::VerifiedImportDelegation>,
+        delegation: contract::VerifiedImportDelegation,
     ) -> Result<Self> {
         contract::validate_public_bundle(&bundle)?;
-        Ok(Self {
-            bundle,
-            delegations,
-        })
+        if !bundle.delegations.first().is_some_and(|signed| {
+            contract::signed_delegation_digest(signed)
+                .is_ok_and(|digest| digest == delegation.digest())
+        }) {
+            return Err(Reject::Scope.into());
+        }
+        Ok(Self { bundle, delegation })
     }
     pub fn bind(
         &self,
@@ -239,15 +232,20 @@ impl VerifiedImportCarriers {
         operation: &ThreadOperation,
         parents: &[ThreadOperation],
     ) -> Result<Option<DelegatedImport>> {
-        let scopes = self.delegations.iter().collect::<Vec<_>>();
-        bind_import_original(&self.bundle, &scopes, genesis, operation, parents)
+        bind_import_original(
+            &self.bundle,
+            &[&self.delegation],
+            genesis,
+            operation,
+            parents,
+        )
     }
     pub fn bundle(&self) -> &wire::ImportPublicProofBundleV1 {
         &self.bundle
     }
 }
 
-/// Opaque original creation authority. Later owner transfers/renewals do not
+/// Opaque original creation authority. Later owner transfers do not
 /// replace its creator, account, native signature or first signed binding.
 #[derive(Clone, Debug)]
 pub struct VerifiedImportGenesis {

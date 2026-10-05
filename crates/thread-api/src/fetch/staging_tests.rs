@@ -105,7 +105,7 @@ fn only_exact_portable_empty_seed_stages_without_source_operation() {
         ready.thread.as_ref().expect("Thread"),
     )
     .expect("genesis");
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
         .expect("canonical seed");
     genesis.base = seed.id();
     let signed =

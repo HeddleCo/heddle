@@ -58,6 +58,7 @@ fn owner_at_before_claim_returns_prior_authority_and_true_interval() {
             limits,
         },
         Vec::new(),
+        &[],
     )
     .expect("verified effective timeline");
     assert_eq!(facts.len(), 2);
@@ -93,5 +94,67 @@ fn owner_at_before_claim_returns_prior_authority_and_true_interval() {
     assert!(
         contract::verify_delegation(&certificate, None, &expectation).is_err(),
         "the API refuses claimed authority resolved before the claim"
+    );
+}
+
+#[test]
+fn owner_at_transfer_caps_prior_root_and_starts_new_owner_at_acceptance() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/hybrid/import-authority-host-witness-v1.json"
+    ))
+    .expect("fixture");
+    let device = crypto::Ed25519Signer::from_seed(&[72; 32]).expect("device");
+    let (bundle, authority, _) =
+        super::super::hosted_trust_tests::transferred_bundle(&fixture, &device);
+    let states =
+        public_owners((&bundle).into(), 1350).expect("authenticated transfer and owner histories");
+    let prior = import_owner_facts(
+        &states,
+        authority.selection(0),
+        Vec::new(),
+        &bundle.ownership_transfers,
+    )
+    .expect("old resource owner");
+    let next = import_owner_facts(
+        &states,
+        authority.selection(1),
+        Vec::new(),
+        &bundle.ownership_transfers,
+    )
+    .expect("new resource owner");
+    assert_eq!(
+        (prior[0].from, prior[0].until),
+        (0, Some(1250)),
+        "prior root ends at accepted transfer"
+    );
+    assert_eq!(
+        (next[0].from, next[0].until),
+        (1250, None),
+        "new root starts at accepted transfer, not account creation"
+    );
+    let current = next[0].identity.clone();
+    let mut timeline = prior;
+    timeline.extend(next);
+    let before = owner_fact_at(&timeline, &current, Some(1249)).expect("prior state");
+    let after = owner_fact_at(&timeline, &current, Some(1250)).expect("transferred state");
+    assert_ne!(before.identity.owner_id, after.identity.owner_id);
+    let expectation = after.expectation(&[]);
+    let expected = contract::ImportOwnerExpectation {
+        identity: expectation.identity,
+        owner_public_key: expectation.owner_public_key,
+        owner_chain_digest: expectation.owner_chain_digest,
+        authority_expires_at_seconds: expectation.authority_expires_at_seconds,
+        now_unix_seconds: 1250,
+        forbidden_job_keys: expectation.forbidden_job_keys,
+        known_job_associations: &[],
+    };
+    assert!(
+        contract::verify_delegation(
+            &bundle.delegations[0],
+            bundle.member_permission.as_ref(),
+            &expected
+        )
+        .is_err(),
+        "prior resource authority cannot execute after transfer"
     );
 }

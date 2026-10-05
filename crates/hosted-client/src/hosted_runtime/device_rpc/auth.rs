@@ -488,8 +488,7 @@ pub(super) fn source_revision_visible(
         };
         let genesis = owner.genesis()?;
         if revision == genesis.base {
-            let seed =
-                objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+            let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()?;
             if revision != seed.id() {
                 let Some(parent) = genesis.parent else {
                     return Ok(false);
@@ -614,7 +613,7 @@ fn signed_unmaterialized_source_visible(
     revision: objects::object::StateId,
 ) -> Result<bool> {
     use objects::object::{ContentHash, StateId, visible};
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()?;
     let Some(target_audience) = reader_audience(repository, replica, principal, agent)? else {
         return Ok(false);
     };
@@ -822,7 +821,7 @@ fn source_content_projection(
         return Ok(None);
     };
     let mut floor = repository.effective_visibility_tier(&revision)?;
-    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()?;
     let lineage_set: BTreeSet<_> = lineage.iter().copied().collect();
     let mut originals: BTreeMap<
         objects::object::StateId,

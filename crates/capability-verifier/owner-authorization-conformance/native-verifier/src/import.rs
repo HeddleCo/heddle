@@ -139,7 +139,7 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         let mut child = d.clone();
         let b = child.body.as_mut().ok_or("delegation")?;
         b.delegating_public_key = key(f, role)?;
-        b.job_public_key = key(f, "renew_job")?;
+        b.job_public_key = key(f, "device")?;
         b.job_key_id = hybrid_codec::key_id(&b.job_public_key);
         b.parent_permission_digest =
             contract::signed_permission_digest(&parent).map_err(|e| e.to_string())?;
@@ -237,9 +237,19 @@ pub fn cases(f: &Value) -> Result<Value, String> {
         )?;
         if case["id"] == "claimed-human-after-deadline" {
             let mut revoked = c;
-            revoked.revoked_json =
-                serde_json::to_string(&[hex::encode(hybrid_codec::key_id(&key(f, "device")?))])
-                    .map_err(|e| e.to_string())?;
+            let certificate: SignedImportJobDelegationV1 = hybrid_codec::strict_decode(
+                &hex::decode(&revoked.certificate_hex).map_err(|e| e.to_string())?,
+                contract::MAX_BUNDLE_BYTES,
+            )
+            .map_err(|e| e.to_string())?;
+            revoked.revoked_json = serde_json::to_string(&[hex::encode(
+                &certificate
+                    .body
+                    .as_ref()
+                    .ok_or("claimed certificate")?
+                    .job_key_id,
+            )])
+            .map_err(|e| e.to_string())?;
             add("claimed-human-revoked", revoked, Some("witness is revoked"))?;
         }
     }

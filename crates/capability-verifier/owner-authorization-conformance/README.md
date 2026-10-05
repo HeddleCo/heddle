@@ -2,7 +2,7 @@
 
 This repository owns the executable parity gate for the canonical verifier.
 The harness starts from every checked-in `conformance/fixtures/*` matrix and
-API alpha.32's verbatim HYBRID fixture. It applies deterministic evidence
+API alpha.33's verbatim HYBRID fixture. It applies deterministic evidence
 mutations and sends identical inputs to:
 
 1. a native adapter whose dependency is the repository root by path; and

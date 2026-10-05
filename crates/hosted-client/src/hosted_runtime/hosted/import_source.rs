@@ -10,10 +10,7 @@ use wire::ProtocolError;
 use super::{HostedClient, operation_id::ClientOperationId};
 
 mod job;
-pub use job::{
-    ImportConfiguration, ImportJobState, ImportRenewalSubmission, PreparedImportJob,
-    ResolvedImportSource,
-};
+pub use job::{ImportConfiguration, ImportJobState, PreparedImportJob, ResolvedImportSource};
 
 #[cfg(test)]
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
@@ -480,7 +477,7 @@ fn protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use api::v2::client::Rpc as _;
-    use objects::object::thread_replication::hosted_import;
+    use objects::object::thread_replication::initial_base;
     use prost::Message;
 
     use super::*;
@@ -488,11 +485,11 @@ mod tests {
     fn signed_proof() -> contract::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha32.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("alpha.25 fixed vectors");
         let bytes = hex::decode(
-            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+            fixture["wire_vectors"]["complete_export"]["wire_hex"]
                 .as_str()
                 .expect("wire"),
         )
@@ -567,7 +564,7 @@ mod tests {
     fn discovered_oids_must_be_pinned_and_conflicting_advertisements_refuse() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha32.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("vectors");
         let bytes = hex::decode(
@@ -609,7 +606,7 @@ mod tests {
     fn unavailable_oids_require_explicit_signed_observe_disclosure() {
         let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../thread-api/tests/fixtures/hybrid-alpha32.json"
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
         )))
         .expect("fixture");
         let decode = |name: &str| {
@@ -694,7 +691,7 @@ mod tests {
     #[test]
     fn canonical_initial_base_fits_the_import_bootstrap_bound() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
-        let state = hosted_import::synthetic_initial_base().expect("stable initial base");
+        let state = initial_base::synthetic_initial_base().expect("stable initial base");
         let bytes = state.encode_current_msgpack().expect("canonical state");
         assert!(bytes.len() <= 4096);
     }

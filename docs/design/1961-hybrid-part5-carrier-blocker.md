@@ -18,5 +18,4 @@ exact native source-parent equality. Duplicate State parents reject.
 
 Standalone `ThreadOperation::validate_parents` remains strict. Ordinary native
 Captures and LocalIntegration retain their existing rules. State IDs, the
-converter and signing formats are unchanged. The retired HostedImport arm is
-not used to admit this exception. See the Part 5 evidence for the path audit.
+converter and signing formats are unchanged. The retired HostedImport body and kind have been deleted. See the Part 5 evidence for the path audit.

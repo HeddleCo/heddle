@@ -279,7 +279,7 @@ impl ThreadReplica {
     /// and their causal dependencies. A selected genesis requires no conversion.
     /// The callback must install actual packs/pins/sidecars through its journal;
     /// any callback or commit-time rejection restores them under the trust lock.
-    /// Public evidence includes the complete post-renewal history.
+    /// Public evidence includes the complete cumulative publication history.
     /// Canonical protobuf is checked before trusting typed fields. `store` must
     /// be an isolated staging store: receives may write source states there.
     /// Publish its actual pack and sidecars through the callback journal.
@@ -419,6 +419,7 @@ fn import_owner_facts(
     states: &BTreeMap<[u8; 32], heddleco_capability_verifier::VerifiedOwnerState>,
     selection: Selection<'_>,
     forbidden: Vec<Vec<u8>>,
+    transfers: &[wire::ResourceTransferAuditRecord],
 ) -> Result<Vec<ImportOwnerFacts>> {
     let mut timeline = states
         .values()
@@ -430,6 +431,31 @@ fn import_owner_facts(
         .any(|w| w[0].sequence() == w[1].sequence())
     {
         return Err(Reject::Root.into());
+    }
+    let account = &selection
+        .owner
+        .signed_root()
+        .root
+        .as_ref()
+        .ok_or(Reject::Root)?
+        .account_uuid;
+    let mut transfer_from = 0;
+    let mut transfer_until = None;
+    for record in transfers {
+        let handoff = record
+            .transfer
+            .as_ref()
+            .and_then(|t| t.acceptance.as_ref())
+            .and_then(|a| a.signed_handoff.as_ref())
+            .and_then(|h| h.handoff.as_ref())
+            .ok_or(Reject::Root)?;
+        if handoff.destination_owner_uuid == *account {
+            transfer_from = record.committed_at_unix_seconds;
+        }
+        if handoff.source_owner_uuid == *account {
+            transfer_until = Some(record.committed_at_unix_seconds);
+            break;
+        }
     }
     timeline
         .iter()
@@ -446,16 +472,22 @@ fn import_owner_facts(
                 expiry,
                 key: owner.authority_key().public_key.clone(),
                 forbidden,
-                from: owner.valid_from_unix_seconds(),
-                until: timeline
-                    .get(i + 1)
-                    .map(|next| next.valid_from_unix_seconds()),
+                from: owner.valid_from_unix_seconds().max(transfer_from),
+                until: match (
+                    timeline
+                        .get(i + 1)
+                        .map(|next| next.valid_from_unix_seconds()),
+                    transfer_until,
+                ) {
+                    (Some(next), Some(transfer)) => Some(next.min(transfer)),
+                    (next, transfer) => next.or(transfer),
+                },
             })
         })
         .collect()
 }
 
-/// Compose API-owned admission order, renewal CAS, narrowing and cumulative
+/// Compose API-owned admission order, single-delegation cumulative
 /// budgets with independently verified owner/policy/native contexts.
 fn verify_import_history(
     bundle: &wire::ImportPublicProofBundleV1,
@@ -531,32 +563,31 @@ pub fn verify_witnessed_import_bundle(
     require_selection: impl Fn(&Selection<'_>) -> Result<()>,
 ) -> Result<contract::VerifiedImportBundleWitnesses> {
     let states = public_owners(bundle.into(), now_millis / 1000)?;
-    let mut facts = Vec::new();
-    for signed in &bundle.delegations {
-        let id = signed
-            .body
-            .as_ref()
-            .and_then(|b| b.identity.as_ref())
-            .ok_or(Reject::Root)?;
-        let selection = authority.for_witness(&host::HostedWitnessStatementV1 {
-            spool_uuid: id.spool_uuid.clone(),
-            spool_genesis_digest: id.spool_genesis_digest.clone(),
-            owner_id: id.owner_id.clone(),
-            owner_state_hash: id.owner_state_hash.clone(),
-            ownership_transfer_sequence: id.ownership_transfer_sequence,
-            ..Default::default()
-        })?;
-        require_selection(&selection)?;
-        facts.push(import_owner_facts(&states, selection, forbidden.to_vec())?);
-    }
-    let mut owner_at = |index: usize, time: Option<i64>| {
-        let timeline = facts.get(index).ok_or(Reject::Root)?;
-        let id = bundle.delegations[index]
-            .body
-            .as_ref()
-            .and_then(|b| b.identity.as_ref())
-            .ok_or(Reject::Root)?;
-        let fact = owner_fact_at(timeline, id, time)?;
+    let [signed] = bundle.delegations.as_slice() else {
+        return Err(Reject::Canonical.into());
+    };
+    let id = signed
+        .body
+        .as_ref()
+        .and_then(|b| b.identity.as_ref())
+        .ok_or(Reject::Root)?;
+    let selection = authority.for_witness(&host::HostedWitnessStatementV1 {
+        spool_uuid: id.spool_uuid.clone(),
+        spool_genesis_digest: id.spool_genesis_digest.clone(),
+        owner_id: id.owner_id.clone(),
+        owner_state_hash: id.owner_state_hash.clone(),
+        ownership_transfer_sequence: id.ownership_transfer_sequence,
+        ..Default::default()
+    })?;
+    require_selection(&selection)?;
+    let facts = import_owner_facts(
+        &states,
+        selection,
+        forbidden.to_vec(),
+        &bundle.ownership_transfers,
+    )?;
+    let mut owner_at = |time: Option<i64>| {
+        let fact = owner_fact_at(&facts, id, time)?;
         Ok(fact.expectation(associations))
     };
     let mut verify_policy =
@@ -836,15 +867,34 @@ fn install_in(
                 .ok_or(Reject::Canonical)?
                 .parent_permission_digest,
         )?;
-        let d = permission::verify_historical_genesis(
+        let import_result = bundle
+            .operations
+            .iter()
+            .find(|o| {
+                o.body
+                    .as_ref()
+                    .is_some_and(|o| o.genesis_digest == binding_body.genesis_digest)
+            })
+            .ok_or(Reject::Transition)?;
+        let (publication_manifest, publication_statement) =
+            find_publication(bundle, import_result)?;
+        let publication_evidence =
+            self::evidence(&bundle.history_proofs, context, publication_statement)?;
+        let d = permission::verify_publication_admission(
             signed,
             member,
             &c,
             payload,
             statement,
             evidence.resolved(),
+            Some(&permission::PublicationWitness {
+                operation: import_result,
+                manifest: publication_manifest,
+                statement: publication_statement,
+                proof: publication_evidence.proof(),
+            }),
             context.set(),
-            |r| authority.import_revoked(s, r),
+            |observation, r| authority.import_revoked(observation, r),
         )?;
         let genesis = verification::verify_genesis_payload_at_boundary(
             payload,
@@ -905,83 +955,7 @@ fn install_in(
             selection.limits,
         )?;
         if s.purpose == 1 {
-            let payload = bundle
-                .genesis_witnesses
-                .iter()
-                .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == s.canonical_payload))
-                .ok_or(Reject::Scope)?;
-            let binding = payload.binding.as_ref().ok_or(Reject::Canonical)?;
-            let digest = contract::signed_genesis_digest(binding)?;
-            let parent = &binding
-                .body
-                .as_ref()
-                .ok_or(Reject::Canonical)?
-                .parent_permission_digest;
-            let d = delegations
-                .values()
-                .find(|d| {
-                    d.scope()
-                        .body()
-                        .branch_manifest
-                        .iter()
-                        .any(|b| b.genesis_authority_digest == digest)
-                        && d.scope().body().parent_permission_digest == *parent
-                })
-                .ok_or(Reject::Scope)?;
-            let c = current_context(selection, context, &forbidden, &job_associations);
-            let verified = permission::verify_historical_genesis(
-                d.signed(),
-                d.member_permission(),
-                &c,
-                payload,
-                statement,
-                evidence.resolved(),
-                context.set(),
-                |r| authority.import_revoked(s, r),
-            )?;
-            let genesis = verification::verify_genesis_payload_at_boundary(
-                payload,
-                &evidence,
-                &verified,
-                &closure,
-                &verification::NativeAuthorityContext {
-                    owner: selection.owner,
-                    spool_uuid: uuid::Uuid::from_bytes(
-                        selection.keyring.owner_genesis().spool_uuid(),
-                    ),
-                    spool_genesis: selection.spool_genesis_digest,
-                    transfer_sequence: selection.keyring.wire().ownership_transfers.len() as u64,
-                    spool_path: &selection
-                        .keyring
-                        .wire()
-                        .canonical_spool_path_segments
-                        .join("/"),
-                    witness_set: context.set(),
-                    original_geneses: crypto::import_authority::OriginalGeneses::Import(
-                        &bundle.genesis_witnesses,
-                    ),
-                    known_job_associations: &job_associations,
-                    forbidden_authority_keys: &forbidden,
-                },
-                |r| authority.native_revoked(s, r),
-            )?;
-            admit_boundary_originals(
-                &mut admissions,
-                payload.boundary_acceptance.as_slice(),
-                &originals,
-                &evidence,
-            )?;
-            admissions.insert(
-                genesis.genesis().id()?,
-                (
-                    payload
-                        .original_genesis
-                        .as_ref()
-                        .ok_or(Reject::Canonical)?
-                        .clone(),
-                    evidence,
-                ),
-            );
+            // Already admitted with its own atomic P3 in the genesis loop.
             continue;
         }
         if s.purpose == 3 {
@@ -1111,22 +1085,13 @@ fn install_in(
         };
         let converted = *converted;
         let (_, native_operation) = verification::verify_native_operation(converted)?;
-        let converter = delegations
-            .values()
-            .find(|v| {
-                v.scope().body().job_public_key == native_operation.publisher
-                    && v.scope().body().logical_job_id == d.scope().body().logical_job_id
-                    && v.scope().body().retry_lineage_id == d.scope().body().retry_lineage_id
-            })
-            .ok_or(Reject::KeyRole)?;
         let parents = native_operation
             .parents
             .iter()
             .map(|id| closure.operation(id).cloned())
             .collect::<verification::Result<Vec<ThreadOperation>>>()?;
-        let content = verification::verify_delegated_import(
-            operation, d, converter, original, converted, &parents,
-        )?;
+        let content =
+            verification::verify_delegated_import(operation, d, original, converted, &parents)?;
         let (manifest, statement) = find_publication(bundle, operation)?;
         let evidence = evidence(&bundle.history_proofs, context, statement)?;
         verification::verify_publication(
@@ -1221,9 +1186,6 @@ pub fn authenticate_import_carriers(
             .as_ref()
             .ok_or(Reject::Canonical)?
             .delegation_digest;
-        if verified.contains_key(digest) {
-            continue;
-        }
         let signed = bundle
             .delegations
             .iter()
@@ -1267,7 +1229,10 @@ pub fn authenticate_import_carriers(
     }
     Ok(verification::VerifiedImportCarriers::new(
         bundle.clone(),
-        verified.into_values().collect(),
+        verified
+            .into_values()
+            .next()
+            .ok_or(Reject::ImportPermission)?,
     )?)
 }
 
@@ -1533,21 +1498,6 @@ pub(super) fn selected_originals(
     Ok(selected)
 }
 
-fn replica_genesis(
-    context: &TrustTransaction<'_>,
-    thread: ContentHash,
-) -> Result<crypto::thread_operation::SignedGenesis> {
-    Ok(context.sql().query_row(
-        "SELECT genesis,genesis_signature FROM threads WHERE id=?1",
-        [thread.as_bytes()],
-        |r| {
-            Ok(crypto::thread_operation::SignedGenesis {
-                canonical: r.get(0)?,
-                signature: r.get(1)?,
-            })
-        },
-    )?)
-}
 pub(super) fn retain_bundle(
     context: &TrustTransaction<'_>,
     thread: &ContentHash,
@@ -1600,12 +1550,8 @@ pub(super) fn retain_bundle(
                 .delegations
                 .iter()
                 .any(|d| !bundle.delegations.contains(d))
-            || old
-                .member_permissions
-                .iter()
-                .any(|p| !bundle.member_permissions.contains(p))
+            || old.member_permission != bundle.member_permission
             || old.manifests.iter().any(|m| !bundle.manifests.contains(m))
-            || old.renewals.iter().any(|r| !bundle.renewals.contains(r))
             || old.policies.iter().any(|p| !bundle.policies.contains(p))
             || old
                 .owner_histories
@@ -1627,161 +1573,6 @@ pub(super) fn retain_bundle(
     Ok(())
 }
 
-/// Native first-admission or landing subject, retaining exact API originals.
-pub enum NativeSubject<'a> {
-    Authority(&'a wire::ImportAuthorityWitnessV1),
-    Landing(&'a wire::HostedLandingWitnessV1),
-}
-/// Complete evidence for one already-known Thread. Dependency objects must be
-/// separately admitted under their own original-author proofs before install.
-pub struct NativeEvidence<'a> {
-    pub set: &'a host::SignedHostedWitnessSetV1,
-    pub statement: &'a host::SignedHostedWitnessStatementV1,
-    pub proof: Option<&'a host::HostedWitnessHistoryProofV1>,
-    pub policy: &'a wire::SignedSpoolPolicyRecord,
-    pub originals: &'a [wire::SignedRecord],
-    pub genesis_witnesses: &'a [wire::ImportGenesisWitnessV1],
-    pub subject: NativeSubject<'a>,
-}
-impl ThreadReplica {
-    /// Part 2's native source/control/landing receive seam. Resolve trust and
-    /// accepted original owner/policy inside the mutation transaction, then
-    /// check current disclosure with `authorize`. Job grants cannot authorize
-    /// any native control or landing; pending dependency closure fails closed.
-    pub fn receive_witnessed(
-        &self,
-        trust: &HostedTrust<impl Clock>,
-        input: &NativeEvidence<'_>,
-        authority: &impl AcceptedAuthority,
-        store: &impl ObjectStore,
-        authorize: impl Fn(&ThreadOperation, i64) -> Result<()>,
-    ) -> Result<Admission> {
-        if self.path.parent().ok_or(Reject::Root)?.canonicalize()?
-            != trust.directory().canonicalize()?
-        {
-            return Err(Error::Hybrid(Reject::Root));
-        }
-        let final_original = match input.subject {
-            NativeSubject::Authority(p) => p.original.as_ref(),
-            NativeSubject::Landing(p) => p.execution.as_ref(),
-        }
-        .ok_or(Reject::Canonical)?;
-        let (_, final_operation) = verification::verify_native_operation(final_original)?;
-        let admitted = trust.mutate_validated(
-            input.set,
-            |context| {
-                let evidence = WitnessEvidence::resolve(
-                    context.set(),
-                    input.statement,
-                    input.proof,
-                    false,
-                    context.now_millis(),
-                )?;
-                let statement = input.statement.body.as_ref().ok_or(Reject::Canonical)?;
-                let selection = authority.for_witness(statement)?;
-                context.require_spool_selection(&selection)?;
-                selection.keyring.verify_current_owner(
-                    selection.owner,
-                    statement.observed_at_unix_millis / 1000,
-                    selection.limits,
-                )?;
-                let policy = input.policy.body.as_ref().ok_or(Reject::Canonical)?;
-                if policy.spool_uuid != statement.spool_uuid
-                    || policy.owner_id != statement.owner_id
-                    || policy.owner_state_hash != statement.owner_state_hash
-                    || policy.ownership_transfer_sequence != statement.ownership_transfer_sequence
-                    || policy.sequence != statement.policy_sequence
-                    || policy.policy_state_hash != statement.policy_state_hash
-                {
-                    return Err(Error::Hybrid(Reject::Scope));
-                }
-                permission::verify_policy_record(input.policy, &[selection.owner])?;
-                let boundaries = match input.subject {
-                    NativeSubject::Authority(p) => p.boundary_acceptances.as_slice(),
-                    NativeSubject::Landing(_) => &[],
-                };
-                let closure = NativeClosure::verify_with_boundaries(input.originals, boundaries)?;
-                let path = selection
-                    .keyring
-                    .wire()
-                    .canonical_spool_path_segments
-                    .join("/");
-                let native = verification::NativeAuthorityContext {
-                    owner: selection.owner,
-                    spool_uuid: uuid::Uuid::from_bytes(
-                        selection.keyring.owner_genesis().spool_uuid(),
-                    ),
-                    spool_genesis: selection.spool_genesis_digest,
-                    transfer_sequence: selection.keyring.wire().ownership_transfers.len() as u64,
-                    spool_path: &path,
-                    witness_set: context.set(),
-                    original_geneses: verification::OriginalGeneses::Import(
-                        input.genesis_witnesses,
-                    ),
-                    known_job_associations: context.job_associations(),
-                    forbidden_authority_keys: &context.forbidden_job_keys(),
-                };
-                let original = match input.subject {
-                    NativeSubject::Authority(payload) => {
-                        verification::verify_authority_payload(
-                            payload,
-                            &evidence,
-                            &closure,
-                            &native,
-                            |r| authority.native_revoked(statement, r),
-                        )?;
-                        if payload.kind != 1 {
-                            return Err(Error::Hybrid(Reject::ImportPermission));
-                        }
-                        payload.original.as_ref().ok_or(Reject::Canonical)?
-                    }
-                    NativeSubject::Landing(payload) => {
-                        verification::verify_landing_payload(
-                            payload,
-                            &evidence,
-                            &closure,
-                            &native,
-                            |r| authority.native_revoked(statement, r),
-                        )?;
-                        payload.execution.as_ref().ok_or(Reject::Canonical)?
-                    }
-                };
-                let (signed, operation) = verification::verify_native_operation(original)?;
-                if operation.thread != self.thread
-                    || context
-                        .job_associations()
-                        .iter()
-                        .any(|(key, _)| key == &operation.publisher)
-                {
-                    return Err(Error::Hybrid(Reject::KeyRole));
-                }
-                let genesis = replica_genesis(context, self.thread)?.verify()?;
-                if closure.genesis(&self.thread)? != &genesis {
-                    return Err(Error::Hybrid(Reject::Root));
-                }
-                authorize(&operation, context.now_millis())?;
-                self.validate_reference_capture(&operation, store)?;
-                retain_statement(context, operation.id()?, &evidence)?;
-                let admitted = self.receive_verified_in(
-                    context.sql(),
-                    &signed,
-                    &operation,
-                    store,
-                    false,
-                    None,
-                    false,
-                )?;
-                if admitted != Admission::Accepted {
-                    return Err(Error::Hybrid(Reject::Scope));
-                }
-                Ok(admitted)
-            },
-            |_, now| authorize(&final_operation, now),
-        )?;
-        self.notify_committed()?;
-        Ok(admitted)
-    }
-}
 pub(super) fn retain_statement(
     context: &TrustTransaction<'_>,
     id: ContentHash,

@@ -40,10 +40,10 @@ fn sync_call_context_and_openings_share_the_disabled_cutover_switch() {
 #[test]
 fn a_complete_public_bundle_has_a_capable_transport_control() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
             .expect("alpha.21 vectors");
     let bytes = hex::decode(
-        fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+        fixture["wire_vectors"]["complete_export"]["wire_hex"]
             .as_str()
             .expect("wire bytes"),
     )
@@ -77,7 +77,7 @@ fn a_complete_public_bundle_has_a_capable_transport_control() {
 #[test]
 fn boundary_acceptance_is_carried_with_its_exact_api_binding() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
             .expect("published vectors");
     let record = |section: &str, name: &str| {
         hex::decode(
@@ -87,10 +87,9 @@ fn boundary_acceptance_is_carried_with_its_exact_api_binding() {
         )
         .expect("hex")
     };
-    let mut bundle = ImportPublicProofBundleV1::decode(
-        record("wire_vectors", "complete_renewed_export").as_slice(),
-    )
-    .expect("complete export");
+    let mut bundle =
+        ImportPublicProofBundleV1::decode(record("wire_vectors", "complete_export").as_slice())
+            .expect("complete export");
     let payload = ImportGenesisWitnessV1::decode(
         record("wire_vectors", "boundary_genesis_payload").as_slice(),
     )

@@ -5,7 +5,7 @@ use repo::thread_replication::{ThreadReplica, hosted_trust::*};
 use super::*;
 
 fn fixture() -> serde_json::Value {
-    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
         .expect("tagged fixture")
 }
 fn record<T: Message + Default>(name: &str) -> T {
@@ -211,4 +211,153 @@ fn real_policy_revoked_job_key_rejects() {
         install(bundle).is_err(),
         "real signed policy revocation must reject"
     );
+}
+
+// Exercise SelectedAuthority directly: upstream bundle validation is deliberately
+// outside this test, so another verifier cannot mask a missing local guard.
+#[test]
+fn selected_authority_zero_policy_record_refuses_import_revocations() {
+    use repo::thread_replication::delegated_import::AcceptedAuthority;
+    let bundle = genesis_policy();
+    let limits = VerificationLimits::new(3600).expect("limits");
+    let pinned = tests::selected(&bundle, limits);
+    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
+        .expect("verified independent owner");
+    let mut authority = SelectedAuthority::new(
+        history,
+        bundle,
+        |_: &wire::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+    );
+    let statement = authority
+        .bundle
+        .statements
+        .iter()
+        .find_map(|s| s.body.as_ref().filter(|s| s.purpose == 1))
+        .expect("genesis observation")
+        .clone();
+    let job = authority.bundle.delegations[0]
+        .body
+        .as_ref()
+        .expect("delegation")
+        .job_key_id
+        .clone();
+    let import = permission::import_delegation::Revocation::Key(&job);
+    assert!(!authority.import_revoked(&statement, import));
+    let mut replacement: wire::SignedSpoolPolicyRecord = record("signed_policy");
+    let body = replacement.body.as_mut().expect("policy");
+    body.sequence = 0;
+    body.policy_state_hash = vec![0; 32];
+    replacement.owner_signature = Some(wire::AuthorizationSignature {
+        signer_key_id: api::hybrid_codec::key_id(signer("owner").public_key()),
+        signature: signer("owner")
+            .sign(&permission::policy::policy_signature_digest(body).expect("digest"))
+            .expect("signed zero record"),
+    });
+    authority.bundle.policies.push(replacement);
+    assert!(
+        authority.import_revoked(&statement, import),
+        "local genesis guard must reject a signed zero record for imports"
+    );
+    authority.bundle.policies.clear();
+    for (sequence, hash) in [(0, Vec::new()), (0, vec![1; 32]), (1, vec![1; 32])] {
+        let mut unknown = statement.clone();
+        unknown.policy_sequence = sequence;
+        unknown.policy_state_hash = hash;
+        assert!(
+            authority.import_revoked(&unknown, import),
+            "unknown or missing policy fails closed directly"
+        );
+    }
+}
+
+#[test]
+fn staging_checks_each_publication_after_job_key_revocation() {
+    use repo::thread_replication::delegated_import;
+    let mut bundle = tests::bundle();
+    let mut later = bundle.policies[0].clone();
+    let body = later.body.as_mut().expect("policy");
+    body.expected_head = Some(wire::SignedPolicyHead {
+        state_hash: body.policy_state_hash.clone(),
+        sequence: body.sequence,
+    });
+    body.sequence += 1;
+    body.policy.as_mut().expect("policy").revoked_key_ids.push(
+        bundle.delegations[0]
+            .body
+            .as_ref()
+            .expect("job")
+            .job_key_id
+            .clone(),
+    );
+    body.policy.as_mut().expect("policy").revoked_key_ids.sort();
+    body.policy_state_hash = permission::policy::policy_state_hash(body)
+        .expect("hash")
+        .to_vec();
+    later.owner_signature = Some(wire::AuthorizationSignature {
+        signer_key_id: api::hybrid_codec::key_id(signer("owner").public_key()),
+        signature: signer("owner")
+            .sign(&permission::policy::policy_signature_digest(body).expect("digest"))
+            .expect("signature"),
+    });
+    for statement in &mut bundle.statements {
+        let s = statement.body.as_mut().expect("statement");
+        if s.observed_at_unix_millis >= 1_200_000 {
+            s.policy_sequence = body.sequence;
+            s.policy_state_hash = body.policy_state_hash.clone();
+        }
+    }
+    bundle.policies.push(later);
+    resign_observations(&mut bundle);
+    let limits = VerificationLimits::new(3600).expect("limits");
+    let pinned = tests::selected(&bundle, limits);
+    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
+        .expect("verified history");
+    let authority = SelectedAuthority::new(
+        history,
+        bundle.clone(),
+        |_: &wire::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+    );
+    let pin = api::import_authority::ImportWitnessRootPin {
+        authority: "https://weft.example.test".into(),
+        root_id: "descriptor-root-1".into(),
+        public_key: signer("root").public_key().to_vec(),
+        epoch: 1,
+    };
+    let result = delegated_import::authenticate_import_carriers(
+        &bundle,
+        &authority,
+        &pin,
+        1_350_000,
+        &[],
+        &[],
+        |_| Ok(()),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(repo::thread_replication::Error::ImportAuthority(
+                permission::Error::Hybrid(Reject::Revoked)
+            ))
+        ),
+        "each operation must check its own publication's job revocation"
+    );
+    let control = tests::bundle();
+    let pinned = tests::selected(&control, limits);
+    let history = AcceptedHistory::from_selected_spool(&control, &pinned, 1350, limits)
+        .expect("control history");
+    let authority = SelectedAuthority::new(
+        history,
+        control.clone(),
+        |_: &wire::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+    );
+    delegated_import::authenticate_import_carriers(
+        &control,
+        &authority,
+        &pin,
+        1_350_000,
+        &[],
+        &[],
+        |_| Ok(()),
+    )
+    .expect("both publications live under one delegation");
 }

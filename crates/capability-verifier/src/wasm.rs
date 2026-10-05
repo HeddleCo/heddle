@@ -200,14 +200,14 @@ pub fn verify_signed_policy_chain_binding(
 
 use crate::canonical::{canonical_message, fixed};
 
-/// Compute an alpha.32 remaining scope from exact protobuf bytes. This is
+/// Compute an alpha.33 remaining scope from exact protobuf bytes. This is
 /// recovery arithmetic, with no signature or execution authority claim.
 #[wasm_bindgen(js_name = remainingImportScope)]
 pub fn remaining_import_scope_binding(scope: &[u8], manifest: &[u8]) -> Result<Vec<u8>, JsValue> {
     crate::import_delegation::remaining_scope_bytes(scope, manifest).map_err(verification_error)
 }
 
-/// Verify exact alpha.32 import authority. All uint64 scope values remain in
+/// Verify exact alpha.33 import authority. All uint64 scope values remain in
 /// encoded bytes; verification clocks use the checked bigint boundary.
 #[wasm_bindgen(js_name = verifyImportDelegation, unchecked_return_type = "ImportSummary")]
 #[allow(clippy::too_many_arguments)]
@@ -530,7 +530,6 @@ export type VerificationErrorCode =
   "hybrid_validity_bounds" |
   "hybrid_genesis_binding" |
   "hybrid_import_permission" |
-  "hybrid_renewal_fork" |
   "hybrid_stale_manifest" |
   "hybrid_committed_slot" |
   "hybrid_stale_context" |

@@ -512,7 +512,7 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
 #[tokio::test]
 async fn hybrid_relay_preserves_the_complete_bundle_only_after_exact_negotiation() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha32.json"))
+        serde_json::from_str(include_str!("../tests/fixtures/hybrid-alpha33.json"))
             .expect("alpha.24 fixed vectors");
     let decode = |name: &str| {
         hex::decode(
@@ -526,10 +526,9 @@ async fn hybrid_relay_preserves_the_complete_bundle_only_after_exact_negotiation
     let original = crate::replication::decode_record(wire.clone()).expect("original signature");
     let operation = original.verify().expect("original");
     let id = operation.id().expect("ID");
-    let bundle = crate::contract::ImportPublicProofBundleV1::decode(
-        decode("complete_renewed_export").as_slice(),
-    )
-    .expect("complete original bundle");
+    let bundle =
+        crate::contract::ImportPublicProofBundleV1::decode(decode("complete_export").as_slice())
+            .expect("complete original bundle");
     crate::hybrid::bundle(Some(&bundle)).expect("structurally complete bundle");
     let store = Store {
         thread: operation.thread,

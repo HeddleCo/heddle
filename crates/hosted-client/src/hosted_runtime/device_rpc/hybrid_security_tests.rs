@@ -29,7 +29,7 @@ use super::{DeviceRpc, auth};
 
 pub(crate) fn record<T: Message + Default>(name: &str) -> T {
     let f: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../thread-api/tests/fixtures/hybrid-alpha32.json"
+        "../../../../thread-api/tests/fixtures/hybrid-alpha33.json"
     ))
     .expect("API fixture");
     let v = f["wire_vectors"]
@@ -115,12 +115,12 @@ impl Fixture {
         let source = tempfile::tempdir().expect("source");
         let repository = repo::Repository::init(root_dir.path()).expect("receiver");
         let source_repo = repo::Repository::init(source.path()).expect("source");
-        let mut bundle: ImportPublicProofBundleV1 = record("complete_renewed_export");
+        let mut bundle: ImportPublicProofBundleV1 = record("complete_export");
         bundle.history_proofs = [
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .map(record)
         .to_vec();
@@ -308,7 +308,7 @@ impl Fixture {
             }
         };
         let original_genesis = genesis.genesis.clone().expect("genesis");
-        let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        let seed = objects::object::thread_replication::initial_base::synthetic_initial_base()
             .expect("seed");
         for repo in [&repository, &source_repo] {
             repo.store()

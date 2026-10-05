@@ -28,8 +28,8 @@ pub trait PublicEvidence {
     fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
         &[]
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
-        &[]
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
+        None
     }
     fn native_envelope(
         &self,
@@ -85,8 +85,8 @@ impl PublicEvidence for wire::ImportPublicProofBundleV1 {
     fn delegations(&self) -> &[wire::SignedImportJobDelegationV1] {
         &self.delegations
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
-        &self.member_permissions
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
+        self.member_permission.as_ref()
     }
     fn native_envelope(
         &self,
@@ -251,10 +251,10 @@ impl PublicEvidence for PublicProof {
             _ => &[],
         }
     }
-    fn member_permissions(&self) -> &[wire::SignedImportMemberPermissionV1] {
+    fn member_permission(&self) -> Option<&wire::SignedImportMemberPermissionV1> {
         match self {
-            Self::Import(b) => &b.member_permissions,
-            _ => &[],
+            Self::Import(b) => b.member_permission.as_ref(),
+            _ => None,
         }
     }
     fn native_envelope(&self, s: &host::HostedWitnessStatementV1) -> Option<(&[u8], Vec<Vec<u8>>)> {
@@ -470,8 +470,8 @@ impl<
                         .any(|d| d.cancellation_id == id)
                         && !self
                             .bundle
-                            .member_permissions()
-                            .iter()
+                            .member_permission()
+                            .into_iter()
                             .filter_map(|p| p.body.as_ref())
                             .any(|p| p.cancellation_id == id)
             }
@@ -825,10 +825,10 @@ pub(crate) mod tests {
 
     pub(crate) fn bundle() -> wire::ImportPublicProofBundleV1 {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("fixed vectors");
         let bytes = hex::decode(
-            fixture["wire_vectors"]["complete_renewed_export"]["wire_hex"]
+            fixture["wire_vectors"]["complete_export"]["wire_hex"]
                 .as_str()
                 .expect("wire bytes"),
         )
@@ -911,7 +911,7 @@ pub(crate) mod tests {
         };
         use repo::thread_replication::delegated_import::AcceptedAuthority as _;
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("published vectors");
         let decode = |name: &str, signed: bool| {
             hex::decode(
@@ -1079,7 +1079,7 @@ pub(crate) mod tests {
             }
         }
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+            serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
                 .expect("published fixture");
         fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
             let vector = fixture["wire_vectors"]
@@ -1098,7 +1098,7 @@ pub(crate) mod tests {
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .map(|name| record(&fixture, name))
         .to_vec();

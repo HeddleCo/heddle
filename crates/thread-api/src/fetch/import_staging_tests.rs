@@ -8,7 +8,7 @@ fn imported_root_stages_state_closure_with_one_authenticated_tip() {
 
     use crate::hybrid::authority::{AcceptedHistory, SelectedAuthority, tests};
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+        serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
             .expect("signed import fixture");
     let record = |name: &str| {
         let bytes = fixture["wire_vectors"]
@@ -30,7 +30,7 @@ fn imported_root_stages_state_closure_with_one_authenticated_tip() {
         "genesis_proof",
         "genesis_dev_proof",
         "publication_proof",
-        "renewed_publication_proof",
+        "dev_publication_proof",
     ]
     .iter()
     .map(|name| {

@@ -1053,9 +1053,7 @@ impl ThreadReplica {
             ThreadOperationBody::Capture(bytes) => {
                 Some(State::decode_current_msgpack(&bytes.result.state)?.id())
             }
-            ThreadOperationBody::Integration(_)
-            | ThreadOperationBody::HostedImport(_)
-            | ThreadOperationBody::LocalIntegration(_) => {
+            ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
             ThreadOperationBody::Discussion(_)

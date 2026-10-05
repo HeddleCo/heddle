@@ -54,9 +54,7 @@ impl DelegatedImport {
         };
         // One native Capture selects the branch tip; Git ancestors are States
         // in its content closure, not additional native operations or grants.
-        // The API job signature authorizes their exact content/frontier. A
-        // renewal retains those converter bytes rather than re-signing them
-        // with the successor job key and changing their native operation IDs.
+        // The API job signature authorizes their exact content/frontier.
         if !matches!(capture.author, super::SourceAuthor::LocalKey)
             || genesis.owner != GenesisOwner::Account(account)
             || identity.spool_uuid != original_identity.spool_uuid

@@ -128,7 +128,7 @@ fn assert_one_import(operation: ThreadOperation, expected: &State) {
     assert_eq!(closure.operations.len(), 1);
     let genesis = verify_genesis_payload(&payload, &evidence, &delegation, |_| false)
         .expect("verified genesis");
-    verify_delegated_import(&signed, &delegation, &delegation, &genesis, &original, &[])
+    verify_delegated_import(&signed, &delegation, &genesis, &original, &[])
         .expect("dual signature verification of one tip");
 }
 #[test]
@@ -429,4 +429,149 @@ fn imported_capture_with_nonempty_frontier_keeps_exact_native_ancestry() {
             "nonempty frontier cannot drop or invent source ancestry"
         );
     }
+}
+
+#[test]
+fn valid_import_carrier_cannot_unlock_noncanonical_genesis_base() {
+    use crate::{Ed25519Signer, thread_operation::SignedGenesis};
+    fn sign<T: hybrid_codec::Canonical>(
+        f: &Value,
+        role: &str,
+        domain: &str,
+        body: &T,
+    ) -> wire::AuthorizationSignature {
+        let signer = Ed25519Signer::from_seed(
+            &hex::decode(f["keys"][role]["seed_hex"].as_str().expect("seed")).expect("hex"),
+        )
+        .expect("signer");
+        wire::AuthorizationSignature {
+            signer_key_id: hybrid_codec::key_id(signer.public_key()),
+            signature: signer
+                .sign(&hybrid_codec::signing_digest(domain, body).expect("digest"))
+                .expect("signature"),
+        }
+    }
+    let f = fixture();
+    let (mut genesis, mut operation, identity) = original(&f);
+    genesis.base = heddle_object_model::object::StateId::from_bytes([93; 32]);
+    let device = Ed25519Signer::from_seed(
+        &hex::decode(f["keys"]["device"]["seed_hex"].as_str().expect("seed")).expect("hex"),
+    )
+    .expect("device");
+    let original_genesis = SignedGenesis::sign(&genesis, &device).expect("valid creator signature");
+    original_genesis
+        .verify()
+        .expect("signed noncanonical genesis is structurally valid");
+    let id = genesis.id().expect("Thread");
+    operation.thread = id;
+    let mut binding: wire::SignedImportGenesisAuthorityV1 = record(&f, "genesis_main");
+    let body = binding.body.as_mut().expect("binding");
+    body.genesis_digest = id.as_bytes().to_vec();
+    body.original_creator_signature = original_genesis.signature;
+    binding.creator_signature = Some(sign(&f, "device", contract::GENESIS_DOMAIN, body));
+    let mut permission: wire::SignedImportMemberPermissionV1 = record(&f, "permission");
+    let mut certificate: wire::SignedImportJobDelegationV1 = record(&f, "delegation");
+    let body = certificate.body.as_mut().expect("certificate");
+    let branch = body
+        .scope
+        .as_mut()
+        .expect("scope")
+        .branches
+        .iter_mut()
+        .find(|b| b.ref_name == "refs/heads/main")
+        .expect("main");
+    branch.genesis_digest = id.as_bytes().to_vec();
+    branch.target_thread_id = id.as_bytes().to_vec();
+    branch.expected_frontier_digest = contract::frontier_digest(&wire::ImportFrontierV1 {
+        format_version: 1,
+        thread_id: id.as_bytes().to_vec(),
+        operation_ids: vec![],
+    })
+    .expect("frontier");
+    let manifest = body
+        .branch_manifest
+        .iter_mut()
+        .find(|b| b.limit.as_ref().expect("limit").ref_name == "refs/heads/main")
+        .expect("main manifest");
+    manifest.limit = Some(branch.clone());
+    manifest.genesis_authority_digest =
+        contract::signed_genesis_digest(&binding).expect("binding digest");
+    permission.body.as_mut().expect("permission").scope = body.scope.clone();
+    permission.owner_signature = Some(sign(
+        &f,
+        "owner",
+        contract::PERMISSION_DOMAIN,
+        permission.body.as_ref().expect("body"),
+    ));
+    body.parent_permission_digest =
+        contract::signed_permission_digest(&permission).expect("parent");
+    // Genesis authority binds the regenerated parent too.
+    let gb = binding.body.as_mut().expect("binding");
+    gb.parent_permission_digest = body.parent_permission_digest.clone();
+    binding.creator_signature = Some(sign(&f, "device", contract::GENESIS_DOMAIN, gb));
+    manifest.genesis_authority_digest = contract::signed_genesis_digest(&binding).expect("binding");
+    certificate.delegating_signature = Some(sign(&f, "device", contract::DELEGATION_DOMAIN, body));
+    let chain = hex::decode(
+        f["context"]["owner_chain_digest_hex"]
+            .as_str()
+            .expect("chain"),
+    )
+    .expect("hex");
+    let owner_key = key(&f, "owner");
+    let verified = contract::verify_delegation(
+        &certificate,
+        Some(&permission),
+        &contract::ImportOwnerExpectation {
+            identity: &identity,
+            owner_public_key: &owner_key,
+            owner_chain_digest: &chain,
+            authority_expires_at_seconds: 2000,
+            now_unix_seconds: 1100,
+            forbidden_job_keys: &[],
+            known_job_associations: &[],
+        },
+    )
+    .expect("genuinely signed exact carrier authority");
+    let mut signed = sign_import(&f, &operation);
+    let body = signed.body.as_mut().expect("operation");
+    body.genesis_digest = id.as_bytes().to_vec();
+    body.target_thread_id = id.as_bytes().to_vec();
+    body.delegation_digest = contract::signed_delegation_digest(&certificate).expect("certificate");
+    signed.job_signature = Some(sign(&f, "job", contract::OPERATION_DOMAIN, body));
+    contract::verify_operation(&signed, &verified)
+        .expect("all signed operation bindings valid before ancestry");
+    assert!(
+        DelegatedImport::bind(&signed, &verified, &genesis, &identity, &operation, &[]).is_err(),
+        "a valid carrier must still require the canonical synthetic base"
+    );
+}
+
+#[test]
+fn frozen_old_parentless_capture_stays_strict_and_retired_import_kind_refuses() {
+    let f: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/hybrid-native-old-parentless-v1.json"
+    ))
+    .expect("frozen API negative");
+    let decode = |field: &str| hex::decode(f[field].as_str().expect("hex field")).expect("hex");
+    let genesis = crate::thread_operation::SignedGenesis {
+        canonical: decode("genesis_canonical_hex"),
+        signature: decode("genesis_signature_hex"),
+    }
+    .verify()
+    .expect("genuine frozen genesis signature");
+    let record = wire::SignedRecord::decode(decode("capture").as_slice()).expect("record");
+    let (_, operation) =
+        verify_native_operation(&record).expect("genuine frozen operation signature");
+    assert!(operation.parents.is_empty());
+    assert!(state(&operation).parents.is_empty());
+    assert!(
+        operation.validate_parents(&genesis, &[]).is_err(),
+        "frozen carrierless parentless Capture remains strict"
+    );
+    let legacy = wire::SignedRecord::decode(decode("legacy_wire_hex").as_slice())
+        .expect("legacy signed wire");
+    assert!(
+        verify_native_operation(&legacy).is_err(),
+        "retired HostedImport has no structural admission path"
+    );
 }

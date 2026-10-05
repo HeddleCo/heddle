@@ -25,7 +25,7 @@ use objects::{
         CollaborationActor, ContentHash, StateId, ThreadName,
         thread_replication::{
             AuthoredCapture, GenesisOwner, ThreadGenesis, ThreadOperation, ThreadOperationBody,
-            hosted_import::synthetic_initial_base,
+            initial_base::synthetic_initial_base,
         },
     },
     store::ObjectStore,
@@ -2358,7 +2358,7 @@ mod tests {
         object::{
             Attribution, Principal, State, StateId, Tree,
             thread_replication::{
-                GenesisOwner, ThreadGenesis, hosted_import::synthetic_initial_base,
+                GenesisOwner, ThreadGenesis, initial_base::synthetic_initial_base,
             },
         },
         store::ObjectStore,

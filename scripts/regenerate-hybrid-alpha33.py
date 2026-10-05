@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Reproduce alpha.32 signed corpora from the API pin; never edit signatures.
+"""Reproduce alpha.33 signed corpora from the API pin; never edit signatures.
 
-Usage: python3 scripts/regenerate-hybrid-alpha32.py [--api /path/to/api]
+Usage: python3 scripts/regenerate-hybrid-alpha33.py [--api /path/to/api]
 Requires npm, buf and the API native maintenance tool's Rust dependencies.
 """
 import argparse
@@ -53,10 +53,8 @@ def import_roots(output):
     assert source.count(old) == 2
     source = source.replace(old, "result:importCapture,author:{kind:'local_key'}", 1)
     path.write_text(source)
-    for generator in ['generate-hybrid-fixture', 'generate-alpha31-review-fixture',
-                      'generate-import-job-control-alpha31', 'generate-alpha32-fixture',
-                      'generate-import-sibling-jobs-alpha32', 'generate-import-consumer-alpha32',
-                      'generate-import-review-fixes-alpha32']:
+    for generator in ['generate-hybrid-fixture', 'generate-import-sibling-jobs-alpha32',
+                      'generate-native-witness-fixture']:
         run(['node', f'tools/{generator}.mjs'], output)
 
 
@@ -66,7 +64,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     pin = re.search(r'api = \{ package = "heddle-api".*rev = "([0-9a-f]{40})"', (root / 'Cargo.toml').read_text()).group(1)
-    output = Path(tempfile.mkdtemp(prefix='heddle-alpha32-'))
+    output = Path(tempfile.mkdtemp(prefix='heddle-alpha33-'))
     archive = output / 'api.tar'
     with archive.open('wb') as target:
         run(['git', '-C', str(args.api), 'archive', pin], root, stdout=target)
@@ -74,17 +72,16 @@ def main():
     archive.unlink()
     run(['npm', 'ci'], output)
     run(['npm', 'run', 'build'], output)
-    for generator in ['generate-hybrid-fixture', 'generate-alpha31-review-fixture',
-                      'generate-import-job-control-alpha31', 'generate-alpha32-fixture',
-                      'generate-import-sibling-jobs-alpha32', 'generate-import-consumer-alpha32',
-                      'generate-import-review-fixes-alpha32']:
+    for generator in ['generate-hybrid-fixture', 'generate-import-sibling-jobs-alpha32',
+                      'generate-native-witness-fixture']:
         run(['node', f'tools/{generator}.mjs'], output)
+    run(['node', 'tests/generate-hybrid-job-selector-fixture.mjs'], output)
     # Consumer additions deliberately preserve the earlier descriptor inventory.
     # Compare every generated record with the pinned frozen representation before
     # restoring only metadata/property order and installing any fixture copy.
     names = ['import-authority-host-witness-v1.json', 'native-host-witness-v1.json',
-             'import-job-control-alpha31.json', 'import-sibling-jobs-alpha32.json',
-             'import-consumer-alpha32.json', 'import-review-fixes-alpha32.json']
+             'import-sibling-jobs-alpha32.json', 'hybrid-job-selector-v1.json',
+             'hybrid-native-old-parentless-v1.json']
     for name in names:
         frozen = subprocess.check_output(['git', '-C', str(args.api), 'show', f'{pin}:tests/fixtures/{name}'])
         path = output / 'tests' / 'fixtures' / name
@@ -93,7 +90,7 @@ def main():
         excluded = {'messages', 'descriptors', 'enums'} if name == names[0] else set()
         assert {k: v for k, v in generated.items() if k not in excluded} == {k: v for k, v in expected.items() if k not in excluded}, name
         path.write_bytes(frozen)
-    run(['node', 'tools/verify-alpha32-vector-continuity.mjs'], output)
+    run(['node', 'tools/verify-alpha33-vector-continuity.mjs'], output)
     # First prove exact tag regeneration above; then generate Heddle's newly
     # specified imported-root positives without changing the signing formats.
     import_roots(output)
@@ -107,9 +104,11 @@ def main():
         names[0]: ['crates/capability-verifier/conformance/hybrid/' + names[0],
                    'crates/crypto/tests/fixtures/' + names[0],
                    'crates/repo/tests/fixtures/hybrid/' + names[0],
-                   'crates/thread-api/tests/fixtures/hybrid-alpha32.json'],
+                   'crates/thread-api/tests/fixtures/hybrid-alpha33.json'],
         names[1]: [f'crates/{crate}/tests/fixtures/{names[1]}' for crate in ['capability-verifier', 'crypto', 'thread-api']],
-        **{name: ['crates/hosted-client/tests/fixtures/' + name] for name in names[2:]},
+        names[2]: ['crates/hosted-client/tests/fixtures/' + names[2]],
+        names[3]: ['crates/hosted-client/tests/fixtures/' + names[3]],
+        names[4]: ['crates/crypto/tests/fixtures/' + names[4]],
     }
     for name, destinations in targets.items():
         for destination in destinations:

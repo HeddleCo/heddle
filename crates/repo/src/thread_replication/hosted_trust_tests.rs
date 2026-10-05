@@ -274,7 +274,7 @@ fn cached_context_concurrent_revocation_and_root_replacement() {
         Err(Error::Hybrid(hybrid_codec::Reject::Transition))
     ));
 }
-struct Authority {
+pub(super) struct Authority {
     disclosure: AtomicBool,
     owner: heddleco_capability_verifier::VerifiedOwnerState,
     ring: heddleco_capability_verifier::VerifiedCloneKeyring,
@@ -373,7 +373,7 @@ impl super::delegated_import::AcceptedAuthority for Authority {
     }
 }
 #[test]
-fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
+fn complete_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
     let f = fixture();
     let dir = tempfile::tempdir().expect("dir");
     let repo = crate::Repository::init_default(dir.path()).expect("repo");
@@ -394,12 +394,12 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         TestClock::new(1350000),
     )
     .expect("trust");
-    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     bundle.history_proofs = [
         "genesis_proof",
         "genesis_dev_proof",
         "publication_proof",
-        "renewed_publication_proof",
+        "dev_publication_proof",
     ]
     .iter()
     .map(|n| record(&f, n))
@@ -414,7 +414,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         repo.store(),
         |_| Ok(()),
     )
-    .expect("full renewed import");
+    .expect("full single-delegation import");
     assert_eq!(replicas.len(), 2);
     assert_eq!(repo.head().expect("head"), head);
     for r in &replicas {
@@ -444,7 +444,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
         db.query_row("SELECT count(*) FROM hosted_import_job_keys", [], |r| r
             .get::<_, i64>(0))
             .expect("jobs"),
-        2
+        1
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM hosted_import_slots", [], |r| r
@@ -458,7 +458,7 @@ fn complete_renewed_import_is_atomic_exact_and_does_not_enroll_foreign_owner() {
             .expect("job snapshot")
             .known_job_associations
             .len(),
-        2
+        1
     );
     assert!(!repo.heddle_dir().join("owner-authorization.bin").exists());
     let job_root = RootSelection {
@@ -600,128 +600,6 @@ fn set_expiry_during_mutation_and_monotonic_rollback_leave_no_durable_authority(
     ));
 }
 #[test]
-fn witnessed_native_control_commits_its_exact_original_and_invalidates_replay() {
-    use super::delegated_import::{NativeEvidence, NativeSubject};
-    let f = fixture();
-    let dir = tempfile::tempdir().expect("dir");
-    let repo = crate::Repository::init_default(dir.path()).expect("repo");
-    let selected = root(&f);
-    select_root(repo.heddle_dir(), &selected).expect("root");
-    let a = Authority::new(&f);
-    select_spool(
-        repo.heddle_dir(),
-        a.ring.owner_genesis().spool_uuid(),
-        a.digest,
-        a.initial,
-    )
-    .expect("selected Spool");
-    let trust = HostedTrust::open(
-        repo.heddle_dir(),
-        &selected.authority,
-        TestClock::new(1350000),
-    )
-    .expect("trust");
-    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
-    bundle.history_proofs = [
-        "genesis_proof",
-        "genesis_dev_proof",
-        "publication_proof",
-        "renewed_publication_proof",
-    ]
-    .iter()
-    .map(|n| record(&f, n))
-    .collect();
-    let conversions = [record(&f, "converted_main"), record(&f, "converted_dev")];
-    ThreadReplica::install_hybrid_import(
-        repo.heddle_dir(),
-        &trust,
-        &bundle.encode_to_vec(),
-        &conversions,
-        &a,
-        repo.store(),
-        |_| Ok(()),
-    )
-    .expect("import original genesis controls");
-    let payload: wire::ImportAuthorityWitnessV1 = record(&f, "authority_admission_payload");
-    let (_, op) = crypto::import_authority::verify_native_operation(
-        payload.original.as_ref().expect("original"),
-    )
-    .expect("native original");
-    let replica =
-        ThreadReplica::open(repo.heddle_dir(), op.thread).expect("existing imported Thread");
-    let set = record(&f, "retired_set");
-    let statement = record(&f, "authority_admission");
-    let proof = record(&f, "authority_proof");
-    let policy = record(&f, "signed_policy");
-    let mut originals = bundle.original_geneses;
-    originals.extend(payload.original.iter().cloned());
-    originals.extend(payload.dependencies.clone());
-    let input = NativeEvidence {
-        set: &set,
-        statement: &statement,
-        proof: Some(&proof),
-        policy: &policy,
-        originals: &originals,
-        genesis_witnesses: &bundle.genesis_witnesses,
-        subject: NativeSubject::Authority(&payload),
-    };
-    let mut unbound_originals = originals.clone();
-    unbound_originals.extend(conversions);
-    let unbound = NativeEvidence {
-        originals: &unbound_originals,
-        subject: NativeSubject::Authority(&payload),
-        ..input
-    };
-    assert!(
-        matches!(
-            replica.receive_witnessed(&trust, &unbound, &a, repo.store(), |_, _| Ok(())),
-            Err(Error::HybridEvidence(
-                crypto::import_authority::Error::Object(_)
-            ))
-        ),
-        "native-only evidence cannot borrow ancestry from already installed imported tips"
-    );
-    assert_eq!(
-        replica
-            .receive_witnessed(&trust, &input, &a, repo.store(), |_, _| Ok(()))
-            .expect("independent native control and exact witness"),
-        objects::object::thread_replication::Admission::Accepted
-    );
-    let retained = replica
-        .hosted_admission(op.id().expect("id"))
-        .expect("retained sidecar")
-        .expect("witness");
-    assert_eq!(retained.statement, statement);
-    assert_eq!(retained.proof, Some(proof.clone()));
-    assert_eq!(retained.deployment_authority, selected.authority);
-    assert!(matches!(
-        replica.receive(
-            &crypto::import_authority::verify_native_operation(
-                payload.original.as_ref().expect("original")
-            )
-            .expect("native")
-            .0,
-            repo.store(),
-            |_| Ok(())
-        ),
-        Err(Error::WitnessEvidenceRequired)
-    ));
-    let revoked = record(&f, "revoked_set");
-    trust
-        .mutate(&revoked, |_| Ok(()))
-        .expect("learned revocation");
-    let revoked = NativeEvidence {
-        set: &revoked,
-        ..input
-    };
-    assert!(matches!(
-        replica.receive_witnessed(&trust, &revoked, &a, repo.store(), |_, _| Ok(())),
-        Err(Error::HybridEvidence(
-            crypto::import_authority::Error::Contract(hybrid_codec::Reject::Revoked)
-        ))
-    ));
-}
-#[test]
 fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() {
     let f = fixture();
     let dir = tempfile::tempdir().expect("dir");
@@ -742,12 +620,12 @@ fn incomplete_public_authority_and_conflicting_job_keys_are_not_cached_grants() 
         TestClock::new(1350000),
     )
     .expect("trust");
-    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     bundle.history_proofs = [
         "genesis_proof",
         "genesis_dev_proof",
         "publication_proof",
-        "renewed_publication_proof",
+        "dev_publication_proof",
     ]
     .iter()
     .map(|n| record(&f, n))
@@ -952,12 +830,12 @@ fn review_disclosure_expiry_is_checked_at_commit_without_durable_changes() {
         .expect("Spool pin");
         let trust =
             HostedTrust::open(repo.heddle_dir(), &selected.authority, clock).expect("trust");
-        let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+        let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
         bundle.history_proofs = [
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .iter()
         .map(|n| record(&f, n))
@@ -1017,18 +895,6 @@ fn seed_signer(f: &Value, role: &str) -> Ed25519Signer {
         &hex::decode(f["keys"][role]["seed_hex"].as_str().expect("seed")).expect("bytes"),
     )
     .expect("signer")
-}
-fn typed_sign<T: hybrid_codec::Canonical>(
-    signer: &Ed25519Signer,
-    domain: &str,
-    body: &T,
-) -> wire::AuthorizationSignature {
-    wire::AuthorizationSignature {
-        signer_key_id: hybrid_codec::key_id(signer.public_key()),
-        signature: signer
-            .sign(&hybrid_codec::signing_digest(domain, body).expect("digest"))
-            .expect("signature"),
-    }
 }
 fn transfer_a_to_b(
     f: &Value,
@@ -1108,14 +974,14 @@ fn transfer_a_to_b(
         }),
         previous_audit_record_hash: previous,
         audit_record_hash: vec![],
-        committed_at_unix_seconds: 1190,
+        committed_at_unix_seconds: 1250,
     };
     audit.audit_record_hash = heddleco_capability_verifier::resource_transfer_audit_hash(&audit)
         .expect("audit hash")
         .to_vec();
     audit
 }
-struct TransferredAuthority {
+pub(super) struct TransferredAuthority {
     initial: Authority,
     owner: heddleco_capability_verifier::VerifiedOwnerState,
     ring: heddleco_capability_verifier::VerifiedCloneKeyring,
@@ -1123,11 +989,11 @@ struct TransferredAuthority {
     mode: AtomicU64,
 }
 impl TransferredAuthority {
-    fn selection(
+    pub(super) fn selection(
         &self,
         sequence: u64,
     ) -> heddleco_capability_verifier::import_delegation::Selection<'_> {
-        if sequence == 0 && self.mode.load(Ordering::SeqCst) != 3 {
+        if sequence == 0 && self.mode.load(Ordering::SeqCst) == 0 {
             return self.initial.selection();
         }
         let mut selected = self.initial.selection();
@@ -1185,15 +1051,14 @@ impl super::delegated_import::AcceptedAuthority for TransferredAuthority {
         false
     }
 }
-fn transferred_bundle(
+pub(super) fn transferred_bundle(
     f: &Value,
-    b_device: &Ed25519Signer,
+    _b_device: &Ed25519Signer,
 ) -> (
     wire::ImportPublicProofBundleV1,
     TransferredAuthority,
     wire::ResourceTransferAuditRecord,
 ) {
-    use api::import_authority as contract;
     let initial = Authority::new(f);
     let b_key = Ed25519Signer::from_seed(&[71; 32]).expect("B key");
     let b_recovery = Ed25519Signer::from_seed(&[73; 32]).expect("B recovery");
@@ -1217,7 +1082,7 @@ fn transferred_bundle(
         accepted_transitions: vec![],
         state_hash: owner.state_hash().to_vec(),
     };
-    let mut bundle: wire::ImportPublicProofBundleV1 = record(f, "complete_renewed_export");
+    let mut bundle: wire::ImportPublicProofBundleV1 = record(f, "complete_export");
     bundle.owner_histories.push(h);
     bundle.ownership_transfers = vec![transfer];
     let mut w = initial.ring.wire().clone();
@@ -1229,148 +1094,6 @@ fn transferred_bundle(
     w.ownership_transfers = vec![wrong];
     let wrong_ring = heddleco_capability_verifier::verify_clone_keyring(w, 1350, limits, &[])
         .expect("different genuine A to B prefix");
-    let chain = wire::ImportOwnerChainV1 {
-        spool_genesis_digest: initial.digest.to_vec(),
-        owner_state_hashes: {
-            let mut hashes = vec![
-                initial.owner.state_hash().to_vec(),
-                owner.state_hash().to_vec(),
-            ];
-            hashes.sort();
-            hashes
-        },
-        transfer_audit_hashes: bundle
-            .ownership_transfers
-            .iter()
-            .map(|t| t.audit_record_hash.clone())
-            .collect(),
-    };
-    let digest = contract::owner_chain_digest(&chain).expect("chain digest");
-    let mut identity: wire::ImportIdentityV1 = record(f, "identity");
-    identity.owner_id = owner.owner_id().to_vec();
-    identity.owner_account_uuid = owner
-        .signed_root()
-        .root
-        .as_ref()
-        .expect("root")
-        .account_uuid
-        .clone();
-    identity.owner_state_hash = owner.state_hash().to_vec();
-    identity.ownership_transfer_sequence = 1;
-    let mut parent: wire::SignedImportMemberPermissionV1 = record(f, "renewed_permission");
-    let p = parent.body.as_mut().expect("body");
-    p.identity = Some(identity.clone());
-    p.owner_chain_digest = digest.clone();
-    p.subject_public_key = b_device.public_key().to_vec();
-    parent.owner_signature = Some(typed_sign(&b_key, contract::PERMISSION_DOMAIN, p));
-    let mut d: wire::SignedImportJobDelegationV1 = record(f, "renewed_delegation");
-    let old_digest = contract::signed_delegation_digest(&d).expect("old digest");
-    let b = d.body.as_mut().expect("body");
-    b.identity = Some(identity);
-    b.owner_chain_digest = digest;
-    b.delegating_public_key = b_device.public_key().to_vec();
-    b.parent_permission_digest = contract::signed_permission_digest(&parent).expect("parent");
-    d.delegating_signature = Some(typed_sign(b_device, contract::DELEGATION_DOMAIN, b));
-    let next_digest = contract::signed_delegation_digest(&d).expect("new digest");
-    bundle.delegations[1] = d.clone();
-    bundle
-        .member_permissions
-        .retain(|p| p != &record(f, "renewed_permission"));
-    bundle.member_permissions.push(parent);
-    bundle
-        .member_permissions
-        .sort_by_key(|p| contract::signed_permission_digest(p).expect("digest"));
-    let renewal = bundle.renewals[0].body.as_mut().expect("renewal");
-    renewal.replacement = Some(d);
-    bundle.renewals[0].delegating_signature =
-        Some(typed_sign(b_device, contract::RENEWAL_DOMAIN, renewal));
-    let op = bundle
-        .operations
-        .iter_mut()
-        .find(|o| {
-            o.body
-                .as_ref()
-                .is_some_and(|b| b.delegation_digest == old_digest)
-        })
-        .expect("post-transfer result");
-    let old_op = contract::signed_operation_digest(op).expect("old result");
-    op.body.as_mut().expect("body").delegation_digest = next_digest.clone();
-    op.job_signature = Some(typed_sign(
-        &seed_signer(f, "renew_job"),
-        contract::OPERATION_DOMAIN,
-        op.body.as_ref().expect("body"),
-    ));
-    let operation = op.clone();
-    let op_digest = contract::signed_operation_digest(op).expect("result digest");
-    for manifest in &mut bundle.manifests {
-        for slot in &mut manifest.slots {
-            if slot.signed_operation_digest == old_op {
-                slot.signed_operation_digest = op_digest.clone();
-            }
-        }
-    }
-    let terminal = bundle.terminal_manifest.as_mut().expect("terminal");
-    for slot in &mut terminal.slots {
-        if slot.signed_operation_digest == old_op {
-            slot.signed_operation_digest = op_digest.clone();
-        }
-    }
-    bundle
-        .manifests
-        .sort_by_key(|m| contract::manifest_digest(m).expect("digest"));
-    let statement = bundle
-        .statements
-        .iter_mut()
-        .find(|s| {
-            s.body
-                .as_ref()
-                .is_some_and(|b| b.purpose == 3 && b.authority_digest == old_digest)
-        })
-        .expect("renewed publication");
-    let s = statement.body.as_mut().expect("body");
-    s.owner_id = owner.owner_id().to_vec();
-    s.owner_state_hash = owner.state_hash().to_vec();
-    s.ownership_transfer_sequence = 1;
-    // The new owner accepts the unchanged policy at its own transfer phase.
-    // Keep A's original policy so earlier observations resolve their own head.
-    let mut next_policy = bundle.policies[0].clone();
-    let policy = next_policy.body.as_mut().expect("policy body");
-    policy.expected_head = Some(wire::SignedPolicyHead {
-        state_hash: policy.policy_state_hash.clone(),
-        sequence: policy.sequence,
-    });
-    policy.sequence += 1;
-    policy.owner_id = owner.owner_id().to_vec();
-    policy.owner_state_hash = owner.state_hash().to_vec();
-    policy.ownership_transfer_sequence = 1;
-    policy.policy_state_hash = heddleco_capability_verifier::policy::policy_state_hash(policy)
-        .expect("post-transfer policy hash")
-        .to_vec();
-    next_policy.owner_signature = Some(wire::AuthorizationSignature {
-        signer_key_id: hybrid_codec::key_id(b_key.public_key()),
-        signature: b_key
-            .sign(
-                &heddleco_capability_verifier::policy::policy_signature_digest(policy)
-                    .expect("post-transfer policy digest"),
-            )
-            .expect("B policy signature"),
-    });
-    s.policy_sequence = policy.sequence;
-    s.policy_state_hash = policy.policy_state_hash.clone();
-    bundle.policies.push(next_policy);
-    s.authority_digest = next_digest;
-    s.original_signatures_digest = hybrid_codec::hash(&[&operation
-        .job_signature
-        .as_ref()
-        .expect("signature")
-        .signature]);
-    s.canonical_payload = hybrid_codec::canonical(
-        &contract::publication_payload(&operation, terminal).expect("publication"),
-    )
-    .expect("canonical publication");
-    statement.signature = seed_signer(f, "witness")
-        .sign(&witness_trust::statement_signing_digest(s).expect("digest"))
-        .expect("authentic post-transfer observation");
     let mut set: host::SignedHostedWitnessSetV1 = record(f, "current_set");
     set.body.as_mut().expect("body").generation += 1;
     set.body.as_mut().expect("body").issued_at_unix_millis = 1350000;
@@ -1386,7 +1109,7 @@ fn transferred_bundle(
     resign(f, &mut set);
     bundle.witness_set = Some(set);
     bundle.history_proofs.clear();
-    contract::validate_public_bundle(&bundle).expect("complete transfer/renewal public bundle");
+    api::import_authority::validate_public_bundle(&bundle).expect("complete post-transfer history");
     (
         bundle,
         TransferredAuthority {
@@ -1437,37 +1160,6 @@ fn review_transfer_preserves_original_genesis_and_exact_historical_prefixes() {
         if existing {
             install(&bundle).expect("existing mixed-history control");
         }
-        let mut previous_policy = bundle.clone();
-        let previous_head = previous_policy.policies[0]
-            .body
-            .as_ref()
-            .expect("A policy")
-            .clone();
-        previous_policy.policies.truncate(1);
-        let statement = previous_policy
-            .statements
-            .iter_mut()
-            .find(|s| {
-                s.body
-                    .as_ref()
-                    .is_some_and(|s| s.purpose == 3 && s.ownership_transfer_sequence == 1)
-            })
-            .expect("B publication");
-        let body = statement.body.as_mut().expect("statement");
-        body.policy_sequence = previous_head.sequence;
-        body.policy_state_hash = previous_head.policy_state_hash;
-        statement.signature = seed_signer(&f, "witness")
-            .sign(&witness_trust::statement_signing_digest(body).expect("digest"))
-            .expect("authentic wrong-policy observation");
-        api::import_authority::validate_public_bundle(&previous_policy)
-            .expect("wrong-policy control still has complete signed reference closure");
-        assert!(
-            matches!(
-                install(&previous_policy),
-                Err(Error::Hybrid(hybrid_codec::Reject::Scope))
-            ),
-            "a transferred owner must select its own accepted policy phase"
-        );
         let db = crate::local_metadata::open(repo.heddle_dir()).expect("db");
         let before: i64 = db
             .query_row("SELECT count(*) FROM hosted_import_admissions", [], |r| {
@@ -1513,79 +1205,6 @@ fn review_transfer_preserves_original_genesis_and_exact_historical_prefixes() {
     }
 }
 
-#[test]
-fn review_fresh_bundle_job_cannot_become_post_transfer_delegator() {
-    let f = fixture();
-    let records = [record(&f, "converted_main"), record(&f, "converted_dev")];
-    for role in ["device", "job"] {
-        let device = if role == "device" {
-            Ed25519Signer::from_seed(&[72; 32]).expect("B device")
-        } else {
-            seed_signer(&f, "job")
-        };
-        let (bundle, authority, _) = transferred_bundle(&f, &device);
-        let dir = tempfile::tempdir().expect("dir");
-        let repo = crate::Repository::init_default(dir.path()).expect("repo");
-        let selected = root(&f);
-        select_root(repo.heddle_dir(), &selected).expect("root");
-        select_spool(
-            repo.heddle_dir(),
-            authority.initial.ring.owner_genesis().spool_uuid(),
-            authority.initial.digest,
-            authority.initial.initial,
-        )
-        .expect("Spool");
-        let trust = HostedTrust::open(
-            repo.heddle_dir(),
-            &selected.authority,
-            TestClock::new(1350000),
-        )
-        .expect("trust");
-        let result = ThreadReplica::install_hybrid_import(
-            repo.heddle_dir(),
-            &trust,
-            &bundle.encode_to_vec(),
-            &records,
-            &authority,
-            repo.store(),
-            |_| Ok(()),
-        );
-        if role == "device" {
-            assert_eq!(
-                result.expect("genuine post-transfer device control").len(),
-                2
-            );
-        } else {
-            let error = result
-                .err()
-                .expect("genuine B-signed permission cannot promote the earlier job to device");
-            assert!(
-                matches!(
-                    error,
-                    Error::ImportAuthority(heddleco_capability_verifier::Error::Hybrid(
-                        hybrid_codec::Reject::KeyRole
-                    ))
-                ),
-                "wrong role gate: {error:?}"
-            );
-            let db = crate::local_metadata::open(repo.heddle_dir()).expect("db");
-            for table in [
-                "hosted_import_job_keys",
-                "hosted_import_admissions",
-                "hosted_import_proofs",
-                "hosted_import_slots",
-            ] {
-                assert_eq!(
-                    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
-                        .get::<_, i64>(0))
-                        .expect("count"),
-                    0
-                );
-            }
-        }
-    }
-}
-
 struct HybridReceiver {
     _directory: tempfile::TempDir,
     repo: crate::Repository,
@@ -1613,13 +1232,12 @@ impl HybridReceiver {
         let clock = TestClock::new(1_350_000);
         let trust = HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone())
             .expect("trust");
-        let mut bundle: wire::ImportPublicProofBundleV1 =
-            record(&fixture, "complete_renewed_export");
+        let mut bundle: wire::ImportPublicProofBundleV1 = record(&fixture, "complete_export");
         bundle.history_proofs = [
             "genesis_proof",
             "genesis_dev_proof",
             "publication_proof",
-            "renewed_publication_proof",
+            "dev_publication_proof",
         ]
         .iter()
         .map(|name| record(&fixture, name))
@@ -2156,24 +1774,6 @@ fn hybrid_selected_native_control_installs_with_its_original_admission() {
 #[test]
 fn hybrid_selected_boundary_original_installs_only_verified_receipt_dependencies() {
     let mut receiver = HybridReceiver::new();
-    receiver.bundle.genesis_witnesses = [
-        record(&receiver.fixture, "boundary_genesis_payload"),
-        record(&receiver.fixture, "boundary_dev_genesis_payload"),
-    ]
-    .to_vec();
-    receiver
-        .bundle
-        .statements
-        .retain(|statement| statement.body.as_ref().expect("body").purpose != 1);
-    receiver.bundle.statements.extend([
-        record(&receiver.fixture, "boundary_genesis_statement"),
-        record(&receiver.fixture, "boundary_dev_genesis_statement"),
-    ]);
-    receiver.bundle.history_proofs.extend([
-        record(&receiver.fixture, "boundary_genesis_proof"),
-        record(&receiver.fixture, "boundary_dev_genesis_proof"),
-        record(&receiver.fixture, "boundary_authority_proof"),
-    ]);
     let payload: wire::ImportAuthorityWitnessV1 =
         record(&receiver.fixture, "boundary_authority_payload");
     let original = payload.original.clone().expect("original");
@@ -2184,6 +1784,12 @@ fn hybrid_selected_boundary_original_installs_only_verified_receipt_dependencies
         .bundle
         .statements
         .push(record(&receiver.fixture, "boundary_authority_statement"));
+    receiver
+        .bundle
+        .history_proofs
+        .push(record(&receiver.fixture, "boundary_authority_proof"));
+    // Native boundary receipts stay at their own admission time. Imported genesis
+    // admission independently uses the original branch's atomic P1/P3 pair.
     let replicas = ThreadReplica::install_hybrid_import(
         receiver.repo.heddle_dir(),
         &receiver.trust,
@@ -2854,12 +2460,12 @@ fn hybrid_installation_crash_child() {
         TestClock::new(1_350_000),
     )
     .expect("trust");
-    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let mut bundle: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     bundle.history_proofs = [
         "genesis_proof",
         "genesis_dev_proof",
         "publication_proof",
-        "renewed_publication_proof",
+        "dev_publication_proof",
     ]
     .map(|name| record(&f, name))
     .to_vec();
@@ -2925,7 +2531,7 @@ fn native_and_import_retention_are_exclusive_without_shared_admissions() {
     use super::{delegated_import, native_witness};
     let f = fixture();
     let current: host::SignedHostedWitnessSetV1 = record(&f, "current_set");
-    let imported: wire::ImportPublicProofBundleV1 = record(&f, "complete_renewed_export");
+    let imported: wire::ImportPublicProofBundleV1 = record(&f, "complete_export");
     let native = wire::NativePublicProofBundleV1 {
         format_version: 1,
         ..Default::default()

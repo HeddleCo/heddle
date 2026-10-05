@@ -15,7 +15,7 @@ use super::history::*;
 use crate::contract::{GetHostedWitnessHistoryProofRequest, GetHostedWitnessHistoryProofResponse};
 
 fn fixture() -> serde_json::Value {
-    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha32.json"))
+    serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))
         .expect("fixed fixture")
 }
 fn wire<T: prost::Message + Default>(section: &str, name: &str) -> T {
@@ -165,7 +165,7 @@ fn learned_revocation_and_changed_original_invalidate_a_resolved_context() {
 #[test]
 fn receiver_refresh_preserves_every_original_and_rejects_authority_substitution() {
     let mut original: crate::contract::ImportPublicProofBundleV1 =
-        wire("wire_vectors", "complete_renewed_export");
+        wire("wire_vectors", "complete_export");
     let before = original.clone();
     let mut refreshed = original.clone();
     refreshed.witness_set = Some(wire("signed_vectors", "revoked_set"));

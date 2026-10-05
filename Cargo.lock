@@ -2135,7 +2135,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-cli-render",
  "heddle-config",
  "heddle-fs-prims",
@@ -2157,7 +2157,31 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.31.0-alpha.32"
-source = "git+https://github.com/HeddleCo/api.git?rev=77f73219b72f02c6fcef21cf11e7c37ec2da2ff7#77f73219b72f02c6fcef21cf11e7c37ec2da2ff7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f2bfbb900efcd3a78c9ef57cc668425e7f024a620f64af0ea9f302a1051c716"
+dependencies = [
+ "blake3",
+ "bytes",
+ "ed25519-dalek 3.0.0",
+ "hex",
+ "prost 0.14.1",
+ "prost-build",
+ "prost-reflect",
+ "prost-types 0.14.1",
+ "protoc-bin-vendored",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "unicode-general-category",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "heddle-api"
+version = "0.31.0-alpha.33"
+source = "git+https://github.com/HeddleCo/api?rev=9697e97538607ec922595468205dea6d99d3d358#9697e97538607ec922595468205dea6d99d3d358"
 dependencies = [
  "blake3",
  "bytes",
@@ -2187,7 +2211,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.32",
  "heddleco-capability-verifier",
  "hex",
  "proptest",
@@ -2202,7 +2226,7 @@ dependencies = [
 name = "heddle-ci-config"
 version = "0.28.8"
 dependencies = [
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "hex",
  "prost 0.14.1",
  "regex",
@@ -2243,7 +2267,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "heddle-agent-relay",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-biscuit-verifier",
  "heddle-ci-config",
  "heddle-ci-engine",
@@ -2315,7 +2339,7 @@ version = "0.28.8"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-config",
  "heddle-objects",
  "heddle-repo",
@@ -2396,7 +2420,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-fs-prims",
  "heddle-object-model",
  "heddleco-capability-verifier",
@@ -2508,7 +2532,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.4.3",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-biscuit-verifier",
  "heddle-config",
  "heddle-crypto",
@@ -2632,7 +2656,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-format",
  "hex",
  "proptest",
@@ -2750,7 +2774,7 @@ dependencies = [
  "biscuit-auth",
  "blake3",
  "chrono",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-biscuit-verifier",
  "heddle-crypto",
  "heddle-objects",
@@ -2845,7 +2869,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-biscuit-verifier",
  "heddle-crypto",
  "heddle-object-model",
@@ -2925,7 +2949,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-biscuit-verifier",
  "hex",
  "js-sys",
@@ -8309,7 +8333,7 @@ version = "0.28.8"
 dependencies = [
  "anyhow",
  "ed25519-dalek 3.0.0",
- "heddle-api",
+ "heddle-api 0.31.0-alpha.33",
  "heddle-crypto",
  "heddle-perf-contract",
  "heddle-thread-api",
