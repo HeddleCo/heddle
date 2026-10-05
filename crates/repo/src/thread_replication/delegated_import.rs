@@ -131,7 +131,7 @@ fn current_context<'a>(
         known_job_associations: job_associations,
     }
 }
-fn find_publication<'a>(
+pub(super) fn find_publication<'a>(
     bundle: &'a wire::ImportPublicProofBundleV1,
     operation: &wire::SignedDelegatedImportOperationV1,
 ) -> Result<(
@@ -339,6 +339,7 @@ impl ThreadReplica {
                     authority,
                     store,
                     context,
+                    None,
                 )
             },
             |context, now| authority.authorize_import(&bundle, now, context),
@@ -375,6 +376,7 @@ struct ImportOwnerFacts {
     expiry: i64,
     key: Vec<u8>,
     forbidden: Vec<Vec<u8>>,
+    landing_forbidden: Vec<Vec<u8>>,
     from: i64,
     until: Option<i64>,
 }
@@ -409,6 +411,7 @@ impl ImportOwnerFacts {
             effective_from_unix_seconds: self.from,
             effective_until_unix_seconds: self.until,
             forbidden_job_keys: &self.forbidden,
+            forbidden_landing_keys: &self.landing_forbidden,
             known_job_associations: associations,
         }
     }
@@ -463,6 +466,7 @@ fn import_owner_facts(
         .map(|(i, owner)| {
             let (identity, chain, expiry) =
                 permission::native_lineage(&Selection { owner, ..selection })?;
+            let landing_forbidden = forbidden.clone();
             let mut forbidden = forbidden.clone();
             forbidden.extend(owner.authority_public_keys());
             forbidden.extend(selection.keyring.authority_public_keys().cloned());
@@ -471,6 +475,7 @@ fn import_owner_facts(
                 chain,
                 expiry,
                 key: owner.authority_key().public_key.clone(),
+                landing_forbidden,
                 forbidden,
                 from: owner.valid_from_unix_seconds().max(transfer_from),
                 until: match (
@@ -493,8 +498,13 @@ fn verify_import_history(
     bundle: &wire::ImportPublicProofBundleV1,
     authority: &impl AcceptedAuthority,
     context: &TrustTransaction<'_>,
+    recheck: bool,
 ) -> Result<()> {
-    let snapshot = context.import_witness_snapshot()?;
+    let snapshot = if recheck {
+        None
+    } else {
+        context.import_witness_snapshot()?
+    };
     verify_witnessed_import_bundle(
         bundle,
         authority,
@@ -687,15 +697,19 @@ pub fn verify_witnessed_import_bundle(
     Ok(verified)
 }
 
-fn install_in(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn install_in(
     directory: &Path,
     bundle: &wire::ImportPublicProofBundleV1,
     native_records: &[wire::SignedRecord],
     authority: &impl AcceptedAuthority,
     store: &impl ObjectStore,
     context: &TrustTransaction<'_>,
+    recheck_path: Option<&super::foreign_dependencies::Recheck<'_>>,
 ) -> Result<Vec<ThreadReplica>> {
-    authority.authorize_import(bundle, context.now_millis(), context)?;
+    if recheck_path.is_none() {
+        authority.authorize_import(bundle, context.now_millis(), context)?;
+    }
     let mut job_associations = context.job_associations().to_vec();
     // Carried declarations restrict roles before any mutation. Only fully
     // verified certificates become durable job associations below.
@@ -779,7 +793,7 @@ fn install_in(
         }
         permission::verify_policy_record(policy, &[selection.owner])?;
     }
-    verify_import_history(bundle, authority, context)?;
+    verify_import_history(bundle, authority, context, recheck_path.is_some())?;
     let mut delegations: BTreeMap<Vec<u8>, VerifiedImportDelegation> = BTreeMap::new();
     // Each result resolves its ORIGINAL certificate at its own exact
     // publication, never a later permission or current author timestamp.
@@ -817,13 +831,42 @@ fn install_in(
         )?;
         delegations.insert(body.delegation_digest.clone(), d);
     }
+    let authors = crypto::writer_authority::WitnessedAuthors::from_import(
+        bundle,
+        context.set(),
+        context.now_millis(),
+    )?;
+    let mut original_geneses = verification::OriginalGeneses::import(&bundle.genesis_witnesses)?;
+    let verified = std::cell::RefCell::default();
+    let fresh = super::foreign_dependencies::Recheck {
+        path: &[],
+        verified: &verified,
+    };
+    let foreign = super::foreign_dependencies::InstalledForeign::load(
+        &originals,
+        super::foreign_dependencies::Dependent {
+            references: &bundle.foreign_dependencies,
+            statements: &bundle.statements,
+            authority: &bundle.authority_witnesses,
+            landing: &bundle.landing_witnesses,
+            spool: uuid::Uuid::from_bytes(initial_selection.keyring.owner_genesis().spool_uuid()),
+            spool_genesis: initial_selection.spool_genesis_digest,
+        },
+        context,
+        directory,
+        store,
+        authority,
+        recheck_path.unwrap_or(&fresh),
+    )?;
+    foreign.add_geneses(&mut originals, &mut original_geneses)?;
     let scopes = delegations.values().map(|d| d.scope()).collect::<Vec<_>>();
-    let closure = NativeClosure::verify_with_imports(
+    let mut closure = NativeClosure::verify_with_resolvers(
         &originals,
         &boundaries,
         |genesis, operation, parents| {
             verification::bind_import_original(bundle, &scopes, genesis, operation, parents)
         },
+        |r| foreign.resolve(r),
     )?;
     let mut imports = BTreeMap::new();
     let mut admissions = BTreeMap::new();
@@ -902,6 +945,7 @@ fn install_in(
             &d,
             &closure,
             &verification::NativeAuthorityContext {
+                author_authority: &authors,
                 owner: selection.owner,
                 spool_uuid: uuid::Uuid::from_bytes(selection.keyring.owner_genesis().spool_uuid()),
                 spool_genesis: selection.spool_genesis_digest,
@@ -912,9 +956,7 @@ fn install_in(
                     .canonical_spool_path_segments
                     .join("/"),
                 witness_set: context.set(),
-                original_geneses: crypto::import_authority::OriginalGeneses::Import(
-                    &bundle.genesis_witnesses,
-                ),
+                original_geneses: &original_geneses,
                 known_job_associations: &job_associations,
                 forbidden_authority_keys: &forbidden,
             },
@@ -939,12 +981,16 @@ fn install_in(
             ),
         );
         geneses.insert(thread, genesis);
-        context.retain_delegation(&d)?;
+        if recheck_path.is_none() {
+            context.retain_delegation(&d)?;
+        }
         delegations
             .entry(contract::signed_delegation_digest(signed)?)
             .or_insert(d);
     }
-    for statement in &bundle.statements {
+    let mut statements = bundle.statements.iter().collect::<Vec<_>>();
+    statements.sort_by_key(|s| s.body.as_ref().map(|s| (s.purpose == 4, s.admission_order)));
+    for statement in statements {
         let s = statement.body.as_ref().ok_or(Reject::Canonical)?;
         let evidence = evidence(&bundle.history_proofs, context, statement)?;
         let selection = authority.for_witness(s)?;
@@ -1006,15 +1052,14 @@ fn install_in(
             .canonical_spool_path_segments
             .join("/");
         let native = verification::NativeAuthorityContext {
+            author_authority: &authors,
             owner: selection.owner,
             spool_uuid: spool,
             spool_genesis: selection.spool_genesis_digest,
             transfer_sequence: selection.keyring.wire().ownership_transfers.len() as u64,
             spool_path: &path,
             witness_set: context.set(),
-            original_geneses: crypto::import_authority::OriginalGeneses::Import(
-                &bundle.genesis_witnesses,
-            ),
+            original_geneses: &original_geneses,
             known_job_associations: &job_associations,
             forbidden_authority_keys: &forbidden,
         };
@@ -1024,7 +1069,7 @@ fn install_in(
                 .iter()
                 .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == s.canonical_payload))
                 .ok_or(Reject::Scope)?;
-            verification::verify_authority_payload(p, &evidence, &closure, &native, |r| {
+            verification::verify_authority_payload(p, &evidence, &mut closure, &native, |r| {
                 authority.native_revoked(s, r)
             })?;
             admit_boundary_originals(
@@ -1041,7 +1086,7 @@ fn install_in(
                 .iter()
                 .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == s.canonical_payload))
                 .ok_or(Reject::Scope)?;
-            verification::verify_landing_payload(p, &evidence, &closure, &native, |r| {
+            verification::verify_landing_payload(p, &evidence, &mut closure, &native, |r| {
                 authority.native_revoked(s, r)
             })?;
             let record = p.execution.as_ref().ok_or(Reject::Canonical)?;
@@ -1078,8 +1123,10 @@ fn install_in(
         let original = geneses.get(&thread).ok_or(Reject::Scope)?;
         // Public history authenticates all publications and slots, even when
         // this carrier does not request their converted native counterparts.
-        context.retain_delegation(d)?;
-        context.retain_slot(operation)?;
+        if recheck_path.is_none() {
+            context.retain_delegation(d)?;
+            context.retain_slot(operation)?;
+        }
         let Some(converted) = native_frontiers.get(&body.resulting_frontier_digest) else {
             continue;
         };
@@ -1105,7 +1152,7 @@ fn install_in(
         imports.insert(native_operation.id()?, content);
         admissions.insert(native_operation.id()?, (converted.clone(), evidence));
     }
-    let selected = selected_originals(native_records, &originals)?;
+    let selected = selected_originals(native_records, &originals, &foreign.ids)?;
     // Signature verification is not admission. Match exact originals, including
     // their signatures, before any receives or filesystem callback can run.
     for (id, record) in &selected {
@@ -1115,6 +1162,10 @@ fn install_in(
         {
             return Err(Error::Hybrid(Reject::ImportPermission));
         }
+    }
+    if recheck_path.is_some() {
+        recheck_selected_in(directory, &selected, &closure, store, context)?;
+        return Ok(Vec::new());
     }
     let geneses = geneses
         .into_iter()
@@ -1135,6 +1186,7 @@ fn install_in(
         &admissions,
         &closure,
         &imports,
+        &foreign.ids,
         store,
         context,
         |id| retain_bundle(context, id, bundle),
@@ -1247,6 +1299,7 @@ pub(super) fn install_selected_in(
         ContentHash,
         objects::object::thread_replication::delegated_import::DelegatedImport,
     >,
+    installed_foreign: &BTreeSet<ContentHash>,
     store: &impl ObjectStore,
     context: &TrustTransaction<'_>,
     retain: impl Fn(&ContentHash) -> Result<()>,
@@ -1273,7 +1326,7 @@ pub(super) fn install_selected_in(
     let mut local_work: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
     for (id, record) in &selected {
         if record.format == objects::object::thread_replication::OPERATION_FORMAT {
-            let op = verification::verify_native_operation(record)?.1;
+            let op = closure.operation(id)?;
             if matches!(
                 op.source_author()?,
                 Some(objects::object::thread_replication::SourceAuthor::LocalKey)
@@ -1287,7 +1340,10 @@ pub(super) fn install_selected_in(
     let mut dependents: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
     for (id, record) in &selected {
         let (_, thread, dependencies) = native_subject(record)?;
-        let mut dependencies: BTreeSet<_> = dependencies.into_iter().collect();
+        let mut dependencies: BTreeSet<_> = dependencies
+            .into_iter()
+            .filter(|id| !installed_foreign.contains(id))
+            .collect();
         if record.format == objects::object::thread_replication::ownership_claim::FORMAT {
             dependencies.extend(local_work.get(&thread).into_iter().flatten().copied());
         }
@@ -1310,17 +1366,28 @@ pub(super) fn install_selected_in(
         match record.format.as_str() {
             objects::object::thread_replication::GENESIS_FORMAT => {}
             objects::object::thread_replication::OPERATION_FORMAT => {
-                let (signed, operation) = verification::verify_native_operation(&record)?;
+                // The closure already verified this exact original's bytes and
+                // signature. Reuse its operation throughout installation.
+                let operation = closure.operation(&id)?;
+                let signed = crypto::thread_operation::SignedOperation {
+                    canonical: record.canonical_record.clone(),
+                    signature: record
+                        .signatures
+                        .first()
+                        .ok_or(Reject::Signature)?
+                        .signature
+                        .clone(),
+                };
                 replica.validate_reference_capture_in(
                     context.sql(),
                     closure.genesis(&thread)?,
-                    &operation,
+                    operation,
                     store,
                 )?;
                 if replica.receive_verified_content_in(
                     context.sql(),
                     &signed,
-                    &operation,
+                    operation,
                     store,
                     false,
                     imports.get(&id),
@@ -1353,6 +1420,33 @@ pub(super) fn install_selected_in(
         return Err(Error::Hybrid(Reject::Scope));
     }
     Ok(replicas.into_values().collect())
+}
+
+// Reuse native closure checks on installed originals without admitting or
+// publishing anything. Every selected row and signature must still be exact.
+pub(super) fn recheck_selected_in(
+    directory: &Path,
+    selected: &BTreeMap<ContentHash, wire::SignedRecord>,
+    closure: &NativeClosure,
+    store: &impl ObjectStore,
+    context: &TrustTransaction<'_>,
+) -> Result<()> {
+    for record in selected.values() {
+        let (id, thread, _) = native_subject(record)?;
+        super::foreign_dependencies::require_installed(context, record, id, thread)?;
+        if record.format == objects::object::thread_replication::OPERATION_FORMAT {
+            let operation = verification::verify_native_operation(record)?.1;
+            let replica = ThreadReplica::open(directory, thread)?;
+            replica.validate_reference_capture_in(
+                context.sql(),
+                closure.genesis(&thread)?,
+                &operation,
+                store,
+            )?;
+            replica.require_local_integration_source_in(context.sql(), &operation)?;
+        }
+    }
+    Ok(())
 }
 
 // Called only after the native payload verifier authenticates the complete
@@ -1461,6 +1555,7 @@ pub(super) fn native_subject(
 pub(super) fn selected_originals(
     requested: &[wire::SignedRecord],
     originals: &[wire::SignedRecord],
+    installed_foreign: &BTreeSet<ContentHash>,
 ) -> Result<BTreeMap<ContentHash, wire::SignedRecord>> {
     let mut available = BTreeMap::new();
     for record in originals {
@@ -1485,6 +1580,9 @@ pub(super) fn selected_originals(
     let mut selected = BTreeMap::new();
     while let Some(record) = pending.pop() {
         let (id, _, dependencies) = native_subject(&record)?;
+        if installed_foreign.contains(&id) {
+            continue;
+        }
         if let Some(previous) = selected.insert(id, record.clone()) {
             if previous != record {
                 return Err(Error::Hybrid(Reject::Canonical));
@@ -1492,6 +1590,9 @@ pub(super) fn selected_originals(
             continue;
         }
         for dependency in dependencies {
+            if installed_foreign.contains(&dependency) {
+                continue;
+            }
             pending.push((*available.get(&dependency).ok_or(Reject::Scope)?).clone());
         }
     }
@@ -1550,6 +1651,10 @@ pub(super) fn retain_bundle(
                 .delegations
                 .iter()
                 .any(|d| !bundle.delegations.contains(d))
+            || old
+                .foreign_dependencies
+                .iter()
+                .any(|r| !bundle.foreign_dependencies.contains(r))
             || old.member_permission != bundle.member_permission
             || old.manifests.iter().any(|m| !bundle.manifests.contains(m))
             || old.policies.iter().any(|p| !bundle.policies.contains(p))

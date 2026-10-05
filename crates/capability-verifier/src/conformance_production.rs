@@ -36,6 +36,10 @@ pub fn evaluate(case: &Value) -> Result<Value> {
                     &bytes("envelope_hex")?,
                     &bytes("keyring_hex")?,
                     &bytes("current_owner_hex")?,
+                    &bytes("author_history_hex")?,
+                    case["admitted_mint_roots_json"]
+                        .as_str()
+                        .ok_or_else(|| Error::Invalid("missing admitted mint roots".into()))?,
                     &bytes("initial_owner_hex")?,
                     &bytes("spool_genesis_hex")?,
                     case["revoked_keys_json"]

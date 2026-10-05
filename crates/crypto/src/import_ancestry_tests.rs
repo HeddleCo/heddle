@@ -126,7 +126,7 @@ fn assert_one_import(operation: ThreadOperation, expected: &State) {
     })
     .expect("State ancestors require no native operations or separate carriers");
     assert_eq!(closure.operations.len(), 1);
-    let genesis = verify_genesis_payload(&payload, &evidence, &delegation, |_| false)
+    let genesis = verify_genesis_payload(&payload, &evidence, &delegation, &[], |_| false)
         .expect("verified genesis");
     verify_delegated_import(&signed, &delegation, &genesis, &original, &[])
         .expect("dual signature verification of one tip");

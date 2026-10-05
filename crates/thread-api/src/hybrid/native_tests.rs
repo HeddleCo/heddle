@@ -9,6 +9,8 @@ mod admissions;
 mod boundary_revocations;
 mod guards;
 mod local_work;
+mod retained_acceptor;
+mod writers;
 
 fn fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
@@ -57,6 +59,21 @@ fn verify_semantics_with_keys(
     known_job_associations: &[(Vec<u8>, Vec<u8>)],
     forbidden_authority_keys: &[Vec<u8>],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    verify_semantics_with_originals(
+        bundle,
+        now,
+        known_job_associations,
+        forbidden_authority_keys,
+        &[],
+    )
+}
+fn verify_semantics_with_originals(
+    bundle: &wire::NativePublicProofBundleV1,
+    now: i64,
+    known_job_associations: &[(Vec<u8>, Vec<u8>)],
+    forbidden_authority_keys: &[Vec<u8>],
+    additional_originals: &[wire::SignedRecord],
+) -> Result<(), Box<dyn std::error::Error>> {
     use super::authority::tests::{bundle as imported, selected};
     let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)?;
     let pinned = selected(&imported(), limits);
@@ -69,8 +86,9 @@ fn verify_semantics_with_keys(
          _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
     );
     let fresh = set(bundle, now);
-    api::native_witness::verify_bundle_witnesses(bundle, &fresh, now)?;
-    let mut originals = Vec::new();
+    api::native_witness::verify_bundle_witnesses(bundle, &fresh, now, forbidden_authority_keys)?;
+    let authors = crypto::writer_authority::WitnessedAuthors::from_native(bundle, &fresh, now)?;
+    let mut originals = additional_originals.to_vec();
     for p in &bundle.genesis_witnesses {
         originals.extend(p.original_genesis.iter().cloned());
     }
@@ -94,8 +112,11 @@ fn verify_semantics_with_keys(
                 .flat_map(|p| p.boundary_acceptances.clone()),
         )
         .collect();
-    let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
-    for signed in &bundle.statements {
+    let original_geneses = OriginalGeneses::native(&bundle.genesis_witnesses)?;
+    let mut closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
+    let mut statements = bundle.statements.iter().collect::<Vec<_>>();
+    statements.sort_by_key(|s| s.body.as_ref().map(|s| (s.purpose == 4, s.admission_order)));
+    for signed in statements {
         let s = signed.body.as_ref().expect("body");
         let proof = bundle
             .history_proofs
@@ -109,13 +130,14 @@ fn verify_semantics_with_keys(
             .canonical_spool_path_segments
             .join("/");
         let context = verify::NativeAuthorityContext {
+            author_authority: &authors,
             owner: selected.owner,
             spool_uuid: uuid::Uuid::from_bytes(selected.keyring.owner_genesis().spool_uuid()),
             spool_genesis: selected.spool_genesis_digest,
             transfer_sequence: s.ownership_transfer_sequence,
             spool_path: &path,
             witness_set: &fresh,
-            original_geneses: OriginalGeneses::Native(&bundle.genesis_witnesses),
+            original_geneses: &original_geneses,
             known_job_associations,
             forbidden_authority_keys,
         };
@@ -149,7 +171,7 @@ fn verify_semantics_with_keys(
                     .iter()
                     .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == s.canonical_payload))
                     .expect("authority payload");
-                verify::verify_authority_payload(p, &evidence, &closure, &context, |r| {
+                verify::verify_authority_payload(p, &evidence, &mut closure, &context, |r| {
                     authority.native_revoked(s, r)
                 })?;
             }
@@ -159,7 +181,7 @@ fn verify_semantics_with_keys(
                     .iter()
                     .find(|p| hybrid_codec::canonical(*p).is_ok_and(|b| b == s.canonical_payload))
                     .expect("landing payload");
-                verify::verify_landing_payload(p, &evidence, &closure, &context, |r| {
+                verify::verify_landing_payload(p, &evidence, &mut closure, &context, |r| {
                     authority.native_revoked(s, r)
                 })?;
             }
@@ -199,10 +221,10 @@ fn native_carrier_rejections_have_exact_passing_controls() {
         } else {
             1_100_000
         };
-        api::native_witness::verify_bundle_witnesses(&passing, &set(&passing, now), now)
+        api::native_witness::verify_bundle_witnesses(&passing, &set(&passing, now), now, &[])
             .expect("nearby passing control");
         let result = if gate == "witness" {
-            api::native_witness::verify_bundle_witnesses(&failing, &set(&passing, now), now)
+            api::native_witness::verify_bundle_witnesses(&failing, &set(&passing, now), now, &[])
         } else {
             api::native_witness::validate_public_bundle(&failing)
         };
@@ -556,4 +578,39 @@ fn native_commit_rechecks_current_authority_and_restores_artifacts_and_witnesses
             );
         }
     }
+}
+
+// Compare actual durable values so rollback cannot hide an update behind an
+// unchanged row count.
+pub(super) fn receiver_snapshot(directory: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let db = repo::local_metadata::open(directory).expect("metadata");
+    let mut table_query = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .expect("tables");
+    let names = table_query
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("names")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("tables");
+    names
+        .into_iter()
+        .map(|name| {
+            let mut query = db
+                .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))
+                .expect("durable rows");
+            let columns = query.column_count();
+            let mut rows = query
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map(|values| format!("{values:?}"))
+                })
+                .expect("rows")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("durable values");
+            rows.sort();
+            (name, rows)
+        })
+        .collect()
 }

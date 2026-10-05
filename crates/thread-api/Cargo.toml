@@ -74,6 +74,7 @@ getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 uuid = { workspace = true, features = ["js"], optional = true }
 
 [dev-dependencies]
+rusqlite.workspace = true
 serde_json.workspace = true
 tracing-subscriber.workspace = true
 anyhow = "1"

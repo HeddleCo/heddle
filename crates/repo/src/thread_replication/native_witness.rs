@@ -68,7 +68,7 @@ impl ThreadReplica {
             bundle.witness_set.as_ref().ok_or(Reject::Root)?,
             |context| {
                 before(context)?;
-                install_in(directory, &bundle, records, authority, store, context)
+                install_in(directory, &bundle, records, authority, store, context, None)
             },
             |context, now| authority.authorize_native(&bundle, now, context),
             publish,
@@ -162,16 +162,30 @@ impl ThreadReplica {
     }
 }
 
-fn install_in(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn install_in(
     directory: &Path,
     bundle: &wire::NativePublicProofBundleV1,
     requested: &[wire::SignedRecord],
     authority: &impl AcceptedAuthority,
     store: &impl ObjectStore,
     context: &TrustTransaction<'_>,
+    recheck_path: Option<&super::foreign_dependencies::Recheck<'_>>,
 ) -> Result<Vec<ThreadReplica>> {
-    authority.authorize_native(bundle, context.now_millis(), context)?;
-    api::native_witness::verify_bundle_witnesses(bundle, context.set(), context.now_millis())?;
+    if recheck_path.is_none() {
+        authority.authorize_native(bundle, context.now_millis(), context)?;
+    }
+    api::native_witness::verify_bundle_witnesses(
+        bundle,
+        context.set(),
+        context.now_millis(),
+        &context.forbidden_job_keys(),
+    )?;
+    let authors = crypto::writer_authority::WitnessedAuthors::from_native(
+        bundle,
+        context.set(),
+        context.now_millis(),
+    )?;
     let owners = delegated_import::public_owners(bundle.into(), context.now_millis() / 1000)?;
     let first = bundle
         .statements
@@ -227,12 +241,42 @@ fn install_in(
                 .flat_map(|p| p.boundary_acceptances.clone()),
         )
         .collect();
-    let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
+    let mut original_geneses = OriginalGeneses::native(&bundle.genesis_witnesses)?;
+    let verified = std::cell::RefCell::default();
+    let fresh = super::foreign_dependencies::Recheck {
+        path: &[],
+        verified: &verified,
+    };
+    let foreign = super::foreign_dependencies::InstalledForeign::load(
+        &originals,
+        super::foreign_dependencies::Dependent {
+            references: &bundle.foreign_dependencies,
+            statements: &bundle.statements,
+            authority: &bundle.authority_witnesses,
+            landing: &bundle.landing_witnesses,
+            spool: uuid::Uuid::from_bytes(initial.keyring.owner_genesis().spool_uuid()),
+            spool_genesis: initial.spool_genesis_digest,
+        },
+        context,
+        directory,
+        store,
+        authority,
+        recheck_path.unwrap_or(&fresh),
+    )?;
+    foreign.add_geneses(&mut originals, &mut original_geneses)?;
+    let mut closure = NativeClosure::verify_with_resolvers(
+        &originals,
+        &boundaries,
+        |_, _, _| Ok(None),
+        |r| foreign.resolve(r),
+    )?;
     let mut geneses = BTreeMap::new();
     let mut admissions = BTreeMap::new();
     let mut first_admissions = BTreeMap::new();
     let forbidden = context.forbidden_job_keys();
-    for signed in &bundle.statements {
+    let mut statements = bundle.statements.iter().collect::<Vec<_>>();
+    statements.sort_by_key(|s| s.body.as_ref().map(|s| (s.purpose == 4, s.admission_order)));
+    for signed in statements {
         let s = signed.body.as_ref().ok_or(Reject::Canonical)?;
         let evidence = delegated_import::evidence(&bundle.history_proofs, context, signed)?;
         let selected = authority.for_witness(s)?;
@@ -258,13 +302,14 @@ fn install_in(
             .canonical_spool_path_segments
             .join("/");
         let native_context = verification::NativeAuthorityContext {
+            author_authority: &authors,
             owner: selected.owner,
             spool_uuid: uuid::Uuid::from_bytes(selected.keyring.owner_genesis().spool_uuid()),
             spool_genesis: selected.spool_genesis_digest,
             transfer_sequence: s.ownership_transfer_sequence,
             spool_path: &path,
             witness_set: context.set(),
-            original_geneses: OriginalGeneses::Native(&bundle.genesis_witnesses),
+            original_geneses: &original_geneses,
             known_job_associations: context.job_associations(),
             forbidden_authority_keys: &forbidden,
         };
@@ -301,7 +346,9 @@ fn install_in(
                 )?;
                 let id = signed.verify()?.id()?;
                 admit_genesis(&mut geneses, id, signed, &p.creator_authority_envelope)?;
-                retain_binding(context.sql(), id, binding)?;
+                if recheck_path.is_none() {
+                    retain_binding(context.sql(), id, binding)?;
+                }
                 delegated_import::admit_boundary_originals(
                     &mut admissions,
                     p.boundary_acceptance.as_slice(),
@@ -319,7 +366,7 @@ fn install_in(
                 verification::verify_authority_payload(
                     p,
                     &evidence,
-                    &closure,
+                    &mut closure,
                     &native_context,
                     |r| authority.native_revoked(s, r),
                 )?;
@@ -340,7 +387,7 @@ fn install_in(
                 verification::verify_landing_payload(
                     p,
                     &evidence,
-                    &closure,
+                    &mut closure,
                     &native_context,
                     |r| authority.native_revoked(s, r),
                 )?;
@@ -361,7 +408,7 @@ fn install_in(
             return Err(Reject::SlotConflict.into());
         }
     }
-    let mut selected = delegated_import::selected_originals(requested, &originals)?;
+    let mut selected = delegated_import::selected_originals(requested, &originals, &foreign.ids)?;
     // Hosting a LocalKey requires the complete explicit ownership decision.
     for p in &bundle.authority_witnesses {
         if p.kind == 2 || p.kind == 3 {
@@ -370,6 +417,7 @@ fn install_in(
                 selected.extend(delegated_import::selected_originals(
                     std::slice::from_ref(record),
                     &originals,
+                    &foreign.ids,
                 )?);
             }
         }
@@ -417,8 +465,8 @@ fn install_in(
     }
     for (id, record) in &selected {
         if record.format == native::OPERATION_FORMAT {
-            let (_, op) = verification::verify_native_operation(record)?;
-            if dependency_role(&op)? == NativeRole::LocalWork {
+            let op = closure.operation(id)?;
+            if dependency_role(op)? == NativeRole::LocalWork {
                 let genesis = closure.genesis(&op.thread)?;
                 if genesis.owner != GenesisOwner::LocalKey(op.publisher) {
                     return Err(Reject::Scope.into());
@@ -439,6 +487,10 @@ fn install_in(
             return Err(Reject::Scope.into());
         }
     }
+    if recheck_path.is_some() {
+        delegated_import::recheck_selected_in(directory, &selected, &closure, store, context)?;
+        return Ok(Vec::new());
+    }
     delegated_import::install_selected_in(
         directory,
         selected,
@@ -446,6 +498,7 @@ fn install_in(
         &admissions,
         &closure,
         &BTreeMap::new(),
+        &foreign.ids,
         store,
         context,
         |thread| retain_bundle(context, *thread, bundle),
@@ -594,6 +647,10 @@ pub(super) fn retain_bundle(
                 .landing_witnesses
                 .iter()
                 .any(|p| !bundle.landing_witnesses.contains(p))
+            || old
+                .foreign_dependencies
+                .iter()
+                .any(|r| !bundle.foreign_dependencies.contains(r))
             || old
                 .statements
                 .iter()

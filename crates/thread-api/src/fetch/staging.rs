@@ -27,11 +27,191 @@ pub struct StagedSource {
     pub(super) operations: Vec<SignedOperation>,
     pub(super) dependencies: Vec<ThreadGenesisRecord>,
     pub(super) state: State,
+    #[cfg(feature = "native")]
+    pub(super) prefix_original: Option<SignedRecord>,
     pub(super) partial_trees: Vec<heddle_object_model::object::PartialTree>,
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
 impl StagedSource {
+    #[cfg(feature = "native")]
+    pub fn select_prefix(&mut self, reference: &ForeignDependencyV1) -> Result<(), Error> {
+        let proof = match (self.import_authority(), self.native_authority()) {
+            (Some(b), None) => crate::hybrid::authority::PublicProof::from(b.clone()),
+            (None, Some(b)) => crate::hybrid::authority::PublicProof::from(b.clone()),
+            _ => return Err(Error::HostedTrustRequired),
+        };
+        self.prefix_original = match proof.prefix_original(reference) {
+            Ok(record) => Some(record.clone()),
+            Err(_) => self
+                .operations
+                .iter()
+                .map(|signed| {
+                    let operation = signed.verify().map_err(preparation)?;
+                    Ok(SignedRecord {
+                        format: heddle_object_model::object::thread_replication::OPERATION_FORMAT
+                            .into(),
+                        canonical_record: signed.canonical.clone(),
+                        signatures: vec![RecordSignature {
+                            public_key: operation.publisher.to_vec(),
+                            signature: signed.signature.clone(),
+                        }],
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+                .into_iter()
+                .find(|r| {
+                    api::import_authority::signed_native_digest(r)
+                        .is_ok_and(|d| d == reference.signed_native_digest)
+                }),
+        };
+        if self.prefix_original.is_none() {
+            return Err(api::hybrid_codec::Reject::Scope.into());
+        }
+        let projected = proof.prefix(reference)?;
+        let (authorities, landings, geneses, imported) = match &projected {
+            crate::hybrid::authority::PublicProof::Import(b) => (
+                &b.authority_witnesses,
+                &b.landing_witnesses,
+                b.genesis_witnesses
+                    .iter()
+                    .filter_map(|p| p.original_genesis.as_ref())
+                    .collect::<Vec<_>>(),
+                Some(b.as_ref()),
+            ),
+            crate::hybrid::authority::PublicProof::Native(b) => (
+                &b.authority_witnesses,
+                &b.landing_witnesses,
+                b.genesis_witnesses
+                    .iter()
+                    .filter_map(|p| p.original_genesis.as_ref())
+                    .collect::<Vec<_>>(),
+                None,
+            ),
+        };
+        let retained = authorities
+            .iter()
+            .flat_map(|p| p.original.iter().chain(&p.dependencies))
+            .chain(landings.iter().flat_map(|p| {
+                p.execution
+                    .iter()
+                    .chain(p.source_operation.iter())
+                    .chain(&p.review_evidence)
+            }))
+            .chain(self.prefix_original.iter())
+            .collect::<Vec<_>>();
+        let mut operations = Vec::new();
+        for signed in &self.operations {
+            let operation = signed.verify().map_err(preparation)?;
+            let id = operation.id().map_err(preparation)?;
+            let published = if let Some(imported) = imported {
+                let frontier = api::import_authority::frontier_digest(&ImportFrontierV1 {
+                    format_version: 1,
+                    thread_id: operation.thread.as_bytes().to_vec(),
+                    operation_ids: vec![id.as_bytes().to_vec()],
+                })?;
+                imported.operations.iter().any(|o| {
+                    o.body
+                        .as_ref()
+                        .is_some_and(|b| b.resulting_frontier_digest == frontier)
+                })
+            } else {
+                false
+            };
+            if published
+                || retained.iter().any(|r| {
+                    r.canonical_record == signed.canonical
+                        && r.signatures.iter().any(|s| {
+                            s.public_key.as_slice() == operation.publisher
+                                && s.signature == signed.signature
+                        })
+                })
+            {
+                operations.push(signed.clone());
+            }
+        }
+        // Keep exact causal ancestors too. Native LocalKey history has no P2
+        // sidecar per capture; its admitted claim covers the earlier frontier.
+        let available = self
+            .operations
+            .iter()
+            .map(|signed| {
+                let operation = signed.verify().map_err(preparation)?;
+                Ok((operation.id().map_err(preparation)?, (signed, operation)))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
+        let mut pending = operations
+            .iter()
+            .map(|signed| {
+                signed
+                    .verify()
+                    .map_err(preparation)?
+                    .id()
+                    .map_err(preparation)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut causal = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if causal.insert(id) {
+                let (_, op) = available
+                    .get(&id)
+                    .ok_or(Error::Invalid("prefix ancestor absent"))?;
+                pending.extend(op.parents.iter().copied());
+            }
+        }
+        self.operations = available
+            .into_iter()
+            .filter(|(id, _)| causal.contains(id))
+            .map(|(_, (signed, _))| signed.clone())
+            .collect();
+        let mut threads = BTreeSet::new();
+        for record in geneses {
+            threads.insert(
+                crypto::import_authority::verify_native_genesis(record)
+                    .map_err(preparation)?
+                    .1
+                    .id()
+                    .map_err(preparation)?,
+            );
+        }
+        for signed in &self.operations {
+            threads.insert(signed.verify().map_err(preparation)?.thread);
+        }
+        for r in projected.foreign_dependencies() {
+            threads.insert(ContentHash::from_bytes(
+                r.thread_genesis_digest
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Hybrid(api::hybrid_codec::Reject::Scope))?,
+            ));
+        }
+        self.dependencies.retain(|g| {
+            g.genesis.as_ref().is_some_and(|r| {
+                crypto::import_authority::verify_native_genesis(r)
+                    .is_ok_and(|(_, g)| g.id().is_ok_and(|id| threads.contains(&id)))
+            })
+        });
+        for wrapper in self
+            .ready
+            .thread_genesis
+            .iter_mut()
+            .chain(&mut self.dependencies)
+        {
+            wrapper.ownership_claims.retain(|r| retained.contains(&r));
+            wrapper
+                .ownership_resolutions
+                .retain(|r| retained.contains(&r));
+        }
+        match projected {
+            crate::hybrid::authority::PublicProof::Import(b) => {
+                self.ready.import_authority = Some(*b)
+            }
+            crate::hybrid::authority::PublicProof::Native(b) => {
+                self.ready.native_authority = Some(*b)
+            }
+        }
+        Ok(())
+    }
     pub fn artifact_paths(&self) -> [std::path::PathBuf; 2] {
         [
             self.directory.path().join("source.pack"),
@@ -230,6 +410,7 @@ struct DisclosureInput {
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
     allow_partial: bool,
     carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+    foreign: Vec<ForeignDependencyV1>,
 }
 
 #[cfg(test)]
@@ -282,12 +463,25 @@ pub(super) fn validate_with_receipts_and_carriers(
             dependency_records: dependencies,
             receipt_records,
             allow_partial: !ready.full_closure_available,
+            foreign: ready
+                .import_authority
+                .as_ref()
+                .map(|b| b.foreign_dependencies.clone())
+                .or_else(|| {
+                    ready
+                        .native_authority
+                        .as_ref()
+                        .map(|b| b.foreign_dependencies.clone())
+                })
+                .unwrap_or_default(),
             carriers,
         },
     )?;
     Ok(StagedSource {
         directory: value.directory,
         ready,
+        #[cfg(feature = "native")]
+        prefix_original: None,
         operations: value.operations,
         dependencies: value.dependencies,
         state: value.state,
@@ -352,6 +546,8 @@ impl ValidatedSourceArtifacts {
         Ok(StagedSource {
             directory: self.directory,
             ready,
+            #[cfg(feature = "native")]
+            prefix_original: None,
             operations: self.operations,
             dependencies: self.dependencies,
             state: self.state,
@@ -391,6 +587,7 @@ pub(crate) fn validate_artifacts(
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
     carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+    foreign: Vec<ForeignDependencyV1>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     validate_disclosure_artifacts(
         thread,
@@ -402,6 +599,7 @@ pub(crate) fn validate_artifacts(
             dependency_records,
             receipt_records,
             allow_partial: false,
+            foreign,
             carriers,
         },
     )
@@ -420,6 +618,7 @@ fn validate_disclosure_artifacts(
         receipt_records,
         allow_partial,
         carriers,
+        foreign,
     } = input;
     if operations.len() > 10_000
         || dependency_records.len() >= 128
@@ -692,11 +891,32 @@ fn validate_disclosure_artifacts(
             .transpose()
             .map_err(preparation)?
             .flatten();
-        match imported {
-            Some(bound) => bound.validate_parents(genesis, &parents),
-            None => operation.validate_parents(genesis, &parents),
+        let signed = originals
+            .get(&id)
+            .ok_or(Error::Invalid("original absent"))?;
+        let original = SignedRecord {
+            format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
+            canonical_record: signed.canonical.clone(),
+            signatures: vec![RecordSignature {
+                public_key: operation.publisher.to_vec(),
+                signature: signed.signature.clone(),
+            }],
+        };
+        let foreign_original = foreign.iter().any(|r| {
+            r.thread_genesis_digest.as_slice() == operation.thread.as_bytes()
+                && api::import_authority::signed_native_digest(&original)
+                    .is_ok_and(|d| d == r.signed_native_digest)
+        });
+        if !foreign_original {
+            match imported {
+                Some(bound) => bound.validate_parents(genesis, &parents),
+                None => operation.validate_parents(genesis, &parents),
+            }
+            .map_err(preparation)?;
         }
-        .map_err(preparation)?;
+        // A reference permits temporary structural staging only. The receiver
+        // transaction must resolve its exact original through installed evidence.
+
         let mut required = operation.parents.clone();
         if let Some(receipt) = operation.local_integration().map_err(preparation)? {
             let source = decoded

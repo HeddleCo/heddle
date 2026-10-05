@@ -1647,6 +1647,76 @@ impl HostedClient {
     pub async fn install_staged_source(
         &self,
         repo: &Repository,
+        staged: thread_api::fetch::StagedSource,
+    ) -> Result<StateId, ProtocolError> {
+        self.install_source_prefixes(repo, staged, Vec::new()).await
+    }
+
+    async fn install_source_prefixes(
+        &self,
+        repo: &Repository,
+        staged: thread_api::fetch::StagedSource,
+        outstanding: Vec<contract::ForeignDependencyV1>,
+    ) -> Result<StateId, ProtocolError> {
+        let proof = match (staged.import_authority(), staged.native_authority()) {
+            (Some(b), None) => thread_api::hybrid::authority::PublicProof::from(b.clone()),
+            (None, Some(b)) => thread_api::hybrid::authority::PublicProof::from(b.clone()),
+            _ => return Err(native_error(api::hybrid_codec::Reject::Protocol)),
+        };
+        for obligation in proof.foreign_dependencies() {
+            if outstanding.contains(obligation) {
+                return Err(native_error(api::hybrid_codec::Reject::Scope));
+            }
+            let original = proof.foreign_original(obligation).map_err(native_error)?;
+            if foreign_original_installed(repo, original, obligation).map_err(native_error)? {
+                continue;
+            }
+            let reference = staged
+                .ready()
+                .thread
+                .as_ref()
+                .ok_or_else(|| native_error("Thread absent"))?;
+            let revision =
+                foreign_source_revision(original, reference.spool.clone()).map_err(native_error)?;
+            let open = FetchOpen {
+                thread: Some(ThreadRef {
+                    spool: reference.spool.clone(),
+                    id: Some(contract::ThreadId {
+                        value: obligation.thread_genesis_digest.clone(),
+                    }),
+                }),
+                revision,
+                selection: Some(TransferSelection {
+                    facets: vec![contract::SharedFacet::Source as i32],
+                    ..Default::default()
+                }),
+                protocol: Some(thread_api::hybrid::protocol()),
+                ..Default::default()
+            };
+            let scratch = tempfile::Builder::new()
+                .prefix("heddle-foreign-prefix-")
+                .tempdir()
+                .map_err(native_error)?;
+            let mut prefix = self
+                .fetch_native_source(
+                    repo,
+                    open,
+                    thread_api::fetch::Limits::default(),
+                    scratch.path(),
+                )
+                .await
+                .map_err(native_error)?;
+            prefix.select_prefix(obligation).map_err(native_error)?;
+            let mut nested = outstanding.clone();
+            nested.push(obligation.clone());
+            Box::pin(self.install_source_prefixes(repo, prefix, nested)).await?;
+        }
+        self.install_staged_source_one(repo, staged).await
+    }
+
+    async fn install_staged_source_one(
+        &self,
+        repo: &Repository,
         mut staged: thread_api::fetch::StagedSource,
     ) -> Result<StateId, ProtocolError> {
         use repo::thread_replication::hosted_trust::{
@@ -2347,6 +2417,95 @@ fn record_hosted_capture(
             "hosted capture was not admitted: {other:?}"
         ))),
     }
+}
+
+// Preflight only avoids a redundant download. Installed origin, prefix and
+// fresh witness authority are rechecked under the dependent mutation lock.
+fn foreign_original_installed(
+    repo: &Repository,
+    original: &contract::SignedRecord,
+    reference: &contract::ForeignDependencyV1,
+) -> anyhow::Result<bool> {
+    let thread = ContentHash::from_bytes(
+        reference
+            .thread_genesis_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| api::hybrid_codec::Reject::Scope)?,
+    );
+    let replica = match ThreadReplica::open(repo.heddle_dir(), thread) {
+        Ok(replica) => replica,
+        Err(_) => return Ok(false),
+    };
+    if original.format == objects::object::thread_replication::GENESIS_FORMAT {
+        let genesis = replica.genesis_record()?;
+        return Ok(genesis.genesis.as_ref() == Some(original));
+    }
+    if original.format == objects::object::thread_replication::ownership_claim::FORMAT
+        || original.format == objects::object::thread_replication::ownership_resolution::FORMAT
+    {
+        let genesis = replica.genesis_record()?;
+        return Ok(genesis.ownership_claims.contains(original)
+            || genesis.ownership_resolutions.contains(original));
+    }
+    let (_, operation) = crypto::import_authority::verify_native_operation(original)?;
+    if operation.thread != thread {
+        return Err(api::hybrid_codec::Reject::Scope.into());
+    }
+    let stored = replica.operation(&operation.id()?)?;
+    Ok(stored.is_some_and(|(signed, status)| {
+        status == objects::object::thread_replication::Admission::Accepted
+            && signed.canonical == original.canonical_record
+            && original.signatures.len() == 1
+            && signed.signature == original.signatures[0].signature
+    }))
+}
+fn foreign_source_revision(
+    original: &contract::SignedRecord,
+    spool: Option<contract::SpoolRef>,
+) -> anyhow::Result<Option<RevisionRef>> {
+    if [
+        objects::object::thread_replication::ownership_claim::FORMAT,
+        objects::object::thread_replication::ownership_resolution::FORMAT,
+    ]
+    .contains(&original.format.as_str())
+    {
+        return Ok(None);
+    }
+    if original.format == objects::object::thread_replication::GENESIS_FORMAT {
+        let (_, genesis) = crypto::import_authority::verify_native_genesis(original)?;
+        return Ok(Some(RevisionRef {
+            spool,
+            revision: Some(revision_ref::Revision::State(ApiStateId {
+                value: genesis.base.as_bytes().to_vec(),
+            })),
+        }));
+    }
+    let (_, operation) = crypto::import_authority::verify_native_operation(original)?;
+    let state = if let Some(state) = operation.source_state()? {
+        state.id()
+    } else {
+        let objects::object::thread_replication::ThreadOperationBody::Metadata(bytes) =
+            &operation.body
+        else {
+            return Err(api::hybrid_codec::Reject::Scope.into());
+        };
+        let control = objects::object::thread_replication::metadata::ThreadControl::decode(bytes)?;
+        let objects::object::thread_replication::metadata::Control::Review(review) =
+            control.control
+        else {
+            return Ok(None);
+        };
+        review.source
+    };
+    Ok(Some(RevisionRef {
+        spool,
+        revision: Some(revision_ref::Revision::State(
+            api::heddle::api::common::StateId {
+                value: state.as_bytes().to_vec(),
+            },
+        )),
+    }))
 }
 
 #[cfg(test)]
