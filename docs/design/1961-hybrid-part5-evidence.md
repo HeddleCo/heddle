@@ -45,6 +45,7 @@ native source ancestry. Ordinary Captures and LocalIntegration remain strict.
 | Publication staging | `crates/thread-api/src/publication/staging.rs:25`: exact enclosing proof bundle and same source validator; ordinary/owned-device publication stays strict. |
 | Client source download | `crates/hosted-client/src/hosted_runtime/hosted/native_provider.rs:151`: independently pinned root/Spool owner, refreshed witness proofs, authenticated carriers before direct/provider staging. |
 | Native-only witness install | `crates/repo/src/thread_replication/native_witness.rs:230`: no import carrier, strict ancestry; native evidence cannot grant the exception. |
+| Single native witness receive | `crates/repo/src/thread_replication/delegated_import.rs:1651`: `NativeEvidence` has no import carrier and uses strict closure at line 1703. Its regression rejects unrelated imported tips even when already installed; the ordinary native control and exact dependencies still pass. |
 
 No Heddle production path creates per-commit imported native ancestor Captures.
 `crates/ingest/src/state_writer.rs:73` converts Git commits to State objects.

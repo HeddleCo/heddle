@@ -669,6 +669,7 @@ fn witnessed_native_control_commits_its_exact_original_and_invalidates_replay() 
     unbound_originals.extend(conversions);
     let unbound = NativeEvidence {
         originals: &unbound_originals,
+        subject: NativeSubject::Authority(&payload),
         ..input
     };
     assert!(
