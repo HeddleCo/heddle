@@ -19,11 +19,11 @@ pub use iroh::{Endpoint, EndpointId, RelayMode};
 /// Owner-root claim router hosted on the daemon endpoint, and the socket
 /// convention for bridging its co-sign step to a foreground signer
 /// (heddle#1620, piece 3). See [`crate::hosted_runtime::claim_bridge`].
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", unix))]
 pub use crate::hosted_runtime::claim_bridge::{
     DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
 };
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", unix))]
 pub use crate::hosted_runtime::hosted::hosted_bridge::{HostedBridge, hosted_bridge_socket_path};
 
 /// Home relay for this build flavor. Trailing slash matches the
@@ -81,7 +81,7 @@ pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<E
 
 /// Bind the persistent device endpoint together with the hosted-session
 /// bridge that reuses it for CLI weft calls.
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", unix))]
 pub async fn bind_persistent_hosted(
     relay_mode: RelayMode,
 ) -> anyhow::Result<(
@@ -279,6 +279,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn bind_persistent_hosted_uses_the_device_endpoint() {

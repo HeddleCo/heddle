@@ -9,13 +9,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::common::{CallFailure, CallFailureCode};
+#[cfg(unix)]
 use config::UserConfig;
 
+#[cfg(unix)]
 use super::{
-    HostedAuthMode, HostedSession, agent_node_identity,
-    auth::resolve_server,
-    claim_authorization::validate_stored_claim_signer,
-    claim_bridge::ClaimBridgeWorker,
+    HostedAuthMode, HostedSession, agent_node_identity, auth::resolve_server,
+    claim_authorization::validate_stored_claim_signer, claim_bridge::ClaimBridgeWorker,
+};
+use super::{
     hosted::{
         canonical_server_authority, claim_protocol::VerifiedClaimPrincipal, server_keys_match,
     },
@@ -71,6 +73,7 @@ enum ClaimWaitOutcome {
 /// `on_ready` runs once after the short-lived offer is active and before the
 /// operation waits for a human. Callers can render it, forward it as an event,
 /// or retain it for another surface.
+#[cfg(unix)]
 pub async fn claim(
     args: ClaimOptions,
     on_ready: impl FnOnce(&ClaimOfferReady) -> Result<()>,
@@ -174,6 +177,14 @@ pub async fn claim(
     }
 }
 
+#[cfg(not(unix))]
+pub async fn claim(
+    _args: ClaimOptions,
+    _on_ready: impl FnOnce(&ClaimOfferReady) -> Result<()>,
+) -> Result<ClaimOutcome> {
+    bail!("the claim ceremony requires the Unix network daemon")
+}
+
 fn claimable_state(server: &str) -> Result<ClaimState> {
     let state = identity_state::load()?.context(
         "no agent account is waiting to be claimed; create one with `heddle auth login --invite <code>` first",
@@ -219,6 +230,7 @@ fn activate_offer(expected: &ClaimState, timeout: Duration) -> Result<ActiveClai
     Ok(offer)
 }
 
+#[cfg(unix)]
 async fn wait_for_claim(
     authorization_hash: &str,
     timeout: Duration,
@@ -272,6 +284,7 @@ async fn wait_for_claim(
     }
 }
 
+#[cfg(unix)]
 enum RearmOutcome {
     Rearmed(ClaimBridgeWorker),
     Terminal(ClaimWaitOutcome),
@@ -280,6 +293,7 @@ enum RearmOutcome {
 /// Re-establish the co-sign bridge after the daemon closed it (a
 /// mid-window restart), or report a terminal outcome if the ceremony
 /// resolved or the deadline passed while the daemon was away.
+#[cfg(unix)]
 async fn rearm(
     claim_socket: &std::path::Path,
     authorization_hash: &str,
