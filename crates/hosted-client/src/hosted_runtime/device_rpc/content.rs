@@ -24,7 +24,7 @@ use super::{
 const MAX_WORK: usize = 100_000;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ITEMS: u32 = 4096;
-const MAX_FRAME: u32 = 256 * 1024;
+const MAX_FRAME: u32 = 512 * 1024;
 
 #[derive(Clone, Copy)]
 struct Budget {
@@ -34,30 +34,21 @@ struct Budget {
 }
 impl Budget {
     fn new(requested: Option<ReadBudget>) -> Result<Self> {
-        let requested = requested.unwrap_or_default();
-        let limits = ReadBudget {
-            max_items: if requested.max_items == 0 {
-                1024
-            } else {
-                requested.max_items
-            },
-            max_frame_bytes: if requested.max_frame_bytes == 0 {
-                64 * 1024
-            } else {
-                requested.max_frame_bytes
-            },
-            max_snapshot_bytes: if requested.max_snapshot_bytes == 0 {
-                MAX_BYTES
-            } else {
-                requested.max_snapshot_bytes
-            },
+        let maximum = ReadBudget {
+            max_items: MAX_ITEMS,
+            max_frame_bytes: MAX_FRAME,
+            max_snapshot_bytes: MAX_BYTES,
         };
-        if limits.max_items > MAX_ITEMS
-            || !(1024..=MAX_FRAME).contains(&limits.max_frame_bytes)
-            || limits.max_snapshot_bytes > MAX_BYTES
-        {
-            bail!("content read budget exceeds endpoint limits");
-        }
+        let limits = api::v2::negotiate_read_budget(
+            &requested.unwrap_or_default(),
+            &ReadBudget {
+                max_items: 1024,
+                max_frame_bytes: 64 * 1024,
+                max_snapshot_bytes: MAX_BYTES,
+            },
+            &maximum,
+            &maximum,
+        )?;
         Ok(Self {
             limits,
             items: 0,
@@ -65,7 +56,7 @@ impl Budget {
         })
     }
     fn charge(&mut self, message: &impl Message) -> Result<()> {
-        let length = message.encoded_len() as u64;
+        let length = message.encoded_len() as u64 + 5;
         if self.items >= self.limits.max_items
             || length > u64::from(self.limits.max_frame_bytes)
             || length > self.limits.max_snapshot_bytes.saturating_sub(self.bytes)
@@ -152,6 +143,15 @@ impl DeviceRpc {
             if request.selections.is_empty() || request.selections.len() > 128 {
                 bail!("invalid content selection count");
             }
+            let echo = ContentEvent {
+                revision: Some(revision.clone()),
+                payload: Some(content_event::Payload::AcceptedBudget(budget.limits)),
+                ..Default::default()
+            };
+            budget.charge(&echo)?;
+            sender
+                .blocking_send(Ok(echo.encode_to_vec()))
+                .map_err(|_| anyhow::anyhow!("content read cancelled"))?;
             let mut ids = BTreeSet::new();
             let mut work = 0usize;
             for selection in request.selections {
@@ -289,7 +289,7 @@ impl DeviceRpc {
         let mut sent_frames = 0usize;
         while let Some(bytes) = receiver.recv().await {
             #[cfg(test)]
-            if sent_frames > 0 {
+            if sent_frames > 1 {
                 let gate = self
                     .content_send_gate
                     .lock()
@@ -619,4 +619,41 @@ fn tree_entry(
         last_changed_at: None,
         last_changed_by: None,
     })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn content_budget_clamps_and_echoes_the_resolved_limits() {
+        let requested = ReadBudget {
+            max_items: u32::MAX,
+            max_frame_bytes: u32::MAX,
+            max_snapshot_bytes: u64::MAX,
+        };
+        let budget = Budget::new(Some(requested)).expect("clamped budget");
+        api::v2::validate_accepted_read_budget(&requested, Some(&budget.limits))
+            .expect("legal echo");
+        assert_eq!(budget.limits.max_items, MAX_ITEMS);
+        assert_eq!(budget.limits.max_frame_bytes, MAX_FRAME);
+        assert_eq!(budget.limits.max_snapshot_bytes, MAX_BYTES);
+    }
+
+    #[test]
+    fn content_budget_charges_echo_and_transport_header() {
+        let mut budget = Budget::new(Some(ReadBudget {
+            max_items: 1,
+            max_frame_bytes: 1024,
+            max_snapshot_bytes: 1024,
+        }))
+        .expect("small legal request");
+        let echo = ContentEvent {
+            payload: Some(content_event::Payload::AcceptedBudget(budget.limits)),
+            ..Default::default()
+        };
+        budget.charge(&echo).expect("echo fits");
+        assert_eq!(budget.bytes, echo.encoded_len() as u64 + 5);
+        assert!(budget.charge(&echo).is_err(), "echo consumes the only item");
+    }
 }

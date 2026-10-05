@@ -193,6 +193,243 @@ fn blob_frames() -> Vec<Vec<u8>> {
     ]
 }
 
+fn budget_echo(accepted: ReadBudget) -> Vec<u8> {
+    ContentEvent {
+        payload: Some(content_event::Payload::AcceptedBudget(accepted)),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+async fn read_content_frames(
+    frames: Vec<Vec<u8>>,
+    requested: ReadBudget,
+) -> Result<Vec<heddle_thread_api::content::Blob>, Error> {
+    let method = rpc::ContentServiceReadContent::METHOD.path;
+    // Start after the injected retryable failure: these cases exercise one stream.
+    let calls = Arc::new(AtomicUsize::new(1));
+    let mut remote = remote(
+        Transport::new(calls.clone(), aborted("unused"), frames, method),
+        method,
+    );
+    remote.description.default_read_budget = Some(requested);
+    let result = remote
+        .read_blobs(
+            thread(),
+            revision(),
+            vec![BlobSource::ObjectHash(vec![9; 32])],
+        )
+        .await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "protocol failures must not retry"
+    );
+    result
+}
+
+#[tokio::test]
+async fn content_accepts_initial_budget_echo_before_domain_events() {
+    for revision in [None, Some(revision())] {
+        let echo = ContentEvent {
+            revision,
+            payload: Some(content_event::Payload::AcceptedBudget(budget())),
+            ..Default::default()
+        };
+        let mut frames = vec![echo.encode_to_vec()];
+        frames.extend(blob_frames());
+        let blobs = read_content_frames(frames, budget())
+            .await
+            .expect("alpha.22 content stream");
+        assert_eq!(blobs[0].bytes, b"hello\n");
+        assert_eq!(blobs[0].object_hash, vec![9; 32]);
+    }
+}
+
+#[tokio::test]
+async fn content_rejects_missing_budget_echo() {
+    for frames in [vec![], blob_frames()] {
+        assert!(matches!(
+            read_content_frames(frames, budget()).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn content_rejects_duplicate_budget_echo() {
+    for position in [1, 2, 3] {
+        let mut frames = vec![budget_echo(budget())];
+        frames.extend(blob_frames());
+        frames.insert(position, budget_echo(budget()));
+        assert!(matches!(
+            read_content_frames(frames, budget()).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn content_rejects_budget_echo_after_domain_event() {
+    let mut frames = blob_frames();
+    frames.insert(1, budget_echo(budget()));
+    assert!(matches!(
+        read_content_frames(frames, budget()).await,
+        Err(Error::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn content_rejects_widened_zero_or_below_floor_budget_echo() {
+    for accepted in [
+        ReadBudget {
+            max_items: 17,
+            ..budget()
+        },
+        ReadBudget {
+            max_frame_bytes: budget().max_frame_bytes + 1,
+            ..budget()
+        },
+        ReadBudget {
+            max_snapshot_bytes: budget().max_snapshot_bytes + 1,
+            ..budget()
+        },
+        ReadBudget {
+            max_items: 0,
+            ..budget()
+        },
+        ReadBudget {
+            max_frame_bytes: 0,
+            ..budget()
+        },
+        ReadBudget {
+            max_snapshot_bytes: 0,
+            ..budget()
+        },
+        ReadBudget {
+            max_items: 15,
+            ..budget()
+        },
+        ReadBudget {
+            max_frame_bytes: budget().max_frame_bytes - 1,
+            ..budget()
+        },
+        ReadBudget {
+            max_snapshot_bytes: budget().max_snapshot_bytes - 1,
+            ..budget()
+        },
+    ] {
+        let mut frames = vec![budget_echo(accepted)];
+        frames.extend(blob_frames());
+        assert!(
+            matches!(
+                read_content_frames(frames, budget()).await,
+                Err(Error::Invalid(_))
+            ),
+            "accepted {accepted:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn content_rejects_selection_scoped_budget_echo_and_unknown_payload() {
+    for frame in [
+        ContentEvent {
+            selection_id: "0".into(),
+            payload: Some(content_event::Payload::AcceptedBudget(budget())),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        ContentEvent {
+            revision: Some(RevisionRef {
+                spool: None,
+                ..revision()
+            }),
+            payload: Some(content_event::Payload::AcceptedBudget(budget())),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    ] {
+        let mut frames = vec![frame];
+        frames.extend(blob_frames());
+        assert!(matches!(
+            read_content_frames(frames, budget()).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    let mut frames = vec![
+        budget_echo(budget()),
+        ContentEvent {
+            selection_id: "0".into(),
+            revision: Some(revision()),
+            payload: None,
+        }
+        .encode_to_vec(),
+    ];
+    frames.extend(blob_frames());
+    assert!(matches!(
+        read_content_frames(frames, budget()).await,
+        Err(Error::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn content_charges_echo_and_completion_against_item_budget() {
+    for max_items in [1, 2, 3] {
+        let requested = ReadBudget {
+            max_items,
+            ..budget()
+        };
+        let mut frames = vec![budget_echo(requested)];
+        frames.extend(blob_frames());
+        assert_eq!(
+            read_content_frames(frames, requested).await.is_ok(),
+            max_items == 3
+        );
+    }
+}
+
+#[tokio::test]
+async fn content_counts_transport_framing_in_frame_and_snapshot_budgets() {
+    let mut domain = blob_frames();
+    let mut chunk = ContentEvent::decode(domain[0].as_slice()).expect("chunk");
+    let Some(content_event::Payload::Blob(ref mut blob)) = chunk.payload else {
+        panic!("blob")
+    };
+    blob.data = vec![42; 1800];
+    blob.total_size = 1800;
+    domain[0] = chunk.encode_to_vec();
+    let frame_bytes = domain[0].len() as u32 + 5;
+    for max_frame_bytes in [frame_bytes - 1, frame_bytes] {
+        let requested = ReadBudget {
+            max_frame_bytes,
+            ..budget()
+        };
+        let mut frames = vec![budget_echo(requested)];
+        frames.extend(domain.clone());
+        assert_eq!(
+            read_content_frames(frames, requested).await.is_ok(),
+            max_frame_bytes == frame_bytes
+        );
+    }
+    // The snapshot fits only if both the echo and every 5-byte stream header are charged.
+    let mut requested = ReadBudget {
+        max_frame_bytes: frame_bytes,
+        max_snapshot_bytes: 4096,
+        ..budget()
+    };
+    let total = budget_echo(requested).len() + domain.iter().map(Vec::len).sum::<usize>() + 15;
+    for max_snapshot_bytes in [total as u64 - 1, total as u64] {
+        requested.max_snapshot_bytes = max_snapshot_bytes;
+        let mut frames = vec![budget_echo(requested)];
+        frames.extend(domain.clone());
+        assert_eq!(
+            read_content_frames(frames, requested).await.is_ok(),
+            max_snapshot_bytes == total as u64
+        );
+    }
+}
+
 fn identity_frames() -> Vec<Vec<u8>> {
     let open = IdentityEvent {
         frame: Some(StreamFrame {
@@ -259,7 +496,9 @@ async fn authority_change_reopens_a_fresh_content_selection_and_succeeds() {
     let transport = Transport::new(
         Arc::clone(&observe_calls),
         aborted("material authority changed; reopen exact selection"),
-        blob_frames(),
+        std::iter::once(budget_echo(budget()))
+            .chain(blob_frames())
+            .collect(),
         method,
     );
     let remote = remote(transport, method);
@@ -321,7 +560,9 @@ async fn non_transient_content_failure_is_not_retried() {
             message: "hidden source".into(),
             ..Default::default()
         },
-        blob_frames(),
+        std::iter::once(budget_echo(budget()))
+            .chain(blob_frames())
+            .collect(),
         method,
     );
     let remote = remote(transport, method);

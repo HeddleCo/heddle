@@ -90,18 +90,47 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let mut range_done = vec![false; blobs.len()];
         let mut complete = vec![false; blobs.len()];
         let mut totals = vec![None; blobs.len()];
+        let mut accepted = None;
         let mut received_bytes = 0_u64;
         let mut received_items = 0_u32;
+        // Validate through FIN so selection completion cannot hide a trailing echo.
         while let Some(event) = messages.next().await? {
-            let size = prost::Message::encoded_len(&event) as u64;
-            if size > u64::from(budget.max_frame_bytes)
-                || size > budget.max_snapshot_bytes.saturating_sub(received_bytes)
-                || received_items >= budget.max_items
+            let echo = matches!(
+                event.payload,
+                Some(content_event::Payload::AcceptedBudget(_))
+            );
+            if let Some(content_event::Payload::AcceptedBudget(effective)) = &event.payload {
+                if accepted.is_some() || !event.selection_id.is_empty() {
+                    return Err(Error::Invalid(
+                        "duplicate or selection-scoped content budget echo",
+                    ));
+                }
+                if event
+                    .revision
+                    .as_ref()
+                    .is_some_and(|echo_revision| echo_revision != &revision)
+                {
+                    return Err(Error::Invalid("content revision mismatch"));
+                }
+                api::v2::validate_accepted_read_budget(&budget, Some(effective))
+                    .map_err(|_| Error::Invalid("invalid accepted content budget"))?;
+                accepted = Some(*effective);
+            }
+            let limits = accepted.ok_or(Error::Invalid("missing initial content budget echo"))?;
+            // Hosted stream framing is a one-byte kind and four-byte body length.
+            // The echo and selection completions consume the same budget as blobs.
+            let size = prost::Message::encoded_len(&event) as u64 + 5;
+            if size > u64::from(limits.max_frame_bytes)
+                || size > limits.max_snapshot_bytes.saturating_sub(received_bytes)
+                || received_items >= limits.max_items
             {
                 return Err(Error::Invalid("content budget exceeded"));
             }
             received_bytes += size;
             received_items += 1;
+            if echo {
+                continue;
+            }
             if event.revision.as_ref() != Some(&revision) {
                 return Err(Error::Invalid("content revision mismatch"));
             }
@@ -120,7 +149,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 content_event::Payload::Blob(chunk) => {
                     if range_done[index]
                         || chunk.offset != blob.bytes.len() as u64
-                        || chunk.total_size > budget.max_snapshot_bytes
+                        || chunk.total_size > limits.max_snapshot_bytes
                         || chunk.data.len() as u64 > chunk.total_size.saturating_sub(chunk.offset)
                         || chunk.object_hash.len() != 32
                         || totals[index].is_some_and(|total| total != chunk.total_size)
@@ -148,12 +177,15 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 }
                 _ => return Err(Error::Invalid("unexpected content payload")),
             }
-            if complete.iter().all(|done| *done) {
-                messages.cancel();
-                return Ok(blobs);
-            }
         }
-        Err(Error::Interrupted)
+        if accepted.is_none() {
+            return Err(Error::Invalid("missing initial content budget echo"));
+        }
+        if complete.iter().all(|done| *done) {
+            Ok(blobs)
+        } else {
+            Err(Error::Interrupted)
+        }
     }
 }
 
