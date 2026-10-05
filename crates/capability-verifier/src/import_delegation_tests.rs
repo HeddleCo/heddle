@@ -114,6 +114,308 @@ fn portable_import_permission_scope_and_current_expiry() {
     }
 }
 
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_future_within_skew_preserves_execution_start() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let signed: SignedImportJobDelegationV1 = record(&f, "commit_future_within_skew");
+    let parent = record(&f, "permission");
+    let prepared = record(&f, "commit_preparation");
+    let geneses = [record(&f, "genesis_dev"), record(&f, "genesis_main")];
+    let operation = record(&f, "commit_future_operation");
+    let forbidden = vec![key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")];
+    let mut c = context(&owner, &keyring, &digest, &initial, &forbidden, 1100);
+    let result =
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false);
+    println!(
+        "Commit admission at T=1100, N=1200: {:?}",
+        result.as_ref().map(|_| ())
+    );
+    let admitted = result.expect("scheduled Commit at the skew edge is eligible for admission");
+    assert_eq!(c.now_millis, 1100000, "admission never advances host time");
+    assert_eq!(
+        admitted.signed(),
+        &signed,
+        "retain the exact signed certificate"
+    );
+    c.now_millis = 1199000;
+    assert!(matches!(
+        verify_current(&signed, Some(&parent), &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    ));
+    assert_eq!(
+        verify_new_operation(&operation, &admitted, Some(&parent), &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    );
+    c.now_millis = 1200000;
+    verify_current(&signed, Some(&parent), &c, |_| false).expect("execution starts at N");
+    verify_new_operation(&operation, &admitted, Some(&parent), &c, |_| false)
+        .expect("frozen job-signed operation at N");
+    c.now_millis = signed.body.as_ref().expect("body").expires_at_unix_seconds * 1000;
+    assert!(matches!(
+        verify_current(&signed, Some(&parent), &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    ));
+    println!("Execution: N-1 Expired; N PASS; E Expired");
+}
+
+fn admission_preparation(
+    f: &Value,
+    signed: &SignedImportJobDelegationV1,
+) -> PrepareImportJobResponse {
+    let mut prepared: PrepareImportJobResponse = record(f, "commit_preparation");
+    prepared.proposal = Some(contract::delegation_preparation(
+        signed.body.as_ref().expect("body"),
+    ));
+    prepared
+}
+
+// Re-sign the portable bindings for a changed authority. Native originals and
+// creator envelopes remain separate host gates, just as in the API vectors.
+fn admission_bindings(
+    f: &Value,
+    signed: &mut SignedImportJobDelegationV1,
+    role: &str,
+) -> Vec<SignedImportGenesisAuthorityV1> {
+    let d = signed.body.as_mut().expect("delegation");
+    let mut geneses: Vec<SignedImportGenesisAuthorityV1> =
+        vec![record(f, "genesis_dev"), record(f, "genesis_main")];
+    for (g, manifest) in geneses.iter_mut().zip(&mut d.branch_manifest) {
+        let body = g.body.as_mut().expect("genesis binding");
+        body.identity = d.identity.clone();
+        body.creator_public_key = d.delegating_public_key.clone();
+        body.parent_permission_digest = d.parent_permission_digest.clone();
+        body.owner_chain_digest = d.owner_chain_digest.clone();
+        g.creator_signature = Some(sign_changed(f, role, contract::GENESIS_DOMAIN, body));
+        manifest.genesis_authority_digest =
+            contract::signed_genesis_digest(g).expect("binding digest");
+    }
+    signed.delegating_signature = Some(sign_changed(f, role, contract::DELEGATION_DOMAIN, d));
+    geneses
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_direct_owner_and_member_skew_edges() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let parent = record(&f, "permission");
+    let c = context(&owner, &keyring, &digest, &initial, &[], 1100);
+    for (name, role, member, geneses) in [
+        (
+            "direct_owner",
+            "owner",
+            None,
+            vec![
+                record(&f, "direct_genesis_0"),
+                record(&f, "direct_genesis_1"),
+            ],
+        ),
+        (
+            "commit_future_within_skew",
+            "device",
+            Some(&parent),
+            vec![record(&f, "genesis_dev"), record(&f, "genesis_main")],
+        ),
+    ] {
+        for (start, accepted) in [(1130, true), (1131, false)] {
+            let mut signed: SignedImportJobDelegationV1 = record(&f, name);
+            let body = signed.body.as_mut().expect("body");
+            body.not_before_unix_seconds = start;
+            signed.delegating_signature =
+                Some(sign_changed(&f, role, contract::DELEGATION_DOMAIN, body));
+            let mut prepared = admission_preparation(&f, &signed);
+            prepared.clock_skew_allowance_seconds = 30;
+            let result =
+                verify_commit_admission(&prepared, &signed, member, &geneses, &c, |_| false);
+            if accepted {
+                result.expect("N = T+S is admissible for owner and member");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::Hybrid(contract::Reject::ValidityBounds))
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_requires_host_order_and_exclusive_expiry() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let signed = record(&f, "commit_future_within_skew");
+    let parent = record(&f, "permission");
+    let geneses = [record(&f, "genesis_dev"), record(&f, "genesis_main")];
+    let mut prepared: PrepareImportJobResponse = record(&f, "commit_preparation");
+    prepared.prepared_at_unix_seconds = 1101;
+    prepared.reservation_expires_at_unix_seconds = 4701;
+    let mut c = context(&owner, &keyring, &digest, &initial, &[], 1100);
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    ));
+    c.now_millis = 1101000;
+    verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false)
+        .expect("host reaches Prepare time");
+
+    let expired = record(&f, "commit_window_expired");
+    prepared = record(&f, "commit_preparation");
+    c.now_millis = 1100000;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &expired, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::ValidityBounds))
+    ));
+    let control = record(&f, "delegation");
+    verify_commit_admission(&prepared, &control, Some(&parent), &geneses, &c, |_| false)
+        .expect("unexpired child control");
+
+    let signed = record(&f, "commit_reservation");
+    let parent = record(&f, "commit_reservation_parent");
+    let geneses = [
+        record(&f, "commit_reservation_genesis_dev"),
+        record(&f, "commit_reservation_genesis_main"),
+    ];
+    c.now_millis = 4599000;
+    verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false)
+        .expect("last second of reservation");
+    c.now_millis = 4600000;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Expired))
+    ));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_requires_parent_at_actual_time_and_containment() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let mut c = context(&owner, &keyring, &digest, &initial, &[], 1100);
+    for (start, end, reject) in [
+        (1101, 1400, contract::Reject::Expired),
+        (1201, 1400, contract::Reject::Expired),
+        (1000, 1100, contract::Reject::Expired),
+        (1000, 1299, contract::Reject::Scope),
+    ] {
+        let mut parent: SignedImportMemberPermissionV1 = record(&f, "permission");
+        let body = parent.body.as_mut().expect("parent");
+        body.not_before_unix_seconds = start;
+        body.expires_at_unix_seconds = end;
+        parent.owner_signature = Some(sign_changed(&f, "owner", contract::PERMISSION_DOMAIN, body));
+        let mut signed: SignedImportJobDelegationV1 = record(&f, "commit_future_within_skew");
+        signed
+            .body
+            .as_mut()
+            .expect("child")
+            .parent_permission_digest =
+            contract::signed_permission_digest(&parent).expect("parent digest");
+        let geneses = admission_bindings(&f, &mut signed, "device");
+        let prepared = admission_preparation(&f, &signed);
+        let result =
+            verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false);
+        assert!(
+            matches!(result, Err(Error::Hybrid(actual)) if actual == reject),
+            "parent window {start}..{end}"
+        );
+        if start == 1101 {
+            c.now_millis = 1101000;
+            verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false)
+                .expect("same genuine parent becomes current at its not-before");
+            c.now_millis = 1100000;
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_reuses_selected_lineage_roles_associations_and_revocations() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let signed: SignedImportJobDelegationV1 = record(&f, "commit_future_within_skew");
+    let parent: SignedImportMemberPermissionV1 = record(&f, "permission");
+    let prepared = record(&f, "commit_preparation");
+    let geneses = [record(&f, "genesis_dev"), record(&f, "genesis_main")];
+    let mut c = context(&owner, &keyring, &digest, &initial, &[], 1100);
+    verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false)
+        .expect("control");
+    for id in [
+        hybrid_codec::key_id(&key(&f, "owner")),
+        hybrid_codec::key_id(&key(&f, "device")),
+        hybrid_codec::key_id(&key(&f, "job")),
+    ] {
+        assert!(matches!(
+            verify_commit_admission(
+                &prepared,
+                &signed,
+                Some(&parent),
+                &geneses,
+                &c,
+                |r| matches!(r, Revocation::Key(actual) if actual == id)
+            ),
+            Err(Error::Hybrid(contract::Reject::Revoked))
+        ));
+    }
+    for id in [
+        &signed.body.as_ref().expect("child").cancellation_id,
+        &parent.body.as_ref().expect("parent").cancellation_id,
+    ] {
+        assert!(matches!(
+            verify_commit_admission(
+                &prepared,
+                &signed,
+                Some(&parent),
+                &geneses,
+                &c,
+                |r| matches!(r, Revocation::Cancellation(namespace, actual)
+                    if namespace == contract::CANCELLATION_NAMESPACE && actual == id)
+            ),
+            Err(Error::Hybrid(contract::Reject::Revoked))
+        ));
+    }
+    for role in ["job", "device", "owner"] {
+        let forbidden = [key(&f, role)];
+        let role_context = context(&owner, &keyring, &digest, &initial, &forbidden, 1100);
+        assert!(matches!(
+            verify_commit_admission(
+                &prepared,
+                &signed,
+                Some(&parent),
+                &geneses,
+                &role_context,
+                |_| false
+            ),
+            Err(Error::Hybrid(contract::Reject::KeyRole))
+        ));
+    }
+    let associations = [(key(&f, "job"), vec![0x88; 16])];
+    c.known_job_associations = &associations;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Scope))
+    ));
+    let wrong = [0x99; 32];
+    c.known_job_associations = &[];
+    c.selection.spool_genesis_digest = &wrong;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Root))
+    ));
+    c.selection.spool_genesis_digest = &digest;
+    c.selection.initial_owner_id = &wrong;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Root))
+    ));
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn role_substitution_and_conflicting_job_associations() {
@@ -349,6 +651,114 @@ fn direct_delegation(
     body.expires_at_unix_seconds = expires_at;
     signed.delegating_signature = Some(sign_changed(f, role, contract::DELEGATION_DOMAIN, body));
     signed
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_uses_effective_owner_expiry() {
+    let f = fixture();
+    let (deferred, claimed, _) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    for (owner, role, now, expiry, rejected) in [
+        (&deferred, "owner", 1050, CLAIM_DEADLINE, false),
+        (&deferred, "owner", 1050, CLAIM_DEADLINE + 1, true),
+        (&claimed, "device", 1250, 1290, false),
+    ] {
+        let c = context(owner, &ring, &digest, &initial, &[], now);
+        let mut signed = direct_delegation(&f, &c, role, now + 30, expiry);
+        let geneses = admission_bindings(&f, &mut signed, role);
+        let mut prepared = admission_preparation(&f, &signed);
+        prepared.prepared_at_unix_seconds = now;
+        prepared.reservation_expires_at_unix_seconds = now + 3600;
+        prepared.clock_skew_allowance_seconds = 30;
+        let result = verify_commit_admission(&prepared, &signed, None, &geneses, &c, |_| false);
+        if rejected {
+            assert!(matches!(
+                result,
+                Err(Error::Hybrid(contract::Reject::Scope))
+            ));
+        } else {
+            result.expect("admission uses the expiry of the effective selected owner state");
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_future_owner_transition_cannot_authorize_at_t() {
+    let f = fixture();
+    let (deferred, claimed, _) = deferred_owners(&f);
+    let ring = deferred_keyring(&f, &deferred);
+    let (_, _, digest) = selected(&f);
+    let initial = deferred.owner_id();
+    let mut c = context(&claimed, &ring, &digest, &initial, &[], CLAIM_TIME);
+    let mut signed = direct_delegation(&f, &c, "device", CLAIM_TIME + 29, CLAIM_DEADLINE + 50);
+    let geneses = admission_bindings(&f, &mut signed, "device");
+    let mut prepared = admission_preparation(&f, &signed);
+    prepared.clock_skew_allowance_seconds = 30;
+    c.now_millis = (CLAIM_TIME - 1) * 1000;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, None, &geneses, &c, |_| false),
+        Err(Error::NotYetValid)
+    ));
+    c.selection.owner = &deferred;
+    assert!(matches!(
+        verify_commit_admission(&prepared, &signed, None, &geneses, &c, |_| false),
+        Err(Error::Hybrid(contract::Reject::Root))
+    ));
+    c.selection.owner = &claimed;
+    c.now_millis = CLAIM_TIME * 1000;
+    verify_commit_admission(&prepared, &signed, None, &geneses, &c, |_| false)
+        .expect("the same claim authorizes admission only after its actual activation");
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_admission_preserves_preparation_signatures_and_genesis_bindings() {
+    let f = fixture();
+    let (owner, keyring, digest) = selected(&f);
+    let initial = owner.owner_id();
+    let c = context(&owner, &keyring, &digest, &initial, &[], 1100);
+    let prepared = record(&f, "commit_preparation");
+    let parent = record(&f, "permission");
+    let geneses = [record(&f, "genesis_dev"), record(&f, "genesis_main")];
+    let control = record(&f, "delegation");
+    verify_commit_admission(&prepared, &control, Some(&parent), &geneses, &c, |_| false)
+        .expect("unmodified frozen Commit control");
+    for (name, reject) in [
+        (
+            "commit_frozen_logicalJobId",
+            contract::Reject::PreparedFields,
+        ),
+        (
+            "commit_frozen_manifest_reordered",
+            contract::Reject::PreparedFields,
+        ),
+        ("commit_bad_signature", contract::Reject::Signature),
+        ("commit_genesis_digest", contract::Reject::GenesisBinding),
+        ("commit_genesis_branch", contract::Reject::GenesisBinding),
+    ] {
+        let signed = record(&f, name);
+        let result =
+            verify_commit_admission(&prepared, &signed, Some(&parent), &geneses, &c, |_| false);
+        assert!(
+            matches!(result, Err(Error::Hybrid(actual)) if actual == reject),
+            "{name}"
+        );
+    }
+    assert!(matches!(
+        verify_commit_admission(
+            &prepared,
+            &control,
+            Some(&parent),
+            &geneses[..1],
+            &c,
+            |_| false
+        ),
+        Err(Error::Hybrid(contract::Reject::GenesisBinding))
+    ));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
