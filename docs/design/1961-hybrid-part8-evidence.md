@@ -192,6 +192,16 @@ OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED seed=38322398 count=1
 
 The final CLI gate includes the 1,000-State/later-capture workload: **308.603 seconds, PASS**, within the unchanged six-minute timeout. The final workspace gate, including doctests, ran serially after the feature matrix to avoid shared-target metadata replacement.
 
+Integration advanced to `06eceb13` while this work was being verified. The final
+branch merges that base without rewriting history, preserving its Windows fixes,
+release CI changes, and workspace/browser version `0.28.10`. The only conflict
+was the browser README, resolved with that version and the exact alpha.37 pin.
+After the merge, six additional checks pass: affected libraries (1,447 passed,
+0 failed, 11 ignored), workspace/client clippy with warnings and dead code denied,
+hosted-client (488 passed, 0 failed, 3 skipped), release browser binding, npm
+pack dry-run, and bigint/differential (374 checks and 272 matching cases).
+Nightly formatting again passes on the same 34 touched Rust files.
+
 17 guard-removal pairs completed. Each named runtime assertion fails with exit 101 when its guard is disabled, then passes with exit 0 after exact source restoration. No compiler failure or empty test selection counts as proof. API mutations used an isolated alpha.37 copy; the final workspace retains the published git pin.
 
 | Guard | Regression | Removed / restored |

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Release 0.28.10: Windows builds compile again; fix git-projection `GitError::io_kind` and hosted-client Unix bridge cfg (#1982).
+
 - Release 0.28.9: content readers handle the mandatory alpha.22 AcceptedBudget echo first, exactly once, validated and budget-accounted (#1979).
 
 - PR #1965 review fixes: validate original JS bigint types and signed/unsigned ranges before WASM conversion; exclude all verified owner-history authority keys when a policy introduces revocations; use the general 256-transition import bound and restore the 4096 policy-revocation bound. Keep the alpha.21 API pin; alpha.23 error mapping and dependency migration remain coordinated release work.

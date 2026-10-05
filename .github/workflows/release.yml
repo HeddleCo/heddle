@@ -75,14 +75,14 @@ jobs:
   # and would let a tagged rewrite replace the gate — forbidden.
   validate-tag:
     name: validate tag
-    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@e847f41b146e42e5bd688039469ed0a5ab9eff21
+    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@a7cb533be5635b8a0009d0981feb66cad524d464
     permissions:
       contents: read
 
   build-verifier-npm:
     name: build capability-verifier npm package
     needs: validate-tag
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -128,7 +128,7 @@ jobs:
     name: publish capability-verifier to GitHub Packages
     needs: [validate-tag, build-verifier-npm, release]
     if: needs.validate-tag.outputs.kind == 'stable'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: release
     permissions:
@@ -158,7 +158,7 @@ jobs:
           if npm view "$package" version --json > /tmp/npm-probe.json 2>/tmp/npm-probe.log; then
             echo "$package already published"
           elif node -e 'const e = require("/tmp/npm-probe.json"); process.exit(e.error?.code === "E404" ? 0 : 1)'; then
-            npm publish "package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts
+            npm publish "./package/heddleco-capability-verifier-wasm-${version}.tgz" --ignore-scripts
           else
             cat /tmp/npm-probe.log >&2
             exit 1
@@ -182,10 +182,10 @@ jobs:
             # binaries run on Debian 12 (2.36) and Ubuntu 22.04+ forward.
             # Building on ubuntu-24.04 (glibc 2.39) crashed at runtime on
             # those targets with GLIBC_2.3x-not-found (#549).
-            runner: ubuntu-22.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2204-arm
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: blacksmith-4vcpu-ubuntu-2204
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
@@ -458,7 +458,7 @@ jobs:
     name: publish release
     needs: [validate-tag, build, build-macos-cask]
     if: needs.validate-tag.outputs.publish_release == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: release
     permissions:
@@ -519,7 +519,7 @@ jobs:
     name: publish package manifests
     needs: [validate-tag, build, build-macos-cask, release]
     if: needs.validate-tag.outputs.kind == 'stable'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: release
     permissions:
