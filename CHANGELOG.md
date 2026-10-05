@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.28.10: Windows builds compile again; fix git-projection `GitError::io_kind` and hosted-client Unix bridge cfg (#1982).
+
 - Release 0.28.9: content readers handle the mandatory alpha.22 AcceptedBudget echo first, exactly once, validated and budget-accounted (#1979).
 
 - Adopt heddle-api 0.31.0-alpha.21 and its exact HYBRID boundary-acceptance binding (api#319). Native verification checks complete selection and accepting authority; original formats stay unchanged. Fix commit-time disclosure expiry, ownership-transfer histories, permanent key roles, process-wide clock rollback protection and millisecond freshness. Release 0.28.8 for the dependency contract change (#1961, #1964). Alpha.21 (api#322) revises undeployed Prepare/Commit in place; completed signing layouts and the alpha.20 boundary binding are unchanged. Part 2 owns the client/RPC integration.
