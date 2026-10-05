@@ -397,9 +397,7 @@ fn remove_credential_helpers(config: &mut GitConfig) {
 fn embedded_helper_failure_allows_prompt(error: &GitError) -> bool {
     match error {
         GitError::Command(message) => message.contains("credential helper"),
-        #[cfg(windows)]
-        GitError::Io(_) => true,
-        _ => false,
+        _ => cfg!(windows) && error.io_kind().is_some(),
     }
 }
 
@@ -449,6 +447,48 @@ fn unix_time_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use std::io::{Error, ErrorKind};
+
+    use sley::GitError;
+
+    use super::embedded_helper_failure_allows_prompt;
+
+    #[test]
+    fn helper_command_failure_allows_prompt() {
+        assert!(embedded_helper_failure_allows_prompt(&GitError::Command(
+            "credential helper failed to start".to_string(),
+        )));
+        assert!(!embedded_helper_failure_allows_prompt(&GitError::Command(
+            "transport failed".to_string(),
+        )));
+    }
+
+    #[test]
+    fn helper_io_failure_allows_prompt_only_on_windows() {
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::BrokenPipe,
+        ] {
+            let error = GitError::from(Error::new(kind, "helper I/O failed"));
+            assert_eq!(embedded_helper_failure_allows_prompt(&error), cfg!(windows));
+        }
+    }
+
+    #[test]
+    fn non_io_failures_do_not_allow_prompt() {
+        for error in [
+            GitError::InvalidFormat("credential helper told Heddle to stop".to_string()),
+            GitError::Cancelled,
+        ] {
+            let error = GitError::from(Error::other(error));
+            assert!(!embedded_helper_failure_allows_prompt(&error));
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
