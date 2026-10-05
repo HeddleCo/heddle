@@ -257,8 +257,8 @@ jobs:
           write_bool repo_fault repo_needed
           write_bool fault_tests fault_needed
 
-  # Default-feature quality lane. Build, clippy, tests, and executable-backed
-  # Default CLI contracts share one `target/`; alternate feature contracts run
+  # Default-feature quality lane. Build, clippy, unique tests, and executable-backed
+  # CLI contracts share one `target/`; alternate feature contracts run
   # in parallel below so they do not invalidate default-feature artifacts.
   quality:
     name: Quality
@@ -302,13 +302,15 @@ jobs:
           cache-on-failure: true
           cache-all-crates: true
 
+      - uses: taiki-e/install-action@nextest
+
       - name: Rust source reachability and dead-code blankets
         if: needs.changes.outputs.skip_cargo != 'true'
         run: cargo run --locked -p heddle-devtools -- check-rust-source-reachability
 
       # Build, lint, and test changed crates plus their reverse dependents on
       # one shared target directory.
-      - name: Build, clippy, and test affected packages
+      - name: Build, clippy, and unique tests for affected packages
         if: needs.changes.outputs.skip_cargo != 'true'
         env:
           CARGO_PACKAGE_ARGS: ${{ needs.changes.outputs.cargo_package_args }}
@@ -332,14 +334,34 @@ jobs:
             --lib --bins --tests --examples -- -D warnings -D dead-code
           echo "::endgroup::"
 
-          echo "::group::cargo test"
           current_fd_limit=$(ulimit -n)
           if [ "$current_fd_limit" != "unlimited" ] && [ "$current_fd_limit" -lt 65536 ]; then
             ulimit -n 65536
           fi
           echo "Open-file limit: $(ulimit -n)"
-          cargo test --locked "${package_args[@]}"
+
+          echo "::group::nextest"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # The fast lane owns units and CLI/hosted-client regressions at
+            # this SHA. Keep the other integration binaries, including the
+            # security/conformance tests, that those runs do not execute.
+            # A CLI-only selection can legitimately have no unique binaries.
+            cargo nextest run --locked "${package_args[@]}" --tests \
+              -E 'kind(test) & not package(heddle-cli) & not package(heddle-hosted-client)' \
+              --no-tests pass
+          else
+            # Merge groups/manual dispatches have no fast-lane test run.
+            cargo nextest run --locked --workspace --features heddle-cli/client
+          fi
           echo "::endgroup::"
+
+          echo "::group::doctests"
+          cargo test --locked "${package_args[@]}" --doc
+          echo "::endgroup::"
+
+          # CLI defaults already include client, and no test declaration is
+          # gated by cfg(not(feature = "client")). Its unit/integration tests
+          # therefore have no extra default-only variant to repeat here.
 
       - name: No affected Rust packages
         if: needs.changes.outputs.skip_cargo == 'true'
