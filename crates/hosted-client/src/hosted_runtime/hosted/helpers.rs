@@ -257,6 +257,65 @@ mod tests {
     }
 
     #[test]
+    fn invitation_and_approval_refusals_preserve_alpha39_reasons() {
+        use api::heddle::api::common::{CallFailureCode, ErrorDetail, ErrorReason};
+        use prost::Message;
+        for (code, reason, field) in [
+            (
+                CallFailureCode::PermissionDenied,
+                ErrorReason::InvitationHumanSessionRequired,
+                "invitation",
+            ),
+            (
+                CallFailureCode::FailedPrecondition,
+                ErrorReason::InvitationInviterAuthorityLost,
+                "invitation",
+            ),
+            (
+                CallFailureCode::NotFound,
+                ErrorReason::InvitationHandleNotFound,
+                "invitation.handle",
+            ),
+            (
+                CallFailureCode::InvalidArgument,
+                ErrorReason::ApprovalRoleBelowEligibilityFloor,
+                "group.member_role",
+            ),
+        ] {
+            let detail = ErrorDetail {
+                reason: reason as i32,
+                field: field.into(),
+                ..Default::default()
+            };
+            let error = hosted_to_protocol_error(HostedError::Call {
+                code,
+                message: "refused".into(),
+                error: Some(Box::new(detail.clone())),
+            });
+            let ProtocolError::RemoteFailure {
+                code: actual,
+                details,
+                ..
+            } = error
+            else {
+                panic!("typed remote failure");
+            };
+            assert_eq!(actual, remote_failure_code(code));
+            let wire::RemoteFailureDetail::Unknown { type_url, value } = &details[0] else {
+                panic!("complete shared error detail");
+            };
+            assert_eq!(
+                type_url,
+                "type.googleapis.com/heddle.api.common.ErrorDetail"
+            );
+            assert_eq!(
+                ErrorDetail::decode(value.as_slice()).expect("detail"),
+                detail
+            );
+        }
+    }
+
+    #[test]
     fn hosted_to_protocol_error_maps_call_codes_without_detail() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::CallFailureCode;

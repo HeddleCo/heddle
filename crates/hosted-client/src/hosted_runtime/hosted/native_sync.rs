@@ -33,7 +33,7 @@ use objects::{
 use repo::{
     Repository, SyncedThreadMetadata, ThreadManager,
     thread_replication::{
-        ThreadReplica,
+        ForeignPrefixBudget, ThreadReplica,
         source_heads::{default_source_head, greatest_source_head},
     },
 };
@@ -66,7 +66,19 @@ fn native_error(error: impl std::fmt::Display) -> ProtocolError {
 }
 
 fn replica_err(error: repo::thread_replication::Error) -> ProtocolError {
-    ProtocolError::InvalidState(error.to_string())
+    match error {
+        repo::thread_replication::Error::ForeignPrefixLimitExceeded { limit_name, limit } => {
+            ProtocolError::ForeignPrefixLimitExceeded { limit_name, limit }
+        }
+        error => ProtocolError::InvalidState(error.to_string()),
+    }
+}
+
+fn fetch_install_error(error: thread_api::fetch::Error) -> ProtocolError {
+    match error {
+        thread_api::fetch::Error::Repository(error) => replica_err(*error),
+        error => native_error(error),
+    }
 }
 
 fn once_observe() -> ObserveOptions {
@@ -1649,7 +1661,13 @@ impl HostedClient {
         repo: &Repository,
         staged: thread_api::fetch::StagedSource,
     ) -> Result<StateId, ProtocolError> {
-        self.install_source_prefixes(repo, staged, Vec::new()).await
+        self.install_source_prefixes(
+            repo,
+            staged,
+            Vec::new(),
+            &mut ForeignPrefixBudget::default(),
+        )
+        .await
     }
 
     async fn install_source_prefixes(
@@ -1657,6 +1675,7 @@ impl HostedClient {
         repo: &Repository,
         staged: thread_api::fetch::StagedSource,
         outstanding: Vec<contract::ForeignDependencyV1>,
+        budget: &mut ForeignPrefixBudget,
     ) -> Result<StateId, ProtocolError> {
         let proof = match (staged.import_authority(), staged.native_authority()) {
             (Some(b), None) => thread_api::hybrid::authority::PublicProof::from(b.clone()),
@@ -1671,6 +1690,9 @@ impl HostedClient {
             if foreign_original_installed(repo, original, obligation).map_err(native_error)? {
                 continue;
             }
+            budget
+                .visit(outstanding.len() + 1, false)
+                .map_err(replica_err)?;
             let reference = staged
                 .ready()
                 .thread
@@ -1709,7 +1731,7 @@ impl HostedClient {
             prefix.select_prefix(obligation).map_err(native_error)?;
             let mut nested = outstanding.clone();
             nested.push(obligation.clone());
-            Box::pin(self.install_source_prefixes(repo, prefix, nested)).await?;
+            Box::pin(self.install_source_prefixes(repo, prefix, nested, budget)).await?;
         }
         self.install_staged_source_one(repo, staged).await
     }
@@ -1839,7 +1861,7 @@ impl HostedClient {
         );
         staged
             .install_hosted(repo, &trust, &authority, chrono::Utc::now().timestamp())
-            .map_err(native_error)
+            .map_err(fetch_install_error)
     }
 
     async fn current_source_disclosure_deadline(
@@ -2509,6 +2531,10 @@ fn foreign_source_revision(
 }
 
 #[cfg(test)]
+#[path = "../../../../thread-api/tests/support/foreign_prefix.rs"]
+mod prefix_graph;
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
@@ -2527,6 +2553,175 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn foreign_prefix_fetch_depth_33_refuses_with_typed_limit() {
+        // Debug builds materialize the large staged-transfer future on the
+        // stack before polling it. Keep this protocol fixture off libtest's
+        // small default stack, as the existing CLI runtime does.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime")
+                    .block_on(fetch_depth_33())
+            })
+            .expect("protocol thread")
+            .join()
+            .expect("depth assertion");
+    }
+
+    async fn fetch_depth_33() {
+        use repo::thread_replication::authority::PublicProof;
+
+        use super::super::native_exchange_test_server::{self, PublicationCapture};
+        let _guard = crate::test_process_env::exclusive().await;
+        let directory = tempfile::tempdir().expect("receiver");
+        let repository = Repository::init_default(directory.path()).expect("repository");
+        let chain = prefix_graph::chain(33);
+        let mut prefixes = Vec::new();
+        for prefix in &chain {
+            let source = prefix_graph::source(prefix);
+            let spool = SpoolRef {
+                id: Uuid::from_slice(
+                    &source
+                        .owner_genesis
+                        .genesis
+                        .as_ref()
+                        .expect("body")
+                        .spool_uuid,
+                )
+                .expect("UUID")
+                .to_string(),
+            };
+            let (imported, native) = match &prefix.proof {
+                PublicProof::Import(b) => (Some(*b.clone()), None),
+                PublicProof::Native(b) => (None, Some(*b.clone())),
+            };
+            prefixes.push(PublicationCapture {
+                revision: Some(revision_ref(&spool, source.state.id())),
+                thread_genesis: Some(source.genesis),
+                operations: vec![contract::ReplicationOperations {
+                    operations: source.operations,
+                    import_authority: imported.clone(),
+                    native_authority: native.clone(),
+                    ..Default::default()
+                }],
+                pack_data: source.pack,
+                index_data: source.index,
+                native_authority: native,
+                import_authority: imported,
+                owner_genesis: Some(source.owner_genesis),
+                ownership: Some(source.owner),
+                ..Default::default()
+            });
+        }
+        let last = chain.last().expect("root");
+        let (_, original) =
+            crypto::import_authority::verify_native_operation(&last.original).expect("original");
+        let source = prefix_graph::source(last);
+        let spool = Uuid::from_slice(
+            &source
+                .owner_genesis
+                .genesis
+                .as_ref()
+                .expect("body")
+                .spool_uuid,
+        )
+        .expect("Spool");
+        let (mut client, server, captured) =
+            native_exchange_test_server::start(spool, "prefix-root", *original.thread.as_bytes())
+                .await;
+        let mut fresh = last.proof.witness_set().expect("set").clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        let body = fresh.body.as_mut().expect("body");
+        body.issued_at_unix_millis = now - 1000;
+        body.valid_until_unix_millis = now + 240_000;
+        for entry in &mut body.entries {
+            entry.active_until_unix_millis = now + 300_000;
+        }
+        let bytes = api::witness_trust::set_signing_bytes(body).expect("set bytes");
+        fresh.body_digest = api::hybrid_codec::hash(&[&bytes]);
+        fresh.root_signature = Ed25519Signer::from_seed(&[7; 32])
+            .expect("root")
+            .sign(&bytes)
+            .expect("signature");
+        std::sync::Arc::get_mut(client.witness_lookup.as_mut().expect("lookup"))
+            .expect("unique lookup")
+            .test_responses
+            .as_mut()
+            .expect("responses")
+            .set = Some(fresh);
+        captured.lock().expect("fixture").prefixes = prefixes;
+        let staged = client
+            .fetch_native_source(
+                &repository,
+                FetchOpen {
+                    protocol: Some(thread_api::hybrid::protocol()),
+                    thread: Some(ThreadRef {
+                        spool: Some(SpoolRef {
+                            id: spool.to_string(),
+                        }),
+                        id: Some(contract::ThreadId {
+                            value: original.thread.as_bytes().to_vec(),
+                        }),
+                    }),
+                    revision: Some(revision_ref(
+                        &SpoolRef {
+                            id: spool.to_string(),
+                        },
+                        source.state.id(),
+                    )),
+                    selection: Some(TransferSelection {
+                        facets: vec![contract::SharedFacet::Source as i32],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                thread_api::fetch::Limits::default(),
+                directory.path(),
+            )
+            .await
+            .expect("genuine staged chain root");
+        let result = client.install_staged_source(&repository, staged).await;
+        assert!(
+            matches!(
+                result,
+                Err(ProtocolError::ForeignPrefixLimitExceeded {
+                    limit_name: "depth",
+                    limit: 32
+                })
+            ),
+            "fetch visit must refuse the genuine depth-33 chain with a typed limit: {result:?}"
+        );
+        for prefix in &chain {
+            let (_, operation) =
+                crypto::import_authority::verify_native_operation(&prefix.original)
+                    .expect("operation");
+            assert!(
+                ThreadReplica::open(repository.heddle_dir(), operation.thread)
+                    .and_then(|replica| replica.genesis_record())
+                    .is_err(),
+                "depth refusal precedes prefix installation"
+            );
+        }
+        drop(client);
+        server.abort();
+    }
+
+    #[test]
+    fn hosted_replay_preserves_foreign_prefix_limit_type() {
+        for (limit_name, limit) in [("depth", 32), ("count", 256)] {
+            let error = thread_api::fetch::Error::from(
+                repo::thread_replication::Error::ForeignPrefixLimitExceeded { limit_name, limit },
+            );
+            assert!(
+                matches!(fetch_install_error(error), ProtocolError::ForeignPrefixLimitExceeded { limit_name: actual_name, limit: actual_limit } if actual_name == limit_name && actual_limit == limit),
+                "hosted replay conversion must preserve the typed prefix refusal"
+            );
+        }
+    }
     #[test]
     fn concurrent_source_heads_advertise_the_greatest_state_regardless_of_wire_order() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();

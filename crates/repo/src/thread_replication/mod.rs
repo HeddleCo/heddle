@@ -15,6 +15,7 @@ pub use checkout_resolution::source_conflict_version;
 pub mod authority;
 pub mod delegated_import;
 mod foreign_dependencies;
+pub use foreign_dependencies::ForeignPrefixBudget;
 mod genesis_admission;
 pub mod hosted_trust;
 #[cfg(test)]
@@ -71,6 +72,11 @@ const ACCEPTED_PAGE_SQL: &str = "SELECT id,canonical,signature FROM operations W
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("foreign prefix {limit_name} exceeds limit {limit}")]
+    ForeignPrefixLimitExceeded {
+        limit_name: &'static str,
+        limit: usize,
+    },
     #[error(transparent)]
     Hybrid(#[from] api::hybrid_codec::Reject),
     #[error(transparent)]

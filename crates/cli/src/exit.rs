@@ -256,6 +256,7 @@ impl HeddleExitCode {
                     wire::ProtocolError::ObjectNotFound(_) => Self::Config,
                     wire::ProtocolError::ThreadCaptureRequired { .. } => Self::DataErr,
                     wire::ProtocolError::InvalidState(_)
+                    | wire::ProtocolError::ForeignPrefixLimitExceeded { .. }
                     | wire::ProtocolError::PublicationLimitExceeded { .. }
                     | wire::ProtocolError::PublicationOperationTooLarge { .. }
                     | wire::ProtocolError::AlreadyExists(_)
@@ -533,6 +534,18 @@ mod tests {
     fn no_merge_in_progress_typed_variant_is_data_err() {
         let err: anyhow::Error = objects::error::HeddleError::NoMergeInProgress.into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn foreign_prefix_limits_remain_protocol_refusals_through_context() {
+        for limit_name in ["depth", "count"] {
+            let err = anyhow::Error::new(wire::ProtocolError::ForeignPrefixLimitExceeded {
+                limit_name,
+                limit: 32,
+            })
+            .context("Fetch could not install a foreign prefix");
+            assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Protocol);
+        }
     }
 
     #[test]
