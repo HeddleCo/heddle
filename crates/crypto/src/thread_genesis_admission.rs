@@ -8,8 +8,6 @@ use heddle_object_model::object::{
 };
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "owner-root")]
-pub use crate::import_authority::verify_genesis_payload as verify_import_witness;
 use crate::{
     Ed25519Signer, Signer,
     thread_operation::{Error, SignedGenesis},

@@ -33,6 +33,31 @@ pub(super) struct Dependent<'a> {
 pub(super) struct Recheck<'a> {
     pub path: &'a [wire::ForeignDependencyV1],
     pub verified: &'a RefCell<BTreeSet<Vec<u8>>>,
+    pub budget: &'a RefCell<ForeignPrefixBudget>,
+}
+
+/// Bound uncached Fetch work across siblings and depth for Fetch and retained replay.
+#[derive(Default)]
+pub struct ForeignPrefixBudget {
+    visited: usize,
+}
+impl ForeignPrefixBudget {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_PREFIXES: usize = 256;
+
+    /// Installed endpoints spend no Fetch count, but retained replay still obeys
+    /// the depth bound and revalidates authority under the current trust lock.
+    pub fn visit(&mut self, depth: usize, installed: bool) -> Result<()> {
+        let (limit_name, limit) = if depth > Self::MAX_DEPTH {
+            ("depth", Self::MAX_DEPTH)
+        } else if !installed && self.visited >= Self::MAX_PREFIXES {
+            ("count", Self::MAX_PREFIXES)
+        } else {
+            self.visited += usize::from(!installed);
+            return Ok(());
+        };
+        Err(super::Error::ForeignPrefixLimitExceeded { limit_name, limit })
+    }
 }
 type RetainedOrigins = (Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -603,6 +628,10 @@ fn recheck_prefix(
     if check.verified.borrow().contains(&commitment) {
         return Ok(());
     }
+    check
+        .budget
+        .borrow_mut()
+        .visit(check.path.len() + 1, true)?;
     let original = original.clone();
     let proof = proof.prefix(reference)?;
     let dependent = dependent_statements
@@ -631,6 +660,7 @@ fn recheck_prefix(
     let next = Recheck {
         path: &path,
         verified: check.verified,
+        budget: check.budget,
     };
     let retained = SelectedAuthority::from_proof(
         history,
@@ -762,4 +792,36 @@ fn prefix_causal_originals(
         }
     }
     Ok(requested)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn foreign_prefix_budget_bounds_depth_and_total_sibling_work() {
+        let mut budget = ForeignPrefixBudget::default();
+        for depth in 1..=ForeignPrefixBudget::MAX_DEPTH {
+            budget.visit(depth, false).expect("bounded chain");
+        }
+        assert!(matches!(
+            budget.visit(ForeignPrefixBudget::MAX_DEPTH + 1, false),
+            Err(super::super::Error::ForeignPrefixLimitExceeded {
+                limit_name: "depth",
+                ..
+            })
+        ));
+        // A depth refusal does not spend the count budget. Shallow siblings
+        // share what remains instead of each starting an unbounded traversal.
+        for _ in ForeignPrefixBudget::MAX_DEPTH..ForeignPrefixBudget::MAX_PREFIXES {
+            budget.visit(1, false).expect("remaining siblings");
+        }
+        assert!(matches!(
+            budget.visit(1, false),
+            Err(super::super::Error::ForeignPrefixLimitExceeded {
+                limit_name: "count",
+                ..
+            })
+        ));
+    }
 }

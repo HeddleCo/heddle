@@ -34,6 +34,10 @@ pub(crate) struct PublicationCapture {
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
     pub native_authority: Option<v2::NativePublicProofBundleV1>,
+    pub import_authority: Option<v2::ImportPublicProofBundleV1>,
+    pub owner_genesis: Option<v2::SignedSpoolOwnerGenesis>,
+    pub ownership: Option<v2::OwnerState>,
+    pub prefixes: Vec<PublicationCapture>,
 }
 
 #[derive(Clone)]
@@ -805,12 +809,41 @@ async fn serve_fetch(
     let Some(v2::fetch_client_frame::Body::Open(open)) = opening.body else {
         panic!("native fetch must start with Open");
     };
-    assert_eq!(open.thread, Some(thread_ref(&fixture)));
-    let accepted = fixture
+    let mut accepted = fixture
         .captured
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .clone();
+    let prefix_fixture = !accepted.prefixes.is_empty();
+    if prefix_fixture {
+        accepted = accepted
+            .prefixes
+            .iter()
+            .find(|p| {
+                let record = p
+                    .thread_genesis
+                    .as_ref()
+                    .expect("wrapper")
+                    .genesis
+                    .as_ref()
+                    .expect("genesis");
+                let (_, genesis) =
+                    crypto::import_authority::verify_native_genesis(record).expect("signature");
+                open.thread
+                    .as_ref()
+                    .and_then(|r| r.id.as_ref())
+                    .is_some_and(|id| id.value == genesis.id().expect("id").as_bytes())
+                    && open
+                        .revision
+                        .as_ref()
+                        .is_none_or(|r| Some(r) == p.revision.as_ref())
+            })
+            .expect("exact requested prefix")
+            .clone();
+    } else {
+        assert_eq!(open.thread, Some(thread_ref(&fixture)));
+    }
+    let reference = open.thread.clone();
     let genesis = accepted
         .thread_genesis
         .clone()
@@ -837,18 +870,26 @@ async fn serve_fetch(
                     kind: v2::EndpointKind::Weft as i32,
                     public_key: server_key,
                 }),
-                thread: Some(thread_ref(&fixture)),
+                thread: reference,
                 current: Some(revision.clone()),
                 protocol: open.protocol,
                 native_authority: accepted.native_authority.clone(),
-                owner_genesis: Some(fixture.owner_genesis),
-                ownership: Some(fixture.owner),
+                import_authority: accepted.import_authority.clone(),
+                owner_genesis: accepted
+                    .owner_genesis
+                    .clone()
+                    .or(Some(fixture.owner_genesis)),
+                ownership: accepted.ownership.clone().or(Some(fixture.owner)),
                 thread_genesis: Some(genesis),
                 packs: packs.clone(),
                 checkpoint: Some(checkpoint.clone()),
                 budget: Some(v2::ReadBudget {
                     max_items: 10_000,
-                    max_frame_bytes: 64 * 1024,
+                    max_frame_bytes: if prefix_fixture {
+                        512 * 1024
+                    } else {
+                        64 * 1024
+                    },
                     max_snapshot_bytes: 16 * 1024 * 1024,
                 }),
                 full_closure_available: true,

@@ -8,6 +8,8 @@ Run after committing: python3 scripts/prove-native-witness-guards.py [guard ...]
 import argparse
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -273,6 +275,113 @@ EXTRA_MUTATIONS = {
 }
 
 
+# Part 8 review guards. These transformations deliberately remove real checks;
+# every selected runtime assertion must fail and pass after exact restoration.
+def replace_once(source, old, new):
+    assert old in source, old
+    return source.replace(old, new, 1)
+
+
+def no_cut(source, role):
+    start = source.index('permission::thread_control_authority::Revocation::' + role + '(key) => {')
+    end = source.index('\n            }', start)
+    body = source[start:end]
+    old = '|| revoked.contains(&api::hybrid_codec::key_id(key).to_vec())'
+    assert old in body
+    return source[:start] + body.replace(old, '|| false') + source[end:]
+
+
+def empty_fn(source, name, visibility='pub '):
+    start = source.index(visibility + 'fn ' + name + '(')
+    end = source.index('\n}\n', start)
+    body = source[start:end]
+    opening = body.index(' {\n')
+    return source[:start] + body[:opening + 3] + '    Ok(())' + source[end:]
+
+
+def no_review(source):
+    return empty_fn(source, 'require_review_operation', '')
+
+
+PART8_MUTATIONS = [
+    ('wasm-spool-owner-pin', 'crates/capability-verifier/src/native_genesis.rs',
+     lambda s: replace_once(s, '            .account_uuid\n    {', '            .account_uuid && false\n    {'), VERIFIER,
+     'native_genesis_owner_pin_cuts_truncated_pre_recover_author_history'),
+    ('spool-owner-real-receiver-pin', 'crates/crypto/src/writer_authority.rs',
+     lambda s: replace_once(s, '            == account\n        {', '            == account && false\n        {'), API,
+     'spool_owner_pre_recover_history_real_receiver_rejects_cut_device'),
+    ('foreign-fetch-depth', 'crates/hosted-client/src/hosted_runtime/hosted/native_sync.rs',
+     lambda s: replace_once(s, '            budget\n                .visit(outstanding.len() + 1, false)\n                .map_err(replica_err)?;', ''), HOSTED,
+     'foreign_prefix_fetch_depth_33_refuses_with_typed_limit'),
+    ('foreign-replay-depth', 'crates/repo/src/thread_replication/foreign_dependencies.rs',
+     lambda s: replace_once(s, '    check\n        .budget\n        .borrow_mut()\n        .visit(check.path.len() + 1, true)?;', ''), API,
+     'foreign_prefix_replay_depth_33_refuses_with_typed_limit'),
+    ('foreign-installed-count', 'crates/repo/src/thread_replication/foreign_dependencies.rs',
+     lambda s: replace_once(s, 'visit(check.path.len() + 1, true)?', 'visit(check.path.len() + 1, false)?'), API,
+     'installed_foreign_closure_larger_than_fetch_count_remains_installable'),
+    ('foreign-replay-error-type', 'crates/thread-api/src/fetch/hosted.rs',
+     lambda s: replace_once(s, '            .map_err(Error::from)?;\n            (replicas, Vec::new())', '            .map_err(preparation)?;\n            (replicas, Vec::new())'), API,
+     'foreign_prefix_replay_depth_33_refuses_with_typed_limit'),
+    ('hosted-replay-error-type', 'crates/hosted-client/src/hosted_runtime/hosted/native_sync.rs',
+     lambda s: replace_once(s, 'thread_api::fetch::Error::Repository(error) => replica_err(*error),', 'thread_api::fetch::Error::Repository(error) => native_error(error),'), HOSTED,
+     'hosted_replay_preserves_foreign_prefix_limit_type'),
+    ('spool-owner-receiver-pin', 'crates/crypto/src/writer_authority.rs',
+     lambda s: replace_once(s, '            == account\n        {', '            == account && false\n        {'), API,
+     'spool_owner_pre_recover_history_cannot_revive_cut_device'),
+    ('governance-is-not-author', 'crates/crypto/src/writer_authority.rs',
+     lambda s: replace_once(s, '            == account\n        {', '            == account || true\n        {'), API,
+     'cowriter_start_capture_own_and_owner_thread_and_review'),
+    ('foreign-resolver', 'crates/repo/src/thread_replication/native_witness.rs',
+     lambda s: replace_once(s, '|r| foreign.resolve(r),', '|_| Ok(None),'), API,
+     'foreign_import_tip_lands_into_native_fast_forward_and_merge'),
+    ('installed-status', 'crates/repo/src/thread_replication/foreign_dependencies.rs',
+     lambda s: replace_once(s, 'id=?1 AND thread=?2 AND status=1', 'id=?1 AND thread=?2'), API,
+     'foreign_original_requires_a_durably_installed_operation'),
+    ('attachment-required', 'crates/capability-verifier/src/thread_control_authority.rs',
+     lambda s: replace_once(s, 'if admitted_mint_roots.contains(attachment) {', 'if false {'), API,
+     'paired_cowriter_after_rotate_uses_witness_admitted_attachment'),
+    ('attachment-exact-inventory', 'crates/capability-verifier/src/thread_control_authority.rs',
+     lambda s: replace_once(s, 'if admitted_mint_roots.contains(attachment) {', 'if true {'), API,
+     'forged_old_owner_certificate_cannot_join_durable_attachment_inventory'),
+    ('actor-publisher-cut', 'crates/repo/src/thread_replication/authority.rs',
+     lambda s: no_cut(s, 'Publisher'), API,
+     'receiver_policy_cuts_the_independent_actor_publisher_and_mint'),
+    ('actor-mint-cut', 'crates/repo/src/thread_replication/authority.rs',
+     lambda s: no_cut(s, 'MintRoot'), API,
+     'receiver_policy_cuts_the_independent_actor_publisher_and_mint'),
+    ('boundary-prefix-scope', 'crates/repo/src/thread_replication/prefix.rs',
+     lambda s: replace_once(s, 'projected.require_boundary_originals()?;', ''), API,
+     'boundary_p1_prefix_refuses_selection_beyond_cutoff'),
+    ('p4-own-admission', 'crates/crypto/src/import_authority.rs',
+     lambda s: s[:s.index('pub fn verify_landing_payload(')] + s[s.index('pub fn verify_landing_payload('):].replace('if !closure.foreign(', 'if false && !closure.foreign('), CRYPTO,
+     'native_authority_ownership_and_landing_preserve_original_closure'),
+    ('root-owner-identity', '@api/src/writer_authority.rs',
+     lambda s: replace_once(s, 'if actor_account == spool_account && root.owner_id != spool_owner_id {', 'if false {'), API,
+     'writer_account_and_owner_identity_negatives_reject_then_controls_pass'),
+    ('requester-token-binding', '@api/src/writer_authority.rs',
+     lambda s: empty_fn(s, 'verify_landing_actor_binding'), API,
+     'landing_requester_must_be_the_verified_token_subject'),
+    ('p2-actor-binding', '@api/src/writer_authority.rs',
+     lambda s: empty_fn(s, 'verify_authority_actor_binding'), API,
+     'p2_envelope_cannot_replace_the_verified_operation_author'),
+    ('recover-cuts-attachments', '@api/src/writer_authority.rs',
+     lambda s: replace_once(s, 'if t.kind == 2 {', 'if false {'), API,
+     'paired_cowriter_after_rotate_uses_witness_admitted_attachment'),
+    ('writer-key-policy', '@api/src/writer_authority.rs',
+     lambda s: s.replace('return Err(Reject::Revoked);', 'return Ok(());'), API,
+     'actor_key_policy_cut_and_non_review_p4_reject_then_controls_pass'),
+    ('counterparty-policy', '@api/src/writer_authority.rs',
+     lambda s: replace_once(s, '.any(|s| revoked.contains(&key_id(&s.public_key)))', '.any(|_| false)'), API,
+     'actor_key_policy_cut_and_non_review_p4_reject_then_controls_pass'),
+    ('review-only-p4', '@api/src/import_authority.rs',
+     no_review, API,
+     'actor_key_policy_cut_and_non_review_p4_reject_then_controls_pass'),
+    ('job-request-role', '@api/src/import_authority.rs',
+     lambda s: empty_fn(s, 'verify_landing_key_roles'), API,
+     'job_key_cannot_sign_landing_request'),
+]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('guards', nargs='*')
@@ -292,10 +401,34 @@ def main():
         archive.unlink()
         for rust in source.rglob('*.rs'):
             rust.touch()
-    target = os.environ.get('NATIVE_PROOF_TARGET', str(args.output / 'target'))
+    assert source.resolve() != root.resolve(), 'Guard mutations require isolated sources'
+    target = os.environ.get('NATIVE_PROOF_TARGET', os.environ.get('CARGO_TARGET_DIR', str(args.output / 'target')))
     receipts = []
     selected = [m for m in MUTATIONS if not args.guards or m[0] in args.guards]
-    assert selected and set(args.guards) <= {m[0] for m in MUTATIONS}
+    part8 = [m for m in PART8_MUTATIONS if not args.guards or m[0] in args.guards]
+    assert (selected or part8) and set(args.guards) <= {m[0] for m in MUTATIONS + PART8_MUTATIONS}
+    if any(m[1].startswith('@api/') for m in part8):
+        metadata = json.loads(subprocess.check_output(
+            ['cargo', 'metadata', '--offline', '--locked', '--format-version', '1'], cwd=source))
+        package = next(p for p in metadata['packages'] if p['name'] == 'heddle-api' and p['source'] and p['source'].startswith('git+'))
+        api_source = args.output.resolve() / 'api-source'
+        assert not api_source.exists(), 'Use a fresh output directory for isolated API mutations'
+        shutil.copytree(Path(package['manifest_path']).parent, api_source,
+                        ignore=shutil.ignore_patterns('.git', 'target', 'node_modules'))
+        manifest = source / 'Cargo.toml'
+        contents = manifest.read_text()
+        pattern = r'git = "https://github.com/HeddleCo/api", rev = "[0-9a-f]{40}", version = "(=[^"]+)"'
+        contents, count = re.subn(pattern, lambda m: 'path = "' + str(api_source) + '", version = "' + m[1] + '"', contents)
+        assert count == 2, 'Both API entries must relocate together'
+        manifest.write_text(contents)
+        subprocess.run(['cargo', 'update', '--offline', '-p', 'heddle-api'], cwd=source, check=True)
+    for name, file, mutate, crate, test in part8:
+        path = api_source / file.removeprefix('@api/') if file.startswith('@api/') else source / file
+        original = path.read_text()
+        changed = mutate(original)
+        assert changed != original, name
+        # Whole-file replacement permits intentional multi-site guard removals.
+        selected.append((name, str(path), original, changed, crate, test, test))
     print('SOURCE', source, 'SHA', sha, flush=True)
     for name, file, old, new, crate, test, assertion in selected:
         path = source / file
@@ -309,7 +442,7 @@ def main():
             changes.append((extra_path, extra_original, before, after))
         for red in [True, False]:
             label = name + ('-red' if red else '-green')
-            command = ['cargo', 'test', '--locked', '-p', crate]
+            command = ['cargo', 'test', '--offline', '--locked', '-p', crate]
             if crate == CLI:
                 command += ['--features', 'ci', '--test', 'hosted_clone_writes']
             else:
@@ -318,10 +451,16 @@ def main():
                 command += ['--features', 'client']
             elif crate == CRYPTO:
                 command += ['--features', 'owner-root']
-            command += [test, '--', '--nocapture', '--test-threads', '1']
+            if name == 'wasm-spool-owner-pin':
+                command += ['--target', 'wasm32-unknown-unknown']
+            command += [test, '--', '--nocapture']
+            if name != 'wasm-spool-owner-pin':
+                command += ['--test-threads', '1']
             log = args.output / (label + '.log')
             env = {**os.environ, 'CARGO_TARGET_DIR': target,
                    'HEDDLE_HOME': tempfile.mkdtemp(prefix='home-', dir=args.output)}
+            if name == 'wasm-spool-owner-pin':
+                env['CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER'] = 'wasm-bindgen-test-runner'
             start = time.monotonic()
             print('RUN', label, flush=True)
             try:
@@ -341,9 +480,11 @@ def main():
             output = log.read_text(errors='replace')
             assert 'could not compile' not in output and 'running 0 tests' not in output, output[-6000:]
             if red:
-                assert result.returncode == 101 and 'FAILED' in output and assertion in output, output[-6000:]
+                # Cargo propagates the WASM runner's exit 1; libtest uses 101.
+                red_codes = (1, 101) if name == 'wasm-spool-owner-pin' else (101,)
+                assert result.returncode in red_codes and 'FAILED' in output and assertion in output, output[-6000:]
             else:
-                assert result.returncode == 0, output[-6000:]
+                assert result.returncode == 0 and re.search(r'test result: ok\. [1-9][0-9]* passed;', output), output[-6000:]
             receipt = dict(guard=name, red=red, code=result.returncode, sha=sha, test=test,
                            command=command, log=str(log), seconds=round(time.monotonic()-start, 2))
             receipts.append(receipt)

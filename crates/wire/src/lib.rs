@@ -77,6 +77,11 @@ pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// Error type for protocol operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    #[error("foreign prefix {limit_name} exceeds limit {limit}")]
+    ForeignPrefixLimitExceeded {
+        limit_name: &'static str,
+        limit: usize,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -182,6 +187,7 @@ impl From<objects::error::HeddleError> for ProtocolError {
 impl ProtocolError {
     pub fn client_message(&self) -> String {
         match self {
+            ProtocolError::ForeignPrefixLimitExceeded { .. } => self.to_string(),
             ProtocolError::Io(_) => "network error".to_string(),
             ProtocolError::Serialization(_) => "protocol error".to_string(),
             ProtocolError::MessageTooLarge { .. } => "message too large".to_string(),
@@ -204,6 +210,7 @@ impl ProtocolError {
 
     pub fn error_code(&self) -> ErrorCode {
         match self {
+            ProtocolError::ForeignPrefixLimitExceeded { .. } => ErrorCode::InvalidArgument,
             ProtocolError::Io(_) => ErrorCode::Network,
             ProtocolError::Serialization(_) => ErrorCode::Protocol,
             ProtocolError::MessageTooLarge { .. } => ErrorCode::Protocol,
