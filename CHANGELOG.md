@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.28.11: HYBRID Part 8 adopts api alpha.37 writer authority and foreign closures (#1988); Part 9 pins the receiver owner and adopts api alpha.39 (invitations by handle, notification inheritance, role approval groups, SuggestPrincipals, and invite codes) (#1989); Part 10 stops Fetch at verified foreign endpoints and fixes false rollback reports from receiver clock sampling (#1990). CI moves to Blacksmith (#1986, #1987).
+
 - Release 0.28.10: Windows builds compile again; fix git-projection `GitError::io_kind` and hosted-client Unix bridge cfg (#1982).
 
 - Release 0.28.9: content readers handle the mandatory alpha.22 AcceptedBudget echo first, exactly once, validated and budget-accounted (#1979).
