@@ -524,3 +524,182 @@ fn receiver_policy_cuts_the_independent_actor_publisher_and_mint() {
         );
     }
 }
+
+#[test]
+fn spool_owner_pre_recover_history_cannot_revive_cut_device() {
+    use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext;
+    use crypto::Signer;
+    use objects::object::thread_replication::{
+        ThreadOperationBody,
+        metadata::{AUTHORITY_FORMAT, ThreadControl},
+    };
+
+    let mut bundle: wire::NativePublicProofBundleV1 = writer_record("p2_owner_bundle");
+    verify_semantics(&bundle, 1_100_000).expect("pre-Recover device control");
+    let selected_payload =
+        hybrid_codec::canonical(&bundle.authority_witnesses[0]).expect("selected P2");
+    let mut history = bundle.owner_histories[0].clone();
+    let initial = heddleco_capability_verifier::creation::history_state(&history, 1100)
+        .expect("independent owner root");
+    let template: wire::OwnerHistory = writer_record("verified_recover_history");
+    let mut transition = template.accepted_transitions[0].clone();
+    let body = transition.transition.as_mut().expect("Recover");
+    body.owner_id = initial.owner_id().to_vec();
+    body.previous_state_hash = initial.state_hash().to_vec();
+    let digest = hybrid_codec::hash(&[
+        crypto::owner_root::OWNER_TRANSITION_DOMAIN,
+        &crypto::owner_root::owner_key_transition_body(body).expect("Recover body"),
+    ]);
+    let authorization = |role: &str| wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(writer_signer(role).public_key()),
+        signature: writer_signer(role)
+            .sign(&digest)
+            .expect("Recover signature"),
+    };
+    transition.authorizations = initial
+        .recovery_policy()
+        .guardians
+        .iter()
+        .map(|g| {
+            let role = ["guardian_a", "guardian_b"]
+                .into_iter()
+                .find(|r| {
+                    writer_signer(r).public_key() == g.key.as_ref().expect("guardian").public_key
+                })
+                .expect("enrolled guardian");
+            authorization(role)
+        })
+        .collect();
+    transition.next_authority_key_proof = Some(authorization("rotated_owner"));
+    transition.next_recovery_key_proofs = body
+        .next_recovery_policy
+        .as_ref()
+        .expect("recovery policy")
+        .guardians
+        .iter()
+        .map(|g| {
+            let role = ["next_recovery_a", "next_recovery_b"]
+                .into_iter()
+                .find(|r| {
+                    writer_signer(r).public_key() == g.key.as_ref().expect("guardian").public_key
+                })
+                .expect("new guardian");
+            authorization(role)
+        })
+        .collect();
+    let current = heddleco_capability_verifier::apply_accepted_transition(
+        &initial,
+        &transition,
+        1100,
+        heddleco_capability_verifier::VerificationLimits::new(3600).expect("limits"),
+    )
+    .expect("genuine recovery cuts prior device attachments");
+    history.accepted_transitions.push(transition);
+    history.state_hash = current.state_hash().to_vec();
+    bundle.owner_histories.push(history.clone());
+    let statement = bundle
+        .statements
+        .iter_mut()
+        .find(|s| s.body.as_ref().expect("body").canonical_payload == selected_payload)
+        .expect("P2");
+    statement.body.as_mut().expect("body").owner_state_hash = history.state_hash.clone();
+    statement.signature = writer_signer("witness")
+        .sign(
+            &witness_trust::statement_signing_digest(statement.body.as_ref().expect("body"))
+                .expect("statement digest"),
+        )
+        .expect("fresh witness signature");
+    bundle.statements.sort_by_key(|s| {
+        witness_trust::statement_signing_digest(s.body.as_ref().expect("body")).expect("digest")
+    });
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000, &[])
+        .expect("portable testimony still passes; native owner authority must reject");
+    let error = verify_semantics(&bundle, 1_100_000).expect_err(
+        "receiver-pinned Recover must reject truncated history with the cut device attachment",
+    );
+    assert!(
+        error.to_string().contains("recovered") || error.to_string().contains("Root"),
+        "{error}"
+    );
+
+    // The current owner issues a fresh capability to this publisher. The old
+    // device's own mint root and attachment no longer authorize its writes.
+    let payload = &mut bundle.authority_witnesses[0];
+    let mut envelope =
+        api::writer_authority::decode_authority(&payload.authority_envelope).expect("envelope");
+    let (_, mut operation) =
+        verify::verify_native_operation(payload.original.as_ref().expect("original"))
+            .expect("signed original");
+    let ThreadOperationBody::Metadata(bytes) = &operation.body else {
+        panic!("metadata");
+    };
+    let mut control = ThreadControl::decode(bytes).expect("metadata author");
+    let actor = &control.actor;
+    let method = control
+        .authorization_method()
+        .rsplit('/')
+        .next()
+        .expect("method");
+    let seed = hex::decode(
+        writer_fixture()["keys"]["rotated_owner"]["seed_hex"]
+            .as_str()
+            .expect("seed"),
+    )
+    .expect("hex");
+    let pair = biscuit_auth::KeyPair::from(
+        &biscuit_auth::PrivateKey::from_bytes(&seed, biscuit_auth::Algorithm::Ed25519)
+            .expect("mint key"),
+    );
+    let token = biscuit_auth::Biscuit::builder().code(format!(
+        "user(\"{}\"); session(\"recovered-owner\"); device_pop_key(\"{}\"); check if operation(\"{method}\"); check if resource(\"spool\", \"acme/imports\"); check if time($now), $now < 1970-01-01T00:30:00Z;",
+        actor.principal_id, hex::encode(operation.publisher),
+    )).expect("capability facts").build_v1(&pair).expect("current owner token");
+    envelope.owner = Some(history);
+    envelope.mint_root_public_key = current.authority_key().public_key.clone();
+    envelope.mint_root_association = None;
+    envelope.sealed_biscuit = token.seal().expect("seal").to_vec().expect("sealed bytes");
+    payload.authority_envelope = envelope.encode_to_vec();
+    control.authority_envelope = payload.authority_envelope.clone();
+    control.authority_digest =
+        objects::object::ContentHash::compute_typed(AUTHORITY_FORMAT, &control.authority_envelope);
+    operation.body = ThreadOperationBody::Metadata(control.encode().expect("current author"));
+    let signed =
+        crypto::thread_operation::SignedOperation::sign(&operation, &writer_signer("device"))
+            .expect("current original");
+    let original = payload.original.as_mut().expect("original");
+    original.canonical_record = signed.canonical;
+    original.signatures[0].signature = signed.signature;
+    let statement = bundle
+        .statements
+        .iter_mut()
+        .find(|s| s.body.as_ref().expect("body").canonical_payload == selected_payload)
+        .expect("P2");
+    rebind_statement(
+        statement,
+        &hybrid_codec::canonical(payload).expect("payload"),
+        hybrid_codec::hash(&[
+            b"heddle-hosted-authority-envelope-v1",
+            &(payload.authority_envelope.len() as u32).to_be_bytes(),
+            &payload.authority_envelope,
+        ]),
+        retained_acceptor::original_signatures_digest(
+            &payload
+                .original
+                .iter()
+                .chain(&payload.dependencies)
+                .cloned()
+                .collect::<Vec<_>>(),
+            &[],
+        )
+        .expect("signatures"),
+    );
+    bundle.statements.sort_by_key(|s| {
+        witness_trust::statement_signing_digest(s.body.as_ref().expect("body")).expect("digest")
+    });
+    bundle.authority_witnesses.sort_by_key(|p| {
+        hybrid_codec::signing_digest("heddle-import-authority-witness-payload-v1", p)
+            .expect("payload digest")
+    });
+    verify_semantics(&bundle, 1_100_000)
+        .expect("current owner history and fresh current-owner capability pass");
+}
