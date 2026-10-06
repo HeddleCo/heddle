@@ -95,7 +95,7 @@ pub struct HostedTrust<C = SystemClock> {
     directory: PathBuf,
     authority: String,
     clock: Arc<C>,
-    anchor: Arc<Mutex<Option<(i64, u64)>>>,
+    anchor: ClockAnchor,
 }
 impl<C> Clone for HostedTrust<C> {
     fn clone(&self) -> Self {
@@ -109,7 +109,28 @@ impl<C> Clone for HostedTrust<C> {
 }
 type TrustRow = (String, Vec<u8>, i64, String, Vec<u8>, Option<Vec<u8>>, i64);
 
-type ClockAnchor = Arc<Mutex<Option<(i64, u64)>>>;
+#[derive(Clone, Copy)]
+struct ClockSample {
+    wall: i64,
+    before: u64,
+    after: u64,
+}
+impl ClockSample {
+    fn read(clock: &impl Clock) -> Result<Self> {
+        let before = clock.elapsed_millis()?;
+        let wall = clock.now_millis()?;
+        let after = clock.elapsed_millis()?;
+        if after < before {
+            return Err(Error::HostedClock);
+        }
+        Ok(Self {
+            wall,
+            before,
+            after,
+        })
+    }
+}
+type ClockAnchor = Arc<Mutex<Option<ClockSample>>>;
 // Retain anchors for the process lifetime, including after the last handle is
 // dropped. A rejected rollback cannot be cleared by opening the store again.
 fn shared_anchor(directory: &Path, authority: &str) -> Result<ClockAnchor> {
@@ -123,15 +144,20 @@ fn shared_anchor(directory: &Path, authority: &str) -> Result<ClockAnchor> {
     Ok(Arc::clone(anchors.entry(key).or_default()))
 }
 
-fn require_clock_progress(last: (i64, u64), now: (i64, u64)) -> Result<()> {
-    let passed = now.1.checked_sub(last.1).ok_or(Error::HostedClock)?;
+fn require_clock_progress(last: ClockSample, now: ClockSample) -> Result<()> {
+    // Only time outside both sampling intervals is known to have elapsed
+    // between wall readings. Scheduling inside either interval is unbounded.
+    let passed = now
+        .before
+        .checked_sub(last.after)
+        .ok_or(Error::HostedClock)?;
     // Independently truncated millisecond readings can differ by one tick.
     // This precision bound never changes the signed set's exclusive expiry.
     let floor = last
-        .0
+        .wall
         .checked_add(i64::try_from(passed.saturating_sub(1)).map_err(|_| Error::HostedClock)?)
         .ok_or(Error::HostedClock)?;
-    if now.0 < floor {
+    if now.wall < floor {
         return Err(Error::HostedClock);
     }
     Ok(())
@@ -170,13 +196,13 @@ impl<C: Clock> HostedTrust<C> {
         )?;
         let tx = connection.transaction()?;
         let row: TrustRow = tx.query_row("SELECT root_id,root_key,root_epoch,history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1", [&self.authority], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
-        let now = self.clock.now_millis()?;
-        let elapsed = self.clock.elapsed_millis()?;
+        let sampled = ClockSample::read(self.clock.as_ref())?;
+        let now = sampled.wall;
         if now < row.6 {
             return Err(Error::HostedClock);
         }
         if let Some(last) = *anchor {
-            require_clock_progress(last, (now, elapsed))?;
+            require_clock_progress(last, sampled)?;
         }
         let associations = job_associations(&tx)?;
         let jobs = associations
@@ -204,7 +230,7 @@ impl<C: Clock> HostedTrust<C> {
                 )?)
             })
             .transpose()?;
-        *anchor = Some((now, elapsed));
+        *anchor = Some(sampled);
         Ok(TrustSnapshot {
             root: RootSelection {
                 authority: self.authority.clone(),
@@ -261,12 +287,12 @@ impl<C: Clock> HostedTrust<C> {
         let mut connection = crate::local_metadata::open(&self.directory)?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row:TrustRow=tx.query_row("SELECT root_id,root_key,root_epoch,history_root_id,history_root_key,signed_set,clock_floor FROM hosted_witness_trust WHERE authority=?1",[&self.authority],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
-        let now = self.clock.now_millis()?;
-        let elapsed = self.clock.elapsed_millis()?;
+        let sampled = ClockSample::read(self.clock.as_ref())?;
+        let now = sampled.wall;
         if let Some(last) = *anchor {
-            require_clock_progress(last, (now, elapsed))?;
+            require_clock_progress(last, sampled)?;
         } else {
-            *anchor = Some((now, elapsed));
+            *anchor = Some(sampled);
         }
         let associations = job_associations(&tx)?;
         let jobs = associations
@@ -306,9 +332,9 @@ impl<C: Clock> HostedTrust<C> {
             associations,
         };
         let result = mutation(&context)?;
-        let install_now = self.clock.now_millis()?;
-        let install_elapsed = self.clock.elapsed_millis()?;
-        require_clock_progress((now, elapsed), (install_now, install_elapsed))?;
+        let install_sample = ClockSample::read(self.clock.as_ref())?;
+        let install_now = install_sample.wall;
+        require_clock_progress(sampled, install_sample)?;
         if install_now < set.body().issued_at_unix_millis
             || install_now >= set.body().valid_until_unix_millis
         {
@@ -323,9 +349,9 @@ impl<C: Clock> HostedTrust<C> {
             artifacts.mark(&tx)?;
             // Expiry and receiver-clock changes during verification cannot leave
             // an earlier opaque context authorizing the eventual durable commit.
-            let commit_now = self.clock.now_millis()?;
-            let commit_elapsed = self.clock.elapsed_millis()?;
-            require_clock_progress((install_now, install_elapsed), (commit_now, commit_elapsed))?;
+            let commit_sample = ClockSample::read(self.clock.as_ref())?;
+            let commit_now = commit_sample.wall;
+            require_clock_progress(install_sample, commit_sample)?;
             witness_trust::verify_set(
                 signed,
                 &SetExpectation {
@@ -336,9 +362,9 @@ impl<C: Clock> HostedTrust<C> {
             )?;
             // Signature verification can itself take time. Sample again after it,
             // retaining millisecond freshness for the final current-access hook.
-            let final_now = self.clock.now_millis()?;
-            let final_elapsed = self.clock.elapsed_millis()?;
-            require_clock_progress((commit_now, commit_elapsed), (final_now, final_elapsed))?;
+            let final_sample = ClockSample::read(self.clock.as_ref())?;
+            let final_now = final_sample.wall;
+            require_clock_progress(commit_sample, final_sample)?;
             if final_now < set.body().issued_at_unix_millis
                 || final_now >= set.body().valid_until_unix_millis
             {
@@ -346,9 +372,9 @@ impl<C: Clock> HostedTrust<C> {
             }
             tx.execute("UPDATE hosted_witness_trust SET signed_set=?2,clock_floor=?3,history_root_id=root_id,history_root_key=root_key WHERE authority=?1",params![self.authority,signed.encode_to_vec(),final_now])?;
             validate_commit(&context, final_now)?;
-            Ok((final_now, final_elapsed))
+            Ok(final_sample)
         }));
-        let (final_now, final_elapsed) = match committed {
+        let final_sample = match committed {
             Ok(Ok(time)) => time,
             rejection => {
                 // Destroy SQL before filesystem undo, while cross-process
@@ -384,7 +410,7 @@ impl<C: Clock> HostedTrust<C> {
             return Err(error.into());
         }
         checkpoint("commit");
-        *anchor = Some((final_now, final_elapsed));
+        *anchor = Some(final_sample);
         artifacts.finish()?;
         Ok(result)
     }
