@@ -263,6 +263,7 @@ fn classify_protocol(error: &ProtocolError, delivered: bool) -> ReplicationIssue
         }
         ProtocolError::InvalidState(_)
         | ProtocolError::ThreadCaptureRequired { .. }
+        | ProtocolError::ForeignPrefixLimitExceeded { .. }
         | ProtocolError::PublicationLimitExceeded { .. }
         | ProtocolError::PublicationOperationTooLarge { .. }
         | ProtocolError::Serialization(_)

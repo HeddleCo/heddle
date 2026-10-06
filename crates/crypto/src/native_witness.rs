@@ -66,7 +66,7 @@ pub fn verify_genesis_payload(
     evidence: &WitnessEvidence,
     selection: &Selection<'_>,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<SignedGenesis> {
     let statement = evidence.signed().body.as_ref().ok_or(Reject::Canonical)?;
@@ -101,6 +101,7 @@ pub fn verify_genesis_payload(
                 context.author_authority.resolve(
                     account.as_bytes(),
                     &payload.creator_authority_envelope,
+                    context.owner,
                     statement.observed_at_unix_millis / 1000,
                 )?
             }

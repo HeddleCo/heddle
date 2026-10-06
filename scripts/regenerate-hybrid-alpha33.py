@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce alpha.33 signed corpora from the API pin; never edit signatures.
+"""Reproduce HYBRID signed corpora from the API pin; never edit signatures.
 
 Usage: python3 scripts/regenerate-hybrid-alpha33.py [--api /path/to/api]
 Requires npm, buf and the API native maintenance tool's Rust dependencies.
@@ -58,13 +58,34 @@ def import_roots(output):
         run(['node', f'tools/{generator}.mjs'], output)
 
 
+def writer_inputs(output):
+    # The upstream maintenance generators take sealed, deterministic capabilities.
+    # Keep their seed artifacts inside this isolated regeneration directory.
+    manifest = 'tools/hybrid-native/Cargo.toml'
+    seeds = [
+        ('api-alpha35-cowriter-biscuit.binpb', '31313131-3131-3131-3131-313131313131', 65, 65),
+        ('api-alpha35-fake-owner-biscuit.binpb', '21212121-2121-2121-2121-212121212121', 65, 65),
+        ('api-alpha36-acceptor-biscuit.binpb', '21212121-2121-2121-2121-212121212121', 65, 67),
+    ]
+    for name, account, mint, publisher in seeds:
+        run(['cargo', 'run', '--offline', '--locked', '--manifest-path', manifest,
+             '--bin', 'generate-hybrid-native-biscuit', '--', str(output / name),
+             account, str(mint), str(publisher)], output)
+        for generator in ['generate-alpha35-writer-fixture', 'generate-alpha36-boundary-fixture']:
+            path = output / 'tools' / (generator + '.mjs')
+            path.write_text(path.read_text().replace('/tmp/' + name, str(output / name)))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--api', type=Path, default=Path('/home/heddleco/HeddleCo/api'))
+    parser.add_argument('--work-dir', type=Path, help='Reuse an isolated generator directory')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     pin = re.search(r'api = \{ package = "heddle-api".*rev = "([0-9a-f]{40})"', (root / 'Cargo.toml').read_text()).group(1)
-    output = Path(tempfile.mkdtemp(prefix='heddle-alpha33-'))
+    output = args.work_dir or Path(tempfile.mkdtemp(prefix='heddle-hybrid-'))
+    output.mkdir(parents=True, exist_ok=True)
+    output = output.resolve()
     archive = output / 'api.tar'
     with archive.open('wb') as target:
         run(['git', '-C', str(args.api), 'archive', pin], root, stdout=target)
@@ -90,10 +111,16 @@ def main():
         excluded = {'messages', 'descriptors', 'enums'} if name == names[0] else set()
         assert {k: v for k, v in generated.items() if k not in excluded} == {k: v for k, v in expected.items() if k not in excluded}, name
         path.write_bytes(frozen)
-    run(['node', 'tools/verify-alpha33-vector-continuity.mjs'], output)
+    # Historical release manifests hash descriptor inventories from that release.
+    # The exact current-pin signed-record comparison above is the regeneration gate.
+    print('EXACT PIN SIGNED CORPORA VERIFIED', pin, flush=True)
     # First prove exact tag regeneration above; then generate Heddle's newly
     # specified imported-root positives without changing the signing formats.
     import_roots(output)
+    writer_inputs(output)
+    for generator in ['generate-alpha34-foreign-fixture', 'generate-alpha35-writer-fixture',
+                      'generate-alpha36-boundary-fixture', 'generate-alpha37-attachment-fixture']:
+        run(['node', f'tools/{generator}.mjs'], output)
     path = output / 'tests/fixtures' / names[0]
     generated = json.loads(path.read_bytes())
     frozen = json.loads(subprocess.check_output(['git', '-C', str(args.api), 'show', f'{pin}:tests/fixtures/{names[0]}']))
@@ -110,6 +137,9 @@ def main():
         names[3]: ['crates/hosted-client/tests/fixtures/' + names[3]],
         names[4]: ['crates/crypto/tests/fixtures/' + names[4]],
     }
+    for name in ['foreign-dependencies-alpha34.json', 'writer-authority-alpha35.json',
+                 'boundary-acceptor-alpha36.json']:
+        targets[name] = ['crates/thread-api/tests/fixtures/' + name]
     for name, destinations in targets.items():
         for destination in destinations:
             shutil.copyfile(output / 'tests' / 'fixtures' / name, root / destination)

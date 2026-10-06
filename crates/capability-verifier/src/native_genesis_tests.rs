@@ -126,6 +126,44 @@ fn native_creator_binding_checks_lineage_envelope_time_and_revocation() {
     verify(&input("local_adopt_push"))
         .expect("local creator with exact empty envelope; hosted claim is separate");
     let mut cases = vec![control.clone(), input("local_adopt_push")];
+    let envelope: wire::ThreadControlAuthority = hybrid_codec::strict_decode(
+        &hex::decode(control["envelope_hex"].as_str().expect("envelope")).expect("hex"),
+        65536,
+    )
+    .expect("canonical envelope");
+    let wire::thread_control_authority::MintRootAssociation::OwnerMintRootAttachment(attachment) =
+        envelope.mint_root_association.expect("paired creator")
+    else {
+        panic!("owner attachment");
+    };
+    let exact = hex::encode(attachment.encode_to_vec());
+    let mut admitted = control.clone();
+    admitted["id"] = json!("exact-authenticated-inventory");
+    admitted["admitted_mint_roots_json"] =
+        json!(serde_json::to_string(&[&exact]).expect("inventory"));
+    verify(&admitted).expect("exact verified attachment");
+    cases.push(admitted.clone());
+    let mut forged = attachment;
+    forged.attachment.as_mut().expect("body").nonce[0] ^= 1;
+    for (label, roots) in [
+        ("duplicate-inventory", vec![exact.clone(), exact.clone()]),
+        (
+            "unrelated-forged-inventory",
+            vec![exact, hex::encode(forged.encode_to_vec())],
+        ),
+    ] {
+        let mut denied = admitted.clone();
+        denied["id"] = json!(label);
+        denied["admitted_mint_roots_json"] =
+            json!(serde_json::to_string(&roots).expect("inventory"));
+        denied["expected_accept"] = json!(false);
+        assert!(
+            verify(&denied).is_err(),
+            "{label}: every inventory entry must be independently valid"
+        );
+        cases.push(denied);
+        verify(&admitted).expect("authenticated inventory control");
+    }
     for name in ["missing_binding", "forged_binding", "substituted_envelope"] {
         let mut denied = input(name);
         denied["expected_accept"] = json!(false);

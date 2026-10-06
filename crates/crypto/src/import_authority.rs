@@ -796,8 +796,8 @@ pub struct ForeignOriginal {
     pub genesis: ThreadGenesis,
     pub import: Option<DelegatedImport>,
 }
-pub struct NativeAuthorityContext<'a, A: crate::writer_authority::AuthorAuthority> {
-    pub author_authority: &'a A,
+pub struct NativeAuthorityContext<'a> {
+    pub author_authority: &'a crate::writer_authority::WitnessedAuthors,
     pub owner: &'a heddleco_capability_verifier::VerifiedOwnerState,
     pub spool_uuid: uuid::Uuid,
     pub spool_genesis: &'a [u8; 32],
@@ -820,7 +820,7 @@ fn verify_boundary_selection(
     boundaries: &[wire::ImportBoundaryAcceptanceV1],
     statement: &host::HostedWitnessStatementV1,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: &impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<BoundaryCoverage> {
     use heddle_object_model::object::{
@@ -898,6 +898,7 @@ fn verify_boundary_selection(
         let author = context.author_authority.resolve(
             actor.principal_id.as_bytes(),
             authority,
+            context.owner,
             statement.observed_at_unix_millis / 1000,
         )?;
         api::writer_authority::verify_account_binding(
@@ -1106,7 +1107,7 @@ pub fn verify_genesis_payload_at_boundary(
     evidence: &WitnessEvidence,
     delegation: &VerifiedImportDelegation,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportGenesis> {
     let statement = evidence.signed.body.as_ref().ok_or(Reject::Canonical)?;
@@ -1143,6 +1144,7 @@ pub fn verify_genesis_payload_at_boundary(
             .resolve(
                 account.as_bytes(),
                 &payload.creator_authority_envelope,
+                context.owner,
                 statement.observed_at_unix_millis / 1000,
             )?
             .mint_roots
@@ -1155,7 +1157,7 @@ pub(crate) fn verify_native_genesis_boundary(
     payload: &wire::NativeGenesisWitnessV1,
     evidence: &WitnessEvidence,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: &impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
     let statement = evidence.signed().body.as_ref().ok_or(Reject::Canonical)?;
@@ -1186,12 +1188,13 @@ fn native_authority(
     actor: &heddle_object_model::object::CollaborationActor,
     method: &str,
     evidence: &WitnessEvidence,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
     let author = context.author_authority.resolve(
         actor.principal_id.as_bytes(),
         envelope,
+        context.owner,
         evidence
             .signed
             .body
@@ -1259,7 +1262,7 @@ pub fn verify_landing_payload(
     payload: &wire::HostedLandingWitnessV1,
     evidence: &WitnessEvidence,
     closure: &mut NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<heddle_object_model::object::thread_replication::integration::HostedIntegration> {
     use api::v2::client::Rpc;
@@ -1308,11 +1311,9 @@ pub fn verify_landing_payload(
             // including boundary acceptance; later landing cannot renew it.
         }
         Some(SourceAuthor::LocalKey) => {
-            if let Some(bound) = closure.import_bound(&source.id()?) {
-                if bound.converted().publisher != source.publisher {
-                    return Err(Reject::ImportPermission.into());
-                }
-            } else if !closure.foreign(&source.id()?) {
+            // The installed carrier already binds the converted original to
+            // its delegation job key. Only unbound native work needs ownership.
+            if closure.import_bound(&source.id()?).is_none() && !closure.foreign(&source.id()?) {
                 closure.verify_local_work(&source.id()?, s.admission_order)?;
             }
         }
@@ -1408,6 +1409,7 @@ pub fn verify_landing_payload(
     let author = context.author_authority.resolve(
         &account,
         &payload.authority_envelope,
+        context.owner,
         s.observed_at_unix_millis / 1000,
     )?;
     let verified = heddleco_capability_verifier::thread_control_authority::verify_landing_request_with_retained_mint_roots(
@@ -1486,7 +1488,7 @@ pub fn verify_authority_payload(
     payload: &wire::ImportAuthorityWitnessV1,
     evidence: &WitnessEvidence,
     closure: &mut NativeClosure,
-    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
+    context: &NativeAuthorityContext<'_>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
     use heddle_object_model::object::thread_replication::{

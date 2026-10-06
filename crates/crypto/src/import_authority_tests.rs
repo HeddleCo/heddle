@@ -494,10 +494,50 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .as_slice()
         .try_into()
         .expect("Spool genesis");
-    let author = crate::writer_authority::HostAuthorAuthority {
-        owner: &owner,
-        mint_roots: &[],
-    };
+    let mut author = crate::writer_authority::WitnessedAuthors::from_import(&b, &set, 1350000)
+        .expect("authenticated author testimony");
+    for (payload, statement, proof) in [
+        (
+            "authority_admission_payload",
+            "authority_admission",
+            "authority_proof",
+        ),
+        (
+            "ownership_admission_payload",
+            "ownership_admission",
+            "ownership_proof",
+        ),
+        (
+            "resolution_admission_payload",
+            "resolution_admission",
+            "resolution_proof",
+        ),
+        ("landing_payload", "landing_statement", "landing_proof"),
+    ] {
+        let evidence = WitnessEvidence::resolve(
+            &set,
+            &record(&f, statement),
+            Some(&record(&f, proof)),
+            false,
+            1350000,
+        )
+        .expect("authenticated payload testimony");
+        let p;
+        let landing;
+        let payload = if payload == "landing_payload" {
+            landing = record(&f, payload);
+            WitnessPayload::Landing(&landing)
+        } else {
+            p = record(&f, payload);
+            WitnessPayload::Authority(&p)
+        };
+        author
+            .admit(
+                &evidence,
+                api::writer_authority::WriterWitnessPayload::Import(payload),
+            )
+            .expect("witnessed author inventory");
+    }
     let context = NativeAuthorityContext {
         author_authority: &author,
         owner: &owner,
@@ -812,10 +852,15 @@ fn boundary_vector(
         .as_slice()
         .try_into()
         .expect("digest");
-    let author = crate::writer_authority::HostAuthorAuthority {
-        owner: &owner,
-        mint_roots: &[],
+    let mut author = crate::writer_authority::WitnessedAuthors::from_import(&b, &set, now)?;
+    let payload = if let Some(p) = &genesis {
+        api::writer_authority::WriterWitnessPayload::Import(WitnessPayload::Genesis(p))
+    } else {
+        api::writer_authority::WriterWitnessPayload::Import(WitnessPayload::Authority(
+            authority.as_ref().ok_or(Reject::Canonical)?,
+        ))
     };
+    author.admit(&evidence, payload)?;
     let context = NativeAuthorityContext {
         author_authority: &author,
         owner: &owner,

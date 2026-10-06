@@ -2,7 +2,7 @@
 
 Production browser bindings for `heddleco-capability-verifier`. All proof
 verification runs in Rust. This revision builds version **0.28.10**, using
-`heddle-api` **0.31.0-alpha.37**. Tapestry should pin
+`heddle-api` **0.31.0-alpha.39**. Tapestry should pin
 `@heddleco/capability-verifier-wasm@0.28.10` exactly when that artifact is
 published. If the next Heddle release bumps the workspace version, pin that
 exact release version instead: CI requires npm, Cargo and the validated tag
@@ -19,7 +19,7 @@ const lineage = verifyResourceKeyring(keyringBytes, ownerStateBytes, nowSeconds,
 const policy = verifySignedPolicyChain(policyRecords, keyringBytes, ownerStateBytes, nowSeconds, ttlSeconds);
 ```
 
-Protobuf inputs are `Uint8Array` containing the matching alpha.37 message
+Protobuf inputs are `Uint8Array` containing the matching alpha.39 message
 bytes, with canonical protobuf encoding. Unknown fields, repeated-field
 aliases, wrong widths and oversized evidence fail closed. There is no TS
 verification implementation. Encode with the matching `@heddleco/api` schema
@@ -107,3 +107,14 @@ consumed total and operations once. Reapplying an old manifest to a remainder
 refuses. The `u64` total stays lossless in encoded bytes.
 Clocks and TTLs continue to require checked `bigint` inputs. Retries
 cannot reset budgets; sibling jobs have separate signed totals.
+
+`verifyNativeGenesisAuthority` takes an independently authenticated current
+author history and attachment inventory. `admittedMintRootsJson` is a JSON array
+of canonical protobuf attachment hex strings (at most 256). Every entry must be
+distinct, signed by a retained issuer in that history, for that exact account,
+and valid at the selected time. Recover cuts earlier issuers. Signature validity
+does not prove device enrollment: use durable account enrollment or verify the
+exact original's witness statement, current witness set and attachment
+commitment before constructing this input. Copying the envelope's attachment
+into this array does not establish trust. For the Spool owner's own Genesis, the
+selected current Spool owner must extend the envelope history.

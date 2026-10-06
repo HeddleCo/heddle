@@ -122,7 +122,7 @@ impl VerifiedOwnerState {
     }
 
     /// Both states must belong to one immutable root and one linear history.
-    pub(crate) fn extends(&self, previous: &Self) -> bool {
+    pub fn extends(&self, previous: &Self) -> bool {
         self.owner_id == previous.owner_id && self.issuers.contains_key(&previous.state_hash)
     }
 

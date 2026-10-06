@@ -12,6 +12,7 @@
     "heddle.api.v1alpha2.CancelImportJobRequest",
     "heddle.api.v1alpha2.CommitImportJobRequest",
     "heddle.api.v1alpha2.DelegatedImportOperationV1",
+    "heddle.api.v1alpha2.ForeignDependencyV1",
     "heddle.api.v1alpha2.GetHostedWitnessHistoryProofRequest",
     "heddle.api.v1alpha2.GetHostedWitnessHistoryProofResponse",
     "heddle.api.v1alpha2.GetImportConfigurationRequest",
@@ -559,6 +560,41 @@
           "name": "converter_version",
           "number": 19,
           "type": "9",
+          "list": false
+        }
+      ]
+    },
+    {
+      "name": "heddle.api.v1alpha2.ForeignDependencyV1",
+      "fields": [
+        {
+          "name": "format_version",
+          "number": 1,
+          "type": "13",
+          "list": false
+        },
+        {
+          "name": "origin",
+          "number": 2,
+          "type": "heddle.api.v1alpha2.ForeignDependencyOrigin",
+          "list": false
+        },
+        {
+          "name": "thread_genesis_digest",
+          "number": 3,
+          "type": "12",
+          "list": false
+        },
+        {
+          "name": "signed_native_digest",
+          "number": 4,
+          "type": "12",
+          "list": false
+        },
+        {
+          "name": "prefix_admission_order",
+          "number": 5,
+          "type": "4",
           "list": false
         }
       ]
@@ -1683,6 +1719,12 @@
           "number": 22,
           "type": "heddle.api.v1alpha2.HostedLandingWitnessV1",
           "list": true
+        },
+        {
+          "name": "foreign_dependencies",
+          "number": 23,
+          "type": "heddle.api.v1alpha2.ForeignDependencyV1",
+          "list": true
         }
       ]
     },
@@ -2256,6 +2298,23 @@
         {
           "name": "HOSTED_WITNESS_STATE_REVOKED",
           "number": 3
+        }
+      ]
+    },
+    {
+      "name": "heddle.api.v1alpha2.ForeignDependencyOrigin",
+      "values": [
+        {
+          "name": "FOREIGN_DEPENDENCY_ORIGIN_UNSPECIFIED",
+          "number": 0
+        },
+        {
+          "name": "FOREIGN_DEPENDENCY_ORIGIN_IMPORT",
+          "number": 1
+        },
+        {
+          "name": "FOREIGN_DEPENDENCY_ORIGIN_NATIVE",
+          "number": 2
         }
       ]
     },

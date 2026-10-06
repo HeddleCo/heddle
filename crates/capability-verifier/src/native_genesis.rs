@@ -119,6 +119,11 @@ pub fn verify_original_authority(
 
 /// Portable browser seam for original StartThread authority. The caller selects
 /// lineage and current revocations independently; a bundle never enrolls roots.
+/// `author_history` and `admitted_mint_roots_json` MUST come from authenticated
+/// current account state and durable device enrollment, or separately verified
+/// witness testimony for this exact original. This function verifies signatures,
+/// history, issuer retention and exact inventory membership, but cannot establish
+/// enrollment from caller JSON. Never populate the inventory from the envelope.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_bytes(
     binding: &[u8],
@@ -172,6 +177,26 @@ pub fn verify_bytes(
     let history: wire::OwnerHistory =
         heddle_api::hybrid_codec::strict_decode(author_history, 65536)?;
     let author = crate::creation::history_state(&history, now)?;
+    let author = if owner
+        .signed_root()
+        .root
+        .as_ref()
+        .ok_or(Reject::Root)?
+        .account_uuid
+        == author
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid
+    {
+        if !owner.extends(&author) {
+            return Err(Reject::Root.into());
+        }
+        owner.clone()
+    } else {
+        author
+    };
     if admitted_mint_roots_json.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
         return Err(Reject::Bounds.into());
     }
@@ -187,6 +212,24 @@ pub fn verify_bytes(
             Ok(heddle_api::hybrid_codec::strict_decode(&bytes, 65536)?)
         })
         .collect::<Result<Vec<wire::SignedOwnerMintRootAttachment>>>()?;
+    for (index, attachment) in mint_roots.iter().enumerate() {
+        if mint_roots[..index].contains(attachment) {
+            return Err(Reject::Canonical.into());
+        }
+        let body = attachment.attachment.as_ref().ok_or(Reject::Root)?;
+        crate::creation::verify_retained_mint_root_attachment(
+            attachment,
+            &author,
+            &author
+                .signed_root()
+                .root
+                .as_ref()
+                .ok_or(Reject::Root)?
+                .account_uuid,
+            &body.mint_root_key.as_ref().ok_or(Reject::Root)?.public_key,
+            now,
+        )?;
+    }
     verify_original_authority(
         &binding,
         &original,

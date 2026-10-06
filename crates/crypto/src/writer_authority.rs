@@ -18,20 +18,14 @@ pub struct AuthorState {
     pub mint_roots: Vec<wire::SignedOwnerMintRootAttachment>,
 }
 
-/// Issuers supply independently installed actor state and admission inventory.
-/// A receiver's implementation may use authenticated historical testimony only.
-pub trait AuthorAuthority {
-    fn resolve(&self, account: &[u8; 16], envelope: &[u8], now: i64) -> Result<AuthorState>;
-}
-
 /// Single-account host context. The inventory must come from durable enrollment,
 /// never from the incoming envelope or a receiver's witness testimony.
 pub struct HostAuthorAuthority<'a> {
     pub owner: &'a VerifiedOwnerState,
     pub mint_roots: &'a [wire::SignedOwnerMintRootAttachment],
 }
-impl AuthorAuthority for HostAuthorAuthority<'_> {
-    fn resolve(&self, account: &[u8; 16], _: &[u8], _: i64) -> Result<AuthorState> {
+impl HostAuthorAuthority<'_> {
+    pub fn resolve(&self, account: &[u8; 16], _: &[u8], _: i64) -> Result<AuthorState> {
         if self
             .owner
             .signed_root()
@@ -51,6 +45,14 @@ impl AuthorAuthority for HostAuthorAuthority<'_> {
 }
 
 #[derive(Default)]
+/// Receiver inventories contain only attachments admitted by exact witness evidence.
+/// Host enrollment cannot be substituted for receiver testimony.
+/// ```compile_fail
+/// use crypto::writer_authority::{HostAuthorAuthority, WitnessedAuthors};
+/// fn substitute(host: &HostAuthorAuthority<'_>) {
+///     let _: &WitnessedAuthors = host;
+/// }
+/// ```
 pub struct WitnessedAuthors {
     envelopes: BTreeMap<Vec<u8>, Vec<wire::SignedOwnerMintRootAttachment>>,
 }
@@ -257,8 +259,14 @@ fn resolve(
         Err(e) => Err(e),
     }
 }
-impl AuthorAuthority for WitnessedAuthors {
-    fn resolve(&self, account: &[u8; 16], envelope: &[u8], now: i64) -> Result<AuthorState> {
+impl WitnessedAuthors {
+    pub fn resolve(
+        &self,
+        account: &[u8; 16],
+        envelope: &[u8],
+        pinned: &VerifiedOwnerState,
+        now: i64,
+    ) -> Result<AuthorState> {
         let mint_roots = self.envelopes.get(envelope).ok_or(Reject::Scope)?.clone();
         let authority = contract::decode_authority(envelope)?;
         let history = authority.owner.as_ref().ok_or(Reject::Root)?;
@@ -272,6 +280,32 @@ impl AuthorAuthority for WitnessedAuthors {
             != account
         {
             return Err(Reject::GenesisBinding.into());
+        }
+        let owner = if pinned
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid
+            == account
+        {
+            // QA7: the receiver's selected newer state must extend this envelope.
+            if !pinned.extends(&owner) {
+                return Err(Reject::Root.into());
+            }
+            pinned.clone()
+        } else {
+            owner
+        };
+        for attachment in &mint_roots {
+            let body = attachment.attachment.as_ref().ok_or(Reject::Root)?;
+            creation::verify_retained_mint_root_attachment(
+                attachment,
+                &owner,
+                account,
+                &body.mint_root_key.as_ref().ok_or(Reject::Root)?.public_key,
+                now,
+            )?;
         }
         Ok(AuthorState { owner, mint_roots })
     }

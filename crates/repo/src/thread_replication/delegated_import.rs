@@ -838,9 +838,11 @@ pub(super) fn install_in(
     )?;
     let mut original_geneses = verification::OriginalGeneses::import(&bundle.genesis_witnesses)?;
     let verified = std::cell::RefCell::default();
+    let budget = std::cell::RefCell::default();
     let fresh = super::foreign_dependencies::Recheck {
         path: &[],
         verified: &verified,
+        budget: &budget,
     };
     let foreign = super::foreign_dependencies::InstalledForeign::load(
         &originals,

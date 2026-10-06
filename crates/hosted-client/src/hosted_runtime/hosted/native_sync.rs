@@ -33,7 +33,7 @@ use objects::{
 use repo::{
     Repository, SyncedThreadMetadata, ThreadManager,
     thread_replication::{
-        ThreadReplica,
+        ForeignPrefixBudget, ThreadReplica,
         source_heads::{default_source_head, greatest_source_head},
     },
 };
@@ -66,7 +66,12 @@ fn native_error(error: impl std::fmt::Display) -> ProtocolError {
 }
 
 fn replica_err(error: repo::thread_replication::Error) -> ProtocolError {
-    ProtocolError::InvalidState(error.to_string())
+    match error {
+        repo::thread_replication::Error::ForeignPrefixLimitExceeded { limit_name, limit } => {
+            ProtocolError::ForeignPrefixLimitExceeded { limit_name, limit }
+        }
+        error => ProtocolError::InvalidState(error.to_string()),
+    }
 }
 
 fn once_observe() -> ObserveOptions {
@@ -1649,7 +1654,13 @@ impl HostedClient {
         repo: &Repository,
         staged: thread_api::fetch::StagedSource,
     ) -> Result<StateId, ProtocolError> {
-        self.install_source_prefixes(repo, staged, Vec::new()).await
+        self.install_source_prefixes(
+            repo,
+            staged,
+            Vec::new(),
+            &mut ForeignPrefixBudget::default(),
+        )
+        .await
     }
 
     async fn install_source_prefixes(
@@ -1657,6 +1668,7 @@ impl HostedClient {
         repo: &Repository,
         staged: thread_api::fetch::StagedSource,
         outstanding: Vec<contract::ForeignDependencyV1>,
+        budget: &mut ForeignPrefixBudget,
     ) -> Result<StateId, ProtocolError> {
         let proof = match (staged.import_authority(), staged.native_authority()) {
             (Some(b), None) => thread_api::hybrid::authority::PublicProof::from(b.clone()),
@@ -1671,6 +1683,7 @@ impl HostedClient {
             if foreign_original_installed(repo, original, obligation).map_err(native_error)? {
                 continue;
             }
+            budget.visit(outstanding.len() + 1).map_err(replica_err)?;
             let reference = staged
                 .ready()
                 .thread
@@ -1709,7 +1722,7 @@ impl HostedClient {
             prefix.select_prefix(obligation).map_err(native_error)?;
             let mut nested = outstanding.clone();
             nested.push(obligation.clone());
-            Box::pin(self.install_source_prefixes(repo, prefix, nested)).await?;
+            Box::pin(self.install_source_prefixes(repo, prefix, nested, budget)).await?;
         }
         self.install_staged_source_one(repo, staged).await
     }
