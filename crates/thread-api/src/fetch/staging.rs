@@ -434,7 +434,7 @@ pub(crate) fn validate_with_receipts(
 }
 pub(super) fn validate_with_receipts_and_carriers(
     directory: tempfile::TempDir,
-    ready: TransferReady,
+    mut ready: TransferReady,
     operations: Vec<SignedOperation>,
     dependencies: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
@@ -479,6 +479,8 @@ pub(super) fn validate_with_receipts_and_carriers(
             carriers,
         },
     )?;
+    // Install reads the ready genesis, including claims omitted above.
+    ready.thread_genesis = Some(value.genesis.clone());
     Ok(StagedSource {
         directory: value.directory,
         ready,
@@ -1076,17 +1078,122 @@ fn validate_disclosure_artifacts(
     if !originals.is_empty() {
         return Err(Error::Invalid("source dependency cycle"));
     }
+    // A foreign endpoint's claim cutoff lives in its origin prefix. Staging
+    // does not fetch that frontier, and NativeClosure rejects a claim whose
+    // frontier was not supplied. Omit those claims so the staged set is what
+    // install accepts.
+    let mut genesis_record = original.clone();
+    omit_unusable_ownership(&mut genesis_record, &decoded)?;
+    for dependency in &mut dependencies {
+        omit_unusable_ownership(dependency, &decoded)?;
+    }
     Ok(ValidatedSourceArtifacts {
         import_authority: None,
         native_authority: None,
         directory,
-        genesis: original.clone(),
+        genesis: genesis_record,
         operations: ordered,
         authority_admissions,
         dependencies,
         state,
         partial_trees,
     })
+}
+fn source_frontier_is_installable(
+    thread: ContentHash,
+    frontier: &BTreeSet<ContentHash>,
+    operations: &BTreeMap<ContentHash, ThreadOperation>,
+) -> bool {
+    frontier.iter().all(|id| {
+        operations.get(id).is_some_and(|operation| {
+            operation.thread == thread && operation.source_state().ok().flatten().is_some()
+        })
+    })
+}
+fn omit_unusable_ownership(
+    wrapper: &mut ThreadGenesisRecord,
+    operations: &BTreeMap<ContentHash, ThreadOperation>,
+) -> Result<(), Error> {
+    if wrapper.ownership_claims.is_empty() && wrapper.ownership_resolutions.is_empty() {
+        return Ok(());
+    }
+    let signed = wrapper
+        .genesis
+        .as_ref()
+        .ok_or(Error::Invalid("claim genesis absent"))?;
+    let genesis = heddle_object_model::object::thread_replication::ThreadGenesis::decode(
+        &signed.canonical_record,
+    )
+    .map_err(preparation)?;
+    let thread = genesis.id().map_err(preparation)?;
+    let mut kept_claims = BTreeSet::new();
+    let mut claims = Vec::new();
+    for record in wrapper.ownership_claims.drain(..) {
+        let crate::thread_ownership::ClaimProof::Complete(proof) =
+            crate::thread_ownership::decode(&record).map_err(preparation)?
+        else {
+            return Err(Error::Invalid(
+                "transferred claim requires both original signatures",
+            ));
+        };
+        let claim = proof.verify().map_err(preparation)?;
+        if source_frontier_is_installable(thread, &claim.source_frontier, operations) {
+            kept_claims.insert(claim.id().map_err(preparation)?);
+            claims.push(record);
+        }
+    }
+    wrapper.ownership_claims = claims;
+    let mut claim_admissions = Vec::new();
+    for record in wrapper.ownership_claim_admissions.drain(..) {
+        let statement = admission_subject(&record)?;
+        let Some(id) = statement.subject.claim_id() else {
+            return Err(Error::Invalid("ownership claim admission subject"));
+        };
+        if kept_claims.contains(&id) {
+            claim_admissions.push(record);
+        }
+    }
+    wrapper.ownership_claim_admissions = claim_admissions;
+    let mut kept_resolutions = BTreeSet::new();
+    let mut resolutions = Vec::new();
+    for record in wrapper.ownership_resolutions.drain(..) {
+        let proof = crate::thread_ownership::decode_resolution(&record).map_err(preparation)?;
+        let resolution = heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&proof.canonical).map_err(preparation)?;
+        let claims_present = kept_claims.contains(&resolution.winning_claim)
+            && resolution
+                .conflicting_claims
+                .iter()
+                .all(|id| kept_claims.contains(id));
+        if claims_present
+            && source_frontier_is_installable(thread, &resolution.frontier, operations)
+        {
+            kept_resolutions.insert(resolution.id().map_err(preparation)?);
+            resolutions.push(record);
+        }
+    }
+    wrapper.ownership_resolutions = resolutions;
+    let mut resolution_admissions = Vec::new();
+    for record in wrapper.ownership_resolution_admissions.drain(..) {
+        let statement = admission_subject(&record)?;
+        if matches!(
+            statement.subject,
+            heddle_object_model::object::thread_authority_admission::OriginalAuthoritySubject::OwnershipResolution(id)
+                if kept_resolutions.contains(&id)
+        ) {
+            resolution_admissions.push(record);
+        }
+    }
+    wrapper.ownership_resolution_admissions = resolution_admissions;
+    Ok(())
+}
+fn admission_subject(
+    record: &SignedRecord,
+) -> Result<heddle_object_model::object::thread_authority_admission::ThreadAuthorityAdmission, Error>
+{
+    crate::authority_admission::decode(record)
+        .map_err(preparation)?
+        .verify_signature()
+        .map_err(preparation)
 }
 fn foreign_endpoint(
     foreign: &[ForeignDependencyV1],

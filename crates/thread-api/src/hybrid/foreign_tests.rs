@@ -1139,6 +1139,76 @@ fn forged_foreign_endpoint_is_traversed_and_rejected() {
     }
 }
 
+#[tokio::test]
+async fn fetch_install_without_foreign_prefix_refuses_without_state_change() {
+    for name in ["import_tip_native_fast_forward", "import_tip_native_merge"] {
+        let receiver = Receiver::new();
+        let staged = fetch_landed_source(name).await;
+        std::fs::write(
+            receiver.repo.heddle_dir().join("spool-id"),
+            &staged
+                .ready()
+                .thread
+                .as_ref()
+                .expect("thread")
+                .spool
+                .as_ref()
+                .expect("Spool")
+                .id,
+        )
+        .expect("selected receiver Spool file");
+        let bundle = PublicProof::from(staged.native_authority().expect("native").clone());
+        let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+            .expect("limits");
+        let pinned = super::authority::tests::selected(&super::authority::tests::bundle(), limits);
+        let history =
+            AcceptedHistory::from_public(&bundle, &pinned, 1200, limits).expect("history");
+        select_spool(
+            receiver.repo.heddle_dir(),
+            pinned.owner_genesis().spool_uuid(),
+            *history.genesis(),
+            *history.initial_owner(),
+        )
+        .expect("selected Spool");
+        let authority = SelectedAuthority::from_proof(
+            history,
+            bundle,
+            |_: &PublicProof, _: i64, _: &TrustTransaction<'_>| Ok(()),
+        );
+        let spool_file = receiver.repo.heddle_dir().join("spool-id");
+        let spool_before = std::fs::read(&spool_file).expect("selected receiver Spool file");
+        let before = receiver.snapshot();
+        let result = staged.install_hosted(&receiver.repo, &receiver.trust, &authority, 1200);
+        assert!(
+            matches!(
+                &result,
+                Err(crate::fetch::Error::Hybrid(
+                    api::hybrid_codec::Reject::Scope
+                ))
+            ),
+            "{name} must refuse the uninstalled foreign endpoint inside install: {result:?}"
+        );
+        assert_eq!(
+            receiver.snapshot(),
+            before,
+            "{name} refusal must not change receiver state"
+        );
+        assert_eq!(
+            std::fs::read(&spool_file).expect("Spool file retained"),
+            spool_before,
+            "{name} refusal must not rewrite the selected Spool"
+        );
+        assert!(
+            !receiver
+                .repo
+                .heddle_dir()
+                .join("owner-authorization.bin")
+                .exists(),
+            "{name} refusal must not write an owner authorization"
+        );
+    }
+}
+
 #[test]
 fn native_fetch_mismatched_ancestry_is_rejected() {
     let mut prefix = prefix_graph::chain(1).pop().expect("native prefix");
