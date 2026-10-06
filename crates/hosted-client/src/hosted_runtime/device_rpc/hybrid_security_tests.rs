@@ -580,13 +580,15 @@ async fn security_f3_final_device_revocation_and_expiry_restore_everything() {
     let _guard = crate::test_process_env::exclusive().await;
     for expiry in [false, true] {
         let mut f = Fixture::new();
-        let expires = chrono::Utc::now() + chrono::Duration::seconds(3);
+        // Expiry must occur in the final hook, after the real install, even
+        // when the full suite is verifying other signatures concurrently.
+        let expires = chrono::Utc::now() + chrono::Duration::seconds(60);
         if expiry {
             let token = crate::hosted_runtime::root_mint::mint_independent_root(
                 crate::hosted_runtime::root_mint::IndependentRootMint {
                     seed: &[1; 32],
                     subject: "security-control",
-                    ttl: chrono::Duration::seconds(3),
+                    ttl: chrono::Duration::seconds(60),
                     credential_id: None,
                     session_id: None,
                     expires_at: Some(expires),
@@ -651,7 +653,7 @@ async fn security_f3_final_device_revocation_and_expiry_restore_everything() {
             .expect_err("late disclosure rejection");
         assert!(
             reached.load(std::sync::atomic::Ordering::SeqCst),
-            "must reach final authority hook"
+            "must reach final authority hook (expiry={expiry}): {error}"
         );
         assert!(
             error
@@ -891,7 +893,7 @@ async fn native_f4_device_relay_refreshes_expired_metadata_without_replacing_ori
     let set = expired.witness_set.as_mut().expect("set");
     set.body.as_mut().expect("body").generation += 1;
     set.body.as_mut().expect("body").valid_until_unix_millis =
-        chrono::Utc::now().timestamp_millis() + 1800;
+        chrono::Utc::now().timestamp_millis() + 30_000;
     sign_set(set, 7);
     let backend = device
         .hosted_backend(f.local(), session.clone(), expired.clone())
@@ -1118,7 +1120,8 @@ async fn security_f4_device_export_refreshes_expired_metadata_and_completes_reti
     let set = expiring.witness_set.as_mut().expect("set");
     let body = set.body.as_mut().expect("body");
     body.generation += 1;
-    body.valid_until_unix_millis = chrono::Utc::now().timestamp_millis() + 1800;
+    // Admit a valid control before deliberately crossing its expiry below.
+    body.valid_until_unix_millis = chrono::Utc::now().timestamp_millis() + 30_000;
     sign_set(set, 7);
     let backend = device
         .hosted_backend(f.local(), session.clone(), expiring.clone())

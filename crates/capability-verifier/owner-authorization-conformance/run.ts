@@ -273,7 +273,7 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
       let value: unknown;
       switch (c.api) {
         case "import-scope": value = Buffer.from(wasm.remainingImportScope(bytes("scope_hex"), bytes("manifest_hex"))).toString("hex"); break;
-        case "native-genesis": value = wasm.verifyNativeGenesisAuthority(bytes("binding_hex"), bytes("original_hex"), bytes("envelope_hex"), bytes("keyring_hex"), bytes("current_owner_hex"), bytes("initial_owner_hex"), bytes("spool_genesis_hex"), String(c.revoked_keys_json), String(c.revoked_credentials_json), now, ttl); break;
+        case "native-genesis": value = wasm.verifyNativeGenesisAuthority(bytes("binding_hex"), bytes("original_hex"), bytes("envelope_hex"), bytes("keyring_hex"), bytes("current_owner_hex"), bytes("author_history_hex"), String(c.admitted_mint_roots_json), bytes("initial_owner_hex"), bytes("spool_genesis_hex"), String(c.revoked_keys_json), String(c.revoked_credentials_json), now, ttl); break;
         case "owner-root": value = wasm.verifyOwnerRoot(bytes("root_hex")); break;
         case "resource-keyring": value = wasm.verifyResourceKeyring(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;
         case "transfer-chain": value = wasm.verifyOwnershipTransferChain(bytes("keyring_hex"), bytes("current_owner_hex"), now, ttl); break;

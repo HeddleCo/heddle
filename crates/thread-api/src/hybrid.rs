@@ -10,6 +10,8 @@ use crate::contract::{
 
 #[cfg(feature = "native")]
 pub mod authority;
+#[cfg(all(test, feature = "native"))]
+mod foreign_tests;
 pub mod history;
 #[cfg(test)]
 mod history_tests;

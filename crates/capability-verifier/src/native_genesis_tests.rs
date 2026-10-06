@@ -46,7 +46,7 @@ fn input(name: &str) -> Value {
         ..Default::default()
     };
     let p = &bundle.genesis_witnesses[0];
-    json!({"id":name,"api":"native-genesis","binding_hex":hex::encode(p.binding.clone().unwrap_or_default().encode_to_vec()),"original_hex":hex::encode(p.original_genesis.as_ref().expect("original").encode_to_vec()),"envelope_hex":hex::encode(&p.creator_authority_envelope),"keyring_hex":hex::encode(keyring.encode_to_vec()),"current_owner_hex":hex::encode(observed.encode_to_vec()),"initial_owner_hex":hex::encode(owner.owner_id()),"spool_genesis_hex":hex::encode(digest),"revoked_keys_json":"[]","revoked_credentials_json":"[]","now":"1100","max_ttl":"3600","expected_accept":true})
+    json!({"id":name,"api":"native-genesis","binding_hex":hex::encode(p.binding.clone().unwrap_or_default().encode_to_vec()),"original_hex":hex::encode(p.original_genesis.as_ref().expect("original").encode_to_vec()),"envelope_hex":hex::encode(&p.creator_authority_envelope),"keyring_hex":hex::encode(keyring.encode_to_vec()),"current_owner_hex":hex::encode(observed.encode_to_vec()),"author_history_hex":hex::encode(history.encode_to_vec()),"admitted_mint_roots_json":"[]","initial_owner_hex":hex::encode(owner.owner_id()),"spool_genesis_hex":hex::encode(digest),"revoked_keys_json":"[]","revoked_credentials_json":"[]","now":"1100","max_ttl":"3600","expected_accept":true})
 }
 fn verify(c: &Value) -> crate::Result<super::native_genesis::NativeGenesisSummary> {
     let bytes = |field: &str| hex::decode(c[field].as_str().expect("hex field")).expect("hex");
@@ -56,6 +56,8 @@ fn verify(c: &Value) -> crate::Result<super::native_genesis::NativeGenesisSummar
         &bytes("envelope_hex"),
         &bytes("keyring_hex"),
         &bytes("current_owner_hex"),
+        &bytes("author_history_hex"),
+        c["admitted_mint_roots_json"].as_str().expect("inventory"),
         &bytes("initial_owner_hex"),
         &bytes("spool_genesis_hex"),
         c["revoked_keys_json"].as_str().expect("keys"),

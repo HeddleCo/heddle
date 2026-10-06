@@ -40,7 +40,7 @@ fn signed_record(
 
 /// Genuine owner-attached mint root, publisher and credential all differ from
 /// the retained offline author. Both P1 and P2 keep the exact original bytes.
-fn boundary_bundle(source: bool) -> wire::NativePublicProofBundleV1 {
+pub(super) fn boundary_bundle(source: bool) -> wire::NativePublicProofBundleV1 {
     let mut bundle: wire::NativePublicProofBundleV1 = record(
         &fixture(),
         if source {
@@ -335,10 +335,43 @@ fn native_boundary_source_fresh_receiver_retains_accepting_authority() {
     local_work::install_bundle("distinct source acceptor", bundle, &originals, None);
 }
 
+fn selected_authority_from_control(
+    control: &wire::NativePublicProofBundleV1,
+    bundle: wire::NativePublicProofBundleV1,
+) -> impl AcceptedAuthority + use<> {
+    use crate::hybrid::authority::tests::{bundle as imported, selected};
+    let limits = heddleco_capability_verifier::VerificationLimits::new(3600).expect("limits");
+    let history =
+        AcceptedHistory::from_native_spool(control, &selected(&imported(), limits), 1100, limits)
+            .expect("independent unrevoked lineage");
+    SelectedAuthority::new_native(
+        history,
+        bundle,
+        |_: &wire::NativePublicProofBundleV1,
+         _: i64,
+         _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| Ok(()),
+    )
+}
+
 #[test]
 fn native_boundary_acceptor_publisher_and_mint_revocations_reject() {
     for seed in [61, 62] {
         let mut bundle = boundary_bundle(true);
+        let control = bundle.clone();
+        let key = Ed25519Signer::from_seed(&[seed; 32]).expect("acceptor key");
+        let unrevoked = selected_authority_from_control(&control, control.clone());
+        for s in &control.statements {
+            use heddleco_capability_verifier::thread_control_authority::Revocation;
+            let r = if seed == 61 {
+                Revocation::Publisher(key.public_key())
+            } else {
+                Revocation::MintRoot(key.public_key())
+            };
+            assert!(
+                !unrevoked.native_revoked(s.body.as_ref().expect("body"), r),
+                "unrevoked acceptor is independently selected before cutting it"
+            );
+        }
         revoke(
             &mut bundle,
             Ed25519Signer::from_seed(&[seed; 32])
@@ -347,9 +380,12 @@ fn native_boundary_acceptor_publisher_and_mint_revocations_reject() {
         );
         let error = verify_semantics(&bundle, 1_100_000).expect_err("revoked acceptor");
         assert!(
-            error
-                .to_string()
-                .contains("mint root or publisher is revoked"),
+            matches!(
+                error.downcast_ref::<crate::hybrid::authority::Error>(),
+                Some(crate::hybrid::authority::Error::Rejected(
+                    hybrid_codec::Reject::Revoked
+                ))
+            ),
             "{error}"
         );
     }
@@ -388,9 +424,59 @@ fn native_boundary_revoked_original_keeps_provenance_and_signatures() {
                 .expect("source")
         };
         record.signatures[0].signature[0] ^= 1;
+        for signed in &mut forged.statements {
+            let body = signed.body.as_mut().expect("body");
+            if body.purpose == purpose {
+                if purpose == 1 {
+                    let payload = &forged.genesis_witnesses[0];
+                    body.canonical_payload = hybrid_codec::canonical(payload).expect("payload");
+                    let mut framed = 1u32.to_be_bytes().to_vec();
+                    framed.extend(
+                        hybrid_codec::canonical(
+                            &payload
+                                .original_genesis
+                                .as_ref()
+                                .expect("original")
+                                .signatures[0],
+                        )
+                        .expect("signature"),
+                    );
+                    body.original_signatures_digest =
+                        hybrid_codec::hash(&[b"heddle-hosted-original-signatures-v1", &framed]);
+                } else {
+                    let payload = &forged.authority_witnesses[0];
+                    body.canonical_payload = hybrid_codec::canonical(payload).expect("payload");
+                    let signatures = payload
+                        .original
+                        .iter()
+                        .chain(&payload.dependencies)
+                        .flat_map(|r| &r.signatures)
+                        .collect::<Vec<_>>();
+                    let mut framed = (signatures.len() as u32).to_be_bytes().to_vec();
+                    for signature in signatures {
+                        framed.extend(hybrid_codec::canonical(signature).expect("signature"));
+                    }
+                    body.original_signatures_digest =
+                        hybrid_codec::hash(&[b"heddle-hosted-original-signatures-v1", &framed]);
+                }
+            }
+        }
+        resign_statements(&mut forged);
+        let fresh = set(&forged, 1_100_000);
+        for signed in &forged.statements {
+            WitnessEvidence::resolve(&fresh, signed, None, false, 1_100_000)
+                .expect("valid witness signature after forging original");
+        }
+        let error =
+            verify_semantics(&forged, 1_100_000).expect_err("original signature remains mandatory");
         assert!(
-            verify_semantics(&forged, 1_100_000).is_err(),
-            "original signature remains mandatory"
+            matches!(
+                error.downcast_ref::<crate::hybrid::authority::Error>(),
+                Some(crate::hybrid::authority::Error::Rejected(
+                    hybrid_codec::Reject::Signature
+                ))
+            ),
+            "{error:?}"
         );
     }
 }
@@ -411,10 +497,11 @@ fn ordinary_native_p1_p2_revocations_still_reject() {
             .signatures[0]
             .public_key
             .clone();
+        let control = bundle.clone();
         revoke(&mut bundle, &publisher);
         let limits = heddleco_capability_verifier::VerificationLimits::new(3600).expect("limits");
         let history = AcceptedHistory::from_native_spool(
-            &bundle,
+            &control,
             &selected(&imported(), limits),
             1100,
             limits,
@@ -552,6 +639,20 @@ fn native_boundary_revocation_selects_exact_acceptor_credential_identities() {
 #[test]
 fn native_boundary_forged_acceptor_key_outside_acceptance_signature_rejects() {
     let mut bundle = boundary_bundle(true);
+    let unrevoked = selected_authority_from_control(&bundle, bundle.clone());
+    for s in &bundle.statements {
+        assert!(
+            !unrevoked.native_revoked(
+                s.body.as_ref().expect("body"),
+                heddleco_capability_verifier::thread_control_authority::Revocation::Publisher(
+                    Ed25519Signer::from_seed(&[61; 32])
+                        .expect("acceptor")
+                        .public_key()
+                )
+            )
+        );
+    }
+    verify_semantics(&bundle, 1_100_000).expect("unforged acceptor passes");
     let old = hybrid_codec::canonical(&bundle.genesis_witnesses[0]).expect("payload");
     let mut boundary = bundle.genesis_witnesses[0]
         .boundary_acceptance

@@ -66,7 +66,7 @@ pub fn verify_genesis_payload(
     evidence: &WitnessEvidence,
     selection: &Selection<'_>,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<SignedGenesis> {
     let statement = evidence.signed().body.as_ref().ok_or(Reject::Canonical)?;
@@ -96,11 +96,30 @@ pub fn verify_genesis_payload(
             payload, evidence, closure, context, &revoked,
         )?;
     } else {
+        let author = match genesis.owner {
+            heddle_object_model::object::thread_replication::GenesisOwner::Account(account) => {
+                context.author_authority.resolve(
+                    account.as_bytes(),
+                    &payload.creator_authority_envelope,
+                    statement.observed_at_unix_millis / 1000,
+                )?
+            }
+            heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(_) => {
+                crate::writer_authority::AuthorState {
+                    owner: context.owner.clone(),
+                    mint_roots: vec![],
+                }
+            }
+        };
         heddleco_capability_verifier::native_genesis::verify_original_authority(
             binding,
             original,
             &payload.creator_authority_envelope,
             selection,
+            heddleco_capability_verifier::native_genesis::AuthorAuthority {
+                owner: &author.owner,
+                mint_roots: &author.mint_roots,
+            },
             statement.observed_at_unix_millis / 1000,
             revoked,
         )?;
@@ -220,6 +239,10 @@ mod tests {
                 original,
                 &payload.creator_authority_envelope,
                 &selection,
+                heddleco_capability_verifier::native_genesis::AuthorAuthority {
+                    owner: &owner,
+                    mint_roots: &[],
+                },
                 1000,
                 |_| false,
             )

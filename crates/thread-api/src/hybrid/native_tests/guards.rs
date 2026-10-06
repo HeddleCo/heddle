@@ -52,7 +52,7 @@ fn native_landing_accepts_genesis_governance_with_nonzero_review_policy() {
             &[0; 32],
         );
     }
-    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000, &[])
         .expect("API authenticates genesis governance independently");
     verify_semantics(&bundle, 1_100_000)
         .expect("fresh Spool landing retains its separate review policy");
@@ -156,7 +156,7 @@ fn native_landing_rejects_signed_request_policy_mismatch() {
     let mut bundle = fresh_spool_landing();
     verify_semantics(&bundle, 1_100_000).expect("passing control");
     change_landing_review_policy(&mut bundle, false);
-    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000, &[])
         .expect("valid signatures, commitments and governance history");
     let error =
         verify_semantics(&bundle, 1_100_000).expect_err("request policy must match receipt");
@@ -174,7 +174,7 @@ fn native_landing_rejects_review_policy_mismatch() {
     let mut bundle = fresh_spool_landing();
     verify_semantics(&bundle, 1_100_000).expect("passing control");
     change_landing_review_policy(&mut bundle, true);
-    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000)
+    api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000, &[])
         .expect("valid signatures, commitments and governance history");
     let error = verify_semantics(&bundle, 1_100_000).expect_err("review policy must match receipt");
     assert!(
@@ -541,7 +541,10 @@ fn native_binding_rejects_ambiguous_owner_chain_resolution() {
     bundle
         .owner_histories
         .push(bundle.owner_histories[0].clone());
-    api::native_witness::validate_public_bundle(&bundle).expect("portable duplicate history");
+    assert_eq!(
+        api::native_witness::validate_public_bundle(&bundle),
+        Err(hybrid_codec::Reject::Canonical)
+    );
     assert!(
         matches!(
             AcceptedHistory::from_native_spool(&bundle, &pinned, 1100, limits),

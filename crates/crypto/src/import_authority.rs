@@ -291,6 +291,7 @@ pub fn verify_genesis_payload(
     payload: &wire::ImportGenesisWitnessV1,
     evidence: &WitnessEvidence,
     delegation: &VerifiedImportDelegation,
+    admitted_mint_roots: &[wire::SignedOwnerMintRootAttachment],
     is_revoked_at_accepted_order: impl Fn(
         heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
     ) -> bool,
@@ -299,6 +300,7 @@ pub fn verify_genesis_payload(
         payload,
         evidence,
         delegation,
+        admitted_mint_roots,
         false,
         is_revoked_at_accepted_order,
     )
@@ -307,6 +309,7 @@ fn verify_genesis_payload_inner(
     payload: &wire::ImportGenesisWitnessV1,
     evidence: &WitnessEvidence,
     delegation: &VerifiedImportDelegation,
+    admitted_mint_roots: &[wire::SignedOwnerMintRootAttachment],
     boundary: bool,
     is_revoked_at_accepted_order: impl Fn(
         heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
@@ -345,7 +348,7 @@ fn verify_genesis_payload_inner(
         heddleco_capability_verifier::thread_control_authority::verify_genesis_with_retained_mint_roots(
             &payload.creator_authority_envelope,
             heddleco_capability_verifier::thread_control_authority::Context {owner:delegation.owner(),account_uuid:&account,publisher:&genesis.creator,agent_id:None,
-                method:"/heddle.api.v1alpha2.IntegrationService/ImportSource",spool_path:delegation.spool_path(),now:s.observed_at_unix_millis/1000},&[],is_revoked_at_accepted_order)?;
+                method:"/heddle.api.v1alpha2.IntegrationService/ImportSource",spool_path:delegation.spool_path(),now:s.observed_at_unix_millis/1000},admitted_mint_roots,is_revoked_at_accepted_order)?;
     }
     contract::verify_genesis_authority(
         binding,
@@ -389,12 +392,76 @@ pub struct NativeClosure {
         heddle_object_model::object::ContentHash,
         heddle_object_model::object::thread_replication::ownership_claim::ThreadOwnershipClaim,
     >,
+    import_bound: std::collections::BTreeMap<heddle_object_model::object::ContentHash, DelegatedImport>,
+    foreign: std::collections::BTreeSet<heddle_object_model::object::ContentHash>,
+    authorized: std::collections::BTreeMap<heddle_object_model::object::ContentHash, u64>,
     resolutions: std::collections::BTreeMap<heddle_object_model::object::ContentHash, heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution>,
 }
 impl NativeClosure {
     pub fn verify(records: &[wire::SignedRecord]) -> Result<Self> {
         Self::verify_with_boundaries(records, &[])
     }
+    // A later claim cannot retroactively cover a landing's native LocalKey
+    // source. Evaluate the exact signed ownership closure at that P4 order.
+    fn verify_local_work(
+        &self,
+        id: &heddle_object_model::object::ContentHash,
+        order: u64,
+    ) -> Result<()> {
+        use heddle_object_model::object::thread_replication::GenesisOwner;
+        let op = self.operation(id)?;
+        if self.genesis(&op.thread)?.owner != GenesisOwner::LocalKey(op.publisher) {
+            return Err(Reject::Scope.into());
+        }
+        let admitted = |id| {
+            self.authorized
+                .get(&id)
+                .is_some_and(|cutoff| *cutoff <= order)
+        };
+        let claims = self
+            .claims
+            .iter()
+            .filter(|(id, c)| c.thread == op.thread && admitted(**id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let resolutions = self
+            .resolutions
+            .iter()
+            .filter(|(id, r)| r.thread == op.thread && admitted(**id))
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>();
+        let mut pending = match resolutions.as_slice() {
+            [resolution]
+                if resolution.conflicting_claims == claims.keys().map(|id| **id).collect()
+                    && claims.contains_key(&resolution.winning_claim) =>
+            {
+                resolution.frontier.iter().copied().collect::<Vec<_>>()
+            }
+            [] if claims.len() == 1 => claims
+                .values()
+                .next()
+                .ok_or(Reject::Scope)?
+                .source_frontier
+                .iter()
+                .copied()
+                .collect(),
+            _ => return Err(Reject::Scope.into()),
+        };
+        let mut covered = std::collections::BTreeSet::new();
+        while let Some(next) = pending.pop() {
+            let ancestor = self.operation(&next)?;
+            if ancestor.thread != op.thread {
+                return Err(Reject::Scope.into());
+            }
+            if covered.insert(next) {
+                pending.extend(ancestor.parents.iter().copied());
+            }
+        }
+        if !covered.contains(id) {
+            return Err(Reject::Scope.into());
+        }
+        Ok(())
+    }
+
     /// Native boundary dependencies require the exact API-validated evidence.
     /// This preserves signatures/canonicality; account authority is checked at
     /// the authenticated witness observation by the payload verifier.
@@ -416,6 +483,21 @@ impl NativeClosure {
             &[ThreadOperation],
         ) -> Result<Option<DelegatedImport>>,
     ) -> Result<Self> {
+        Self::verify_with_resolvers(records, boundaries, import, |_| Ok(None))
+    }
+
+    /// The receiver resolver supplies only exact originals previously installed
+    /// through the other origin. References alone never select this exception.
+    pub fn verify_with_resolvers(
+        records: &[wire::SignedRecord],
+        boundaries: &[wire::ImportBoundaryAcceptanceV1],
+        import: impl Fn(
+            &ThreadGenesis,
+            &ThreadOperation,
+            &[ThreadOperation],
+        ) -> Result<Option<DelegatedImport>>,
+        foreign: impl Fn(&wire::SignedRecord) -> Result<Option<ForeignOriginal>>,
+    ) -> Result<Self> {
         for boundary in boundaries {
             contract::verify_boundary_acceptance(boundary)?;
         }
@@ -429,6 +511,9 @@ impl NativeClosure {
             geneses: Default::default(),
             operations: Default::default(),
             claims: Default::default(),
+            foreign: Default::default(),
+            authorized: Default::default(),
+            import_bound: Default::default(),
             resolutions: Default::default(),
         };
         let mut seen = std::collections::BTreeMap::new();
@@ -438,6 +523,73 @@ impl NativeClosure {
                 if old != record {
                     return Err(Reject::Canonical.into());
                 }
+                continue;
+            }
+            if let Some(installed) = foreign(record)? {
+                if installed.original != *record {
+                    return Err(Reject::Scope.into());
+                }
+                let genesis_id = installed.genesis.id()?;
+                result.geneses.insert(genesis_id, installed.genesis);
+                let id = match record.format.as_str() {
+                    native::GENESIS_FORMAT => verify_native_genesis(record)?.1.id()?,
+                    native::OPERATION_FORMAT => {
+                        let op = verify_native_operation(record)?.1;
+                        if op.thread != genesis_id {
+                            return Err(Reject::Scope.into());
+                        }
+                        let id = op.id()?;
+                        if let Some(bound) = installed.import {
+                            if bound.converted() != &op {
+                                return Err(Reject::Scope.into());
+                            }
+                            result.import_bound.insert(id, bound);
+                        }
+                        result.operations.insert(id, op);
+                        id
+                    }
+                    native::ownership_claim::FORMAT => {
+                        let c = ThreadOwnershipClaim::decode(&record.canonical_record)?;
+                        if record.signatures.len() != 2 {
+                            return Err(Reject::Signature.into());
+                        }
+                        let c = crate::thread_ownership_claim::SignedOwnershipClaim {
+                            canonical: record.canonical_record.clone(),
+                            local_signature: record_signature(record, &c.prior_local_key)?,
+                            acceptance_signature: record_signature(record, &c.accepting_publisher)?,
+                        }
+                        .verify()?;
+                        c.validate_genesis(result.geneses.get(&genesis_id).ok_or(Reject::Scope)?)?;
+                        let id = c.id()?;
+                        result.claims.insert(id, c);
+                        id
+                    }
+                    native::ownership_resolution::FORMAT => {
+                        let r = ThreadOwnershipResolution::decode(&record.canonical_record)?;
+                        if record.signatures.len() != 2 {
+                            return Err(Reject::Signature.into());
+                        }
+                        r.validate_genesis(result.geneses.get(&genesis_id).ok_or(Reject::Scope)?)?;
+                        let signing = crate::thread_ownership_resolution::signing_bytes(
+                            &record.canonical_record,
+                        );
+                        crate::Ed25519Signer::verify_with_public_key(
+                            &signing,
+                            &r.local_owner,
+                            &record_signature(record, &r.local_owner)?,
+                        )?;
+                        crate::Ed25519Signer::verify_with_public_key(
+                            &signing,
+                            &r.accepting_publisher,
+                            &record_signature(record, &r.accepting_publisher)?,
+                        )?;
+                        let id = r.id()?;
+                        result.resolutions.insert(id, r);
+                        id
+                    }
+                    _ => return Err(Reject::Scope.into()),
+                };
+                result.foreign.insert(id);
                 continue;
             }
             match record.format.as_str() {
@@ -479,6 +631,9 @@ impl NativeClosure {
             }
         }
         for op in result.operations.values() {
+            if result.foreign.contains(&op.id()?) {
+                continue;
+            }
             let genesis = result.geneses.get(&op.thread).ok_or(Reject::Scope)?;
             let parents = op
                 .parents
@@ -490,11 +645,15 @@ impl NativeClosure {
                     return Err(Reject::Scope.into());
                 }
                 bound.validate_parents(genesis, &parents)?;
+                result.import_bound.insert(op.id()?, bound);
             } else {
                 op.validate_parents(genesis, &parents)?;
             }
         }
         for c in result.claims.values() {
+            if result.foreign.contains(&c.id()?) {
+                continue;
+            }
             c.validate_genesis(result.geneses.get(&c.thread).ok_or(Reject::Scope)?)?;
             for id in &c.source_frontier {
                 if !result.operations.get(id).is_some_and(|o| {
@@ -509,6 +668,9 @@ impl NativeClosure {
             .filter(|r| r.format == native::ownership_resolution::FORMAT)
         {
             let r = ThreadOwnershipResolution::decode(&record.canonical_record)?;
+            if result.foreign.contains(&r.id()?) {
+                continue;
+            }
             r.validate_genesis(result.geneses.get(&r.thread).ok_or(Reject::Scope)?)?;
             if record.signatures.len() != 2 {
                 return Err(Reject::Signature.into());
@@ -534,6 +696,15 @@ impl NativeClosure {
             result.resolutions.insert(verified.id()?, verified);
         }
         Ok(result)
+    }
+    pub fn import_bound(
+        &self,
+        id: &heddle_object_model::object::ContentHash,
+    ) -> Option<&DelegatedImport> {
+        self.import_bound.get(id)
+    }
+    pub fn foreign(&self, id: &heddle_object_model::object::ContentHash) -> bool {
+        self.foreign.contains(id)
     }
     pub fn genesis(&self, id: &heddle_object_model::object::ContentHash) -> Result<&ThreadGenesis> {
         self.geneses.get(id).ok_or(Reject::Scope.into())
@@ -564,38 +735,76 @@ fn record_signature(record: &wire::SignedRecord, key: &[u8]) -> Result<Vec<u8>> 
 
 /// Accepted native owner context. Policy and disclosure are independently
 /// selected caller gates; witness observation authorizes only exact history.
-pub enum OriginalGeneses<'a> {
-    Import(&'a [wire::ImportGenesisWitnessV1]),
-    Native(&'a [wire::NativeGenesisWitnessV1]),
-}
-impl OriginalGeneses<'_> {
-    fn envelope(&self, id: &heddle_object_model::object::ContentHash) -> Result<&[u8]> {
-        let matches = |original: &Option<wire::SignedRecord>| {
-            original.as_ref().is_some_and(|g| {
-                verify_native_genesis(g).is_ok_and(|(_, g)| g.id().is_ok_and(|g| &g == id))
-            })
-        };
-        match self {
-            Self::Import(payloads) => payloads
-                .iter()
-                .find(|p| matches(&p.original_genesis))
-                .map(|p| p.creator_authority_envelope.as_slice()),
-            Self::Native(payloads) => payloads
-                .iter()
-                .find(|p| matches(&p.original_genesis))
-                .map(|p| p.creator_authority_envelope.as_slice()),
+#[derive(Default)]
+pub struct OriginalGeneses(
+    std::collections::BTreeMap<
+        heddle_object_model::object::ContentHash,
+        (wire::ForeignDependencyOrigin, Vec<u8>),
+    >,
+);
+impl OriginalGeneses {
+    pub fn import(payloads: &[wire::ImportGenesisWitnessV1]) -> Result<Self> {
+        let mut result = Self::default();
+        for p in payloads {
+            result.insert(
+                p.original_genesis.as_ref().ok_or(Reject::Scope)?,
+                &p.creator_authority_envelope,
+                wire::ForeignDependencyOrigin::Import,
+            )?;
         }
-        .ok_or(Reject::BoundaryAcceptance.into())
+        Ok(result)
+    }
+    pub fn native(payloads: &[wire::NativeGenesisWitnessV1]) -> Result<Self> {
+        let mut result = Self::default();
+        for p in payloads {
+            result.insert(
+                p.original_genesis.as_ref().ok_or(Reject::Scope)?,
+                &p.creator_authority_envelope,
+                wire::ForeignDependencyOrigin::Native,
+            )?;
+        }
+        Ok(result)
+    }
+    pub fn insert(
+        &mut self,
+        original: &wire::SignedRecord,
+        envelope: &[u8],
+        origin: wire::ForeignDependencyOrigin,
+    ) -> Result<()> {
+        let (_, genesis) = verify_native_genesis(original)?;
+        let value = (origin, envelope.to_vec());
+        if self
+            .0
+            .insert(genesis.id()?, value.clone())
+            .is_some_and(|old| old != value)
+        {
+            return Err(Reject::Scope.into());
+        }
+        Ok(())
+    }
+    fn envelope(&self, id: &heddle_object_model::object::ContentHash) -> Result<&[u8]> {
+        self.0
+            .get(id)
+            .map(|(_, e)| e.as_slice())
+            .ok_or(Reject::BoundaryAcceptance.into())
     }
 }
-pub struct NativeAuthorityContext<'a> {
+/// Exact installed foreign original, obtained under the receiver mutation lock.
+#[derive(Clone)]
+pub struct ForeignOriginal {
+    pub original: wire::SignedRecord,
+    pub genesis: ThreadGenesis,
+    pub import: Option<DelegatedImport>,
+}
+pub struct NativeAuthorityContext<'a, A: crate::writer_authority::AuthorAuthority> {
+    pub author_authority: &'a A,
     pub owner: &'a heddleco_capability_verifier::VerifiedOwnerState,
     pub spool_uuid: uuid::Uuid,
     pub spool_genesis: &'a [u8; 32],
     pub transfer_sequence: u64,
     pub spool_path: &'a str,
     pub witness_set: &'a VerifiedWitnessSet,
-    pub original_geneses: OriginalGeneses<'a>,
+    pub original_geneses: &'a OriginalGeneses,
     pub known_job_associations: &'a [(Vec<u8>, Vec<u8>)],
     pub forbidden_authority_keys: &'a [Vec<u8>],
 }
@@ -611,7 +820,7 @@ fn verify_boundary_selection(
     boundaries: &[wire::ImportBoundaryAcceptanceV1],
     statement: &host::HostedWitnessStatementV1,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: &impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<BoundaryCoverage> {
     use heddle_object_model::object::{
@@ -686,6 +895,23 @@ fn verify_boundary_selection(
         if *spool != context.spool_uuid {
             return Err(Reject::BoundaryAcceptance.into());
         }
+        let author = context.author_authority.resolve(
+            actor.principal_id.as_bytes(),
+            authority,
+            statement.observed_at_unix_millis / 1000,
+        )?;
+        api::writer_authority::verify_account_binding(
+            &api::writer_authority::decode_authority(authority)?,
+            actor.principal_id.as_bytes(),
+            &context
+                .owner
+                .signed_root()
+                .root
+                .as_ref()
+                .ok_or(Reject::Root)?
+                .account_uuid,
+            &context.owner.owner_id(),
+        )?;
         let role_forbidden = |key: &[u8]| {
             context.forbidden_authority_keys.iter().any(|k| k == key)
                 || context
@@ -697,7 +923,10 @@ fn verify_boundary_selection(
                 || context.known_job_associations.iter().any(|(k, _)| k == key)
         };
         if role_forbidden(&acceptance.accepting_publisher)
-            || context
+            || role_forbidden(
+                &api::writer_authority::decode_authority(authority)?.mint_root_public_key,
+            )
+            || author
                 .owner
                 .authority_public_keys()
                 .any(|key| role_forbidden(&key))
@@ -834,7 +1063,7 @@ fn verify_boundary_selection(
             boundary_authority::verify_accepting_authority(
                 authority,
                 heddleco_capability_verifier::thread_control_authority::Context {
-                    owner: context.owner,
+                    owner: &author.owner,
                     account_uuid: actor.principal_id.as_bytes(),
                     publisher: &acceptance.accepting_publisher,
                     agent_id: actor.agent_id.as_deref(),
@@ -853,7 +1082,7 @@ fn verify_boundary_selection(
                         .as_ref()
                         .and_then(|a| a.actor.agent_id.as_deref()),
                 },
-                &[],
+                &author.mint_roots,
                 revoked,
             )?;
         }
@@ -877,7 +1106,7 @@ pub fn verify_genesis_payload_at_boundary(
     evidence: &WitnessEvidence,
     delegation: &VerifiedImportDelegation,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<VerifiedImportGenesis> {
     let statement = evidence.signed.body.as_ref().ok_or(Reject::Canonical)?;
@@ -899,7 +1128,26 @@ pub fn verify_genesis_payload_at_boundary(
     } else {
         false
     };
-    verify_genesis_payload_inner(payload, evidence, delegation, boundary, revoked)
+    let roots = if boundary || delegation.member_permission().is_some() {
+        vec![]
+    } else {
+        let (_, genesis) =
+            verify_native_genesis(payload.original_genesis.as_ref().ok_or(Reject::Canonical)?)?;
+        let heddle_object_model::object::thread_replication::GenesisOwner::Account(account) =
+            genesis.owner
+        else {
+            return Err(Reject::GenesisBinding.into());
+        };
+        context
+            .author_authority
+            .resolve(
+                account.as_bytes(),
+                &payload.creator_authority_envelope,
+                statement.observed_at_unix_millis / 1000,
+            )?
+            .mint_roots
+    };
+    verify_genesis_payload_inner(payload, evidence, delegation, &roots, boundary, revoked)
 }
 
 /// Native genesis boundary acceptance retains every exact original and receipt.
@@ -907,7 +1155,7 @@ pub(crate) fn verify_native_genesis_boundary(
     payload: &wire::NativeGenesisWitnessV1,
     evidence: &WitnessEvidence,
     closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: &impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
     let statement = evidence.signed().body.as_ref().ok_or(Reject::Canonical)?;
@@ -938,10 +1186,37 @@ fn native_authority(
     actor: &heddle_object_model::object::CollaborationActor,
     method: &str,
     evidence: &WitnessEvidence,
-    context: &NativeAuthorityContext<'_>,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
-    for key in std::iter::once(publisher.to_vec()).chain(context.owner.authority_public_keys()) {
+    let author = context.author_authority.resolve(
+        actor.principal_id.as_bytes(),
+        envelope,
+        evidence
+            .signed
+            .body
+            .as_ref()
+            .ok_or(Reject::Canonical)?
+            .observed_at_unix_millis
+            / 1000,
+    )?;
+    let authority = api::writer_authority::decode_authority(envelope)?;
+    api::writer_authority::verify_account_binding(
+        &authority,
+        actor.principal_id.as_bytes(),
+        &context
+            .owner
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid,
+        &context.owner.owner_id(),
+    )?;
+    for key in std::iter::once(publisher.to_vec())
+        .chain(std::iter::once(authority.mint_root_public_key.clone()))
+        .chain(author.owner.authority_public_keys())
+    {
         if context.forbidden_authority_keys.contains(&key)
             || context
                 .known_job_associations
@@ -960,10 +1235,10 @@ fn native_authority(
     {
         return Err(Reject::Root.into());
     }
-    heddleco_capability_verifier::thread_control_authority::verify(
+    heddleco_capability_verifier::thread_control_authority::verify_with_retained_mint_roots(
         envelope,
         heddleco_capability_verifier::thread_control_authority::Context {
-            owner: context.owner,
+            owner: &author.owner,
             account_uuid: actor.principal_id.as_bytes(),
             publisher,
             agent_id: actor.agent_id.as_deref(),
@@ -971,6 +1246,7 @@ fn native_authority(
             spool_path: context.spool_path,
             now: s.observed_at_unix_millis / 1000,
         },
+        &author.mint_roots,
         revoked,
     )?;
     Ok(())
@@ -982,8 +1258,8 @@ fn native_authority(
 pub fn verify_landing_payload(
     payload: &wire::HostedLandingWitnessV1,
     evidence: &WitnessEvidence,
-    closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    closure: &mut NativeClosure,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<heddle_object_model::object::thread_replication::integration::HostedIntegration> {
     use api::v2::client::Rpc;
@@ -1015,36 +1291,43 @@ pub fn verify_landing_payload(
     {
         return Err(Reject::Scope.into());
     }
-    if matches!(context.original_geneses, OriginalGeneses::Import(_)) {
-        let ThreadOperationBody::Capture(capture) = &source.body else {
-            return Err(Reject::ImportPermission.into());
-        };
-        let SourceAuthor::Account {
-            actor,
-            authority,
-            spool,
-            ..
-        } = &capture.author
-        else {
-            return Err(Reject::ImportPermission.into());
-        };
-        if spool != &context.spool_uuid {
-            return Err(Reject::Root.into());
+    match source.source_author()? {
+        Some(SourceAuthor::Account { spool, .. }) => {
+            if spool != context.spool_uuid {
+                return Err(Reject::Root.into());
+            }
+            if !closure.foreign(&source.id()?)
+                && !closure
+                    .authorized
+                    .get(&source.id()?)
+                    .is_some_and(|order| *order <= s.admission_order)
+            {
+                return Err(Reject::Scope.into());
+            }
+            // Exact P2 authority is checked at its own authenticated admission,
+            // including boundary acceptance; later landing cannot renew it.
         }
-        native_authority(
-            authority,
-            &source.publisher,
-            actor,
-            heddle_object_model::object::thread_replication::SOURCE_AUTHORIZATION_METHOD,
-            evidence,
-            context,
-            &revoked,
-        )?;
+        Some(SourceAuthor::LocalKey) => {
+            if let Some(bound) = closure.import_bound(&source.id()?) {
+                if bound.converted().publisher != source.publisher {
+                    return Err(Reject::ImportPermission.into());
+                }
+            } else if !closure.foreign(&source.id()?) {
+                closure.verify_local_work(&source.id()?, s.admission_order)?;
+            }
+        }
+        None if source.integration()?.is_some() => {
+            if !closure.foreign(&source.id()?)
+                && !closure
+                    .authorized
+                    .get(&source.id()?)
+                    .is_some_and(|order| *order < s.admission_order)
+            {
+                return Err(Reject::Scope.into());
+            }
+        }
+        _ => return Err(Reject::ImportPermission.into()),
     }
-    // Native source closure resolves each original at its own admission:
-    // account work has purpose 2, hosted execution purpose 4, and LocalKey
-    // work its native proof plus the witnessed claim and signed cutoff. The
-    // atomic native installer verifies those roles before admitting a landing.
     let request = payload.request.as_ref().ok_or(Reject::Canonical)?;
     let body: wire::LandThreadRequest = hybrid_decode(&request.request_body)?;
     let signature = request.signature.as_ref().ok_or(Reject::Signature)?;
@@ -1108,29 +1391,47 @@ pub fn verify_landing_payload(
         || !body.expected_target.as_ref().is_some_and(|r|r.spool.as_ref().is_some_and(|v|v.id==integration.spool.to_string()) && matches!(&r.revision,Some(Revision::State(id)) if id.value==selected_target.as_bytes()))
         || body.expected_policy_version!=integration.review_policy_version.as_bytes()
     {return Err(Reject::Scope.into());}
-    let root = context
-        .owner
-        .signed_root()
-        .root
-        .as_ref()
-        .ok_or(Reject::Root)?;
-    let account: [u8; 16] = root
-        .account_uuid
-        .as_slice()
-        .try_into()
-        .map_err(|_| Reject::Canonical)?;
-    heddleco_capability_verifier::thread_control_authority::verify_landing_request(
+    contract::verify_landing_key_roles(
+        payload,
+        &context
+            .known_job_associations
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>(),
+        context.forbidden_authority_keys,
+    )?;
+    let inspected =
+        heddleco_capability_verifier::thread_control_authority::inspect_landing_subject(
+            &payload.authority_envelope,
+        )?;
+    let account = inspected.account_uuid;
+    let author = context.author_authority.resolve(
+        &account,
+        &payload.authority_envelope,
+        s.observed_at_unix_millis / 1000,
+    )?;
+    let verified = heddleco_capability_verifier::thread_control_authority::verify_landing_request_with_retained_mint_roots(
         &payload.authority_envelope,
         heddleco_capability_verifier::thread_control_authority::Context {
-            owner: context.owner,
-            account_uuid: &account,
-            publisher: &key,
-            agent_id: None,
-            method: request.method_path.as_str(),
-            spool_path: context.spool_path,
+            owner: &author.owner, account_uuid: &account, publisher: &key,
+            agent_id: None, method: request.method_path.as_str(), spool_path: context.spool_path,
             now: s.observed_at_unix_millis / 1000,
         },
-        &revoked,
+        &author.mint_roots, &revoked,
+    )?;
+    api::writer_authority::verify_landing_actor_binding(
+        payload,
+        &verified.account_uuid,
+        &inspected.publisher,
+        &key,
+        &context
+            .owner
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid,
+        &context.owner.owner_id(),
     )?;
     let mut review_ids = std::collections::BTreeSet::new();
     for original in &payload.review_evidence {
@@ -1142,15 +1443,14 @@ pub fn verify_landing_payload(
             return Err(Reject::Scope.into());
         };
         let control = ThreadControl::decode(bytes)?;
-        native_authority(
-            &control.authority_envelope,
-            &op.publisher,
-            &control.actor,
-            control.authorization_method(),
-            evidence,
-            context,
-            &revoked,
-        )?;
+        if !closure.foreign(&op.id()?)
+            && !closure
+                .authorized
+                .get(&op.id()?)
+                .is_some_and(|order| *order <= s.admission_order)
+        {
+            return Err(Reject::Scope.into());
+        }
         let Control::Review(review) = control.control else {
             return Err(Reject::Scope.into());
         };
@@ -1168,6 +1468,9 @@ pub fn verify_landing_payload(
     if review_ids != integration.review_evidence {
         return Err(Reject::Scope.into());
     }
+    closure
+        .authorized
+        .insert(execution.id()?, s.admission_order);
     Ok(integration)
 }
 fn hybrid_decode<T: prost::Message + Default>(bytes: &[u8]) -> Result<T> {
@@ -1182,8 +1485,8 @@ fn hybrid_decode<T: prost::Message + Default>(bytes: &[u8]) -> Result<T> {
 pub fn verify_authority_payload(
     payload: &wire::ImportAuthorityWitnessV1,
     evidence: &WitnessEvidence,
-    closure: &NativeClosure,
-    context: &NativeAuthorityContext<'_>,
+    closure: &mut NativeClosure,
+    context: &NativeAuthorityContext<'_, impl crate::writer_authority::AuthorAuthority>,
     revoked: impl Fn(heddleco_capability_verifier::thread_control_authority::Revocation<'_>) -> bool,
 ) -> Result<()> {
     use heddle_object_model::object::thread_replication::{
@@ -1289,6 +1592,18 @@ pub fn verify_authority_payload(
     {
         return Err(Reject::Scope.into());
     }
+    api::writer_authority::verify_authority_actor_binding(
+        payload,
+        actor.principal_id.as_bytes(),
+        &context
+            .owner
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid,
+        &context.owner.owner_id(),
+    )?;
     let coverage =
         verify_boundary_selection(&payload.boundary_acceptances, s, closure, context, &revoked)?;
     if s.basis == 2 {
@@ -1313,6 +1628,13 @@ pub fn verify_authority_payload(
         {
             return Err(Reject::BoundaryAcceptance.into());
         }
+        closure.authorized.insert(
+            heddle_object_model::object::ContentHash::compute_typed(
+                &original.format,
+                &original.canonical_record,
+            ),
+            s.admission_order,
+        );
         return Ok(());
     }
     native_authority(
@@ -1323,5 +1645,13 @@ pub fn verify_authority_payload(
         evidence,
         context,
         revoked,
-    )
+    )?;
+    closure.authorized.insert(
+        heddle_object_model::object::ContentHash::compute_typed(
+            &original.format,
+            &original.canonical_record,
+        ),
+        s.admission_order,
+    );
+    Ok(())
 }

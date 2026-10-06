@@ -2,7 +2,7 @@
 
 Production browser bindings for `heddleco-capability-verifier`. All proof
 verification runs in Rust. This revision builds version **0.28.10**, using
-`heddle-api` **0.31.0-alpha.27**. Tapestry should pin
+`heddle-api` **0.31.0-alpha.37**. Tapestry should pin
 `@heddleco/capability-verifier-wasm@0.28.10` exactly when that artifact is
 published. If the next Heddle release bumps the workspace version, pin that
 exact release version instead: CI requires npm, Cargo and the validated tag
@@ -19,7 +19,7 @@ const lineage = verifyResourceKeyring(keyringBytes, ownerStateBytes, nowSeconds,
 const policy = verifySignedPolicyChain(policyRecords, keyringBytes, ownerStateBytes, nowSeconds, ttlSeconds);
 ```
 
-Protobuf inputs are `Uint8Array` containing the observed alpha.21 message
+Protobuf inputs are `Uint8Array` containing the matching alpha.37 message
 bytes, with canonical protobuf encoding. Unknown fields, repeated-field
 aliases, wrong widths and oversized evidence fail closed. There is no TS
 verification implementation. Encode with the matching `@heddleco/api` schema
@@ -45,7 +45,7 @@ accepted history. Owner histories use the general 256-transition bound.
 | `verifySpoolOwnerGenesis` | `(genesis: Uint8Array, nowSeconds: bigint): GenesisSummary` | `SignedSpoolOwnerGenesis`, self-signed or with `SpoolCreationProof` |
 | `verifySignedPolicyChain` | `(records: Uint8Array[], keyring, ownerState: Uint8Array, nowSeconds, ttlSeconds: bigint): PolicySummary` | Complete ordered `SpoolEvent.signed_policy` records from the empty head, with transfer-aware authority |
 | `verifyImportDelegation` | `(certificate, permission, keyring, acceptedOwnerHistory, selectedInitialOwnerId, selectedSpoolGenesisDigest: Uint8Array, forbiddenKeysJson, jobAssociationsJson, cancellationsJson, revokedKeysJson: string, nowSeconds, ttlSeconds: bigint): ImportSummary` | Original import certificate and optional member permission; independently selected lineage, current portable permission and certificate digest |
-| `verifyNativeGenesisAuthority` | `(binding, original, envelope, keyring, currentOwner, selectedInitialOwnerId, selectedSpoolGenesisDigest: Uint8Array, revokedKeyIdsJson, revokedCredentialIdsJson: string, nowSeconds, ttlSeconds: bigint): NativeGenesisSummary` | Exact creator binding and selected lineage; account checks StartThread authority, LocalKey still requires a separate hosted ownership claim |
+| `verifyNativeGenesisAuthority` | `(binding, original, envelope, keyring, currentOwner, authorHistory: Uint8Array, admittedMintRootsJson: string, selectedInitialOwnerId, selectedSpoolGenesisDigest: Uint8Array, revokedKeyIdsJson, revokedCredentialIdsJson: string, nowSeconds, ttlSeconds: bigint): NativeGenesisSummary` | Exact creator binding and selected lineage; account checks StartThread authority, LocalKey still requires a separate hosted ownership claim |
 | `verifyPurgeAuthorization` | `(authorization, operationBody, payload, genesis, currentStateHash, spoolUuid: Uint8Array, path: string[], nowSeconds, ttlSeconds: bigint): PurgeDecision` | Typed Rust purge decision |
 | `verifyTimelineAcceptance` | `(origin, acceptance, acceptedStateHash: Uint8Array, path: string[], requestSha256: Uint8Array, firstPosition: bigint, eventCount: number, revokedCapabilityIds, revokedSubjectIds: string[], nowSeconds, ttlSeconds: bigint): boolean` | Format-3 acceptance; false denies invalid evidence |
 | `verifierVersion` | `(): string` | Exact Cargo/npm version |
@@ -63,6 +63,12 @@ own initial-owner/genesis pins and accepted policy head. Historical genesis
 verification is not fresh creation admission or a host permission check.
 Import delegation verifies current portable permission; historical hosted
 witness/set/proof resolution remains in the API trust layer.
+
+Native Genesis resolves the creator's own `authorHistory` independently of the
+Spool's `currentOwner`. `admittedMintRootsJson` supplies authenticated attachment
+admission: hosts use durable enrollment, receivers use verified witness evidence.
+A verified issuer can survive Rotate; Recover cuts attachments from earlier
+issuers. Incoming certificates alone cannot enroll an attachment.
 
 The `run*Fixture` exports are conformance harnesses, not production APIs.
 

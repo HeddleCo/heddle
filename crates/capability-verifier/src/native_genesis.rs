@@ -47,11 +47,21 @@ pub fn verify_binding(
 
 /// Verify original account creation at its witnessed admission time. LocalKey
 /// creation requires the exact empty envelope and a separate hosted claim.
+/// Independently selected actor state and durable mint admission inventory.
+pub struct AuthorAuthority<'a> {
+    /// The genesis account's own verified state.
+    pub owner: &'a crate::VerifiedOwnerState,
+    /// Exact pre-transition admissions, supplied by host state or authenticated witnesses.
+    pub mint_roots: &'a [wire::SignedOwnerMintRootAttachment],
+}
+
+/// Verify the native binding and the separately resolved author's StartThread capability.
 pub fn verify_original_authority(
     binding: &wire::SignedNativeGenesisAuthorityV1,
     original: &wire::SignedRecord,
     envelope: &[u8],
     selection: &Selection<'_>,
+    author: AuthorAuthority<'_>,
     now_seconds: i64,
     revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<()> {
@@ -65,15 +75,26 @@ pub fn verify_original_authority(
     let body = binding.body.as_ref().ok_or(Reject::GenesisBinding)?;
     if body.owner_kind == 1 {
         let identity = body.identity.as_ref().ok_or(Reject::Canonical)?;
-        let account = identity
-            .owner_account_uuid
+        let account: &[u8; 16] = author
+            .owner
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or(Reject::Root)?
+            .account_uuid
             .as_slice()
             .try_into()
             .map_err(|_| Reject::Canonical)?;
+        heddle_api::writer_authority::verify_account_binding(
+            &heddle_api::writer_authority::decode_authority(envelope)?,
+            account,
+            &identity.owner_account_uuid,
+            &selection.owner.owner_id(),
+        )?;
         thread_control_authority::verify_genesis_with_retained_mint_roots(
             envelope,
             Context {
-                owner: selection.owner,
+                owner: author.owner,
                 account_uuid: account,
                 publisher: body
                     .creator_public_key
@@ -89,7 +110,7 @@ pub fn verify_original_authority(
                     .join("/"),
                 now: now_seconds,
             },
-            &[],
+            author.mint_roots,
             revoked,
         )?;
     }
@@ -105,6 +126,8 @@ pub fn verify_bytes(
     envelope: &[u8],
     keyring: &[u8],
     current_owner: &[u8],
+    author_history: &[u8],
+    admitted_mint_roots_json: &str,
     initial_owner: &[u8],
     spool_genesis: &[u8],
     revoked_keys_json: &str,
@@ -146,6 +169,24 @@ pub fn verify_bytes(
             Ok(bytes)
         })
         .collect::<Result<Vec<_>>>()?;
+    let history: wire::OwnerHistory =
+        heddle_api::hybrid_codec::strict_decode(author_history, 65536)?;
+    let author = crate::creation::history_state(&history, now)?;
+    if admitted_mint_roots_json.len() > heddle_api::import_authority::MAX_BUNDLE_BYTES {
+        return Err(Reject::Bounds.into());
+    }
+    let roots: Vec<String> = serde_json::from_str(admitted_mint_roots_json)
+        .map_err(|e| crate::Error::Invalid(e.to_string()))?;
+    if roots.len() > 256 {
+        return Err(Reject::Bounds.into());
+    }
+    let mint_roots = roots
+        .iter()
+        .map(|hex| {
+            let bytes = hex::decode(hex).map_err(|e| crate::Error::Invalid(e.to_string()))?;
+            Ok(heddle_api::hybrid_codec::strict_decode(&bytes, 65536)?)
+        })
+        .collect::<Result<Vec<wire::SignedOwnerMintRootAttachment>>>()?;
     verify_original_authority(
         &binding,
         &original,
@@ -156,6 +197,10 @@ pub fn verify_bytes(
             spool_genesis_digest: &genesis,
             initial_owner_id: &initial,
             limits,
+        },
+        AuthorAuthority {
+            owner: &author,
+            mint_roots: &mint_roots,
         },
         now,
         |r| match r {

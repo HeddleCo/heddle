@@ -22,6 +22,8 @@ pub mod thread_genesis_admission;
 pub mod thread_operation;
 pub mod thread_ownership_claim;
 pub mod thread_ownership_resolution;
+#[cfg(feature = "owner-root")]
+pub mod writer_authority;
 
 #[cfg(test)]
 mod behavior_tests;
