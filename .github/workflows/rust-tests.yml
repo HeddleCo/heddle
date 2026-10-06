@@ -115,13 +115,60 @@ jobs:
         if: github.event_name == 'pull_request'
         run: cargo test --locked --workspace --exclude heddle-cli --lib --bins
 
+      - name: sccache stats
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        run: sccache --show-stats
+
+  # HYBRID Parts 8–10 made the CLI unit suites substantial. Run them
+  # independently so their runtime cannot exhaust fast-check's budget.
+  cli-unit-tests:
+    name: CLI unit tests
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 30
+    env:
+      # Identical to fast-check so both jobs share one rust-cache slot
+      # (rust-cache folds RUST* env into its key).
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Pin so a silent stable bump does not invalidate rust-cache. Matches
+          # rust-toolchain.toml, which already forces this channel at build
+          # time; pinning the installed default keeps rust-cache's rustc probe
+          # aligned with it so the cache stays warm across stable releases.
+          toolchain: "1.98.0"
+          components: clippy
+
+      - name: Ensure LLVM linker
+        run: |
+          if ! command -v ld.lld; then
+            sudo apt-get update
+            sudo apt-get install -y lld
+          fi
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shared with fast-check and the full lane's default-feature Quality
+          # job. Arch-qualified so an x86 and an arm runner never collide on
+          # one slot; prefix bumps the whole namespace when needed;
+          # cache-all-crates keeps registry deps warm across lanes.
+          shared-key: rust-ws-${{ runner.os }}-${{ runner.arch }}
+          prefix-key: v1-rust-incr
+          cache-on-failure: true
+          cache-all-crates: true
+
       - name: CLI unit tests
-        if: github.event_name == 'pull_request'
         # CLI tests temporarily change HOME/HEDDLE_HOME; avoid process-global races.
         run: cargo test --locked -p heddle-cli --lib --bins -- --test-threads=1
 
       - name: sccache stats
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: always()
         run: sccache --show-stats
 
   regression-suites:
