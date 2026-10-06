@@ -352,6 +352,33 @@ gate additionally sets `OWNER_AUTH_FORCE_DIVERGENCE=1` and
 `OWNER_AUTH_FUZZ_CASE_COUNT=0`. Npm uses
 `NPM_CONFIG_CACHE=/home/scratch/heddle-part9-evidence/npm-cache`.
 
+## CI scheduling
+
+The first GitHub Thread API job was canceled at its existing 25-minute
+job budget, during compilation of the iroh replication configuration. Its
+default suite passed all 252 tests (one existing ignore), and its native-only
+suite passed all 204 tests. The two library runs took 511.54 and 507.00 seconds,
+respectively; compilation and the remaining serial feature checks exhausted
+the job's budget. No runtime assertion failed.
+
+The workflow now runs those two exact test commands in separate default/native
+matrix jobs. The original `thread-client` check retains the portable,
+replication, semantic, repository and feature-clippy commands. All 23 original
+run steps are preserved once per intended configuration, the existing
+25-minute budget is unchanged for every job, and neither test selection nor
+production behavior changes. YAML parsing and command-multiset comparison
+verified the partition before push. Matrix fail-fast is disabled so both
+configurations finish independently.
+
+First-run logs are retained in
+`/tmp/heddle-part10-evidence/thread-ci-first.log`, with GitHub's annotation
+`The job has exceeded the maximum execution time of 25m0s`.
+
+```text
+test result: ok. 213 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 511.54s
+test result: ok. 204 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 507.00s
+```
+
 ## Surfaces
 
 Verb/help/clap and human/agent output contracts are unchanged. This is a native

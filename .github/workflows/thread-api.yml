@@ -16,6 +16,26 @@ permissions:
   contents: read
 
 jobs:
+  # Retained-prefix replay makes both native configurations substantial. Run
+  # them independently so their sum cannot exhaust the client job's budget.
+  thread-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [default, native]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - if: matrix.configuration == 'default'
+        run: cargo test --locked -p heddle-thread-api
+      - if: matrix.configuration == 'native'
+        run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
+
   thread-client:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -57,13 +77,11 @@ jobs:
               assert not names & forbidden, f"{features or 'core'}: unexpected dependencies {names & forbidden}"
               print(f"{features or 'core'}: dependency boundary holds")
           PYCODE
-      - run: cargo test --locked -p heddle-thread-api
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features signing --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features root-attachment --test root_attachment
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features root-attachment --all-targets -- -D warnings
       - run: cargo check --locked -p heddle-thread-api --no-default-features --features replication --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
-      - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh,replication
       - run: cargo test --locked -p heddle-semantic --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features semantic-analysis --test behavior_analysis
