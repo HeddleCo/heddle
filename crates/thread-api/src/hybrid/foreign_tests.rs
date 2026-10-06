@@ -10,7 +10,7 @@ use repo::{
     thread_replication::{ThreadReplica, hosted_trust::*},
 };
 
-use super::authority::{AcceptedHistory, PublicProof, SelectedAuthority};
+use super::authority::{AcceptedHistory, PublicEvidence, PublicProof, SelectedAuthority};
 
 fn fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
@@ -123,6 +123,87 @@ impl Receiver {
                 |_| Ok(()),
             ),
         }
+    }
+    // Seed a retained journal fixture rather than repeatedly replaying each
+    // growing closure during setup. The assertions below still enter the real
+    // receiver, which authenticates and replays every retained signed prefix.
+    fn retained_fixture(&self, prefixes: &[prefix_graph::Prefix]) {
+        use rusqlite::params;
+        self.stage("import_stage");
+        self.install_proof(prefixes[0].proof.clone(), &prefixes[0].originals)
+            .expect("public leaf control");
+        let mut db = rusqlite::Connection::open(self.repo.heddle_dir().join("metadata.sqlite3"))
+            .expect("journal");
+        let tx = db.transaction().expect("fixture transaction");
+        for prefix in prefixes {
+            if let PublicProof::Native(b) = &prefix.proof {
+                let p = &b.genesis_witnesses[0];
+                let record = p.original_genesis.as_ref().expect("genesis");
+                let (_, genesis) = crypto::import_authority::verify_native_genesis(record)
+                    .expect("signed fixture genesis");
+                let id = genesis.id().expect("thread");
+                tx.execute("INSERT OR IGNORE INTO threads(id,genesis,genesis_signature,creator_authority) VALUES(?1,?2,?3,?4)",
+                    params![id.as_bytes(),record.canonical_record,record.signatures[0].signature,p.creator_authority_envelope]).expect("genesis row");
+                tx.execute("INSERT OR REPLACE INTO hosted_native_genesis_bindings(thread,binding) VALUES(?1,?2)",
+                    params![id.as_bytes(),p.binding.as_ref().expect("binding").encode_to_vec()]).expect("binding row");
+                tx.execute("INSERT OR REPLACE INTO hosted_native_proofs(thread,authority,bundle) VALUES(?1,?2,?3)",
+                    params![id.as_bytes(),"https://weft.example.test",b.encode_to_vec()]).expect("native proof");
+                let statement = b
+                    .statements
+                    .iter()
+                    .find(|s| s.body.as_ref().expect("body").purpose == 1)
+                    .expect("P1");
+                tx.execute("INSERT OR REPLACE INTO hosted_import_admissions(operation,authority,statement) VALUES(?1,?2,?3)",params![id.as_bytes(),"https://weft.example.test",statement.encode_to_vec()]).expect("genesis admission row");
+            } else if let PublicProof::Import(b) = &prefix.proof {
+                let (_, operation) =
+                    crypto::import_authority::verify_native_operation(&prefix.original)
+                        .expect("operation");
+                tx.execute("INSERT OR REPLACE INTO hosted_import_proofs(thread,authority,bundle) VALUES(?1,?2,?3)",
+                    params![operation.thread.as_bytes(),"https://weft.example.test",b.encode_to_vec()]).expect("import proof");
+            }
+            for record in &prefix.originals {
+                if record.format != objects::object::thread_replication::OPERATION_FORMAT {
+                    continue;
+                }
+                let (_, operation) = crypto::import_authority::verify_native_operation(record)
+                    .expect("signed fixture operation");
+                let id = operation.id().expect("id");
+                let revision = operation
+                    .source_state()
+                    .expect("source")
+                    .map(|s| s.id().as_bytes().to_vec());
+                tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,status,source_revision,authority_admitted) VALUES(?1,?2,1,?3,?4,1,?5,1)",
+                    params![id.as_bytes(),operation.thread.as_bytes(),record.canonical_record,record.signatures[0].signature,revision]).expect("operation row");
+                for parent in &operation.parents {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO parents(child,parent) VALUES(?1,?2)",
+                        params![id.as_bytes(), parent.as_bytes()],
+                    )
+                    .expect("parent row");
+                }
+            }
+            let authority = match &prefix.proof {
+                PublicProof::Native(b) => &b.authority_witnesses,
+                PublicProof::Import(b) => &b.authority_witnesses,
+            };
+            for payload in authority {
+                let record = payload.original.as_ref().expect("original");
+                let (_, operation) = crypto::import_authority::verify_native_operation(record)
+                    .expect("signed operation");
+                let id = operation.id().expect("id");
+                let statement = prefix
+                    .proof
+                    .statements()
+                    .iter()
+                    .find(|s| {
+                        s.body.as_ref().expect("body").canonical_payload
+                            == hybrid_codec::canonical(payload).expect("payload")
+                    })
+                    .expect("P2");
+                tx.execute("INSERT OR REPLACE INTO hosted_import_admissions(operation,authority,statement) VALUES(?1,?2,?3)",params![id.as_bytes(),"https://weft.example.test",statement.encode_to_vec()]).expect("admission row");
+            }
+        }
+        tx.commit().expect("retained fixture");
     }
     fn stage(&self, name: &str) {
         let f = fixture();
@@ -436,4 +517,208 @@ fn job_key_cannot_sign_landing_request() {
                 .expect("execution")],
         )
         .expect("account request control");
+}
+
+#[path = "../../tests/support/foreign_prefix.rs"]
+mod prefix_graph;
+
+#[test]
+fn foreign_prefix_replay_depth_33_refuses_with_typed_limit() {
+    // Retained verification recurses through signed proof prefixes in debug
+    // builds. Use the CLI runtime's stack allowance for this boundary fixture.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(replay_depth_33)
+        .expect("replay thread")
+        .join()
+        .expect("depth assertion");
+}
+
+fn replay_depth_33() {
+    use repo::thread_replication::Error;
+    let receiver = Receiver::new();
+    let chain = prefix_graph::chain(33);
+    receiver.retained_fixture(&chain[..32]);
+    receiver
+        .install_proof(chain[32].proof.clone(), &chain[32].originals)
+        .expect("depth 32 control installs through the real receiver");
+    let bundle = chain.last().expect("depth 33");
+    let staged = stage_prefix(bundle);
+    std::fs::write(
+        receiver.repo.heddle_dir().join("spool-id"),
+        &staged
+            .ready()
+            .thread
+            .as_ref()
+            .expect("Thread")
+            .spool
+            .as_ref()
+            .expect("Spool")
+            .id,
+    )
+    .expect("selected fixture Spool");
+    let before = receiver.snapshot();
+    let limits =
+        heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60).expect("limits");
+    let pinned = super::authority::tests::selected(&super::authority::tests::bundle(), limits);
+    let history =
+        AcceptedHistory::from_public(&bundle.proof, &pinned, 1200, limits).expect("history");
+    let authority = SelectedAuthority::from_proof(
+        history,
+        bundle.proof.clone(),
+        |_: &PublicProof, _: i64, _: &TrustTransaction<'_>| Ok(()),
+    );
+    let result = staged.install_hosted(&receiver.repo, &receiver.trust, &authority, 1200);
+    assert!(
+        matches!(&result, Err(crate::fetch::Error::Repository(error))
+        if matches!(**error, Error::ForeignPrefixLimitExceeded { limit_name: "depth", limit: 32 })),
+        "hosted replay must preserve the repository's typed depth refusal: {result:?}"
+    );
+    assert_eq!(receiver.snapshot(), before);
+}
+
+#[test]
+fn installed_foreign_closure_larger_than_fetch_count_remains_installable() {
+    let receiver = Receiver::new();
+    // 257 leaves, three branch prefixes and a root. Each ordinary signed
+    // bundle stays below the wire's per-record dependency bounds.
+    let mut edges = vec![vec![]; 257];
+    for start in [0, 86, 172] {
+        edges.push((start..(start + 86).min(257)).collect());
+    }
+    edges.push(vec![257, 258, 259]);
+    let graph = prefix_graph::graph(&edges);
+    receiver.retained_fixture(&graph[..260]);
+    let root = &graph[260];
+    receiver
+        .install_proof(root.proof.clone(), &root.originals)
+        .expect("installed closure spends no Fetch count");
+}
+
+fn stage_prefix(prefix: &prefix_graph::Prefix) -> crate::fetch::StagedSource {
+    use crate::{contract::*, publication::*};
+    let source = prefix_graph::source(prefix);
+    let directory = tempfile::tempdir().expect("staging");
+    std::fs::write(directory.path().join("source.pack"), &source.pack).expect("pack");
+    std::fs::write(directory.path().join("source.idx"), &source.index).expect("index");
+    let (_, operation) =
+        crypto::import_authority::verify_native_operation(&prefix.original).expect("original");
+    let spool = SpoolRef {
+        id: uuid::Uuid::from_slice(
+            &source
+                .owner_genesis
+                .genesis
+                .as_ref()
+                .expect("Spool")
+                .spool_uuid,
+        )
+        .expect("UUID")
+        .to_string(),
+    };
+    let thread = ThreadRef {
+        spool: Some(spool.clone()),
+        id: Some(ThreadId {
+            value: operation.thread.as_bytes().to_vec(),
+        }),
+    };
+    let revision = RevisionRef {
+        spool: Some(spool),
+        revision: Some(revision_ref::Revision::State(
+            api::heddle::api::common::StateId {
+                value: source.state.id().as_bytes().to_vec(),
+            },
+        )),
+    };
+    let (imported, native) = match &prefix.proof {
+        PublicProof::Import(b) => (Some(*b.clone()), None),
+        PublicProof::Native(b) => (None, Some(*b.clone())),
+    };
+    let packs = [&source.pack, &source.index]
+        .iter()
+        .enumerate()
+        .map(|(i, bytes)| {
+            let address = ObjectAddress {
+                algorithm: "blake3".into(),
+                digest: objects::object::ContentHash::compute(bytes)
+                    .as_bytes()
+                    .to_vec(),
+            };
+            PackExtent {
+                pack: Some(address.clone()),
+                extent_digest: Some(address),
+                length: bytes.len() as u64,
+                kind: if i == 0 {
+                    pack_extent::Kind::NativePack as i32
+                } else {
+                    pack_extent::Kind::NativeIndex as i32
+                },
+                ..Default::default()
+            }
+        })
+        .collect();
+    let opening = PublishContentOpen {
+        protocol: Some(crate::hybrid::protocol()),
+        thread: Some(thread.clone()),
+        revision: Some(revision.clone()),
+        packs,
+        import_authority: imported.clone(),
+        native_authority: native.clone(),
+        ..Default::default()
+    };
+    let originals = PublicationOriginals {
+        geneses: vec![source.genesis],
+        operations: vec![ReplicationOperations {
+            operations: source.operations,
+            import_authority: imported.clone(),
+            native_authority: native.clone(),
+            ..Default::default()
+        }],
+    };
+    let artifacts = if let Some(b) = &imported {
+        let limits = heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+            .expect("limits");
+        let pinned = super::authority::tests::selected(&super::authority::tests::bundle(), limits);
+        let history =
+            AcceptedHistory::from_public(&prefix.proof, &pinned, 1200, limits).expect("history");
+        let authority = SelectedAuthority::from_proof(
+            history,
+            prefix.proof.clone(),
+            |_: &PublicProof, _: i64, _: &TrustTransaction<'_>| Ok(()),
+        );
+        let f = fixture();
+        let pin = api::import_authority::ImportWitnessRootPin {
+            authority: "https://weft.example.test".into(),
+            root_id: "descriptor-root-1".into(),
+            public_key: hex::decode(f["keys"]["root"]["public_key_hex"].as_str().expect("root"))
+                .expect("hex"),
+            epoch: 1,
+        };
+        let carriers = repo::thread_replication::delegated_import::authenticate_import_carriers(
+            b,
+            &authority,
+            &pin,
+            1_200_001,
+            &[],
+            &[],
+            |_| Ok(()),
+        )
+        .expect("import carriers");
+        validate_source_artifacts_with_import_carriers(directory, &opening, originals, carriers)
+    } else {
+        validate_source_artifacts(directory, &opening, originals)
+    }
+    .expect("signed source staging");
+    artifacts
+        .into_hosted_source(TransferReady {
+            protocol: Some(crate::hybrid::protocol()),
+            thread: Some(thread),
+            current: Some(revision),
+            owner_genesis: Some(source.owner_genesis),
+            ownership: Some(source.owner),
+            import_authority: imported,
+            native_authority: native,
+            full_closure_available: true,
+            ..Default::default()
+        })
+        .expect("hosted staged source")
 }

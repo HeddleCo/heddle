@@ -126,6 +126,7 @@ fn native_creator_binding_checks_lineage_envelope_time_and_revocation() {
     verify(&input("local_adopt_push"))
         .expect("local creator with exact empty envelope; hosted claim is separate");
     let mut cases = vec![control.clone(), input("local_adopt_push")];
+    cases.extend(recovered_owner_cases());
     let envelope: wire::ThreadControlAuthority = hybrid_codec::strict_decode(
         &hex::decode(control["envelope_hex"].as_str().expect("envelope")).expect("hex"),
         65536,
@@ -234,4 +235,187 @@ fn native_summary_distinguishes_account_authority_from_local_binding() {
         );
         assert_eq!(outcome["requires_hosting_claim"], json!(requires_claim));
     }
+}
+
+// Signed controls are rebuilt from published seeds; no signed bytes are edited.
+fn recovered_owner_cases() -> Vec<Value> {
+    use ed25519_dalek::{Signer, SigningKey};
+    use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext;
+    let f = fixture();
+    let key = |role: &str| {
+        if role == "next_guardian_a" {
+            return SigningKey::from_bytes(&[91; 32]);
+        }
+        if role == "next_guardian_b" {
+            return SigningKey::from_bytes(&[92; 32]);
+        }
+        SigningKey::from_bytes(
+            &hex::decode(f["keys"][role]["seed_hex"].as_str().expect("seed"))
+                .expect("seed bytes")
+                .try_into()
+                .expect("32 bytes"),
+        )
+    };
+    let sign = |role: &str, digest: &[u8]| wire::AuthorizationSignature {
+        signer_key_id: hybrid_codec::key_id(key(role).verifying_key().as_bytes()),
+        signature: key(role).sign(digest).to_bytes().to_vec(),
+    };
+    let mut denied = input("start_thread");
+    let decode = |field: &str| hex::decode(denied[field].as_str().expect("wire")).expect("hex");
+    let mut history =
+        wire::OwnerHistory::decode(decode("author_history_hex").as_slice()).expect("history");
+    let initial = crate::creation::history_state(&history, 1100).expect("initial owner");
+    let mut next_policy = initial.recovery_policy().clone();
+    for (guardian, role) in next_policy
+        .guardians
+        .iter_mut()
+        .zip(["next_guardian_a", "next_guardian_b"])
+    {
+        guardian.key.as_mut().expect("key").public_key =
+            key(role).verifying_key().to_bytes().to_vec();
+    }
+    next_policy
+        .guardians
+        .sort_by_key(|g| hybrid_codec::key_id(&g.key.as_ref().expect("key").public_key));
+    let body = wire::OwnerKeyTransition {
+        format_version: 1,
+        owner_id: initial.owner_id().to_vec(),
+        previous_state_hash: initial.state_hash().to_vec(),
+        sequence: 1,
+        kind: wire::OwnerKeyTransitionKind::Recover as i32,
+        next_authority_key: Some(wire::AuthorizationVerificationKey {
+            algorithm: wire::AuthorizationKeyAlgorithm::Ed25519 as i32,
+            public_key: key("rotated_owner").verifying_key().to_bytes().to_vec(),
+        }),
+        next_recovery_policy: Some(next_policy),
+        valid_from_unix_seconds: 1090,
+        previous_key_valid_until_unix_seconds: 0,
+        nonce: vec![99; 32],
+    };
+    let digest = crate::canonical::digest(
+        crate::canonical::OWNER_TRANSITION_DOMAIN,
+        &crate::canonical::transition_body(&body).expect("Recover body"),
+    );
+    let mut guardians = vec![sign("guardian_a", &digest), sign("guardian_b", &digest)];
+    guardians.sort_by(|a, b| a.signer_key_id.cmp(&b.signer_key_id));
+    let mut next_guardians = vec![
+        sign("next_guardian_a", &digest),
+        sign("next_guardian_b", &digest),
+    ];
+    next_guardians.sort_by(|a, b| a.signer_key_id.cmp(&b.signer_key_id));
+    let transition = wire::SignedOwnerKeyTransition {
+        transition: Some(body),
+        authorizations: guardians.clone(),
+        next_authority_key_proof: Some(sign("rotated_owner", &digest)),
+        next_recovery_key_proofs: next_guardians,
+    };
+    let limits = crate::VerificationLimits::new(3600).expect("limits");
+    let current =
+        crate::apply_accepted_transition(&initial, &transition, 1100, limits).expect("Recover");
+    history.accepted_transitions.push(transition);
+    history.state_hash = current.state_hash().to_vec();
+    let mut ring =
+        wire::CloneAuthorizationKeyring::decode(decode("keyring_hex").as_slice()).expect("ring");
+    ring.accepted_transitions = history.accepted_transitions.clone();
+    ring.accepted_state_hash = history.state_hash.clone();
+    let mut observed =
+        wire::OwnerState::decode(decode("current_owner_hex").as_slice()).expect("observation");
+    observed.accepted_transitions = history.accepted_transitions.clone();
+    observed.version = history.state_hash.clone();
+    let mut binding =
+        wire::SignedNativeGenesisAuthorityV1::decode(decode("binding_hex").as_slice())
+            .expect("binding");
+    let envelope =
+        wire::ThreadControlAuthority::decode(decode("envelope_hex").as_slice()).expect("envelope");
+    let wire::thread_control_authority::MintRootAssociation::OwnerMintRootAttachment(attachment) =
+        envelope
+            .mint_root_association
+            .clone()
+            .expect("device attachment")
+    else {
+        panic!("attachment")
+    };
+    // The current lineage binding is genuine even though the device author
+    // attempts to carry only its older, independently valid account history.
+    let verified_ring =
+        crate::verify_clone_keyring(ring.clone(), 1100, limits, &[]).expect("current ring");
+    let genesis = decode("spool_genesis_hex")
+        .try_into()
+        .expect("genesis digest");
+    let initial_id = initial.owner_id();
+    let (identity, chain, _) =
+        crate::import_delegation::native_lineage(&crate::import_delegation::Selection {
+            owner: &current,
+            keyring: &verified_ring,
+            spool_genesis_digest: &genesis,
+            initial_owner_id: &initial_id,
+            limits,
+        })
+        .expect("current lineage");
+    let b = binding.body.as_mut().expect("body");
+    b.identity = Some(identity);
+    b.owner_chain_digest = chain;
+    binding.creator_signature = Some(sign(
+        "device",
+        &hybrid_codec::signing_digest(heddle_api::native_witness::GENESIS_DOMAIN, b)
+            .expect("binding digest"),
+    ));
+    denied["id"] = json!("truncated-pre-recover-cut-device");
+    denied["keyring_hex"] = json!(hex::encode(ring.encode_to_vec()));
+    denied["current_owner_hex"] = json!(hex::encode(observed.encode_to_vec()));
+    denied["binding_hex"] = json!(hex::encode(binding.encode_to_vec()));
+    denied["admitted_mint_roots_json"] = json!(
+        serde_json::to_string(&[hex::encode(attachment.encode_to_vec())]).expect("inventory")
+    );
+    denied["expected_accept"] = json!(false);
+
+    // Fresh authority from the recovered owner, same account and publisher.
+    let mut control = denied.clone();
+    let mut envelope = envelope;
+    let publisher = hex::encode(key("device").verifying_key().to_bytes());
+    let seed = key("rotated_owner").to_bytes();
+    let pair = biscuit_auth::KeyPair::from(
+        &biscuit_auth::PrivateKey::from_bytes(&seed, biscuit_auth::Algorithm::Ed25519)
+            .expect("mint"),
+    );
+    let next = biscuit_auth::KeyPair::from(
+        &biscuit_auth::PrivateKey::from_bytes(&[94; 32], biscuit_auth::Algorithm::Ed25519)
+            .expect("deterministic next key"),
+    );
+    let token = biscuit_auth::Biscuit::builder().code(format!(
+        "user(\"11111111-1111-1111-1111-111111111111\"); session(\"recovered-owner\"); device_pop_key(\"{publisher}\"); check if operation(\"StartThread\"); check if resource(\"spool\", \"acme/imports\"); check if time($now), $now < 1970-01-01T00:30:00Z;"
+    )).expect("facts").build_v1_with_key_pair(&pair, &next).expect("capability");
+    envelope.owner = Some(history.clone());
+    envelope.mint_root_public_key = current.authority_key().public_key.clone();
+    envelope.mint_root_association = None;
+    envelope.sealed_biscuit = token.seal().expect("seal").to_vec().expect("sealed bytes");
+    let bytes = envelope.encode_to_vec();
+    let b = binding.body.as_mut().expect("body");
+    b.creator_authority_envelope_digest = hybrid_codec::hash(&[&bytes]);
+    binding.creator_signature = Some(sign(
+        "device",
+        &hybrid_codec::signing_digest(heddle_api::native_witness::GENESIS_DOMAIN, b)
+            .expect("binding digest"),
+    ));
+    control["id"] = json!("current-recovered-owner-history");
+    control["author_history_hex"] = json!(hex::encode(history.encode_to_vec()));
+    control["envelope_hex"] = json!(hex::encode(bytes));
+    control["binding_hex"] = json!(hex::encode(binding.encode_to_vec()));
+    control["admitted_mint_roots_json"] = json!("[]");
+    control["expected_accept"] = json!(true);
+    vec![denied, control]
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn native_genesis_owner_pin_cuts_truncated_pre_recover_author_history() {
+    let cases = recovered_owner_cases();
+    assert_eq!(
+        verify(&cases[0]),
+        Err(crate::Error::BrokenChain(
+            "attachment issuer is unknown or recovered".into()
+        )),
+        "WASM owner pin must reject the truncated history's cut device"
+    );
+    verify(&cases[1]).expect("current recovered owner history control");
 }

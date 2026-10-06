@@ -243,7 +243,7 @@ impl StagedSource {
                     },
                 )
             }
-            .map_err(preparation)?;
+            .map_err(Error::from)?;
             (Vec::new(), receipt)
         } else {
             let replicas = if native.is_some() {
@@ -267,7 +267,7 @@ impl StagedSource {
                     publish,
                 )
             }
-            .map_err(preparation)?;
+            .map_err(Error::from)?;
             (replicas, Vec::new())
         };
         repository.store().reload_packs().map_err(preparation)?;

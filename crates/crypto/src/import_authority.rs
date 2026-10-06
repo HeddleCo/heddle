@@ -291,16 +291,21 @@ pub fn verify_genesis_payload(
     payload: &wire::ImportGenesisWitnessV1,
     evidence: &WitnessEvidence,
     delegation: &VerifiedImportDelegation,
-    admitted_mint_roots: &[wire::SignedOwnerMintRootAttachment],
+    author_authority: &crate::writer_authority::HostAuthorAuthority<'_>,
     is_revoked_at_accepted_order: impl Fn(
         heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
     ) -> bool,
 ) -> Result<VerifiedImportGenesis> {
+    if author_authority.owner.owner_id() != delegation.owner().owner_id()
+        || author_authority.owner.state_hash() != delegation.owner().state_hash()
+    {
+        return Err(Reject::Root.into());
+    }
     verify_genesis_payload_inner(
         payload,
         evidence,
         delegation,
-        admitted_mint_roots,
+        author_authority.mint_roots,
         false,
         is_revoked_at_accepted_order,
     )

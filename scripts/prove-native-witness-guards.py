@@ -304,6 +304,27 @@ def no_review(source):
 
 
 PART8_MUTATIONS = [
+    ('wasm-spool-owner-pin', 'crates/capability-verifier/src/native_genesis.rs',
+     lambda s: replace_once(s, '            .account_uuid\n    {', '            .account_uuid && false\n    {'), VERIFIER,
+     'native_genesis_owner_pin_cuts_truncated_pre_recover_author_history'),
+    ('spool-owner-real-receiver-pin', 'crates/crypto/src/writer_authority.rs',
+     lambda s: replace_once(s, '            == account\n        {', '            == account && false\n        {'), API,
+     'spool_owner_pre_recover_history_real_receiver_rejects_cut_device'),
+    ('foreign-fetch-depth', 'crates/hosted-client/src/hosted_runtime/hosted/native_sync.rs',
+     lambda s: replace_once(s, '            budget\n                .visit(outstanding.len() + 1, false)\n                .map_err(replica_err)?;', ''), HOSTED,
+     'foreign_prefix_fetch_depth_33_refuses_with_typed_limit'),
+    ('foreign-replay-depth', 'crates/repo/src/thread_replication/foreign_dependencies.rs',
+     lambda s: replace_once(s, '    check\n        .budget\n        .borrow_mut()\n        .visit(check.path.len() + 1, true)?;', ''), API,
+     'foreign_prefix_replay_depth_33_refuses_with_typed_limit'),
+    ('foreign-installed-count', 'crates/repo/src/thread_replication/foreign_dependencies.rs',
+     lambda s: replace_once(s, 'visit(check.path.len() + 1, true)?', 'visit(check.path.len() + 1, false)?'), API,
+     'installed_foreign_closure_larger_than_fetch_count_remains_installable'),
+    ('foreign-replay-error-type', 'crates/thread-api/src/fetch/hosted.rs',
+     lambda s: replace_once(s, '            .map_err(Error::from)?;\n            (replicas, Vec::new())', '            .map_err(preparation)?;\n            (replicas, Vec::new())'), API,
+     'foreign_prefix_replay_depth_33_refuses_with_typed_limit'),
+    ('hosted-replay-error-type', 'crates/hosted-client/src/hosted_runtime/hosted/native_sync.rs',
+     lambda s: replace_once(s, 'thread_api::fetch::Error::Repository(error) => replica_err(*error),', 'thread_api::fetch::Error::Repository(error) => native_error(error),'), HOSTED,
+     'hosted_replay_preserves_foreign_prefix_limit_type'),
     ('spool-owner-receiver-pin', 'crates/crypto/src/writer_authority.rs',
      lambda s: replace_once(s, '            == account\n        {', '            == account && false\n        {'), API,
      'spool_owner_pre_recover_history_cannot_revive_cut_device'),
@@ -430,10 +451,16 @@ def main():
                 command += ['--features', 'client']
             elif crate == CRYPTO:
                 command += ['--features', 'owner-root']
-            command += [test, '--', '--nocapture', '--test-threads', '1']
+            if name == 'wasm-spool-owner-pin':
+                command += ['--target', 'wasm32-unknown-unknown']
+            command += [test, '--', '--nocapture']
+            if name != 'wasm-spool-owner-pin':
+                command += ['--test-threads', '1']
             log = args.output / (label + '.log')
             env = {**os.environ, 'CARGO_TARGET_DIR': target,
                    'HEDDLE_HOME': tempfile.mkdtemp(prefix='home-', dir=args.output)}
+            if name == 'wasm-spool-owner-pin':
+                env['CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER'] = 'wasm-bindgen-test-runner'
             start = time.monotonic()
             print('RUN', label, flush=True)
             try:

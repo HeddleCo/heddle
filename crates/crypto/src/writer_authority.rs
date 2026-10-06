@@ -47,7 +47,15 @@ impl HostAuthorAuthority<'_> {
 #[derive(Default)]
 /// Receiver inventories contain only attachments admitted by exact witness evidence.
 /// Host enrollment cannot be substituted for receiver testimony.
-/// ```compile_fail
+/// The positive control also proves both types are available to the doctest.
+/// ```
+/// use crypto::writer_authority::{HostAuthorAuthority, WitnessedAuthors};
+/// fn separate(host: &HostAuthorAuthority<'_>, witnessed: &WitnessedAuthors) {
+///     let _: &HostAuthorAuthority<'_> = host;
+///     let _: &WitnessedAuthors = witnessed;
+/// }
+/// ```
+/// ```compile_fail,E0308
 /// use crypto::writer_authority::{HostAuthorAuthority, WitnessedAuthors};
 /// fn substitute(host: &HostAuthorAuthority<'_>) {
 ///     let _: &WitnessedAuthors = host;

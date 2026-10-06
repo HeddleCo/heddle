@@ -42,6 +42,21 @@ pub(super) fn install_bundle(
     originals: &[wire::SignedRecord],
     rejection: Option<hybrid_codec::Reject>,
 ) {
+    install_bundle_with_refusal(name, bundle, originals, rejection.map(|expected| {
+        move |error: &repo::thread_replication::Error| {
+            matches!(error, repo::thread_replication::Error::Hybrid(actual) |
+                repo::thread_replication::Error::HybridEvidence(crypto::import_authority::Error::Contract(actual))
+                if *actual == expected)
+        }
+    }));
+}
+
+pub(super) fn install_bundle_with_refusal(
+    name: &str,
+    bundle: wire::NativePublicProofBundleV1,
+    originals: &[wire::SignedRecord],
+    rejection: Option<impl Fn(&repo::thread_replication::Error) -> bool>,
+) {
     use crate::hybrid::authority::tests::{bundle as imported, selected};
 
     let limits =
@@ -104,7 +119,9 @@ pub(super) fn install_bundle(
         }
     } else {
         assert!(
-            matches!(&result, Err(repo::thread_replication::Error::Hybrid(actual)) | Err(repo::thread_replication::Error::HybridEvidence(crypto::import_authority::Error::Contract(actual))) if Some(actual) == rejection.as_ref()),
+            result
+                .as_ref()
+                .is_err_and(|error| rejection.as_ref().is_some_and(|reject| reject(error))),
             "{name}: native authority must reject before installation: {:?}",
             result.err()
         );

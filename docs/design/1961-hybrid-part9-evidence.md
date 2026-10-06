@@ -25,14 +25,20 @@ Landing no longer compares a bound import original's publisher with that same
 original. Carrier verification already binds it to the delegation job key.
 Native LocalKey work still requires its exact ownership frontier.
 
-Fetch staging and transactional foreign-prefix replay share a traversal budget:
-32 foreign edges deep and 256 uncached prefixes across the entire traversal,
-including sibling branches. Cycles remain Scope refusals. Exhaustion has the
-typed `ForeignPrefixLimitExceeded` error, propagated through the hosted protocol
-boundary. Budgets are local traversal limits, independent of history paging.
+Fetch staging counts at most 256 **uncached** prefixes across sibling branches;
+already-installed exact originals skip download and spend no count. Fetch and
+transactional retained replay have separate budgets, each with a 32-edge depth
+bound. Replay spends no Fetch count for installed endpoints. It still runs the
+ordinary prefix verifier under current trust, memoizing successfully rechecked
+prefixes within that transaction. Skipping full installed replay would require a
+trust/owner/policy/time-aware durable authority cache; that is outside this fix.
+The retained full-replay semantics are preserved, while a wide installed closure
+larger than 256 remains installable. Cycles remain Scope refusals. Exhaustion has
+the typed `ForeignPrefixLimitExceeded` error through `StagedSource::install_hosted`
+and the hosted protocol boundary. These local limits are independent of paging.
 
-The committed `scripts/prove-native-witness-guards.py` contains all 17 Part 8
-mutations plus the new receiver-pin mutation. API mutations relocate only an
+The committed `scripts/prove-native-witness-guards.py` retains the initial 18
+Part 9 mutations and adds seven round 2 guard pairs. API mutations relocate only an
 isolated copy of the selected API dependency. Runtime assertion failures and
 successful nonempty restored selections are required; compiler failures count
 as failures of the proof script. `scripts/regenerate-hybrid-alpha33.py` now
@@ -70,11 +76,36 @@ Heddle verifier interfaces:
 - `VerifiedOwnerState::extends` is public. Spool-owner writer verification uses
   the pinned state and its retained issuer map; never replace it with the
   envelope's own endpoint. Non-owner account resolution remains independent.
-- `ForeignPrefixBudget` and typed `ForeignPrefixLimitExceeded` cover both
-  staging and replay, with one count budget shared across sibling recursion.
+- `ForeignPrefixBudget::visit(&mut self, depth: usize, installed: bool)`
+  bounds Fetch count across siblings and depth in both traversals. Only uncached
+  Fetch calls pass `false`; retained replay passes `true`. Fetch and replay use
+  separate budget instances, and installed replay still verifies current trust.
 - `native_genesis::verify_bytes`/`verifyNativeGenesisAuthority` require
   independently authenticated attachment enrollment or verified exact witness
   testimony, and strictly validate all inventory entries and the owner pin.
+
+Round 2 keeps the host's production verifier public, with this exact signature:
+
+```rust
+pub fn verify_genesis_payload(
+    payload: &wire::ImportGenesisWitnessV1,
+    evidence: &WitnessEvidence,
+    delegation: &VerifiedImportDelegation,
+    author_authority: &crate::writer_authority::HostAuthorAuthority<'_>,
+    is_revoked_at_accepted_order: impl Fn(
+        heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
+    ) -> bool,
+) -> Result<VerifiedImportGenesis>
+```
+
+This is `crypto::import_authority::verify_genesis_payload`. Weft must pass its
+verified account state and durable enrollment inventory as
+`HostAuthorAuthority { owner: &owner, mint_roots: &enrolled_attachments }`, with
+that owner matching the verified delegation selection. Receiver testimony cannot
+substitute for this type. `thread_genesis_admission::verify_import_witness` is
+removed; all callers use the explicit `import_authority` path.
+`fetch::Error::Repository(Box<repo::thread_replication::Error>)` preserves typed
+receiver failures. No API wire messages changed in round 2.
 
 Alpha.38/39 hosted API hard cuts:
 
@@ -113,7 +144,7 @@ Alpha.38/39 hosted API hard cuts:
 
 These are coordinated host obligations, not a claim of a live weft deployment.
 
-## Verification
+## Verification (initial Part 9 run)
 
 Each gate uses a fresh `HEDDLE_HOME`, `TMPDIR=/home/scratch` and
 `CARGO_TARGET_DIR=/runner/heddleco-build/scratch/heddle-part9-target`.
@@ -277,3 +308,31 @@ Complete gate inventory:
 | 41 | `forced-differential` | PASS |
 
 Fixture regeneration ran the pinned API generators in an isolated directory, including deterministic writer/acceptor capability seeds, all HYBRID/native/foreign/writer/boundary/attachment corpora, and the ignored claimed-owner generator. The native-genesis conformance generator emitted the strict-inventory positive and negative cases used by both runtimes.
+
+## Review round 2 verification
+
+The conformance corpus includes `truncated-pre-recover-cut-device` (reject) and
+`current-recovered-owner-history` (accept), rebuilt from signed fixture seeds.
+The rejected original has a valid current-lineage Genesis binding, old truncated
+author history, and the genuinely enrolled device attachment cut by Recover.
+The passing control has the same publisher/account, full current history and
+fresh authority from the recovered owner. Both use the existing Rust/WASM parity
+and bigint/differential harnesses.
+
+The semantic and real receiver regressions assert the exact
+`Authority(BrokenChain("attachment issuer is unknown or recovered"))` error.
+The receiver calls `ThreadReplica::install_hybrid_native`, including public
+selection and current-owner checks, and verifies rollback and the passing control.
+The type-separation doctest imports the Rust library `crypto` and selects `compile_fail,E0308`.
+
+Depth tests use genuine signed alternating native/import prefixes. Digest order
+is chosen so the deepest chain is visited before shorter prefixes are cached.
+A signed retained-journal fixture seeds the installed chain. The real receiver
+installs the depth-32 control; depth 33 refuses on Fetch and replay.
+The replay test also goes through public source staging and `install_hosted`.
+The wide graph has 257 installed leaf endpoints plus three branch prefixes; its
+root remains installable. Mutation guards remove each production visit, restore
+the old replay count charge, disable each owner pin (including the WASM runtime), and erase each typed-error
+conversion independently.
+
+Final round 2 commands and executed counts will be recorded here after the gates.

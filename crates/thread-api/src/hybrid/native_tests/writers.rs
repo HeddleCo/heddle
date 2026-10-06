@@ -525,8 +525,10 @@ fn receiver_policy_cuts_the_independent_actor_publisher_and_mint() {
     }
 }
 
-#[test]
-fn spool_owner_pre_recover_history_cannot_revive_cut_device() {
+fn recovered_owner_bundles() -> (
+    wire::NativePublicProofBundleV1,
+    wire::NativePublicProofBundleV1,
+) {
     use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext;
     use crypto::Signer;
     use objects::object::thread_replication::{
@@ -614,13 +616,7 @@ fn spool_owner_pre_recover_history_cannot_revive_cut_device() {
     });
     api::native_witness::verify_bundle_witnesses(&bundle, &set(&bundle, 1_100_000), 1_100_000, &[])
         .expect("portable testimony still passes; native owner authority must reject");
-    let error = verify_semantics(&bundle, 1_100_000).expect_err(
-        "receiver-pinned Recover must reject truncated history with the cut device attachment",
-    );
-    assert!(
-        error.to_string().contains("recovered") || error.to_string().contains("Root"),
-        "{error}"
-    );
+    let denied = bundle.clone();
 
     // The current owner issues a fresh capability to this publisher. The old
     // device's own mint root and attachment no longer authorize its writes.
@@ -702,4 +698,48 @@ fn spool_owner_pre_recover_history_cannot_revive_cut_device() {
     });
     verify_semantics(&bundle, 1_100_000)
         .expect("current owner history and fresh current-owner capability pass");
+    (denied, bundle)
+}
+
+fn install_recovered_owner_bundle(bundle: &wire::NativePublicProofBundleV1, rejected: bool) {
+    let originals = bundle
+        .authority_witnesses
+        .iter()
+        .filter_map(|p| p.original.clone())
+        .collect::<Vec<_>>();
+    local_work::install_bundle_with_refusal(
+        "receiver-pinned Recover",
+        bundle.clone(),
+        &originals,
+        rejected.then_some(|error: &repo::thread_replication::Error| {
+            matches!(error,
+                repo::thread_replication::Error::HybridEvidence(crypto::import_authority::Error::Authority(
+                    heddleco_capability_verifier::Error::BrokenChain(reason)))
+                if reason == "attachment issuer is unknown or recovered")
+        }),
+    );
+}
+
+#[test]
+fn spool_owner_pre_recover_history_cannot_revive_cut_device() {
+    let (bundle, control) = recovered_owner_bundles();
+    let error = verify_semantics(&bundle, 1_100_000).expect_err(
+        "receiver-pinned Recover must reject truncated history with the cut device attachment",
+    );
+    assert!(
+        matches!(error.downcast_ref::<crypto::import_authority::Error>(),
+            Some(crypto::import_authority::Error::Authority(
+                heddleco_capability_verifier::Error::BrokenChain(reason)))
+                if reason == "attachment issuer is unknown or recovered"),
+        "expected the recovered attachment issuer refusal: {error:?}"
+    );
+
+    verify_semantics(&control, 1_100_000).expect("current owner control");
+}
+
+#[test]
+fn spool_owner_pre_recover_history_real_receiver_rejects_cut_device() {
+    let (denied, control) = recovered_owner_bundles();
+    install_recovered_owner_bundle(&denied, true);
+    install_recovered_owner_bundle(&control, false);
 }

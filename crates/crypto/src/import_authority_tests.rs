@@ -267,8 +267,17 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
         1350000,
     )
     .expect("original creation witness");
-    let original = verify_genesis_payload(&p, &genesis_evidence, &d, &[], |_| false)
-        .expect("original portable creation authority");
+    let original = verify_genesis_payload(
+        &p,
+        &genesis_evidence,
+        &d,
+        &crate::writer_authority::HostAuthorAuthority {
+            owner: d.owner(),
+            mint_roots: &[],
+        },
+        |_| false,
+    )
+    .expect("original portable creation authority");
     let converted: wire::SignedRecord = record(&f, "converted_main");
     let content = verify_delegated_import(
         &record(&f, "operation_main"),
@@ -384,8 +393,17 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     let evidence =
         WitnessEvidence::resolve(&set, &s, Some(&proof), false, 1350000).expect("genesis witness");
     let payload: wire::ImportGenesisWitnessV1 = record(&f, "genesis_payload");
-    verify_genesis_payload(&payload, &evidence, &d, &[], |_| false)
-        .expect("independent native genesis control");
+    verify_genesis_payload(
+        &payload,
+        &evidence,
+        &d,
+        &crate::writer_authority::HostAuthorAuthority {
+            owner: d.owner(),
+            mint_roots: &[],
+        },
+        |_| false,
+    )
+    .expect("independent native genesis control");
     let mut changed = payload.clone();
     let mut other: wire::SignedImportMemberPermissionV1 = record(&f, "permission");
     other.body.as_mut().expect("permission").cancellation_id = vec![99; 32];
@@ -437,11 +455,29 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     )
     .expect("all other commitments and signatures match");
     assert!(matches!(
-        verify_genesis_payload(&changed, &changed_evidence, &verified, &[], |_| false),
+        verify_genesis_payload(
+            &changed,
+            &changed_evidence,
+            &verified,
+            &crate::writer_authority::HostAuthorAuthority {
+                owner: verified.owner(),
+                mint_roots: &[]
+            },
+            |_| false
+        ),
         Err(Error::Contract(Reject::ImportPermission))
     ));
-    verify_genesis_payload(&payload, &evidence, &d, &[], |_| false)
-        .expect("unchanged exact envelope control");
+    verify_genesis_payload(
+        &payload,
+        &evidence,
+        &d,
+        &crate::writer_authority::HostAuthorAuthority {
+            owner: d.owner(),
+            mint_roots: &[],
+        },
+        |_| false,
+    )
+    .expect("unchanged exact envelope control");
     let missing: wire::ImportAuthorityWitnessV1 = record(&f, "missing_owner_payload");
     let genuine = record(&f, "witness_without_owner");
     let current = trusted_set(&f, "current_set", 1100000);
