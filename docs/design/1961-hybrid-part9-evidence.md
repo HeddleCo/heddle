@@ -335,4 +335,105 @@ root remains installable. Mutation guards remove each production visit, restore
 the old replay count charge, disable each owner pin (including the WASM runtime), and erase each typed-error
 conversion independently.
 
-Final round 2 commands and executed counts will be recorded here after the gates.
+All eight isolated mutation pairs passed against source
+`8517efd365fc552a7c09fba2b7dcc34e874409fd`. Every red run reached its named
+runtime assertion; no compile error or empty selection counts as a failure.
+WASM propagates runner exit 1; native libtest propagates exit 101. After the
+pairs, every archived source file was compared byte-for-byte with the restored
+isolated checkout.
+
+| Guard removed | Red exit | Restored green |
+| --- | ---: | --- |
+| `wasm-spool-owner-pin` | 1 (assertion failure) | 0; 1 test passed |
+| `spool-owner-real-receiver-pin` | 101 (assertion failure) | 0; 1 test passed |
+| `foreign-fetch-depth` | 101 (assertion failure) | 0; 1 test passed |
+| `foreign-replay-depth` | 101 (assertion failure) | 0; 1 test passed |
+| `foreign-installed-count` | 101 (assertion failure) | 0; 1 test passed |
+| `foreign-replay-error-type` | 101 (assertion failure) | 0; 1 test passed |
+| `hosted-replay-error-type` | 101 (assertion failure) | 0; 1 test passed |
+| `spool-owner-receiver-pin` | 101 (assertion failure) | 0; 1 test passed |
+
+The real receiver rejection leaves its snapshot unchanged and publishes no
+artifacts. Removing the replay depth visit installs depth 33 successfully;
+restoring it gives the typed refusal after the depth-32 positive control.
+Charging installed replay prefixes restores the exact count-256 refusal on the
+257-leaf closure; the restored uncached-only count admits the closure. Erasing
+either receiver or hosted protocol error conversion fails the typed assertion.
+
+The type-separation positive doctest and `compile_fail,E0308` doctest both ran:
+
+```text
+error[E0308]: mismatched types
+expected `&WitnessedAuthors`, found `&HostAuthorAuthority<'_>`
+test result: ok. 2 passed; 0 failed; 0 ignored
+```
+
+All **41/41 final gates** in the complete inventory above were rerun with the
+same commands, including affected/workspace/CI-feature clippy, every Thread API
+feature check, the full CLI and hosted nextest suites, WASM tests and builds,
+browser binding build/pack, bigint/differential checks, and forced divergence.
+There were **10,208 passing Cargo/nextest test executions**, **87 ignored/skipped**,
+and **zero final failures**. Counts include repeated feature matrices, not unique
+test names. The 73 WASM tests are included in that total; bigint and differential
+checks are reported separately below.
+
+Every gate received a fresh `HEDDLE_HOME=$(mktemp -d)`; `TMPDIR=/home/scratch` and
+`CARGO_TARGET_DIR=/runner/heddleco-build/scratch/heddle-part9-target` were retained.
+Cargo commands used `--offline --locked`. The WASM runner and binding build used
+`wasm-bindgen 0.2.127`. Final command/count receipts are in
+`/home/scratch/heddle-part9-r2-evidence/final/results.json`; named logs accompany
+the receipts. Guard receipts/logs are in
+`/home/scratch/heddle-part9-r2-evidence/guards/`.
+
+| Final test gate | Passed | Ignored/skipped |
+| --- | ---: | ---: |
+| `affected-tests` | 1,360 | 11 |
+| `workspace-tests` | 4,615 | 25 |
+| `cli-serialized-units` | 505 | 0 |
+| `cli-ci-integration` | 31 | 0 |
+| `cli-ci-suite` | 2,095 | 41 |
+| `hosted-client` | 491 | 3 |
+| `thread-default` | 249 | 1 |
+| `thread-signing` | 20 | 0 |
+| `thread-root-attachment` | 4 | 0 |
+| `thread-core` | 16 | 0 |
+| `thread-native` | 201 | 0 |
+| `thread-iroh-replication` | 107 | 1 |
+| `semantic` | 336 | 3 |
+| `thread-behavior` | 2 | 0 |
+| `thread-transport-observation` | 1 | 0 |
+| `repo-thread-matrix` | 93 | 2 |
+| `objects-writer-lease` | 9 | 0 |
+| `capability-wasm-tests` | 73 | 0 |
+
+The unchanged CLI nextest command initially hit its existing six-minute timeout
+on the 1,000-State publication/later-capture workload in two suite attempts.
+Those attempts were retained as `cli-first-timeout.log` and
+`cli-second-timeout.log`, and do not count toward the final passing totals.
+The original Part 9 head passed the workload alone in 276.681 seconds. A
+scratch-only current-head phase diagnostic passed in 306.394 seconds and showed
+signer resolution, enrollment and local capture took less than a second; the
+later wait was in the hosted push. No production code, workload, test limit,
+or fixture was changed to obtain the final gate. The original four-thread CLI
+suite then passed all 2,095 selected tests; the workload passed in **349.426
+seconds** within its unchanged **360-second** limit.
+
+Each of seeds `38322398`, `1138`, `247`, and `836` matched **277 Rust/WASM cases**,
+including both new conformance cases: **1,108 differential cases total**. Every
+seed run passed **374 bigint ABI checks** (1,496 checks across four runs).
+Forced divergence exited 1 with the required detection marker.
+
+Selected actual final output:
+
+```text
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.71s
+test result: ok. 965 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 125.45s
+     Summary [1362.877s] 2095 tests run: 2095 passed (5 slow), 41 skipped
+     Summary [ 130.003s] 491 tests run: 491 passed (3 slow), 3 skipped
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 filtered out; finished in 12.06s
+OWNER_AUTH_DIFFERENTIAL=PASS seed=38322398 fuzz_cases_per_fixture=24 corpus_cases=277
+OWNER_AUTH_DIFFERENTIAL=PASS seed=1138 fuzz_cases_per_fixture=24 corpus_cases=277
+OWNER_AUTH_DIFFERENTIAL=PASS seed=247 fuzz_cases_per_fixture=24 corpus_cases=277
+OWNER_AUTH_DIFFERENTIAL=PASS seed=836 fuzz_cases_per_fixture=24 corpus_cases=277
+OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED seed=38322398 count=1
+```
