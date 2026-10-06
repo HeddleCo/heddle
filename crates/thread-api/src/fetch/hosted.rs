@@ -175,9 +175,23 @@ impl StagedSource {
                 }],
             });
         }
+        records.extend(self.prefix_original.iter().cloned());
         if let Some(bundle) = native {
             for wrapper in std::iter::once(main).chain(&self.dependencies) {
-                require_native_genesis_match(bundle, wrapper)?;
+                let genesis = wrapper
+                    .genesis
+                    .as_ref()
+                    .ok_or(Error::Invalid("genesis absent"))?;
+                let (_, decoded) = crypto::import_authority::verify_native_genesis(genesis)
+                    .map_err(preparation)?;
+                let id = decoded.id().map_err(preparation)?;
+                if !bundle
+                    .foreign_dependencies
+                    .iter()
+                    .any(|r| r.thread_genesis_digest.as_slice() == id.as_bytes())
+                {
+                    require_native_genesis_match(bundle, wrapper)?;
+                }
             }
         }
         let state = self.state.id();

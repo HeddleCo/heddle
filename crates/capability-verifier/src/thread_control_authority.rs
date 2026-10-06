@@ -118,7 +118,60 @@ pub fn verify_landing_request(
     ) {
         return Err(invalid("landing request requires an exact landing method"));
     }
-    verify_original(bytes, context, &[], is_revoked, false, &[])
+    verify_landing_request_with_retained_mint_roots(bytes, context, &[], is_revoked)
+}
+
+/// Landing requests retain the actor's independently admitted device inventory.
+pub fn verify_landing_request_with_retained_mint_roots(
+    bytes: &[u8],
+    context: Context<'_>,
+    admitted_mint_roots: &[SignedOwnerMintRootAttachment],
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+) -> Result<VerifiedAuthor> {
+    if !matches!(
+        context.method,
+        "/heddle.api.v1alpha2.ThreadService/LandThread"
+            | "/heddle.api.v1alpha2.ThreadService/LandStack"
+    ) {
+        return Err(invalid("landing request requires an exact landing method"));
+    }
+    verify_original(bytes, context, admitted_mint_roots, is_revoked, false, &[])
+}
+
+/// Signature-authenticated credential selectors used to resolve a landing
+/// requester's account. Full account, mint admission, method/path and revocation
+/// authorization must still run with that resolved account before admission.
+pub struct LandingSubject {
+    /// Account asserted by the signature-verified sealed token.
+    pub account_uuid: [u8; 16],
+    /// Proof key authenticated by that token.
+    pub publisher: [u8; 32],
+}
+/// Inspect signature-bound subject and proof key before independent account resolution.
+pub fn inspect_landing_subject(bytes: &[u8]) -> Result<LandingSubject> {
+    let envelope = decode_envelope(bytes)?;
+    let key = PublicKey::from_bytes(
+        &envelope.mint_root_public_key,
+        biscuit_auth::Algorithm::Ed25519,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let token = heddle_biscuit_verifier::signature_v1::verify(&envelope.sealed_biscuit, key)
+        .map_err(|e| invalid(e.to_string()))?;
+    if !matches!(token.seal(), Err(biscuit_auth::error::Token::AlreadySealed)) {
+        return Err(invalid("landing authority must be sealed"));
+    }
+    let facts = heddle_biscuit_verifier::inspect_verified_credential(&token, &key)
+        .map_err(|e| invalid(e.to_string()))?;
+    Ok(LandingSubject {
+        account_uuid: *facts
+            .asserted_account
+            .ok_or_else(|| invalid("landing token requires an account subject"))?
+            .as_bytes(),
+        publisher: facts
+            .proof_public_key
+            .try_into()
+            .map_err(|_| invalid("landing proof key must be 32 bytes"))?,
+    })
 }
 
 /// As [`verify`], with exact certificates from independently trusted durable

@@ -267,7 +267,7 @@ fn job_content_and_publication_have_separate_signatures_and_native_bindings() {
         1350000,
     )
     .expect("original creation witness");
-    let original = verify_genesis_payload(&p, &genesis_evidence, &d, |_| false)
+    let original = verify_genesis_payload(&p, &genesis_evidence, &d, &[], |_| false)
         .expect("original portable creation authority");
     let converted: wire::SignedRecord = record(&f, "converted_main");
     let content = verify_delegated_import(
@@ -384,7 +384,7 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     let evidence =
         WitnessEvidence::resolve(&set, &s, Some(&proof), false, 1350000).expect("genesis witness");
     let payload: wire::ImportGenesisWitnessV1 = record(&f, "genesis_payload");
-    verify_genesis_payload(&payload, &evidence, &d, |_| false)
+    verify_genesis_payload(&payload, &evidence, &d, &[], |_| false)
         .expect("independent native genesis control");
     let mut changed = payload.clone();
     let mut other: wire::SignedImportMemberPermissionV1 = record(&f, "permission");
@@ -437,10 +437,10 @@ fn genesis_original_owner_and_exact_envelope_remain_mandatory() {
     )
     .expect("all other commitments and signatures match");
     assert!(matches!(
-        verify_genesis_payload(&changed, &changed_evidence, &verified, |_| false),
+        verify_genesis_payload(&changed, &changed_evidence, &verified, &[], |_| false),
         Err(Error::Contract(Reject::ImportPermission))
     ));
-    verify_genesis_payload(&payload, &evidence, &d, |_| false)
+    verify_genesis_payload(&payload, &evidence, &d, &[], |_| false)
         .expect("unchanged exact envelope control");
     let missing: wire::ImportAuthorityWitnessV1 = record(&f, "missing_owner_payload");
     let genuine = record(&f, "witness_without_owner");
@@ -481,7 +481,7 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         "ordinary native closure cannot claim import ancestry"
     );
     let imports = fixture_carriers(&f);
-    let closure =
+    let mut closure =
         NativeClosure::verify_with_imports(&originals, &[], |g, o, p| imports.bind(g, o, p))
             .expect("authenticated import causal and claim closure");
     let history: wire::OwnerHistory = record(&f, "owner_history");
@@ -494,14 +494,20 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .as_slice()
         .try_into()
         .expect("Spool genesis");
+    let author = crate::writer_authority::HostAuthorAuthority {
+        owner: &owner,
+        mint_roots: &[],
+    };
     let context = NativeAuthorityContext {
+        author_authority: &author,
         owner: &owner,
         spool_uuid: uuid::Uuid::from_slice(&identity.spool_uuid).expect("Spool"),
         spool_genesis: &digest,
         transfer_sequence: 0,
         spool_path: "example",
         witness_set: &set,
-        original_geneses: OriginalGeneses::Import(&b.genesis_witnesses),
+        original_geneses: &OriginalGeneses::import(&b.genesis_witnesses)
+            .expect("genesis envelopes"),
         known_job_associations: &[],
         forbidden_authority_keys: &[key(&f, "root"), key(&f, "witness"), key(&f, "next_witness")],
     };
@@ -531,10 +537,10 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
             1350000,
         )
         .expect("exact authority witness");
-        verify_authority_payload(&p, &evidence, &closure, &context, |_| false)
+        verify_authority_payload(&p, &evidence, &mut closure, &context, |_| false)
             .expect("independent original authority");
         assert!(
-            matches!(verify_authority_payload(&p, &evidence, &closure, &context, |_| true), Err(Error::Authority(heddleco_capability_verifier::Error::Invalid(reason))) if reason == "original Thread mint root or publisher is revoked")
+            matches!(verify_authority_payload(&p, &evidence, &mut closure, &context, |_| true), Err(Error::Authority(heddleco_capability_verifier::Error::Invalid(reason))) if reason == "original Thread mint root or publisher is revoked")
         );
     }
     let evidence = WitnessEvidence::resolve(
@@ -545,7 +551,98 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         1350000,
     )
     .expect("exact landing witness");
-    verify_landing_payload(&landing, &evidence, &closure, &context, |_| false)
+    assert!(
+        matches!(
+            verify_landing_payload(&landing, &evidence, &mut closure, &context, |_| false),
+            Err(Error::Contract(Reject::Scope))
+        ),
+        "P4 cannot replace a Review's own P2"
+    );
+    // This payload-only corpus predates complete P2 carriers for P4 Reviews.
+    // Verify each exact original at its own independently signed admission.
+    for original in landing
+        .source_operation
+        .iter()
+        .chain(&landing.review_evidence)
+    {
+        let operation = verify_native_operation(original)
+            .expect("native signature")
+            .1;
+        let authority = match &operation.body {
+            heddle_object_model::object::thread_replication::ThreadOperationBody::Metadata(
+                bytes,
+            ) => {
+                heddle_object_model::object::thread_replication::metadata::ThreadControl::decode(
+                    bytes,
+                )
+                .expect("control")
+                .authority_envelope
+            }
+            _ => match operation.source_author().expect("author") {
+                Some(heddle_object_model::object::thread_replication::SourceAuthor::Account {
+                    authority,
+                    ..
+                }) => authority,
+                _ => continue,
+            },
+        };
+        let payload = wire::ImportAuthorityWitnessV1 {
+            format_version: 1,
+            kind: 1,
+            original: Some(original.clone()),
+            authority_envelope: authority,
+            dependencies: vec![],
+            boundary_acceptances: vec![],
+        };
+        let mut signed: host::SignedHostedWitnessStatementV1 = record(&f, "authority_admission");
+        let s = signed.body.as_mut().expect("body");
+        s.executor_id = set
+            .body()
+            .entries
+            .iter()
+            .find(|e| e.state == 1)
+            .expect("current executor")
+            .executor_id
+            .clone();
+        s.admission_order = evidence
+            .signed()
+            .body
+            .as_ref()
+            .expect("P4 body")
+            .admission_order
+            - 1;
+        s.observed_at_unix_millis = 1_300_000;
+        s.canonical_payload = hybrid_codec::canonical(&payload).expect("payload");
+        s.publisher_key_id = hybrid_codec::key_id(&operation.publisher);
+        s.authority_digest = hybrid_codec::hash(&[
+            b"heddle-hosted-authority-envelope-v1",
+            &(payload.authority_envelope.len() as u32).to_be_bytes(),
+            &payload.authority_envelope,
+        ]);
+        let mut framed = (original.signatures.len() as u32).to_be_bytes().to_vec();
+        for signature in &original.signatures {
+            framed.extend(hybrid_codec::canonical(signature).expect("signature"));
+        }
+        s.original_signatures_digest =
+            hybrid_codec::hash(&[b"heddle-hosted-original-signatures-v1", &framed]);
+        let signer = crate::Ed25519Signer::from_seed(
+            &hex::decode(
+                f["keys"]["next_witness"]["seed_hex"]
+                    .as_str()
+                    .expect("seed"),
+            )
+            .expect("hex"),
+        )
+        .expect("witness");
+        signed.signature = signer
+            .sign(&witness_trust::statement_signing_digest(s).expect("digest"))
+            .expect("signature");
+        let admission = WitnessEvidence::resolve(&set, &signed, None, false, 1_350_000)
+            .expect("own P2 testimony");
+        verify_authority_payload(&payload, &admission, &mut closure, &context, |_| false)
+            .expect("own source/Review P2");
+    }
+    verify_landing_payload(&landing, &evidence, &mut closure, &context, |_| false)
         .expect("independent landing request/source/review");
     let mut bad = landing.clone();
     bad.request
@@ -557,7 +654,7 @@ fn native_authority_ownership_and_landing_preserve_original_closure() {
         .signature =
         record::<host::SignedHostedWitnessStatementV1>(&f, "landing_statement").signature;
     assert!(matches!(
-        verify_landing_payload(&bad, &evidence, &closure, &context, |_| false),
+        verify_landing_payload(&bad, &evidence, &mut closure, &context, |_| false),
         Err(Error::Contract(Reject::Signature))
     ));
     let mut incomplete = originals.clone();
@@ -705,7 +802,7 @@ fn boundary_vector(
         let boundaries = p.boundary_acceptances.clone();
         (None, Some(p), boundaries)
     };
-    let closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
+    let mut closure = NativeClosure::verify_with_boundaries(&originals, &boundaries)?;
     let h: wire::OwnerHistory = record(f, "owner_history");
     let owner = heddleco_capability_verifier::verify_owner_root(h.root.as_ref().expect("root"))
         .expect("owner");
@@ -715,14 +812,19 @@ fn boundary_vector(
         .as_slice()
         .try_into()
         .expect("digest");
+    let author = crate::writer_authority::HostAuthorAuthority {
+        owner: &owner,
+        mint_roots: &[],
+    };
     let context = NativeAuthorityContext {
+        author_authority: &author,
         owner: &owner,
         spool_uuid: uuid::Uuid::from_slice(&identity.spool_uuid).expect("Spool"),
         spool_genesis: &digest,
         transfer_sequence: 0,
         spool_path: "example",
         witness_set: &set,
-        original_geneses: OriginalGeneses::Import(&genesis_payloads),
+        original_geneses: &OriginalGeneses::import(&genesis_payloads).expect("genesis envelopes"),
         known_job_associations: &[],
         forbidden_authority_keys: &[key(f, "root"), key(f, "witness"), key(f, "next_witness")],
     };
@@ -739,7 +841,7 @@ fn boundary_vector(
         verify_authority_payload(
             authority.as_ref().expect("payload"),
             &evidence,
-            &closure,
+            &mut closure,
             &context,
             |_| false,
         )?;

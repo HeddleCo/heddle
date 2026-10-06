@@ -78,29 +78,7 @@ pub(super) fn install_bundle(
         bundle.clone(),
         |_: &wire::NativePublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
     );
-    let db = repo::local_metadata::open(repository.heddle_dir()).expect("metadata");
-    let tables = [
-        "threads",
-        "operations",
-        "hosted_native_proofs",
-        "hosted_native_genesis_bindings",
-        "pending_native_genesis_bindings",
-        "hosted_import_admissions",
-        "hosted_witness_trust",
-        "thread_owner_claims",
-        "thread_owner_claim_history",
-        "thread_owner_claim_frontier",
-        "thread_owner_resolutions",
-    ];
-    let counts = || {
-        tables.map(|table| {
-            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("durable record count")
-        })
-    };
-    let before = counts();
+    let before = super::receiver_snapshot(repository.heddle_dir());
     let published = Cell::new(false);
     let result = ThreadReplica::install_hybrid_native(
         repository.heddle_dir(),
@@ -126,7 +104,7 @@ pub(super) fn install_bundle(
         }
     } else {
         assert!(
-            matches!(&result, Err(repo::thread_replication::Error::Hybrid(actual)) if Some(actual) == rejection.as_ref()),
+            matches!(&result, Err(repo::thread_replication::Error::Hybrid(actual)) | Err(repo::thread_replication::Error::HybridEvidence(crypto::import_authority::Error::Contract(actual))) if Some(actual) == rejection.as_ref()),
             "{name}: native authority must reject before installation: {:?}",
             result.err()
         );
@@ -136,7 +114,7 @@ pub(super) fn install_bundle(
         );
         assert!(!repository.heddle_dir().join("local-work-proof").exists());
         assert_eq!(
-            counts(),
+            super::receiver_snapshot(repository.heddle_dir()),
             before,
             "{name}: rejection must preserve all native and trust state"
         );

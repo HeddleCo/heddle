@@ -2265,9 +2265,11 @@ fn hybrid_landing_requires_each_dependency_first_admission_before_callback() {
         assert!(
             matches!(
                 result,
-                Err(Error::Hybrid(hybrid_codec::Reject::ImportPermission))
+                Err(Error::HybridEvidence(
+                    crypto::import_authority::Error::Contract(hybrid_codec::Reject::Scope)
+                ))
             ),
-            "missing dependency must reach coverage gate: {:?}",
+            "landing must require the dependency's own admission before publication: {:?}",
             result.err()
         );
         assert!(!called);

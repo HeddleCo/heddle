@@ -12,7 +12,9 @@ pub mod checkout;
 mod checkout_resolution;
 mod checkout_selection;
 pub use checkout_resolution::source_conflict_version;
+pub mod authority;
 pub mod delegated_import;
+mod foreign_dependencies;
 mod genesis_admission;
 pub mod hosted_trust;
 #[cfg(test)]
@@ -29,6 +31,7 @@ mod ownership_claim_tests;
 pub mod ownership_resolution;
 mod peers;
 mod policy_sync;
+mod prefix;
 pub mod projection;
 pub mod source_authority;
 pub mod source_heads;

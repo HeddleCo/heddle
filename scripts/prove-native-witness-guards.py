@@ -54,18 +54,18 @@ MUTATIONS = [
             || import_authority::content_digest(&content).map_err(invalid)?
                 != body.resulting_content_digest''', '        if false', CRYPTO,
      'imported_capture_cannot_use_seed_or_a_foreign_carrier', "a valid imported root cannot borrow another operation's carrier"),
-    ('genesis-import-policy', 'crates/thread-api/src/hybrid/authority.rs',
+    ('genesis-import-policy', 'crates/repo/src/thread_replication/authority.rs',
      'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
      'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
      'published_import_at_genesis_policy_installs_on_fresh_receiver', 'authenticated genesis policy must install published import evidence'),
-    ('genesis-native-policy', 'crates/thread-api/src/hybrid/authority.rs',
+    ('genesis-native-policy', 'crates/repo/src/thread_replication/authority.rs',
      'if statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]',
      'if false && statement.policy_sequence == 0 && statement.policy_state_hash == [0; 32]', API,
      'native_genesis_policy_accepts_empty_revocations_on_fresh_receiver', 'genesis policy has no native revocations'),
     ('import-tip-canonical-base', TIP,
      'genesis.base != initial_base::synthetic_initial_base()?.id()', 'false', CRYPTO,
      'valid_import_carrier_cannot_unlock_noncanonical_genesis_base', 'a valid carrier must still require the canonical synthetic base'),
-    ('genesis-import-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+    ('genesis-import-zero-record', 'crates/repo/src/thread_replication/authority.rs',
      """            }) {
                 return None;
             }
@@ -75,7 +75,7 @@ MUTATIONS = [
             }
             return Some(&[]);""", API,
      'selected_authority_zero_policy_record_refuses_import_revocations', 'local genesis guard must reject a signed zero record for imports'),
-    ('genesis-native-zero-record', 'crates/thread-api/src/hybrid/authority.rs',
+    ('genesis-native-zero-record', 'crates/repo/src/thread_replication/authority.rs',
      """            }) {
                 return None;
             }
@@ -181,7 +181,7 @@ MUTATIONS = [
      '        .any(|k| k.as_slice() == genesis.creator)',
      '        .any(|k| k.as_slice() == genesis.creator) && false', API,
      'native_genesis_creator_cannot_be_a_job_key_or_authority_key', 'native creator key role must reject'),
-    ('binding-ambiguity', 'crates/thread-api/src/hybrid/authority.rs', '''                        if resolved.is_some() {
+    ('binding-ambiguity', 'crates/repo/src/thread_replication/authority.rs', '''                        if resolved.is_some() {
                             return Err(Reject::Canonical.into());
                         }''', '', API,
      'native_binding_rejects_ambiguous_owner_chain_resolution', 'ambiguous owner chain must reject'),

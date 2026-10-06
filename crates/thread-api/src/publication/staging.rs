@@ -135,6 +135,17 @@ fn validate_source_artifacts_inner(
         dependencies,
         receipts,
         carriers,
+        opening
+            .import_authority
+            .as_ref()
+            .map(|b| b.foreign_dependencies.clone())
+            .or_else(|| {
+                opening
+                    .native_authority
+                    .as_ref()
+                    .map(|b| b.foreign_dependencies.clone())
+            })
+            .unwrap_or_default(),
     )?;
     validated.import_authority = opening.import_authority.clone();
     validated.native_authority = opening.native_authority.clone();

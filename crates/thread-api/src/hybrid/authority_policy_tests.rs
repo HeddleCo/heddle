@@ -260,24 +260,26 @@ fn real_policy_revoked_job_key_rejects() {
 #[test]
 fn selected_authority_zero_policy_record_refuses_import_revocations() {
     use repo::thread_replication::delegated_import::AcceptedAuthority;
-    let bundle = genesis_policy();
+    let mut bundle = genesis_policy();
     let limits = VerificationLimits::new(3600).expect("limits");
     let pinned = tests::selected(&bundle, limits);
-    let history = AcceptedHistory::from_selected_spool(&bundle, &pinned, 1350, limits)
-        .expect("verified independent owner");
-    let mut authority = SelectedAuthority::new(
-        history,
-        bundle,
-        |_: &wire::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
-    );
-    let statement = authority
-        .bundle
+    let control = bundle.clone();
+    let authority_for = |bundle| {
+        SelectedAuthority::new(
+            AcceptedHistory::from_selected_spool(&control, &pinned, 1350, limits)
+                .expect("verified independent owner"),
+            bundle,
+            |_: &wire::ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
+        )
+    };
+    let authority = authority_for(bundle.clone());
+    let statement = bundle
         .statements
         .iter()
         .find_map(|s| s.body.as_ref().filter(|s| s.purpose == 1))
         .expect("genesis observation")
         .clone();
-    let job = authority.bundle.delegations[0]
+    let job = bundle.delegations[0]
         .body
         .as_ref()
         .expect("delegation")
@@ -295,18 +297,18 @@ fn selected_authority_zero_policy_record_refuses_import_revocations() {
             .sign(&permission::policy::policy_signature_digest(body).expect("digest"))
             .expect("signed zero record"),
     });
-    authority.bundle.policies.push(replacement);
+    bundle.policies.push(replacement);
     assert!(
-        authority.import_revoked(&statement, import),
+        authority_for(bundle.clone()).import_revoked(&statement, import),
         "local genesis guard must reject a signed zero record for imports"
     );
-    authority.bundle.policies.clear();
+    bundle.policies.clear();
     for (sequence, hash) in [(0, Vec::new()), (0, vec![1; 32]), (1, vec![1; 32])] {
         let mut unknown = statement.clone();
         unknown.policy_sequence = sequence;
         unknown.policy_state_hash = hash;
         assert!(
-            authority.import_revoked(&unknown, import),
+            authority_for(bundle.clone()).import_revoked(&unknown, import),
             "unknown or missing policy fails closed directly"
         );
     }
