@@ -851,6 +851,8 @@ fn validate_disclosure_artifacts(
     let mut pending = BTreeSet::from([selected_id]);
     let mut seen = BTreeSet::new();
     let mut used_threads = BTreeSet::new();
+    let mut claim_threads = BTreeSet::new();
+    let mut foreign_endpoints = BTreeSet::new();
     let mut edges = BTreeMap::new();
     while let Some(id) = pending.pop_first() {
         if !seen.insert(id) {
@@ -868,6 +870,7 @@ fn validate_disclosure_artifacts(
             // under current receiver trust, just like NativeClosure's resolver.
             // Its parents belong to that origin's content closure.
             used_threads.insert(operation.thread);
+            foreign_endpoints.insert(id);
             edges.insert(id, BTreeSet::new());
             continue;
         }
@@ -884,7 +887,8 @@ fn validate_disclosure_artifacts(
         let genesis = geneses
             .get(&operation.thread)
             .ok_or(Error::Invalid("source dependency genesis absent"))?;
-        if used_threads.insert(operation.thread)
+        used_threads.insert(operation.thread);
+        if claim_threads.insert(operation.thread)
             && let Some(frontier) = claim_frontiers.get(&operation.thread)
         {
             for head in frontier {
@@ -953,6 +957,9 @@ fn validate_disclosure_artifacts(
     // A claim cutoff is an additional signed causal barrier. Ancestors retain
     // their original local author; work outside it must follow the claim.
     for (thread, frontier) in &claim_frontiers {
+        if !claim_threads.contains(thread) {
+            continue;
+        }
         let mut history = BTreeSet::new();
         let mut pending = frontier.clone();
         while let Some(id) = pending.pop_first() {
@@ -965,11 +972,16 @@ fn validate_disclosure_artifacts(
             if operation.thread != *thread {
                 return Err(Error::Invalid("claim cutoff crosses Thread"));
             }
-            pending.extend(&operation.parents);
+            if !foreign_endpoints.contains(&id) {
+                pending.extend(&operation.parents);
+            }
         }
         {
             for (id, operation) in &decoded {
-                if operation.thread == *thread && !history.contains(id) {
+                if operation.thread == *thread
+                    && !history.contains(id)
+                    && !foreign_endpoints.contains(id)
+                {
                     if matches!(
                         operation.source_author().map_err(preparation)?,
                         Some(

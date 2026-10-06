@@ -321,6 +321,9 @@ PART8_MUTATIONS = [
     ('foreign-fetch-native-ancestry', 'crates/thread-api/src/fetch/staging.rs',
      lambda s: replace_once(s, 'None => operation.validate_parents(genesis, &parents),', 'None => Ok(()),'), API,
      'native_fetch_mismatched_ancestry_is_rejected'),
+    ('foreign-fetch-claim-cutoff', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, 'if !claim_threads.contains(thread) {', 'if false && !claim_threads.contains(thread) {'), API,
+     'source_staging_retains_signed_claim_cutoff_beyond_selected_revision'),
     ('receiver-clock-sampling-interval', 'crates/repo/src/thread_replication/hosted_trust.rs',
      lambda s: replace_once(s, '''        let before = clock.elapsed_millis()?;
         let wall = clock.now_millis()?;
