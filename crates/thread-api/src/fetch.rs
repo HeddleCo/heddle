@@ -16,6 +16,8 @@ mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
 pub(crate) use staging::validate_artifacts;
+#[cfg(test)]
+pub(crate) use staging::validate_with_receipts;
 pub use staging::{StagedSource, ValidatedSourceArtifacts};
 
 use crate::{Remote, contract::*, replication, rpc, transport};
@@ -23,8 +25,11 @@ use crate::{Remote, contract::*, replication, rpc, transport};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[cfg(feature = "native")]
-    #[error(transparent)]
-    Repository(Box<repo::thread_replication::Error>),
+    #[error("foreign prefix {limit_name} exceeds limit {limit}")]
+    ForeignPrefixLimitExceeded {
+        limit_name: &'static str,
+        limit: usize,
+    },
     #[error(transparent)]
     Client(#[from] ClientError<transport::Error>),
     #[error(transparent)]
@@ -56,7 +61,12 @@ impl crate::reopen::ReopenRetryable for Error {
 #[cfg(feature = "native")]
 impl From<repo::thread_replication::Error> for Error {
     fn from(error: repo::thread_replication::Error) -> Self {
-        Self::Repository(Box::new(error))
+        match error {
+            repo::thread_replication::Error::ForeignPrefixLimitExceeded { limit_name, limit } => {
+                Self::ForeignPrefixLimitExceeded { limit_name, limit }
+            }
+            error => Self::Preparation(error.to_string()),
+        }
     }
 }
 

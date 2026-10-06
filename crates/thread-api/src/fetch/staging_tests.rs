@@ -923,7 +923,7 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
         },
     };
     let scratch = tempfile::tempdir().expect("scratch");
-    for omit_cutoff in [false, true] {
+    for (omit_cutoff, foreign_selected) in [(false, false), (true, false), (true, true)] {
         let (directory, mut ready, mut operations, selected) = fixture(scratch.path(), false);
         let genesis = replication::opening::verify_genesis_record(
             ready.thread_genesis.as_ref().expect("genesis"),
@@ -989,8 +989,35 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
         if !omit_cutoff {
             operations.push(next.clone());
         }
+        if foreign_selected {
+            let selected_original = &operations[0];
+            let original = SignedRecord {
+                format: objects::object::thread_replication::OPERATION_FORMAT.into(),
+                canonical_record: selected_original.canonical.clone(),
+                signatures: vec![RecordSignature {
+                    public_key: genesis.creator.to_vec(),
+                    signature: selected_original.signature.clone(),
+                }],
+            };
+            ready.native_authority = Some(NativePublicProofBundleV1 {
+                foreign_dependencies: vec![ForeignDependencyV1 {
+                    format_version: 1,
+                    origin: 1,
+                    prefix_admission_order: 1,
+                    thread_genesis_digest: genesis.id().expect("thread").as_bytes().to_vec(),
+                    signed_native_digest: api::import_authority::signed_native_digest(&original)
+                        .expect("digest"),
+                }],
+                ..Default::default()
+            });
+        }
         let result = validate(directory, ready, operations, vec![]);
-        if omit_cutoff {
+        if foreign_selected {
+            let staged =
+                result.expect("foreign endpoint's claim cutoff belongs to its origin prefix");
+            assert_eq!(staged.state().id(), selected.id());
+            assert_eq!(staged.operations().len(), 1);
+        } else if omit_cutoff {
             assert!(
                 result
                     .err()

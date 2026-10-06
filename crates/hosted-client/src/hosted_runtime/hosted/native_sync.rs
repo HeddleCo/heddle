@@ -76,7 +76,9 @@ fn replica_err(error: repo::thread_replication::Error) -> ProtocolError {
 
 fn fetch_install_error(error: thread_api::fetch::Error) -> ProtocolError {
     match error {
-        thread_api::fetch::Error::Repository(error) => replica_err(*error),
+        thread_api::fetch::Error::ForeignPrefixLimitExceeded { limit_name, limit } => {
+            ProtocolError::ForeignPrefixLimitExceeded { limit_name, limit }
+        }
         error => native_error(error),
     }
 }
