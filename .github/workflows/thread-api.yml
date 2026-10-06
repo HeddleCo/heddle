@@ -19,7 +19,7 @@ jobs:
   # Retained-prefix replay makes both native configurations substantial. Run
   # them independently so their sum cannot exhaust the client job's budget.
   thread-native:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -37,7 +37,7 @@ jobs:
         run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
 
   thread-client:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
