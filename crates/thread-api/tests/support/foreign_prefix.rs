@@ -413,7 +413,20 @@ pub(crate) fn source(prefix: &Prefix) -> Source {
     let state = op.source_state().expect("source").expect("state");
     let (genesis, history, owner_genesis) = match &prefix.proof {
         PublicProof::Native(b) => {
-            let g = &b.genesis_witnesses[0];
+            let g = b
+                .genesis_witnesses
+                .iter()
+                .find(|g| {
+                    crypto::import_authority::verify_native_genesis(
+                        g.original_genesis.as_ref().expect("genesis"),
+                    )
+                    .expect("genesis")
+                    .1
+                    .id()
+                    .expect("thread")
+                        == op.thread
+                })
+                .expect("selected genesis");
             (
                 wire::ThreadGenesisRecord {
                     genesis: g.original_genesis.clone(),

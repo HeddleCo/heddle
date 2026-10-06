@@ -153,10 +153,12 @@ impl StagedSource {
         let mut causal = BTreeSet::new();
         while let Some(id) = pending.pop() {
             if causal.insert(id) {
-                let (_, op) = available
+                let (signed, op) = available
                     .get(&id)
                     .ok_or(Error::Invalid("prefix ancestor absent"))?;
-                pending.extend(op.parents.iter().copied());
+                if !foreign_endpoint(projected.foreign_dependencies(), op, signed)? {
+                    pending.extend(op.parents.iter().copied());
+                }
             }
         }
         self.operations = available
@@ -414,7 +416,7 @@ struct DisclosureInput {
 }
 
 #[cfg(test)]
-pub(super) fn validate_with_receipts(
+pub(crate) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
     operations: Vec<SignedOperation>,
@@ -857,6 +859,18 @@ fn validate_disclosure_artifacts(
         let operation = decoded
             .get(&id)
             .ok_or(Error::Invalid("incomplete source ancestry"))?;
+        let signed = originals
+            .get(&id)
+            .ok_or(Error::Invalid("original absent"))?;
+        if foreign_endpoint(&foreign, operation, signed)? {
+            // Exact foreign references cut only structural staging. Installation
+            // must resolve this original through its verified retained prefix
+            // under current receiver trust, just like NativeClosure's resolver.
+            // Its parents belong to that origin's content closure.
+            used_threads.insert(operation.thread);
+            edges.insert(id, BTreeSet::new());
+            continue;
+        }
         let parents = operation
             .parents
             .iter()
@@ -891,31 +905,11 @@ fn validate_disclosure_artifacts(
             .transpose()
             .map_err(preparation)?
             .flatten();
-        let signed = originals
-            .get(&id)
-            .ok_or(Error::Invalid("original absent"))?;
-        let original = SignedRecord {
-            format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
-            canonical_record: signed.canonical.clone(),
-            signatures: vec![RecordSignature {
-                public_key: operation.publisher.to_vec(),
-                signature: signed.signature.clone(),
-            }],
-        };
-        let foreign_original = foreign.iter().any(|r| {
-            r.thread_genesis_digest.as_slice() == operation.thread.as_bytes()
-                && api::import_authority::signed_native_digest(&original)
-                    .is_ok_and(|d| d == r.signed_native_digest)
-        });
-        if !foreign_original {
-            match imported {
-                Some(bound) => bound.validate_parents(genesis, &parents),
-                None => operation.validate_parents(genesis, &parents),
-            }
-            .map_err(preparation)?;
+        match imported {
+            Some(bound) => bound.validate_parents(genesis, &parents),
+            None => operation.validate_parents(genesis, &parents),
         }
-        // A reference permits temporary structural staging only. The receiver
-        // transaction must resolve its exact original through installed evidence.
+        .map_err(preparation)?;
 
         let mut required = operation.parents.clone();
         if let Some(receipt) = operation.local_integration().map_err(preparation)? {
@@ -1082,6 +1076,32 @@ fn validate_disclosure_artifacts(
         partial_trees,
     })
 }
+fn foreign_endpoint(
+    foreign: &[ForeignDependencyV1],
+    operation: &ThreadOperation,
+    signed: &SignedOperation,
+) -> Result<bool, Error> {
+    if !foreign
+        .iter()
+        .any(|r| r.thread_genesis_digest.as_slice() == operation.thread.as_bytes())
+    {
+        return Ok(false);
+    }
+    let original = SignedRecord {
+        format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
+        canonical_record: signed.canonical.clone(),
+        signatures: vec![RecordSignature {
+            public_key: operation.publisher.to_vec(),
+            signature: signed.signature.clone(),
+        }],
+    };
+    let digest = api::import_authority::signed_native_digest(&original)?;
+    Ok(foreign.iter().any(|r| {
+        r.thread_genesis_digest.as_slice() == operation.thread.as_bytes()
+            && r.signed_native_digest == digest
+    }))
+}
+
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())
 }

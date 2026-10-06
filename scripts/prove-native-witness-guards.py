@@ -304,6 +304,42 @@ def no_review(source):
 
 
 PART8_MUTATIONS = [
+    ('foreign-fetch-before-parents', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, '        if foreign_endpoint(&foreign, operation, signed)? {',
+        '        for parent in &operation.parents {\n            decoded.get(parent).ok_or(Error::Invalid("incomplete source ancestry"))?;\n        }\n        if foreign_endpoint(&foreign, operation, signed)? {'), API,
+     'fresh_fetch_native_main_with_landed_import_stops_at_exact_foreign_endpoint'),
+    ('foreign-fetch-past-endpoint', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, '            edges.insert(id, BTreeSet::new());\n            continue;',
+        '            edges.insert(id, operation.parents.clone());\n            pending.extend(&operation.parents);\n            continue;'), API,
+     'fresh_fetch_native_main_with_landed_import_stops_at_exact_foreign_endpoint'),
+    ('foreign-prefix-endpoint-cut', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, 'if !foreign_endpoint(projected.foreign_dependencies(), op, signed)? {', 'if true {'), API,
+     'fresh_fetch_native_main_with_landed_import_stops_at_exact_foreign_endpoint'),
+    ('foreign-fetch-exact-digest', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, '&& r.signed_native_digest == digest', '&& !digest.is_empty()'), API,
+     'forged_foreign_endpoint_is_traversed_and_rejected'),
+    ('foreign-fetch-native-ancestry', 'crates/thread-api/src/fetch/staging.rs',
+     lambda s: replace_once(s, 'None => operation.validate_parents(genesis, &parents),', 'None => Ok(()),'), API,
+     'native_fetch_mismatched_ancestry_is_rejected'),
+    ('receiver-clock-sampling-interval', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     lambda s: replace_once(s, '''        let before = clock.elapsed_millis()?;
+        let wall = clock.now_millis()?;
+        let after = clock.elapsed_millis()?;''', '''        let wall = clock.now_millis()?;
+        let after = clock.elapsed_millis()?;
+        let before = after;'''), REPO,
+     'receiver_clock_sampling_delay_does_not_report_rollback'),
+    ('receiver-clock-wall-rollback', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     lambda s: replace_once(s, 'if now.wall < floor {', 'if false && now.wall < floor {'), REPO,
+     'receiver_clock_wall_rollback_is_refused'),
+    ('receiver-clock-monotonic-regression', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     lambda s: replace_once(s, '''    let passed = now
+        .before
+        .checked_sub(last.after)
+        .ok_or(Error::HostedClock)?;''', '    let passed = now.before.saturating_sub(last.after);'), REPO,
+     'receiver_clock_monotonic_regression_is_refused'),
+    ('receiver-clock-intrasample-regression', 'crates/repo/src/thread_replication/hosted_trust.rs',
+     lambda s: replace_once(s, 'if after < before {', 'if false && after < before {'), REPO,
+     'receiver_clock_monotonic_regression_within_sample_is_refused'),
     ('wasm-spool-owner-pin', 'crates/capability-verifier/src/native_genesis.rs',
      lambda s: replace_once(s, '            .account_uuid\n    {', '            .account_uuid && false\n    {'), VERIFIER,
      'native_genesis_owner_pin_cuts_truncated_pre_recover_author_history'),
@@ -323,7 +359,11 @@ PART8_MUTATIONS = [
      lambda s: replace_once(s, '            .map_err(Error::from)?;\n            (replicas, Vec::new())', '            .map_err(preparation)?;\n            (replicas, Vec::new())'), API,
      'foreign_prefix_replay_depth_33_refuses_with_typed_limit'),
     ('hosted-replay-error-type', 'crates/hosted-client/src/hosted_runtime/hosted/native_sync.rs',
-     lambda s: replace_once(s, 'thread_api::fetch::Error::Repository(error) => replica_err(*error),', 'thread_api::fetch::Error::Repository(error) => native_error(error),'), HOSTED,
+     lambda s: replace_once(s, '''            ProtocolError::ForeignPrefixLimitExceeded { limit_name, limit }
+        }
+        error => native_error(error),''', '''            native_error(format!("foreign prefix {limit_name} exceeds limit {limit}"))
+        }
+        error => native_error(error),'''), HOSTED,
      'hosted_replay_preserves_foreign_prefix_limit_type'),
     ('spool-owner-receiver-pin', 'crates/crypto/src/writer_authority.rs',
      lambda s: replace_once(s, '            == account\n        {', '            == account && false\n        {'), API,

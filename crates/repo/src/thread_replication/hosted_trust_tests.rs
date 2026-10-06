@@ -71,6 +71,157 @@ impl Clock for TestClock {
         Ok(self.elapsed.load(Ordering::SeqCst))
     }
 }
+
+#[derive(Clone)]
+struct SchedulingClock {
+    clock: TestClock,
+    before_wall: Arc<AtomicU64>,
+    after_wall: Arc<AtomicU64>,
+}
+impl SchedulingClock {
+    fn advance(&self, gap: u64) {
+        self.clock
+            .wall
+            .fetch_add(i64::try_from(gap).expect("gap"), Ordering::SeqCst);
+        self.clock.elapsed.fetch_add(gap, Ordering::SeqCst);
+    }
+}
+impl Clock for SchedulingClock {
+    fn now_millis(&self) -> Result<i64> {
+        let wall = self.clock.now_millis()?;
+        self.advance(self.after_wall.swap(0, Ordering::SeqCst));
+        Ok(wall)
+    }
+    fn elapsed_millis(&self) -> Result<u64> {
+        let elapsed = self.clock.elapsed_millis()?;
+        self.advance(self.before_wall.swap(0, Ordering::SeqCst));
+        Ok(elapsed)
+    }
+}
+
+#[test]
+fn receiver_clock_sampling_delay_does_not_report_rollback() {
+    for after_wall in [false, true] {
+        let f = fixture();
+        let dir = tempfile::tempdir().expect("directory");
+        let repo = crate::Repository::init_default(dir.path()).expect("repository");
+        let selected = root(&f);
+        select_root(repo.heddle_dir(), &selected).expect("root");
+        let clock = SchedulingClock {
+            clock: TestClock::new(1_100_000),
+            before_wall: Arc::new(AtomicU64::new(0)),
+            after_wall: Arc::new(AtomicU64::new(0)),
+        };
+        let trust = HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone())
+            .expect("trust");
+        let current = record(&f, "current_set");
+        trust.mutate(&current, |_| Ok(())).expect("baseline");
+        let gap = if after_wall {
+            &clock.after_wall
+        } else {
+            &clock.before_wall
+        };
+        gap.store(10_000, Ordering::SeqCst);
+        trust
+            .mutate_validated(
+                &current,
+                |_| {
+                    gap.store(10_000, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .expect("sampling delay must not masquerade as rollback");
+        // Snapshots may read expired history. An arbitrary scheduling gap must
+        // still be harmless, and the following undelayed sample must progress.
+        for delay in [2, 60_000, 4_000_000_000] {
+            gap.store(delay, Ordering::SeqCst);
+            trust.snapshot().expect("arbitrary snapshot sampling gap");
+            trust.snapshot().expect("progress after sampling gap");
+        }
+    }
+}
+
+#[test]
+fn receiver_clock_wall_rollback_is_refused() {
+    let f = fixture();
+    let dir = tempfile::tempdir().expect("directory");
+    let repo = crate::Repository::init_default(dir.path()).expect("repository");
+    let selected = root(&f);
+    select_root(repo.heddle_dir(), &selected).expect("root");
+    let clock = TestClock::new(1_100_000);
+    let trust =
+        HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone()).expect("trust");
+    let current = record(&f, "current_set");
+    trust.mutate(&current, |_| Ok(())).expect("baseline");
+    let error = trust.mutate(&current, |_| {
+        clock.set(1_099_999);
+        Ok(())
+    });
+    assert!(
+        matches!(error, Err(Error::HostedClock)),
+        "real wall rollback must refuse: {error:?}"
+    );
+    clock.set(1_100_000);
+    trust
+        .mutate(&current, |_| Ok(()))
+        .expect("restored wall control");
+}
+
+#[test]
+fn receiver_clock_monotonic_regression_is_refused() {
+    let f = fixture();
+    let dir = tempfile::tempdir().expect("directory");
+    let repo = crate::Repository::init_default(dir.path()).expect("repository");
+    let selected = root(&f);
+    select_root(repo.heddle_dir(), &selected).expect("root");
+    let clock = TestClock::new(1_100_000);
+    clock.elapsed.store(10, Ordering::SeqCst);
+    let trust =
+        HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone()).expect("trust");
+    let current = record(&f, "current_set");
+    trust.mutate(&current, |_| Ok(())).expect("baseline");
+    let error = trust.mutate(&current, |_| {
+        clock.elapsed.store(9, Ordering::SeqCst);
+        Ok(())
+    });
+    assert!(
+        matches!(error, Err(Error::HostedClock)),
+        "real monotonic regression must refuse: {error:?}"
+    );
+    clock.elapsed.store(10, Ordering::SeqCst);
+    trust
+        .mutate(&current, |_| Ok(()))
+        .expect("restored monotonic control");
+}
+
+#[test]
+fn receiver_clock_monotonic_regression_within_sample_is_refused() {
+    struct RegressingClock(AtomicU64);
+    impl Clock for RegressingClock {
+        fn now_millis(&self) -> Result<i64> {
+            Ok(1_100_000)
+        }
+        fn elapsed_millis(&self) -> Result<u64> {
+            Ok(self.0.fetch_sub(1, Ordering::SeqCst))
+        }
+    }
+    let f = fixture();
+    let dir = tempfile::tempdir().expect("directory");
+    let repo = crate::Repository::init_default(dir.path()).expect("repository");
+    let selected = root(&f);
+    select_root(repo.heddle_dir(), &selected).expect("root");
+    let trust = HostedTrust::open(
+        repo.heddle_dir(),
+        &selected.authority,
+        RegressingClock(AtomicU64::new(100)),
+    )
+    .expect("trust");
+    assert!(
+        matches!(trust.snapshot(), Err(Error::HostedClock)),
+        "monotonic regression inside a sample must refuse"
+    );
+}
 fn resign(f: &Value, set: &mut host::SignedHostedWitnessSetV1) {
     let seed = hex::decode(f["keys"]["root"]["seed_hex"].as_str().expect("seed")).expect("bytes");
     set.body_digest =
