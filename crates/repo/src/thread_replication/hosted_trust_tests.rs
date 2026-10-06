@@ -154,15 +154,19 @@ fn receiver_clock_wall_rollback_is_refused() {
         HostedTrust::open(repo.heddle_dir(), &selected.authority, clock.clone()).expect("trust");
     let current = record(&f, "current_set");
     trust.mutate(&current, |_| Ok(())).expect("baseline");
+    // Stay above the durable floor so this refusal proves observed rollback,
+    // independently of the witness verifier's across-restart floor check.
+    clock.set(1_100_100);
+    clock.elapsed.store(100, Ordering::SeqCst);
     let error = trust.mutate(&current, |_| {
-        clock.set(1_099_999);
+        clock.set(1_100_099);
         Ok(())
     });
     assert!(
         matches!(error, Err(Error::HostedClock)),
         "real wall rollback must refuse: {error:?}"
     );
-    clock.set(1_100_000);
+    clock.set(1_100_100);
     trust
         .mutate(&current, |_| Ok(()))
         .expect("restored wall control");

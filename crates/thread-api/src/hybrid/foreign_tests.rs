@@ -1110,20 +1110,33 @@ fn stage_landed_originals(
 
 #[test]
 fn forged_foreign_endpoint_is_traversed_and_rejected() {
-    let (mut source, mut bundle, dependencies) = landed_source("bidir_child_sync_prefix");
-    // A real signed original with a forged reference digest must follow the
-    // ordinary native path, all the way into its Git ancestor.
-    for foreign in &mut bundle.foreign_dependencies {
-        foreign.signed_native_digest[0] ^= 1;
+    for include_git_ancestor in [false, true] {
+        let (mut source, mut bundle, dependencies) = landed_source("bidir_child_sync_prefix");
+        // A real signed original with a forged reference digest must follow the
+        // ordinary native path, all the way into its Git ancestor. Omitting it
+        // also proves that weak digest matching would actually admit this graph.
+        for foreign in &mut bundle.foreign_dependencies {
+            foreign.signed_native_digest[0] ^= 1;
+        }
+        if include_git_ancestor {
+            source.operations.push(record("import_tip_0"));
+        }
+        let result = stage_landed_originals(source, bundle, dependencies);
+        let traversed = if include_git_ancestor {
+            matches!(&result, Err(crate::fetch::Error::Preparation(message))
+                if message.contains("capture source ancestry differs from causal parents"))
+        } else {
+            matches!(
+                &result,
+                Err(crate::fetch::Error::Invalid("incomplete source ancestry"))
+            )
+        };
+        assert!(
+            traversed,
+            "unverified endpoint must traverse and retain native ancestry checks: {:?}",
+            result.err()
+        );
     }
-    source.operations.push(record("import_tip_0"));
-    let result = stage_landed_originals(source, bundle, dependencies);
-    assert!(
-        matches!(&result, Err(crate::fetch::Error::Preparation(message))
-        if message.contains("capture source ancestry differs from causal parents")),
-        "unverified endpoint must traverse and retain native ancestry checks: {:?}",
-        result.err()
-    );
 }
 
 #[test]
@@ -1138,7 +1151,7 @@ fn native_fetch_mismatched_ancestry_is_rejected() {
     else {
         panic!("capture")
     };
-    capture.result.state = state.encode_current_msgpack().expect("state").into();
+    capture.result.state = state.encode_current_msgpack().expect("state");
     let writers: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/writer-authority-alpha35.json"
     ))
