@@ -480,7 +480,9 @@ def main():
             output = log.read_text(errors='replace')
             assert 'could not compile' not in output and 'running 0 tests' not in output, output[-6000:]
             if red:
-                assert result.returncode == 101 and 'FAILED' in output and assertion in output, output[-6000:]
+                # Cargo propagates the WASM runner's exit 1; libtest uses 101.
+                red_codes = (1, 101) if name == 'wasm-spool-owner-pin' else (101,)
+                assert result.returncode in red_codes and 'FAILED' in output and assertion in output, output[-6000:]
             else:
                 assert result.returncode == 0 and re.search(r'test result: ok\. [1-9][0-9]* passed;', output), output[-6000:]
             receipt = dict(guard=name, red=red, code=result.returncode, sha=sha, test=test,
