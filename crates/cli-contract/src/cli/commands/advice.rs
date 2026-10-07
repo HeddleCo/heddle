@@ -1081,7 +1081,7 @@ impl RecoveryAdvice {
     /// commit. Keep this distinct from a remote push rejection so recovery is
     /// executable in the current checkout.
     pub(crate) fn git_overlay_local_non_fast_forward(branch: &str) -> Self {
-        let import_command = format!("heddle bridge git import --ref {branch}");
+        let import_command = canonical_git_import_ref_command(branch);
         Self::safety_refusal(
             "git_overlay_local_non_fast_forward",
             format!("Local Git branch '{branch}' does not fast-forward from the Heddle tip"),

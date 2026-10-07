@@ -2,10 +2,10 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+pub use objects::thread_record::*;
 use serde::{Deserialize, Serialize};
 
 use crate::actor_presence::AgentUsageSummary;
-pub use objects::thread_record::*;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadRuntimeOverlay {
@@ -92,6 +92,14 @@ mod thread_id_tests {
             "team@scope",
             "main",
             "wip+1=2",
+            "a;b",
+            "a|b",
+            "a$(x)",
+            "a&b",
+            "`x`",
+            "a,b",
+            "ünicode/ブランチ",
+            "trailing\u{a0}",
         ] {
             assert!(
                 ThreadId::new(ok).is_ok(),
@@ -116,15 +124,15 @@ mod thread_id_tests {
     }
 
     #[test]
-    fn rejects_whitespace_metachars_traversal_and_empty() {
+    fn rejects_git_invalid_names_and_empty() {
         for bad in [
+            "HEAD",
+            "team:scope",
+            ".",
+            "a.lock",
+            "a@{b",
             "my feature", // space
-            "a;b",        // shell separator
-            "a|b",        // pipe
-            "a$(x)",      // command substitution
             "a\nb",       // newline
-            "a&b",        // background
-            "`x`",        // backtick
             "..",         // bare traversal
             "a/../b",     // traversal segment
             "/abs",       // leading slash
@@ -153,10 +161,9 @@ mod thread_id_tests {
     }
 
     #[test]
-    fn deserialize_trusts_persisted_ids_without_revalidating() {
-        // A record written before this rule existed (or by a future version)
-        // must still deserialize — validation is at creation, not on read.
-        let id: ThreadId = serde_json::from_str("\"legacy id\"").unwrap();
-        assert_eq!(id.as_str(), "legacy id");
+    fn deserialize_refuses_git_invalid_ids() {
+        assert!(serde_json::from_str::<ThreadId>("\"team:scope\"").is_err());
+        let id: ThreadId = serde_json::from_str("\"a,b\"").expect("Git-valid identity");
+        assert_eq!(id.as_str(), "a,b");
     }
 }

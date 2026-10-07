@@ -13,6 +13,7 @@ path = "src/lib.rs"
 name = "ingest"
 
 [dependencies]
+sley-refs.workspace = true
 objects = { workspace = true, features = ["memory-backend"] }
 refs.workspace = true
 oplog.workspace = true

@@ -236,6 +236,7 @@ impl GitSource {
     /// namespaces, symbolic refs, and non-commit tags. The regular
     /// `collect_refs` view only includes commit-pointing native refs.
     pub fn collect_frozen_import_refs(&self) -> crate::Result<Vec<ImportRefIdentity>> {
+        repo::require_exact_git_ref_encoding(&self.repo).map_err(IngestError::from)?;
         let refs = self.repo.references();
         let mut raw: Vec<(String, SleyRefTarget)> = refs
             .list_refs()
@@ -452,6 +453,7 @@ impl GitSource {
     pub fn collect_refs_detailed(&self) -> crate::Result<(Vec<RefHead>, RefDiscoveryStats)> {
         let mut out = Vec::new();
         let mut stats = RefDiscoveryStats::default();
+        repo::require_exact_git_ref_encoding(&self.repo).map_err(IngestError::from)?;
 
         let refs = self
             .repo
@@ -461,12 +463,6 @@ impl GitSource {
 
         for reference in refs {
             let full_name = reference.name;
-            // Sley currently returns names as Strings after lossy decoding.
-            // A replacement character means the original Git name cannot be
-            // emitted faithfully as a native Thread or marker.
-            if full_name.contains('\u{fffd}') {
-                continue;
-            }
             let Some((namespace, short_name)) = classify_ref_name(&full_name) else {
                 continue;
             };
@@ -491,9 +487,14 @@ impl GitSource {
                     continue;
                 }
             };
-            let object = self.repo.rev_parse(&full_name).map_err(|error| {
-                IngestError::Git(format!("resolve Git ref '{full_name}': {error}"))
-            })?;
+            // Enumeration already resolved direct refs, including packed refs
+            // whose names exceed the host's loose-file component limit.
+            let object = match &reference.target {
+                SleyRefTarget::Direct(oid) => *oid,
+                SleyRefTarget::Symbolic(_) => self.repo.rev_parse(&full_name).map_err(|error| {
+                    IngestError::Git(format!("resolve Git ref '{full_name}': {error}"))
+                })?,
+            };
 
             match namespace {
                 RefNamespace::Branch => stats.local_branches += 1,
@@ -927,6 +928,10 @@ impl GitSource {
 }
 
 fn classify_ref_name(full_name: &str) -> Option<(RefNamespace, String)> {
+    sley_refs::check_refname_format(full_name, false).ok()?;
+    if let Some(short) = full_name.strip_prefix("refs/heads/") {
+        objects::object::ThreadName::from_git_branch(short).ok()?;
+    }
     full_name
         .strip_prefix("refs/heads/")
         .map(|short| (RefNamespace::Branch, short.to_string()))
@@ -1040,7 +1045,7 @@ mod tests {
     use std::process::Command;
 
     use objects::object::thread_replication::git_import_graph::{
-        ImportRefDisposition, ImportSkipReason, classify_frozen_import_refs,
+        ImportRefDisposition, classify_frozen_import_refs,
     };
     use tempfile::TempDir;
 
@@ -1128,14 +1133,10 @@ mod tests {
             .expect("write invalid ref");
         assert!(status.success());
         let source = GitSource::open(temp.path()).expect("source");
-        let refs = source.collect_frozen_import_refs().expect("refs");
-        let classified = classify_frozen_import_refs(&refs).expect("classification");
-        assert!(classified.skipped_refs.iter().any(|reference| {
-            String::from_utf8_lossy(&reference.raw_name).contains("invalid-")
-                && reference.reason == ImportSkipReason::NonUtf8RefName
-        }));
-        let (heads, _) = source.collect_refs_detailed().expect("heads");
-        assert!(!heads.iter().any(|head| head.full_name.contains("invalid-")));
+        let error = source
+            .collect_frozen_import_refs()
+            .expect_err("malformed UTF-8 must fail before Sley String enumeration");
+        assert!(error.to_string().contains("ref name is not UTF-8"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # heddle#451 — On-disk schema-versioning policy + per-format audit
 
-**Status:** accepted policy, refreshed for repository format v5 on 2026-09-07. **Motivated by:** the #449 brick — the
+**Status:** accepted policy, refreshed for repository format v6 on 2026-10-07. **Motivated by:** the #449 brick — the
 oplog `OpRecord` payload schema changed with no version discriminator; the new reader
 silently misparsed legacy bytes and bricked pre-cutover repos. **Scope:** every on-disk
 format a v0.3.0 binary writes, audited against the discipline below; the clean-cut
@@ -16,10 +16,12 @@ cannot point at the row of §2 it updates and the rule of §3 it follows is not 
 
 ## 1. Verdict
 
-**Repository format v5 is the enforced compatibility gate.** `Repository::open`
-refuses both newer formats and pre-v5 repositories before reading incompatible
+**Repository format v6 is the enforced compatibility gate.** `Repository::open`
+refuses both newer formats and pre-v6 repositories before reading incompatible
 state or ref bytes. The refusal leaves the repository unchanged and directs users
-to recreate it or re-adopt its Git history. Container formats retain their own
+to preserve work and coordination data, then re-clone or re-import into a new
+directory. V5 → v6 is [rebuild-only](../migrations/ref-names-v6.md), with no
+converter. Container formats retain their own
 version checks beneath that coarse repository boundary.
 
 ## 2. Version-stamp inventory
@@ -36,20 +38,20 @@ to do with today’s bytes.
 | 4 | **packfiles** `objects/packs/*.pack` | binary | `LMPK` magic + current `version = 4` + blake3 trailer; annotated tags use id-tag 2 | accept only v4; refuse older versions with recreation/re-adoption advice and unknown-newer versions with upgrade advice; unknown entry `ObjectType`/id-tag byte also refuses | `crates/pack/src/store/pack/mod.rs` (`pack_container_spec`, `ObjectType`), `shared.rs` (`verify_supported_container`) |
 | 5 | **pack index** `*.idx` | binary | `LMI\0` + current `INDEX_VERSION = 4`; offset bit 62 marks annotated-tag ids | accept only v4; refuse older versions with recreation/re-adoption advice and unknown-newer versions with upgrade advice | `pack_index.rs` |
 | 6 | **loose-object compression envelope** (all of blobs/trees/states/actions) | 1 tag byte + u64 size + payload | tag byte is `CompressionType` 0/1/2, not a format version; `is_compressed` *sniffs* (zstd magic check), short inputs “assume uncompressed” | unknown tag → `InvalidType` error; the sniffing is in-band heuristic, not a stamp | `crates/objects/src/store/compression/mod.rs:14-40,238-262,289-298` |
-| 7 | **State objects** `objects/states/**` (also embedded in packs and transfer) | local loose storage uses a private positional/compressed codec; packs and transfer use canonical named-field msgpack | protected by repository format v5; portable bytes are owned by `State::encode_current_msgpack` / `decode_current_msgpack` | exact repository admission gate; portable producers and consumers share the model codec rather than duplicating serde choices | `crates/object-model/src/object/state_core.rs`; local wrapper `crates/objects/src/store/codec.rs` |
+| 7 | **State objects** `objects/states/**` (also embedded in packs and transfer) | local loose storage uses a private positional/compressed codec; packs and transfer use canonical named-field msgpack | protected by repository format v6; portable bytes are owned by `State::encode_current_msgpack` / `decode_current_msgpack` | exact repository admission gate; portable producers and consumers share the model codec rather than duplicating serde choices | `crates/object-model/src/object/state_core.rs`; local wrapper `crates/objects/src/store/codec.rs` |
 | 8 | **Tree objects** `objects/trees/**` | rmp-serde, positional | **NONE.** `TreeEntry` = 4 required fields | same accidental-refuse class as #7. NOTE: tree/state IDs are **custom hash framings, not hashes of the rmp bytes** (`ContentHash::compute_typed_with_len("tree", …)`), so re-encoding bytes is ID-stable — store migrations are possible without rewriting history | `crates/objects/src/object/tree.rs:122-127` (entry), `:270-277` (framing hash); `fs_impl.rs:56-68` (load recomputes framing hash, catches corruption) |
 | 9 | **Action objects** `objects/actions/**` | rmp-serde, positional | **NONE** | same class; load recomputes `compute_id` | `fs_impl.rs:86-101` |
 | 10 | **Versioned sidecar blobs** (provenance, risk signals, review signatures, discussions, structured conflict, visibility sidecars) — content-addressed, referenced by hash from State tail fields | rmp-serde | `format_version: u8` per blob via `versioned_msgpack_blob!`; provenance hand-rolls the same | refuse: `unsupported … version {n}` (strict `!=` for most; risk-signal/op-index use `>` reject-newer) | `crates/objects/src/object/versioned_blob.rs:14-19,50-51` (macro), `state_provenance.rs:64,84-86`, `structured_conflict.rs:28-34,158-160`, `risk_signal.rs:28-42` |
-| 11 | **HEAD** + loose refs `refs/threads/*`, `refs/markers/*`, remotes | bare text (`ref: <thread>` / 32-byte `StateId`) | protected by repository format v4 | parse-error refuse (`HeadParseError` / `StateIdTextError`) | `crates/refs/src/refs/head.rs`, `text.rs` |
+| 11 | **HEAD** + loose refs `refs/threads/**/entry/value`, `refs/markers/**/entry/value`, remotes and synthetics | exact UTF-8 text; bounded, reversible percent-escaped paths | protected by repository format v6 | v5 refused unchanged; HEAD strips only LF/CRLF; parse-error refuse (`HeadParseError` / `StateIdTextError`) | `crates/object-model/src/name_encoding.rs`, `crates/refs/src/refs/head.rs`, `refs_storage.rs`, `refs_synthetic.rs` |
 | 12 | **packed-refs** | git-style text | NONE (comment header only) | ⚠️ **silently skips** unparseable/unknown lines (`continue`) — a future line-format extension would silently vanish refs from an old binary’s view. The one surface today whose failure mode is silent-drop rather than refuse | `crates/refs/src/refs/packed_model.rs:24-46` |
 | 13 | **ref summary index** (cache) | text | `heddle-ref-summary-v1` first line, strict match | refuse → callers fall back to enumerating storage; rebuilt on write | `crates/refs/src/refs/ref_summary_index.rs:14,107-110`; fallback `refs_manager.rs:621-625` |
 | 14 | **operation log index** `cache/operation_index/buckets/*` (cache) | rmp-serde | `format_version: u8 = 1` per bucket; rejects **newer only** | refuse newer; cache — rebuildable | `crates/refs/src/refs/operation_index.rs:38,151-157,279,297` |
 | 15 | **worktree index** `state/index.bin` + journal (cache) | binary | `HDLEIDX\0` + `INDEX_VERSION = 5` (multi-version reader v1–v5); journal `HDLEJNL\0` v1 | refuse `VersionMismatch` → caller logs + proceeds with a fresh empty index (rescan) — correct cache semantics | `crates/repo/src/worktree_index.rs:69-83`, `worktree_index_storage.rs:105-122`; fallback `repository_tree.rs:230-236` |
 | 16 | **commit graph** `LMGRAPH\0` (cache) | binary | `GRAPH_VERSION = 1` | refuse → warn + rebuild empty | `crates/repo/src/commit_graph_persistence.rs:17-18,128-130`; `commit_graph.rs:50-78` |
-| 17 | **thread records** `thread_records/*.json` + `Thread` JSON | serde_json (named) | NONE — but self-describing; `#[serde(default)]` throughout, unknown fields ignored | additive changes tolerated both directions; renames/type changes refuse | `crates/repo/src/thread_storage.rs:24-60`, `thread_record_store.rs` |
-| 18 | **thread manifest** `manifest.toml` | TOML | `SCHEMA_VERSION: u32 = 3`, strict `!=` refuse | refuse, with the **model error message**: “manifest at … uses schema {x} but this binary speaks {y}” | `crates/repo/src/thread_manifest.rs:48,346-356` |
-| 19 | **repo config** `config.toml` | TOML | `[repository] version = 5`, enforced on open | exact match only; refuse older and newer without mutation | `crates/repo/src/repo_config.rs`, `repository_open.rs` |
-| 20 | **migration ledger** | — | — | removed from the current runtime; older repositories are converted offline before the clean cut | ADR-0042 |
+| 17 | **thread records** `thread_records/**/entry/record.toml` + `Thread` JSON | TOML / named JSON | storage layout and strict Git-valid identities protected by repository format v6 | v5 refused unchanged; additive fields tolerated, invalid identities refuse | `crates/repo/src/thread_record_store.rs`, `crates/objects/src/thread_record.rs` |
+| 18 | **thread manifest** `threads/**/entry/manifest.toml` and managed checkout directories | TOML; shared bounded path encoding | `SCHEMA_VERSION: u32 = 3`, strict `!=` refuse; layout protected by repository format v6 | v5 refused unchanged; manifest schema mismatch refuses explicitly | `crates/repo/src/thread_manifest.rs` |
+| 19 | **repo config** `config.toml` | TOML | `[repository] version = 6`, enforced on open | exact match only; refuse older and newer without mutation | `crates/repo/src/repo_config.rs`, `repository_open.rs` |
+| 20 | **migration ledger** | — | — | removed from the current runtime; v5 → v6 requires preservation and rebuild, with no converter | ADR-0042; [v6 rebuild instructions](../migrations/ref-names-v6.md) |
 | 21 | **JSON state sidecars**: stash, sessions, merge state, `REBASE_STATE`/`BISECT_*` etc. | serde_json (named) | NONE | additive-tolerant; ⚠️ list paths skip unreadable entries silently (`let Ok(..) else continue`) | `crates/repo/src/stash.rs:67,91`, `session_storage.rs:125,150`, `merge_state.rs:190,213` |
 | 22 | **identity** `identity.toml` / `device-identity.toml`; agents `agents/*.toml`; `fsmonitor.toml`; `lazy-hydrator.toml`; `shallow` (text id list); worktree `objectstore` pointer (text path) | TOML/text | NONE | tolerant / parse-error refuse; agents are ephemeral runtime state | `identity.rs:188-319`, `agent_registry.rs:4`, `shallow.rs:22-25` |
 | 23 | **Git Projection Mapping** `git-projection/git-projection-mapping.json` + Raw Git Object Residuals | JSON + content-addressed Git bytes | NONE on the mapping; residuals are OID-verified | `.git` remains authoritative in Git Overlay; explicit projection reconstructs from Heddle state or requires complete residual closure. No `.heddle/git` runtime store exists. | `crates/git-projection/src/git_mapping.rs`, `git_residual.rs`, `git_notes.rs`, ADR-0042 |
@@ -147,6 +149,7 @@ next refs-format touch.
 | **#606** verbatim nonstandard tree modes | row 8 + tree hash framing | Safe **only** as a trailing `skip_serializing_if` sparse field (standard trees stay byte-identical; only nonstandard-mode trees refuse on 0.3) + absence-preserving hash framing (R4). A plain-default tail would make every new tree unreadable by 0.3 | Additive under R4; conformance fixtures (§5); ledger entry; no repo-version bump needed if sparse |
 | **#618** oplog truncation recovery | rows 1, 3 (+ new `.oplog.recovery` sidecar) | No format change; pure robustness win (today a <120-byte tail truncation makes the whole oplog unreadable — `packed_oplog.rs:136`, `FOOTER_LEN:34`) | Additive; recovery sidecar gets a version field at birth (R1) |
 | **#265** submodule status (half-recurse) | row 24 (read-only) | Display-only; no format change | None. The in-band-prefix collision class stays open (follow-up F5) |
+| **#2010** exact Git ref names and portable storage | rows 11–13, 17–19; timeline recovery and locks | Ref-derived filesystem layouts change; API alpha.43 changes signed encodings | Repository version 6, exact-version refusal, and owner-directed rebuild-only cutover; preserve every checkout's work and local coordination data first. See [v6 instructions](../migrations/ref-names-v6.md). |
 
 ## 5. Test floor — cross-version conformance per stamped surface
 

@@ -7,7 +7,11 @@ fn test_fsck_dangling_ref() {
     setup_repo_with_file(&temp, "file.txt", "content");
 
     heddle(&["thread", "create", "orphan"], Some(temp.path())).unwrap();
-    let thread_path = temp.path().join(".heddle/refs/threads/orphan");
+    let thread_path = temp
+        .path()
+        .join(".heddle/refs/threads")
+        .join(objects::name_encoding::name_path("orphan"))
+        .join("value");
     fs::write(&thread_path, "hs-deadbeef12345678901234567890").unwrap();
 
     let result = heddle(&["maintenance", "fsck"], Some(temp.path()));

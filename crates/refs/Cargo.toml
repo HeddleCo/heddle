@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+sley-refs.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 heddle-object-model.workspace = true

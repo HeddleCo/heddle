@@ -183,7 +183,7 @@ fn test_start_without_path_defaults_under_heddle_threads() {
         .path()
         .join(".heddle")
         .join("threads")
-        .join("feature%2Fsearch")
+        .join(objects::name_encoding::name_path("feature/search"))
         .join(leaf);
     assert!(
         checkout.join(".heddle").exists(),
@@ -212,7 +212,7 @@ fn test_start_workspace_auto_without_path_defaults_under_heddle_threads() {
         .path()
         .join(".heddle")
         .join("threads")
-        .join("feature%2Fsearch")
+        .join(objects::name_encoding::name_path("feature/search"))
         .join(leaf);
     assert!(
         checkout.join(".heddle").exists(),

@@ -3941,17 +3941,17 @@ fn start_rejects_thread_name_with_space_in_text_and_json() {
 
 /// heddle#464 close-the-class (round 6): the SAME early-reject rule must guard
 /// every user/external thread-creation boundary, not just `start`. `heddle
-/// thread create` with a shell-metacharacter name is rejected before any ref or
+/// thread create` with a Git-invalid name is rejected before any ref or
 /// record is persisted.
 #[test]
-fn thread_create_rejects_thread_name_with_metachar() {
+fn thread_create_rejects_git_invalid_thread_name() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let out = heddle_output(&["thread", "create", "bad;id"], Some(temp.path())).unwrap();
+    let out = heddle_output(&["thread", "create", "bad:id"], Some(temp.path())).unwrap();
     assert!(
         !out.status.success(),
-        "thread create must reject an unsafe name: stdout={}",
+        "thread create must reject a Git-invalid name: stdout={}",
         String::from_utf8_lossy(&out.stdout)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -3962,28 +3962,28 @@ fn thread_create_rejects_thread_name_with_metachar() {
 
     let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
     assert!(
-        !list.contains("bad;id"),
+        !list.contains("bad:id"),
         "the rejected name must never have been persisted: {list}"
     );
 }
 
 /// heddle#464 close-the-class: `thread rename` writes a NEW thread id, so the
-/// destination name is a creation boundary too — an unsafe new name is rejected
+/// destination name is a creation boundary too — a Git-invalid name is rejected
 /// and the original thread is left untouched.
 #[test]
-fn thread_rename_rejects_unsafe_new_name() {
+fn thread_rename_rejects_git_invalid_new_name() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(&["thread", "create", "safe-thread"], Some(temp.path())).unwrap();
 
     let out = heddle_output(
-        &["thread", "rename", "safe-thread", "bad;id"],
+        &["thread", "rename", "safe-thread", "bad:id"],
         Some(temp.path()),
     )
     .unwrap();
     assert!(
         !out.status.success(),
-        "rename to an unsafe name must be rejected: stdout={}",
+        "rename to a Git-invalid name must be rejected: stdout={}",
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
@@ -3994,7 +3994,7 @@ fn thread_rename_rejects_unsafe_new_name() {
 
     let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
     assert!(
-        !list.contains("bad;id"),
+        !list.contains("bad:id"),
         "the rejected name must never have been persisted: {list}"
     );
     assert!(
@@ -4028,20 +4028,20 @@ fn removed_actor_surface_does_not_write_refs() {
 }
 
 /// heddle#464 close-the-class (round 6): `heddle agent reserve` also persists a
-/// thread record, so it must reject an unsafe thread name at the same boundary.
+/// thread record, so it must reject a Git-invalid name at the same boundary.
 #[test]
-fn agent_reserve_rejects_thread_name_with_metachar() {
+fn agent_reserve_rejects_git_invalid_thread_name() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let out = heddle_output(
-        &["agent", "reserve", "--thread", "bad;id"],
+        &["agent", "reserve", "--thread", "bad:id"],
         Some(temp.path()),
     )
     .unwrap();
     assert!(
         !out.status.success(),
-        "agent reserve must reject an unsafe name: stdout={}",
+        "agent reserve must reject a Git-invalid name: stdout={}",
         String::from_utf8_lossy(&out.stdout)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -4052,7 +4052,7 @@ fn agent_reserve_rejects_thread_name_with_metachar() {
 
     let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
     assert!(
-        !list.contains("bad;id"),
+        !list.contains("bad:id"),
         "the rejected name must never have been persisted: {list}"
     );
 }

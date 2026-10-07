@@ -853,7 +853,10 @@ fn export_scoped(
             // A listed thread name with no tip is neither synced nor pruned.
             continue;
         }
-        let branch_ref = format!("refs/heads/{track_name}");
+        let branch_ref = format!(
+            "refs/heads/{}",
+            objects::name_encoding::git_name(track_name)
+        );
         let in_scope = thread.is_none() || thread == Some(track_name.as_str());
         let desired_oid = desired.get(&branch_ref).copied();
         let existing_raw_oid = direct_ref_oid(&repo, &branch_ref);
@@ -875,7 +878,7 @@ fn export_scoped(
                         managed_record.insert(branch_ref.clone(), git_oid);
                         stats.threads_synced += 1;
                         stats.branches.push(ExportedRef {
-                            name: track_name.clone(),
+                            name: objects::name_encoding::git_name(track_name).into_owned(),
                             tip: git_oid,
                         });
                     }
@@ -896,7 +899,7 @@ fn export_scoped(
                         managed_record.insert(branch_ref.clone(), git_oid);
                         stats.threads_synced += 1;
                         stats.branches.push(ExportedRef {
-                            name: track_name.clone(),
+                            name: objects::name_encoding::git_name(track_name).into_owned(),
                             tip: git_oid,
                         });
                     }
@@ -959,12 +962,16 @@ fn export_scoped(
         markers.iter().map(|m| m.to_string()).collect();
     for full_name in managed_record.keys() {
         if let Some(tag) = full_name.strip_prefix("refs/tags/") {
-            tag_names.insert(tag.to_string());
+            tag_names.insert(
+                MarkerName::from_git_tag(tag)
+                    .map_err(|error| GitProjectionError::Git(error.to_string()))?
+                    .to_string(),
+            );
         }
     }
 
     for name in &tag_names {
-        let tag_ref = format!("refs/tags/{name}");
+        let tag_ref = format!("refs/tags/{}", objects::name_encoding::git_name(name));
         let existing_raw_oid = direct_ref_oid(&repo, &tag_ref);
         let existing_oid = existing_raw_oid.and_then(|oid| peel_to_commit_oid(&repo, oid));
         let desired_oid = desired.get(&tag_ref).copied();
@@ -992,7 +999,7 @@ fn export_scoped(
             managed_record.insert(tag_ref.clone(), raw);
             stats.markers_synced += 1;
             stats.tags.push(ExportedRef {
-                name: name.clone(),
+                name: objects::name_encoding::git_name(name).into_owned(),
                 tip: raw,
             });
             continue;
@@ -1013,7 +1020,7 @@ fn export_scoped(
                         managed_record.insert(tag_ref.clone(), git_oid);
                         stats.markers_synced += 1;
                         stats.tags.push(ExportedRef {
-                            name: name.clone(),
+                            name: objects::name_encoding::git_name(name).into_owned(),
                             tip: git_oid,
                         });
                     }
@@ -1450,7 +1457,13 @@ fn project_desired_refs(
             continue;
         };
         if let Some(git_oid) = frontier_git_oid(heddle_repo, mapping, tip)? {
-            desired.insert(format!("refs/heads/{track_name}"), git_oid);
+            desired.insert(
+                format!(
+                    "refs/heads/{}",
+                    objects::name_encoding::git_name(track_name)
+                ),
+                git_oid,
+            );
         }
     }
     for marker_name in markers {
@@ -1460,7 +1473,13 @@ fn project_desired_refs(
         if let Some(git_oid) = mapping.get_git(&state_id) {
             let target = native_annotated_tag_oid(heddle_repo, marker_name, state_id, git_oid)?
                 .unwrap_or(git_oid);
-            desired.insert(format!("refs/tags/{marker_name}"), target);
+            desired.insert(
+                format!(
+                    "refs/tags/{}",
+                    objects::name_encoding::git_name(marker_name)
+                ),
+                target,
+            );
         }
     }
     for (name, state_id) in heddle_repo.refs().list_synthetic_frontiers()? {

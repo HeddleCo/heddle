@@ -122,7 +122,7 @@ fn check_checkout_head(
     let Some(expected_git_oid) = mapping.get_git(&state_id) else {
         return Ok(());
     };
-    let branch_ref = format!("refs/heads/{thread}");
+    let branch_ref = format!("refs/heads/{}", objects::name_encoding::git_name(&thread));
     let Ok(Some(reference)) = checkout.find_reference(&branch_ref) else {
         return Ok(());
     };

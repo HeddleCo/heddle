@@ -81,7 +81,7 @@ fn live_owner_conflict_advice(
     } else {
         "anchor_drift"
     };
-    let primary_command = format!("heddle thread show {thread}");
+    let primary_command = format!("heddle thread show {}", shell_quote(thread));
     if kind == "live_owner" {
         RecoveryAdvice::safety_refusal(
             "live_owner",
@@ -125,7 +125,7 @@ fn anchor_drift_no_owner_advice(
     requested_anchor_full: &str,
     reserved_anchor: &str,
 ) -> RecoveryAdvice {
-    let primary_command = format!("heddle thread show {thread}");
+    let primary_command = format!("heddle thread show {}", shell_quote(thread));
     RecoveryAdvice::safety_refusal(
         "anchor_drift",
         format!(
@@ -1089,7 +1089,7 @@ fn fanout_git_link_failure_advice(thread: &str, detail: impl Into<String>) -> Re
 }
 
 fn fanout_launch_failure_advice(thread: &str, detail: impl Into<String>) -> RecoveryAdvice {
-    let primary = format!("heddle thread show {thread}");
+    let primary = format!("heddle thread show {}", shell_quote(thread));
     RecoveryAdvice::safety_refusal(
         "agent_fanout_launch_failed",
         format!("Harness for lane '{thread}' did not complete"),
@@ -1119,7 +1119,7 @@ fn link_fanout_child_git(parent: &Repository, child: &Path, thread: &str) -> Res
     })?;
     let git = SleyRepository::init_with_format(child, source.object_format(), false)?;
     git.copy_reachable_from(&source, &[tip])?;
-    let branch = format!("refs/heads/{thread}");
+    let branch = format!("refs/heads/{}", objects::name_encoding::git_name(thread));
     set_reference(
         &git,
         &branch,
@@ -1361,7 +1361,16 @@ fn fanout_lane_unavailable_advice(
         kind,
         error,
         guidance,
-        format!("heddle agent fanout plan --title <title> --lane {thread}=<title>"),
+        format!(
+            "heddle agent fanout plan --title <title> --lane {}",
+            shell_quote(
+                &FanoutNodeSpec {
+                    thread: thread.to_owned(),
+                    title: "<title>".into()
+                }
+                .to_lane_arg()
+            )
+        ),
     )
 }
 
@@ -1670,8 +1679,11 @@ pub async fn cmd_agent_capture(
             ),
             "capturing from the wrong thread would violate the lease's ownership scope",
             "the lease was renewed, but no capture, refs, or worktree changes were applied",
-            format!("heddle thread switch {reserved_thread}"),
-            vec![format!("heddle thread switch {reserved_thread}")],
+            format!("heddle thread switch {}", shell_quote(&reserved_thread)),
+            vec![format!(
+                "heddle thread switch {}",
+                shell_quote(&reserved_thread)
+            )],
         )));
     }
 

@@ -1541,11 +1541,7 @@ pub fn merge_thread_into_current_transactional(
 }
 
 fn land_local_command(thread_id: &str) -> String {
-    if thread_id.starts_with('-') {
-        format!("heddle land --thread -- {thread_id}")
-    } else {
-        format!("heddle land --thread {thread_id}")
-    }
+    format!("heddle land {}", repo::thread_flag(thread_id))
 }
 
 fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {

@@ -97,7 +97,13 @@ pub fn check_fanout_start_preflight(
 impl FanoutNodeSpec {
     /// Reconstruct the CLI `--lane` value form: `thread=title`.
     pub fn to_lane_arg(&self) -> String {
-        format!("{}={}", self.thread, self.title)
+        let thread = if self.thread.contains('=') {
+            // Brackets are Git-invalid, so this framing cannot alias a name.
+            format!("[{}]", objects::name_encoding::encode_name(&self.thread))
+        } else {
+            self.thread.clone()
+        };
+        format!("{thread}={}", self.title)
     }
 }
 
@@ -214,7 +220,7 @@ impl std::error::Error for FanoutPlanError {
 ///
 /// Detached HEAD uses the stable label `"detached"` (matches CLI).
 pub fn select_fanout_parent_thread(head_thread: Option<&str>) -> String {
-    match head_thread.map(str::trim).filter(|s| !s.is_empty()) {
+    match head_thread.filter(|s| !s.is_empty()) {
         Some(thread) => thread.to_string(),
         None => "detached".to_string(),
     }
@@ -259,15 +265,29 @@ pub fn fanout_start_attach_rule() -> &'static str {
 // Lane parse
 // ---------------------------------------------------------------------------
 
-/// Parse a single `--lane` value: `thread=title`.
+/// Parse `thread=title`, or `[n-percent-escaped-thread]=title` when the
+/// thread contains `=`. Titles may themselves contain the delimiter.
 pub fn parse_fanout_lane(raw: &str) -> Result<FanoutNodeSpec, FanoutPlanError> {
     let (thread, title) = raw
         .split_once('=')
         .ok_or_else(|| FanoutPlanError::LaneInvalid {
             raw: raw.to_string(),
         })?;
-    let thread = thread.trim();
     let title = title.trim();
+    let decoded;
+    let thread = if let Some(encoded) = thread
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+    {
+        decoded = objects::name_encoding::decode_name(encoded).ok_or_else(|| {
+            FanoutPlanError::LaneInvalid {
+                raw: raw.to_string(),
+            }
+        })?;
+        decoded.as_str()
+    } else {
+        thread
+    };
     if thread.is_empty() || title.is_empty() {
         return Err(FanoutPlanError::LaneInvalid {
             raw: raw.to_string(),
@@ -392,9 +412,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_lane_trims_whitespace() {
-        let node = parse_fanout_lane("  feature/b = Title B  ").unwrap();
-        assert_eq!(node.thread, "feature/b");
+    fn lane_equals_name_and_title_round_trip_without_ambiguity() {
+        let node = FanoutNodeSpec {
+            thread: "feat/mcp=timeout".into(),
+            title: "Timeout=30".into(),
+        };
+        assert_eq!(node.to_lane_arg(), "[n-feat%2Fmcp%3Dtimeout]=Timeout=30");
+        assert_eq!(
+            parse_fanout_lane(&node.to_lane_arg()).expect("encoded lane"),
+            node
+        );
+    }
+
+    #[test]
+    fn parse_lane_preserves_ref_whitespace_and_trims_title() {
+        let node = parse_fanout_lane("feature/b\u{a0}= Title B  ").unwrap();
+        assert_eq!(node.thread, "feature/b\u{a0}");
         assert_eq!(node.title, "Title B");
     }
 
@@ -428,7 +461,10 @@ mod tests {
     #[test]
     fn select_parent_thread_attached_and_detached() {
         assert_eq!(select_fanout_parent_thread(Some("main")), "main");
-        assert_eq!(select_fanout_parent_thread(Some("  ")), "detached");
+        assert_eq!(
+            select_fanout_parent_thread(Some("main\u{a0}")),
+            "main\u{a0}"
+        );
         assert_eq!(select_fanout_parent_thread(None), "detached");
     }
 

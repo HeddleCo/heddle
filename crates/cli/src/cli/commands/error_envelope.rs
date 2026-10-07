@@ -729,7 +729,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         kind: "repository_format_too_old".to_string(),
                         human_error: Some(heddle_err.to_string()),
                         hint: format!(
-                            "This alpha repository uses format v{found}. Back it up, then recreate it or reimport its Git history as format v{required}."
+                            "This repository uses format v{found}. Copy uncommitted and untracked work from every checkout and back up the entire .heddle directory, including local coordination data. Re-clone or re-import into a new directory as format v{required}; retain the old repository until recovery is verified."
                         ),
                         unsafe_condition: format!(
                             "repository format v{found} is incompatible with required format v{required}"

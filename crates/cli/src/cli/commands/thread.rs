@@ -936,8 +936,7 @@ pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice 
     RecoveryAdvice::invalid_usage(
         "thread_name_invalid",
         err.to_string(),
-        "Choose a thread name using only letters, digits, and _ - . / @ : + = \
-         (no spaces or shell metacharacters).",
+        "Choose a Git-valid branch name other than HEAD or the reserved heddle/ namespace (full ref at most 1024 UTF-8 bytes).",
         "heddle start <name>",
     )
 }
@@ -3241,8 +3240,11 @@ mod tests {
         // Both live in the same per-thread directory: checkout at
         // `<dir>/<repo-name>`, manifest at `<dir>/manifest.toml`.
         assert_eq!(checkout.parent().unwrap(), manifest.parent().unwrap());
-        // The slash is encoded into ONE segment directly under `threads/`.
-        assert_eq!(checkout.parent().unwrap(), threads_root.join("foo%2Fbar"));
+        // The slash is encoded in the canonical v6 directory and terminal.
+        assert_eq!(
+            checkout.parent().unwrap(),
+            threads_root.join(objects::name_encoding::name_path("foo/bar"))
+        );
         assert_eq!(
             checkout.file_name().unwrap(),
             repo.managed_checkout_source_root().file_name().unwrap()
