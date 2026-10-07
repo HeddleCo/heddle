@@ -980,12 +980,12 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
         let proof =
             crypto::thread_ownership_claim::SignedOwnershipClaim::sign(&claim, &local, &account)
                 .expect("both ownership signatures");
+        let claim_record = crate::thread_ownership::encode(&proof).expect("portable original");
         ready
             .thread_genesis
             .as_mut()
             .expect("genesis")
-            .ownership_claims =
-            vec![crate::thread_ownership::encode(&proof).expect("portable original")];
+            .ownership_claims = vec![claim_record.clone()];
         if !omit_cutoff {
             operations.push(next.clone());
         }
@@ -1017,6 +1017,31 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
                 result.expect("foreign endpoint's claim cutoff belongs to its origin prefix");
             assert_eq!(staged.state().id(), selected.id());
             assert_eq!(staged.operations().len(), 1);
+            assert!(
+                staged
+                    .ready()
+                    .thread_genesis
+                    .as_ref()
+                    .expect("genesis")
+                    .ownership_claims
+                    .is_empty(),
+                "a claim whose frontier was not fetched must not reach install"
+            );
+            let staged_records = install_closure_records(&staged);
+            crypto::import_authority::NativeClosure::verify(&staged_records)
+                .expect("staged set is the closure install accepts");
+            let mut refused = staged_records;
+            refused.push(claim_record);
+            let rejected = crypto::import_authority::NativeClosure::verify(&refused)
+                .err()
+                .expect("install refuses the unusable claim");
+            assert!(
+                matches!(
+                    rejected,
+                    crypto::import_authority::Error::Contract(api::hybrid_codec::Reject::Scope)
+                ),
+                "install refuses the unusable claim: {rejected}"
+            );
         } else if omit_cutoff {
             assert!(
                 result
@@ -1035,8 +1060,46 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
                 Some(&next),
                 "original cutoff follows causal selected source"
             );
+            assert_eq!(
+                staged
+                    .ready()
+                    .thread_genesis
+                    .as_ref()
+                    .expect("genesis")
+                    .ownership_claims,
+                vec![claim_record],
+                "an installable claim stays with its staged frontier"
+            );
+            crypto::import_authority::NativeClosure::verify(&install_closure_records(&staged))
+                .expect("retained cutoff is installable");
         }
     }
+}
+
+fn install_closure_records(staged: &StagedSource) -> Vec<crate::contract::SignedRecord> {
+    let mut records = Vec::new();
+    for wrapper in staged
+        .ready()
+        .thread_genesis
+        .iter()
+        .chain(staged.dependency_geneses())
+    {
+        records.push(wrapper.genesis.clone().expect("signed genesis"));
+        records.extend(wrapper.ownership_claims.iter().cloned());
+        records.extend(wrapper.ownership_resolutions.iter().cloned());
+    }
+    for signed in staged.operations() {
+        let operation = signed.verify().expect("staged operation");
+        records.push(crate::contract::SignedRecord {
+            format: objects::object::thread_replication::OPERATION_FORMAT.into(),
+            canonical_record: signed.canonical.clone(),
+            signatures: vec![crate::contract::RecordSignature {
+                public_key: operation.publisher.to_vec(),
+                signature: signed.signature.clone(),
+            }],
+        });
+    }
+    records
 }
 
 #[test]

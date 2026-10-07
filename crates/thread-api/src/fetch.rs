@@ -65,6 +65,7 @@ impl From<repo::thread_replication::Error> for Error {
             repo::thread_replication::Error::ForeignPrefixLimitExceeded { limit_name, limit } => {
                 Self::ForeignPrefixLimitExceeded { limit_name, limit }
             }
+            repo::thread_replication::Error::Hybrid(reason) => Self::Hybrid(reason),
             error => Self::Preparation(error.to_string()),
         }
     }

@@ -833,6 +833,65 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn hosted_install_surfaces_typed_hybrid_rejection() {
+        for reason in [
+            api::hybrid_codec::Reject::StaleContext,
+            api::hybrid_codec::Reject::HighWater,
+        ] {
+            let scratch = tempfile::tempdir().expect("scratch");
+            let directory = tempfile::tempdir().expect("receiver");
+            let repo = Repository::init(directory.path()).expect("repository");
+            let before = artifacts(repo.heddle_dir());
+            let (staged, root, pinned) = source(scratch.path(), true);
+            let bundle = staged.import_authority().expect("history").clone();
+            let history = AcceptedHistory::from_selected_spool(
+                &bundle,
+                &pinned,
+                1350,
+                heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                    .expect("limits"),
+            )
+            .expect("selected history");
+            select_root(repo.heddle_dir(), &root).expect("root");
+            select_spool(
+                repo.heddle_dir(),
+                pinned.owner_genesis().spool_uuid(),
+                *history.genesis(),
+                *history.initial_owner(),
+            )
+            .expect("Spool");
+            let trust = HostedTrust::open(repo.heddle_dir(), &root.authority, ReceiverClock)
+                .expect("trust");
+            let authority = SelectedAuthority::new(
+                history,
+                bundle,
+                move |_: &ImportPublicProofBundleV1,
+                      _: i64,
+                      _: &repo::thread_replication::hosted_trust::TrustTransaction<'_>| {
+                    Err(repo::thread_replication::Error::Hybrid(reason))
+                },
+            );
+            let result = staged.install_hosted(&repo, &trust, &authority, 1350);
+            assert!(
+                matches!(result, Err(Error::Hybrid(actual)) if actual == reason),
+                "repository {reason:?} must surface as fetch::Error::Hybrid: {result:?}"
+            );
+            assert_eq!(
+                artifacts(repo.heddle_dir()),
+                before,
+                "typed rejection must not install artifacts"
+            );
+            assert!(
+                trust
+                    .snapshot()
+                    .expect("rolled back trust")
+                    .previous
+                    .is_none()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn hosted_native_relay_retains_bundle_and_rechecks_revoked_durable_context() {
         use std::sync::Arc;
