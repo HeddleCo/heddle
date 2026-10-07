@@ -580,6 +580,15 @@ impl TrustTransaction<'_> {
             .chain(self.set.body().entries.iter().map(|e| e.public_key.clone()))
             .collect()
     }
+    /// Retain current disclosure constraints for an already verified floor.
+    pub fn record_import_floor_tiers(
+        &self,
+        thread: objects::object::ContentHash,
+        tip: objects::object::StateId,
+        summary: &api::heddle::api::v1alpha2::ImportFloorTierSummary,
+    ) -> Result<()> {
+        super::import_floor::record_tiers_in(self.tx, thread, tip, summary)
+    }
     pub(super) fn sql(&self) -> &Transaction<'_> {
         self.tx
     }

@@ -136,6 +136,7 @@ fn imported_root_stages_state_closure_with_one_authenticated_tip() {
         vec![],
         vec![],
         Some(carriers),
+        Default::default(),
     )
     .expect("exact authenticated root stages");
     assert_eq!(staged.operations().len(), 1);

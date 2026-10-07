@@ -347,9 +347,14 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
         right.view().expect("right view").source_heads
     );
     client.abort();
-    server.abort();
     assert!(client.await.expect_err("client cancelled").is_cancelled());
-    assert!(server.await.expect_err("server cancelled").is_cancelled());
+    // Client cancellation can finish the server through transport closure
+    // before it observes its own abort. Join either completion, but fail on a
+    // server task panic.
+    server.abort();
+    if let Err(error) = server.await {
+        assert!(error.is_cancelled(), "server task: {error}");
+    }
     left_endpoint.close().await;
     right_endpoint.close().await;
 }

@@ -40,8 +40,11 @@ impl ThreadReplica {
         tx: &Transaction<'_>,
         revision: StateId,
     ) -> Result<bool> {
+        // A converted Git ancestor inside a recorded import floor is admitted
+        // content of its signed import tip (heddle#2004): a lazily fetched
+        // older imported commit records possession like any source revision.
         let admitted: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_source_revisions WHERE thread=?1 AND revision=?2 UNION SELECT 1 FROM thread_source_bases WHERE thread=?1 AND revision=?2)",
+            "SELECT EXISTS(SELECT 1 FROM thread_source_revisions WHERE thread=?1 AND revision=?2 UNION SELECT 1 FROM thread_source_bases WHERE thread=?1 AND revision=?2 UNION SELECT 1 FROM import_floor_members WHERE thread=?1 AND member=?2)",
             params![self.thread.as_bytes(),revision.as_bytes()], |row| row.get(0))?;
         if !admitted {
             return Err(Error::Invalid(

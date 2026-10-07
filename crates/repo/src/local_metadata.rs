@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 9;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -114,18 +114,30 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
                 .map_err(|error| Error::Initialization(error.to_string()))?;
             crate::device_runs::migrate_report_event_schema(&tx)?;
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         2 => {
             crate::device_runs::migrate_report_event_schema(&tx)?;
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         3 => {
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        4..=6 => {
+        4..=7 => {
+            // Version 9 adds the whole-floor disclosure tier summary.
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        8 => {
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
+            // Version 8 floors had no whole-floor disclosure summary. Retain
+            // immutable States, but fetch their tips again before using a floor.
+            tx.execute_batch("DELETE FROM import_floor_tiers; DELETE FROM import_floor_members; DELETE FROM import_floors;")?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
@@ -405,6 +417,39 @@ mod tests {
                 .pending_requests,
             0
         );
+    }
+
+    #[test]
+    fn version_eight_floors_require_a_fresh_tier_summary() {
+        let directory = tempfile::tempdir().expect("store");
+        let db = open(directory.path()).expect("schema");
+        let id = [1_u8; 32];
+        db.execute(
+            "INSERT INTO import_floors(thread,tip,operation) VALUES(?1,?1,?1)",
+            [id.as_slice()],
+        )
+        .expect("floor");
+        db.execute(
+            "INSERT INTO import_floor_members(thread,tip,member) VALUES(?1,?1,?1)",
+            [id.as_slice()],
+        )
+        .expect("member");
+        db.pragma_update(None, "user_version", 8)
+            .expect("old version");
+        drop(db);
+        let migrated = open(directory.path()).expect("migrate");
+        for table in [
+            "import_floors",
+            "import_floor_members",
+            "import_floor_tiers",
+        ] {
+            let count: i64 = migrated
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count");
+            assert_eq!(count, 0, "a pre-summary floor must be fetched again");
+        }
     }
 
     #[test]

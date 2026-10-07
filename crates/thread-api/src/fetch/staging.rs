@@ -7,12 +7,15 @@ use std::{
 
 use api::v2::client::MessageReader;
 use crypto::thread_operation::SignedOperation;
-use heddle_object_model::object::{ContentHash, State, thread_replication::ThreadOperation};
+use heddle_object_model::object::{
+    ContentHash, State, StateId, thread_replication::ThreadOperation,
+};
 use heddle_pack::store::pack::PackReader;
 use prost::Message;
 use tokio::io::AsyncWriteExt;
 
-use super::{Download, Error, Item};
+pub(super) use super::ancestry::AncestryInput;
+use super::{Download, Error, Item, ancestry};
 use crate::{contract::*, transport};
 
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
@@ -32,6 +35,9 @@ pub struct StagedSource {
     pub(super) partial_trees: Vec<heddle_object_model::object::PartialTree>,
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    /// Verified converted Git ancestors staged in `ancestry.pack`, keyed by
+    /// the import tip they belong to. Empty when no floor travelled.
+    pub(super) ancestry: Vec<ancestry::VerifiedFloor>,
 }
 impl StagedSource {
     #[cfg(feature = "native")]
@@ -269,6 +275,20 @@ impl StagedSource {
     pub fn is_complete(&self) -> bool {
         self.ready.full_closure_available
     }
+    /// Import tips whose complete converted ancestry this download verified,
+    /// with every member. A lazy older-commit Fetch carries a path instead and
+    /// is not listed here.
+    pub fn verified_import_floors(&self) -> impl Iterator<Item = (StateId, &BTreeSet<StateId>)> {
+        self.ancestry
+            .iter()
+            .filter(|floor| floor.coverage == import_ancestry_page::Coverage::Floor)
+            .map(|floor| (floor.tip, &floor.members))
+    }
+    pub(super) fn ancestry_paths(&self) -> Option<[std::path::PathBuf; 2]> {
+        let pack = self.directory.path().join("ancestry.pack");
+        pack.exists()
+            .then(|| [pack, self.directory.path().join("ancestry.idx")])
+    }
 }
 impl<R: MessageReader<Error = transport::Error>> Download<R> {
     /// Consume one complete source download into bounded temporary files and
@@ -327,6 +347,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         let mut operations = Vec::new();
         let mut receipt_records = Vec::new();
         let mut dependencies = Vec::new();
+        let mut ancestry = AncestryInput::new(self.state.excluded_tips.clone());
         let mut metadata_bytes = 0usize;
         let mut complete = false;
         while let Some(item) = self.next().await? {
@@ -365,6 +386,16 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                     }
                     dependencies.push(record);
                 }
+                // Frame-level bounds were charged in `Validation::accept`.
+                Item::ImportAncestry(page) => ancestry.push(
+                    page,
+                    self.state
+                        .ready
+                        .thread
+                        .as_ref()
+                        .ok_or(Error::Invalid("Thread absent"))?,
+                    directory.path(),
+                )?,
                 Item::Complete(_) => complete = true,
                 Item::Sidecar(_) => return Err(Error::Invalid("source staging excludes sidecars")),
             }
@@ -377,6 +408,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
             file.sync_all().await?;
         }
         drop(files);
+        ancestry.finish()?;
         let mut ready = self.state.ready;
         if let Some(carriers) = &carriers {
             ready.import_authority = Some(carriers.bundle().clone());
@@ -389,6 +421,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                 dependencies,
                 receipt_records,
                 carriers,
+                ancestry,
             )
         })
         .await
@@ -413,6 +446,8 @@ struct DisclosureInput {
     allow_partial: bool,
     carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
     foreign: Vec<ForeignDependencyV1>,
+    ancestry: AncestryInput,
+    require_import_ancestry: bool,
 }
 
 #[cfg(test)]
@@ -430,6 +465,7 @@ pub(crate) fn validate_with_receipts(
         dependencies,
         receipt_records,
         None,
+        AncestryInput::default(),
     )
 }
 pub(super) fn validate_with_receipts_and_carriers(
@@ -439,6 +475,7 @@ pub(super) fn validate_with_receipts_and_carriers(
     dependencies: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
     carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
+    ancestry: AncestryInput,
 ) -> Result<StagedSource, Error> {
     if carriers
         .as_ref()
@@ -477,6 +514,8 @@ pub(super) fn validate_with_receipts_and_carriers(
                 })
                 .unwrap_or_default(),
             carriers,
+            ancestry,
+            require_import_ancestry: true,
         },
     )?;
     // Install reads the ready genesis, including claims omitted above.
@@ -491,6 +530,7 @@ pub(super) fn validate_with_receipts_and_carriers(
         state: value.state,
         partial_trees: value.partial_trees,
         authority_admissions: value.authority_admissions,
+        ancestry: value.ancestry,
     })
 }
 /// Structurally verified original source and actual artifact closure. This is
@@ -506,6 +546,7 @@ pub struct ValidatedSourceArtifacts {
     partial_trees: Vec<heddle_object_model::object::PartialTree>,
     authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    ancestry: Vec<ancestry::VerifiedFloor>,
 }
 impl ValidatedSourceArtifacts {
     pub fn native_authority(&self) -> Option<&NativePublicProofBundleV1> {
@@ -557,6 +598,7 @@ impl ValidatedSourceArtifacts {
             state: self.state,
             partial_trees: self.partial_trees,
             authority_admissions: self.authority_admissions,
+            ancestry: self.ancestry,
         })
     }
 
@@ -605,6 +647,10 @@ pub(crate) fn validate_artifacts(
             allow_partial: false,
             foreign,
             carriers,
+            ancestry: AncestryInput::default(),
+            // Publication retains the import floor at both endpoints; only a
+            // Fetch receiver needs its converted ancestors to travel again.
+            require_import_ancestry: false,
         },
     )
 }
@@ -623,7 +669,14 @@ fn validate_disclosure_artifacts(
         allow_partial,
         carriers,
         foreign,
+        ancestry,
+        require_import_ancestry,
     } = input;
+    if !ancestry.is_empty() && carriers.is_none() {
+        return Err(Error::Invalid(
+            "import ancestry requires independently authenticated import carriers",
+        ));
+    }
     if operations.len() > 10_000
         || dependency_records.len() >= 128
         || receipt_records.len() > operations.len()
@@ -706,6 +759,11 @@ fn validate_disclosure_artifacts(
         .map_err(preparation)?
         .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
         .map_err(preparation)?;
+        if !ancestry.is_empty() {
+            return Err(Error::Invalid(
+                "initial source cannot carry import ancestry",
+            ));
+        }
         return Ok(ValidatedSourceArtifacts {
             import_authority: None,
             native_authority: None,
@@ -716,6 +774,7 @@ fn validate_disclosure_artifacts(
             state,
             partial_trees: Vec::new(),
             authority_admissions: BTreeMap::new(),
+            ancestry: Vec::new(),
         });
     }
     let mut geneses = BTreeMap::from([(selected_thread, genesis)]);
@@ -848,8 +907,47 @@ fn validate_disclosure_artifacts(
             return Err(Error::Invalid("duplicate source authority receipt"));
         }
     }
-    let (selected_id, state) =
-        selected_operation.ok_or(Error::Invalid("selected source proof absent"))?;
+    // A revision inside an authenticated import floor is an older converted
+    // Git commit. Its owning import operation is selected by the page that
+    // carries it; the page set must then prove the parent chain from the tip.
+    let (selected_id, state, selected_in_floor) = match selected_operation {
+        Some((id, state)) => (id, state, false),
+        None => {
+            let selected_state = StateId::from_bytes(
+                selected
+                    .value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Invalid("selected revision identity width"))?,
+            );
+            let (tip, canonical) = ancestry
+                .selected_page_tip(selected_state, directory.path())?
+                .ok_or(Error::Invalid("selected source proof absent"))?;
+            let owner = decoded
+                .iter()
+                .find(|(_, operation)| {
+                    operation.thread == source_thread
+                        && operation
+                            .source_state()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|state| state.id() == tip)
+                })
+                .map(|(id, _)| *id)
+                .ok_or(Error::Invalid(
+                    "import ancestry tip is not a carried source operation",
+                ))?;
+            let state = State::decode_current_msgpack(&canonical)
+                .map_err(|_| Error::Invalid("selected import ancestor is not canonical"))?;
+            if state.id() != selected_state {
+                return Err(Error::Invalid(
+                    "selected import ancestor differs from its address",
+                ));
+            }
+            (owner, state, true)
+        }
+    };
+    let mut import_floors = Vec::new();
     let mut pending = BTreeSet::from([selected_id]);
     let mut seen = BTreeSet::new();
     let mut used_threads = BTreeSet::new();
@@ -911,11 +1009,31 @@ fn validate_disclosure_artifacts(
             .transpose()
             .map_err(preparation)?
             .flatten();
-        match imported {
+        match &imported {
             Some(bound) => bound.validate_parents(genesis, &parents),
             None => operation.validate_parents(genesis, &parents),
         }
         .map_err(preparation)?;
+        if let Some(bound) = imported {
+            // Converted Git ancestors below this tip are States, not
+            // operations; the page set for this exact signed operation must
+            // prove them. The frontier is the parents' source States.
+            let mut frontier = BTreeSet::new();
+            for parent in &parents {
+                if let Some(state) = parent.source_state().map_err(preparation)? {
+                    frontier.insert(state.id());
+                }
+            }
+            import_floors.push(ancestry::ImportFloorInput {
+                digest: api::import_authority::signed_operation_digest(bound.signed())
+                    .map_err(preparation)?,
+                tip: operation
+                    .source_state()
+                    .map_err(preparation)?
+                    .ok_or(Error::Invalid("import operation has no source State"))?,
+                frontier,
+            });
+        }
 
         let mut required = operation.parents.clone();
         if let Some(receipt) = operation.local_integration().map_err(preparation)? {
@@ -1023,11 +1141,28 @@ fn validate_disclosure_artifacts(
         .source_result()
         .map_err(preparation)?
         .ok_or(Error::Invalid("selected operation has no source result"))?;
+    // Every carried floor must verify against its signed tip, and a selected
+    // revision below a tip must be proved by its page set, before any pack
+    // object is accepted as that revision's closure.
+    let verified_ancestry = ancestry::verify(
+        &ancestry,
+        &import_floors,
+        thread,
+        selected_in_floor.then_some(state.id()),
+        require_import_ancestry,
+    )?;
     let pack = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
     )
     .map_err(preparation)?;
+    // An older converted commit has no reference proofs or signed entry
+    // privacy of its own: the tip's belong to the tip State's salted tree.
+    let (references, visibility) = if selected_in_floor {
+        (Vec::new(), None)
+    } else {
+        (references, capture.visibility.as_ref())
+    };
     let partial_trees = if allow_partial {
         pack.validate_visible_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
             .map_err(preparation)?
@@ -1036,7 +1171,7 @@ fn validate_disclosure_artifacts(
         pack.validate_source_closure_with_metadata(
             &state,
             &references,
-            capture.visibility.as_ref(),
+            visibility,
             SOURCE_OBJECTS,
             SOURCE_BYTES,
         )
@@ -1097,6 +1232,7 @@ fn validate_disclosure_artifacts(
         dependencies,
         state,
         partial_trees,
+        ancestry: verified_ancestry.floors,
     })
 }
 fn source_frontier_is_installable(

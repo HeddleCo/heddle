@@ -12,6 +12,7 @@ pub use provider::{
     Candidate as ProviderCandidate, ProviderConsentSigner, ProviderDownload, ProviderFetch,
     ProviderPlanSession,
 };
+mod ancestry;
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
@@ -96,7 +97,19 @@ pub enum Item {
     ThreadGenesis(ThreadGenesisRecord),
     Sidecar(TransferSidecar),
     Complete(FetchComplete),
+    /// Converted Git ancestors of a HYBRID import tip. Frame-checked only;
+    /// staging proves the Merkle closure against the authenticated carrier.
+    ImportAncestry(ImportAncestryPage),
 }
+
+/// Most States one `ImportAncestryPage` may carry (api alpha.42).
+pub const ANCESTRY_PAGE_STATES: usize = 4096;
+/// Most converted ancestors one Fetch may carry across every import floor. The
+/// contract floor is 131072 so boost (94794 commits) fits; this is double.
+pub const ANCESTRY_STATES: usize = 262_144;
+/// Encoded ancestry budget per Fetch, separate from the 16 MiB operation
+/// metadata budget because a floor is States, not causal proofs.
+pub const ANCESTRY_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct Download<R: MessageReader<Error = transport::Error>> {
     messages: Messages<R, FetchServerFrame>,
@@ -193,6 +206,12 @@ struct Validation {
     metadata_bytes: u64,
     operations: usize,
     threads: std::collections::BTreeSet<heddle_object_model::object::ContentHash>,
+    ancestry_states: usize,
+    ancestry_bytes: u64,
+    /// Digests of the carried signed import operations; a page may name only these.
+    import_operations: std::collections::BTreeSet<Vec<u8>>,
+    /// Import tips whose floor the client declared it already holds.
+    excluded_tips: std::collections::BTreeSet<heddle_object_model::object::StateId>,
     done: bool,
 }
 impl Validation {
@@ -310,6 +329,41 @@ impl Validation {
                 "partial source disclosure was not requested",
             ));
         }
+        let mut excluded_tips = std::collections::BTreeSet::new();
+        for excluded in open
+            .selection
+            .as_ref()
+            .map(|s| s.exclude_revisions.as_slice())
+            .unwrap_or_default()
+        {
+            // An exclusion names an import tip whose converted ancestry this
+            // client already holds. It is a hint about transfer size; staging
+            // still requires the floor unless it is recorded locally.
+            let Some(revision_ref::Revision::State(id)) = excluded.revision.as_ref() else {
+                return Err(Error::Invalid("excluded revision must be an exact State"));
+            };
+            if excluded.spool != thread.spool {
+                return Err(Error::Invalid("excluded revision crosses Spool"));
+            }
+            let bytes: [u8; 32] = id
+                .value
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Invalid("excluded revision identity width"))?;
+            excluded_tips.insert(heddle_object_model::object::StateId::from_bytes(bytes));
+        }
+        let mut import_operations = std::collections::BTreeSet::new();
+        for operation in ready
+            .import_authority
+            .as_ref()
+            .map(|b| b.operations.as_slice())
+            .unwrap_or_default()
+        {
+            import_operations.insert(
+                api::import_authority::signed_operation_digest(operation)
+                    .map_err(|_| Error::Invalid("invalid signed import operation"))?,
+            );
+        }
         let facets = open.selection.map(|s| s.facets).unwrap_or_default();
         if !facets.contains(&(SharedFacet::Source as i32))
             || facets.iter().any(|f| {
@@ -337,8 +391,69 @@ impl Validation {
             threads: std::collections::BTreeSet::from([verified_genesis
                 .id()
                 .map_err(|_| Error::Invalid("invalid Thread genesis identity"))?]),
+            ancestry_states: 0,
+            ancestry_bytes: 0,
+            import_operations,
+            excluded_tips,
             done: false,
         })
+    }
+    /// Structural page checks. Membership in the signed floor is proved at
+    /// staging, once every operation and page has arrived.
+    fn accept_import_ancestry(&mut self, page: ImportAncestryPage) -> Result<Item, Error> {
+        if self.import_operations.is_empty() {
+            return Err(Error::Invalid(
+                "import ancestry requires import authority on Ready",
+            ));
+        }
+        if page.thread.as_ref() != self.ready.thread.as_ref() {
+            return Err(Error::Invalid("import ancestry crosses Thread"));
+        }
+        if !matches!(
+            import_ancestry_page::Coverage::try_from(page.coverage),
+            Ok(import_ancestry_page::Coverage::Floor | import_ancestry_page::Coverage::Path)
+        ) {
+            return Err(Error::Invalid("import ancestry coverage unspecified"));
+        }
+        if page.tip.as_ref().is_none_or(|tip| tip.value.len() != 32) {
+            return Err(Error::Invalid("import ancestry tip identity width"));
+        }
+        if !self
+            .import_operations
+            .contains(&page.signed_operation_digest)
+        {
+            return Err(Error::Invalid(
+                "import ancestry names an operation outside the carried authority",
+            ));
+        }
+        if page.page_count == 0
+            || page.page_index >= page.page_count
+            || page.states.is_empty()
+            || page.states.len() > ANCESTRY_PAGE_STATES
+            || (page.member_count as usize) < page.states.len()
+            || page.member_count as usize > ANCESTRY_STATES
+        {
+            return Err(Error::Invalid("import ancestry page bounds"));
+        }
+        for state in &page.states {
+            if state.id.as_ref().is_none_or(|id| id.value.len() != 32)
+                || state.canonical_state.is_empty()
+            {
+                return Err(Error::Invalid("import ancestor State framing"));
+            }
+        }
+        self.ancestry_states = self
+            .ancestry_states
+            .checked_add(page.states.len())
+            .ok_or(Error::Invalid("import ancestry count overflow"))?;
+        self.ancestry_bytes = self
+            .ancestry_bytes
+            .checked_add(page.encoded_len() as u64)
+            .ok_or(Error::Invalid("import ancestry size overflow"))?;
+        if self.ancestry_states > ANCESTRY_STATES || self.ancestry_bytes > ANCESTRY_BYTES {
+            return Err(Error::Invalid("import ancestry exceeds download budget"));
+        }
+        Ok(Item::ImportAncestry(page))
     }
     fn accept(&mut self, frame: FetchServerFrame) -> Result<Item, Error> {
         if self.done || frame.encoded_len() > self.frame_bytes {
@@ -519,6 +634,7 @@ impl Validation {
                 self.done = true;
                 Ok(Item::Complete(complete))
             }
+            fetch_server_frame::Body::ImportAncestry(page) => self.accept_import_ancestry(page),
             fetch_server_frame::Body::Sidecar(_) => Err(Error::Invalid(
                 "sidecar facet was not explicitly negotiated",
             )),

@@ -2156,8 +2156,8 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.31.0-alpha.39"
-source = "git+https://github.com/HeddleCo/api?rev=d37de5cf154749747a9632cbce839c4348f17762#d37de5cf154749747a9632cbce839c4348f17762"
+version = "0.31.0-alpha.42"
+source = "git+https://github.com/HeddleCo/api?rev=fec3e7a3012c49c5ca785bb170353b66fc8bd67e#fec3e7a3012c49c5ca785bb170353b66fc8bd67e"
 dependencies = [
  "blake3",
  "bytes",
@@ -2860,6 +2860,7 @@ dependencies = [
  "hex",
  "prost 0.14.1",
  "prost-types 0.14.1",
+ "rmp-serde",
  "rusqlite",
  "serde_json",
  "tempfile",

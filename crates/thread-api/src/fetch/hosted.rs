@@ -10,12 +10,16 @@ use repo::{
     thread_replication::{
         ThreadReplica,
         delegated_import::AcceptedAuthority,
-        hosted_trust::{Clock, HostedTrust},
+        hosted_trust::{Clock, HostedTrust, TrustTransaction},
         install_artifacts::InstallArtifacts,
     },
 };
 
 use super::{Error, StagedSource};
+
+#[cfg(test)]
+#[path = "import_ancestry_tests.rs"]
+mod import_ancestry_tests;
 
 pub struct HostedPublication<'a> {
     pub replica: &'a ThreadReplica,
@@ -211,6 +215,13 @@ impl StagedSource {
             artifacts.write_file(Path::new("spool-id"), spool.to_string().as_bytes())?;
             Ok(())
         };
+        let publish_with_tiers =
+            |context: &TrustTransaction<'_>, artifacts: &mut InstallArtifacts<'_>| {
+                for floor in &self.ancestry {
+                    context.record_import_floor_tiers(main_id, floor.tip, &floor.tiers)?;
+                }
+                publish(artifacts)
+            };
         let (replicas, receipt) = if let Some(publication) = publication {
             let receipt = if native.is_some() {
                 ThreadReplica::publish_native_source(
@@ -223,7 +234,7 @@ impl StagedSource {
                     publication.prepared,
                     publication.command,
                     |context, artifacts| {
-                        publish(artifacts)?;
+                        publish_with_tiers(context, artifacts)?;
                         response(context)
                     },
                 )
@@ -238,7 +249,7 @@ impl StagedSource {
                     publication.prepared,
                     publication.command,
                     |context, artifacts| {
-                        publish(artifacts)?;
+                        publish_with_tiers(context, artifacts)?;
                         response(context)
                     },
                 )
@@ -247,24 +258,26 @@ impl StagedSource {
             (Vec::new(), receipt)
         } else {
             let replicas = if native.is_some() {
-                ThreadReplica::install_hybrid_native(
+                ThreadReplica::install_hybrid_native_with(
                     repository.heddle_dir(),
                     trust,
                     &bundle,
                     &records,
                     authority,
                     staged_repo.store(),
-                    publish,
+                    |_| Ok(()),
+                    publish_with_tiers,
                 )
             } else {
-                ThreadReplica::install_hybrid_import(
+                ThreadReplica::install_hybrid_import_with(
                     repository.heddle_dir(),
                     trust,
                     &bundle,
                     &records,
                     authority,
                     staged_repo.store(),
-                    publish,
+                    |_| Ok(()),
+                    publish_with_tiers,
                 )
             }
             .map_err(Error::from)?;
@@ -438,7 +451,7 @@ pub(crate) mod tests {
         },
     };
 
-    struct ReceiverClock;
+    pub(super) struct ReceiverClock;
     impl Clock for ReceiverClock {
         fn now_millis(&self) -> repo::thread_replication::Result<i64> {
             Ok(1_350_000)
@@ -447,7 +460,7 @@ pub(crate) mod tests {
             Ok(0)
         }
     }
-    fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
+    pub(super) fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
         let vector = fixture["wire_vectors"]
             .get(name)
             .or_else(|| fixture["signed_vectors"].get(name))
@@ -623,6 +636,7 @@ pub(crate) mod tests {
             vec![],
             vec![],
             Some(carriers),
+            Default::default(),
         )
         .expect("selected structural source");
         let root = RootSelection {

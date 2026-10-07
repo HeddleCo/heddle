@@ -384,6 +384,14 @@ impl StagedSource {
     pub(super) fn install_source_objects(&self, repository: &Repository) -> Result<(), Error> {
         let pack = self.directory.path().join("source.pack");
         let index = self.directory.path().join("source.idx");
+        // Verified converted Git ancestors are States only, already address
+        // checked and closure checked against their signed import tip.
+        if let Some([ancestry_pack, ancestry_index]) = self.ancestry_paths() {
+            repository
+                .store()
+                .install_pack_streaming(&ancestry_pack, &ancestry_index)
+                .map_err(preparation)?;
+        }
         if self.is_complete() {
             return repository
                 .store()
