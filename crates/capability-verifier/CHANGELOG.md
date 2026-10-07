@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.12](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.28.11...heddleco-capability-verifier-v0.28.12) - 2026-10-07
+
+### Other
+
+- receive imported ancestry on Fetch, stop the visibility walk at the import floor, fast adoption compression ([#2004](https://github.com/HeddleCo/heddle/pull/2004)) ([#2005](https://github.com/HeddleCo/heddle/pull/2005))
+
 ### Changed
 
 - Release 0.28.11: HYBRID Part 8 adopts api alpha.37 writer authority and foreign closures (#1988); Part 9 pins the receiver owner and adopts api alpha.39 (invitations by handle, notification inheritance, role approval groups, SuggestPrincipals, and invite codes) (#1989); Part 10 stops Fetch at verified foreign endpoints and fixes false rollback reports from receiver clock sampling (#1990). CI moves to Blacksmith (#1986, #1987).
