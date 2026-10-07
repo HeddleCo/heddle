@@ -295,3 +295,85 @@ fn native_fetch_rejects_hybrid_ready_and_operations_before_staging() {
             .map(|_| ()),
     );
 }
+
+#[test]
+fn import_ancestry_pages_need_import_authority_and_stay_within_bounds() {
+    use api::heddle::api::common::StateId as WireStateId;
+    let (open, ready, endpoint, _) = fixture();
+    let thread = ready.thread.clone();
+    let page = |states: usize| ImportAncestryPage {
+        floor_tiers: Some(ImportFloorTierSummary::default()),
+        thread: thread.clone(),
+        tip: Some(WireStateId { value: vec![9; 32] }),
+        signed_operation_digest: vec![3; 32],
+        coverage: import_ancestry_page::Coverage::Floor as i32,
+        page_index: 0,
+        page_count: 1,
+        member_count: states as u32,
+        states: (0..states)
+            .map(|index| ImportAncestorState {
+                id: Some(WireStateId {
+                    value: vec![index as u8; 32],
+                }),
+                canonical_state: vec![1],
+            })
+            .collect(),
+    };
+    let frame = |page| FetchServerFrame {
+        body: Some(fetch_server_frame::Body::ImportAncestry(page)),
+    };
+    // A native Fetch without an authenticated carrier has no floor to verify
+    // against; converted history cannot ride in unauthenticated.
+    let mut download = Validation::new(
+        open.clone(),
+        ready.clone(),
+        Some(&endpoint),
+        Limits::default(),
+    )
+    .expect("admission");
+    assert!(matches!(
+        download.accept(frame(page(1))),
+        Err(Error::Invalid(
+            "import ancestry requires import authority on Ready"
+        ))
+    ));
+    // Page framing is checked before staging: bounds, coverage, identity widths.
+    let mut validation = Validation {
+        import_operations: std::collections::BTreeSet::from([vec![3; 32]]),
+        // The fixture's 16 KiB frame budget would reject the oversized page
+        // before the page bound; exercise the page bound itself.
+        frame_bytes: usize::MAX,
+        ..Validation::new(open, ready, Some(&endpoint), Limits::default()).expect("admission")
+    };
+    let mut oversized = page(ANCESTRY_PAGE_STATES + 1);
+    oversized.member_count = oversized.states.len() as u32;
+    assert!(matches!(
+        validation.accept(frame(oversized)),
+        Err(Error::Invalid("import ancestry page bounds"))
+    ));
+    let mut unspecified = page(1);
+    unspecified.coverage = 0;
+    assert!(matches!(
+        validation.accept(frame(unspecified)),
+        Err(Error::Invalid("import ancestry coverage unspecified"))
+    ));
+    let mut foreign = page(1);
+    foreign.signed_operation_digest = vec![4; 32];
+    assert!(matches!(
+        validation.accept(frame(foreign)),
+        Err(Error::Invalid(
+            "import ancestry names an operation outside the carried authority"
+        ))
+    ));
+    let mut narrow = page(1);
+    narrow.states[0].id = Some(WireStateId { value: vec![1; 31] });
+    assert!(matches!(
+        validation.accept(frame(narrow)),
+        Err(Error::Invalid("import ancestor State framing"))
+    ));
+    assert!(matches!(
+        validation.accept(frame(page(2))).expect("well-formed page"),
+        Item::ImportAncestry(_)
+    ));
+    assert_eq!(validation.ancestry_states, 2);
+}

@@ -22,7 +22,9 @@ mod pack_tests;
 #[cfg(test)]
 mod source_pack_tests;
 
-pub use compact_frame::compress_compact_frame;
+pub use compact_frame::{
+    CompactFrameCompression, compress_compact_frame, compress_compact_frame_with,
+};
 pub use manager::PackManager;
 pub use pack_builder::{PackBuilder, RetainedPackBuild};
 pub use pack_identity::{PACK_LOGICAL_ID_CONTEXT, PackLogicalId, PackRepresentationHash};

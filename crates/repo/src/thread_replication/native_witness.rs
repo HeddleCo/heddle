@@ -48,7 +48,7 @@ impl ThreadReplica {
         )
     }
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn install_hybrid_native_with(
+    pub fn install_hybrid_native_with(
         directory: &Path,
         trust: &HostedTrust<impl Clock>,
         bytes: &[u8],
