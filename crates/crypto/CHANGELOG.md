@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.12](https://github.com/HeddleCo/heddle/compare/heddle-crypto-v0.28.11...heddle-crypto-v0.28.12) - 2026-10-07
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.26.0](https://github.com/HeddleCo/heddle/compare/heddle-crypto-v0.25.7...heddle-crypto-v0.26.0) - 2026-09-28
 
 ### Other
