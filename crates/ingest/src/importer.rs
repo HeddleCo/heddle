@@ -299,20 +299,24 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// `async` because ref emission awaits the backend's `async` marker
     /// read; for the local `RefManager` the future is immediately ready.
     pub async fn run(&mut self) -> crate::Result<ImportStats> {
-        let (mut heads, refs_seen) = self.git.collect_refs_detailed()?;
+        let frozen_refs = self.git.collect_frozen_import_refs()?;
+        let (mut heads, refs_seen) = self.git.collect_refs_from_frozen(&frozen_refs)?;
         let emitted_remote_names: HashSet<String> = heads
             .iter()
             .filter(|head| head.namespace == RefNamespace::RemoteBranch)
             .map(|head| head.full_name.clone())
             .collect();
-        let frozen_refs = self.git.collect_frozen_import_refs()?;
         let mut supported = HashSet::new();
         let mut skipped_refs = Vec::new();
-        for reference in frozen_refs {
-            if reference.raw_name == b"HEAD" {
+        for reference in &frozen_refs {
+            if reference.raw_name == b"HEAD"
+                || (std::str::from_utf8(&reference.raw_name).is_err()
+                    && !reference.raw_name.starts_with(b"refs/heads/")
+                    && !reference.raw_name.starts_with(b"refs/tags/"))
+            {
                 continue;
             }
-            let disposition = classify_git_import_ref(&reference).map_err(|error| {
+            let disposition = classify_git_import_ref(reference).map_err(|error| {
                 IngestError::Git(format!(
                     "classify Git ref {}: {error:?}",
                     String::from_utf8_lossy(&reference.raw_name)
@@ -320,14 +324,14 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             })?;
             match disposition {
                 ImportRefDisposition::Branch | ImportRefDisposition::CommitTag => {
-                    supported.insert(reference.raw_name);
+                    supported.insert(reference.raw_name.clone());
                 }
                 ImportRefDisposition::Unsupported {
                     reason: ImportSkipReason::RemoteTracking,
                 } if std::str::from_utf8(&reference.raw_name)
                     .is_ok_and(|name| emitted_remote_names.contains(name)) =>
                 {
-                    supported.insert(reference.raw_name);
+                    supported.insert(reference.raw_name.clone());
                 }
                 ImportRefDisposition::DefaultHead
                 | ImportRefDisposition::RequiredNotes
@@ -336,7 +340,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 } => {}
                 ImportRefDisposition::Unsupported { reason } => {
                     skipped_refs.push(SkippedImportRef {
-                        raw_name: reference.raw_name,
+                        raw_name: reference.raw_name.clone(),
                         reason,
                     })
                 }
@@ -358,7 +362,10 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // Reflog SHAs are filtered to those still in the odb, so this
         // can't steer us into dangling territory.
         let reflog_entries = if self.scope.is_all() {
-            self.git.collect_reflog()?
+            let mut entries = Vec::new();
+            self.git
+                .collect_reflog_from_frozen(&frozen_refs, &mut entries)?;
+            entries
         } else {
             self.git.collect_reflog_for_refs(&heads)?
         };
@@ -1755,6 +1762,77 @@ mod tests {
     #[test]
     fn refname_round_trip_reserved() {
         refname_round_trip("heddle/foo");
+    }
+
+    #[cfg(unix)]
+    fn import_non_utf8_ref(namespace: &str, packed: bool) {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let source = TempDir::new().expect("Git source");
+        let destination = TempDir::new().expect("native destination");
+        let oid = seed_multibranch_repo(source.path());
+        let raw_name = format!("refs/{namespace}/bad-").into_bytes();
+        let raw_name = [raw_name.as_slice(), b"\xff"].concat();
+        if packed {
+            let bytes = [oid.as_bytes(), b" ", &raw_name, b"\n"].concat();
+            std::fs::write(source.path().join(".git/packed-refs"), bytes).expect("packed ref");
+        } else {
+            let path = source
+                .path()
+                .join(".git")
+                .join(OsString::from_vec(raw_name.clone()));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("namespace");
+            std::fs::write(path, format!("{oid}\n")).expect("loose ref");
+        }
+        let git = GitSource::open(source.path()).expect("open Git");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(destination.path());
+        refs.init().expect("native refs");
+        let mut map = ShaMap::new();
+        let stats = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run())
+            .expect("other refs still import");
+        assert!(
+            refs.get_thread(&ThreadName::new("main"))
+                .expect("main")
+                .is_some()
+        );
+        assert!(
+            !refs
+                .list_threads()
+                .expect("threads")
+                .iter()
+                .any(|name| name.contains("bad-"))
+        );
+        if namespace == "heads" || namespace == "tags" {
+            assert!(
+                stats
+                    .skipped_refs
+                    .iter()
+                    .any(|excluded| excluded.raw_name == raw_name
+                        && excluded.reason == ImportSkipReason::NonUtf8RefName),
+                "excluded ref must retain its exact bytes: {:?}",
+                stats.skipped_refs
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_ignored_namespace_does_not_abort_import() {
+        for namespace in ["remotes/origin", "notes", "pull"] {
+            for packed in [false, true] {
+                import_non_utf8_ref(namespace, packed);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_imported_ref_is_reported_and_other_refs_import() {
+        for namespace in ["heads", "tags"] {
+            for packed in [false, true] {
+                import_non_utf8_ref(namespace, packed);
+            }
+        }
     }
     #[test]
     fn imports_commits_refs_and_tag_end_to_end() {

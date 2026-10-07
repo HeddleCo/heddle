@@ -67,7 +67,7 @@ impl std::fmt::Display for ThreadIdError {
         } else {
             write!(
                 f,
-                "thread name '{}' is invalid: use a Git branch name other than HEAD or the reserved heddle/ namespace (full ref at most 1024 UTF-8 bytes) — try '{}'",
+                "thread name '{}' is invalid: use a Git branch name other than HEAD or the reserved heddle/ namespace or a noncanonical git% prefix (full ref at most 1024 UTF-8 bytes) — try '{}'",
                 self.input, self.suggestion
             )
         }
@@ -83,6 +83,7 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
         && git_name.len() + "refs/heads/".len() <= 1024
         && sley_refs::BranchRefNameBuf::from_branch_name(&git_name).is_ok()
         && !crate::object::is_reserved_heddle_namespace(value)
+        && (!value.starts_with("git%") || crate::name_encoding::native_git_name(&git_name) == value)
     {
         Ok(())
     } else {
@@ -90,6 +91,21 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
             input: value.to_string(),
             suggestion: suggest_thread_id(value),
         })
+    }
+}
+
+#[cfg(test)]
+mod refname_tests {
+    use super::validate_thread_id;
+
+    #[test]
+    fn native_git_prefix_requires_canonical_mapping() {
+        assert!(validate_thread_id("git%foo").is_err());
+        for git in ["git%foo", "heddle/foo", "git%n-heddle%2Ffoo"] {
+            let native = crate::name_encoding::native_git_name(git);
+            assert!(validate_thread_id(&native).is_ok());
+            assert_eq!(crate::name_encoding::git_name(&native), git);
+        }
     }
 }
 

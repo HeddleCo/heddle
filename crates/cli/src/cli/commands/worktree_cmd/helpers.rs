@@ -152,11 +152,11 @@ fn validate_worktree_target(
             .components()
             .next()
             .and_then(|part| part.as_os_str().to_str())
-            .is_some_and(|part| part.starts_with("n-") || part == "git");
-        let checkout_leaf = relative
-            .parent()
-            .and_then(objects::name_encoding::decode_name_path)
-            .is_some();
+            .is_some_and(|part| part.starts_with("n-") || part.starts_with("h-") || part == "git");
+        let checkout_leaf = relative.parent().is_some_and(|encoded| {
+            objects::name_encoding::decode_name_path(encoded).is_some()
+                || objects::name_encoding::is_digest_name_path(encoded)
+        });
         if path.parent() == Some(threads_root.as_path()) || (encoded_namespace && !checkout_leaf) {
             return Err(anyhow::anyhow!(worktree_target_managed_needs_leaf_advice(
                 path

@@ -90,6 +90,7 @@ impl RefManager {
         require_user_ref_name(name)?;
         ThreadName::from_git_branch(&objects::name_encoding::git_name(name))
             .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        objects::name_encoding::verify_name_entry(&self.threads_dir(), name)?;
         Ok(self
             .threads_dir()
             .join(objects::name_encoding::name_path(name))
@@ -99,6 +100,7 @@ impl RefManager {
         require_user_ref_name(name)?;
         objects::object::MarkerName::from_git_tag(&objects::name_encoding::git_name(name))
             .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        objects::name_encoding::verify_name_entry(&self.markers_dir(), name)?;
         Ok(self
             .markers_dir()
             .join(objects::name_encoding::name_path(name))
@@ -106,6 +108,7 @@ impl RefManager {
     }
     pub(super) fn remote_dir(&self, remote: &str) -> Result<PathBuf> {
         require_user_ref_name(remote)?;
+        objects::name_encoding::verify_name_entry(&self.remotes_dir(), remote)?;
         Ok(self
             .remotes_dir()
             .join(objects::name_encoding::name_path(remote)))
@@ -114,6 +117,7 @@ impl RefManager {
         require_user_ref_name(thread)?;
         ThreadName::from_git_branch(&objects::name_encoding::git_name(thread))
             .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        objects::name_encoding::verify_name_entry(&self.remote_dir(remote)?, thread)?;
         Ok(self
             .remote_dir(remote)?
             .join(objects::name_encoding::name_path(thread))
@@ -224,6 +228,15 @@ impl RefManager {
     }
     /// Traverse encoding chunks only; `entry` is a terminal name directory.
     pub(super) fn list_refs_recursive(&self, dir: &Path, prefix: &str) -> Result<Vec<ThreadName>> {
+        self.list_refs_recursive_at(dir, dir, prefix)
+    }
+
+    fn list_refs_recursive_at(
+        &self,
+        root: &Path,
+        dir: &Path,
+        prefix: &str,
+    ) -> Result<Vec<ThreadName>> {
         let mut refs = Vec::new();
         if !dir.exists() {
             return Ok(refs);
@@ -243,11 +256,13 @@ impl RefManager {
                 format!("{prefix}/{segment}")
             };
             if segment == "entry" {
-                if let Some(name) = objects::name_encoding::decode_name_path(Path::new(&relative)) {
+                if let Some(name) =
+                    objects::name_encoding::read_name_entry(root, Path::new(&relative))?
+                {
                     refs.push(ThreadName::new(name));
                 }
-            } else if segment.starts_with("n-") || segment == "git" {
-                refs.extend(self.list_refs_recursive(&entry.path(), &relative)?);
+            } else if segment.starts_with("n-") || segment.starts_with("h-") || segment == "git" {
+                refs.extend(self.list_refs_recursive_at(root, &entry.path(), &relative)?);
             }
         }
         refs.sort();
@@ -270,6 +285,41 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn digest_ref_identity_is_verified_before_read_write_or_delete() {
+        let temp = TempDir::new().expect("refs");
+        let refs = RefManager::new(temp.path());
+        refs.init().expect("init");
+        let name = ThreadName::new("界".repeat(337));
+        let state = crate::refs::fresh_state_id();
+        refs.set_thread(&name, &state).expect("long thread");
+        assert_eq!(refs.get_thread(&name).expect("read"), Some(state));
+        let identity = refs
+            .threads_dir()
+            .join(objects::name_encoding::name_path(&name))
+            .join("name");
+        fs::write(identity, "another name").expect("corrupt identity");
+        assert!(refs.get_thread(&name).is_err());
+        assert!(refs.set_thread(&name, &state).is_err());
+        assert!(refs.delete_thread(&name).is_err());
+        assert!(refs.list_refs_recursive(&refs.threads_dir(), "").is_err());
+    }
+
+    #[test]
+    fn longest_valid_multibyte_tag_round_trips_exactly() {
+        let temp = TempDir::new().expect("refs");
+        let refs = RefManager::new(temp.path());
+        refs.init().expect("init");
+        let git = "界".repeat(338);
+        assert_eq!(format!("refs/tags/{git}").len(), 1024);
+        let marker = objects::object::MarkerName::from_git_tag(&git).expect("longest full ref");
+        let state = crate::refs::fresh_state_id();
+        refs.create_marker(&marker, &state).expect("long tag");
+        let reopened = RefManager::new(temp.path());
+        assert_eq!(reopened.get_marker(&marker).expect("read"), Some(state));
+        assert_eq!(reopened.list_markers().expect("list"), vec![marker]);
+    }
 
     #[test]
     fn all_ref_namespaces_use_portable_exact_storage() {

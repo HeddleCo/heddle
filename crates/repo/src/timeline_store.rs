@@ -378,6 +378,7 @@ impl TimelineStore {
         let bytes = rmp_serde::to_vec_named(record)
             .map_err(|err| HeddleError::Serialization(err.to_string()))?;
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        objects::name_encoding::write_name_entry(&self.root.join(RECOVERY_DIR), &record.thread)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -389,6 +390,7 @@ impl TimelineStore {
         &self,
         thread: &str,
     ) -> Result<Option<TimelineMaterializationRecoveryRecord>> {
+        objects::name_encoding::verify_name_entry(&self.root.join(RECOVERY_DIR), thread)?;
         let path = self.materialization_recovery_path(thread);
         let _guard = self.lock.read().map_err(timeline_lock_error)?;
         let bytes = match fs::read(&path) {
@@ -414,6 +416,7 @@ impl TimelineStore {
     }
 
     pub fn clear_materialization_recovery(&self, thread: &str) -> Result<()> {
+        objects::name_encoding::verify_name_entry(&self.root.join(RECOVERY_DIR), thread)?;
         let path = self.materialization_recovery_path(thread);
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
         match fs::remove_file(path) {
@@ -431,6 +434,7 @@ impl TimelineStore {
     }
 
     pub fn lock_materialization(&self, thread: &str) -> Result<WriteLockGuard> {
+        objects::name_encoding::write_name_entry(&self.root.join(LOCKS_DIR), thread)?;
         RepoLock::at(self.materialization_lock_path(thread))
             .write()
             .map_err(timeline_lock_error)
@@ -444,6 +448,7 @@ impl TimelineStore {
     }
 
     pub fn lock_recording(&self, thread: &str) -> Result<WriteLockGuard> {
+        objects::name_encoding::write_name_entry(&self.root.join(LOCKS_DIR), thread)?;
         RepoLock::at(self.recording_lock_path(thread))
             .write()
             .map_err(timeline_lock_error)

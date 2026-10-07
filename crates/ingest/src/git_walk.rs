@@ -220,7 +220,7 @@ pub struct GitSource {
     /// ref, so `read_heddle_note_bytes` can short-circuit to `None` instead of
     /// attempting a notes-tree walk per commit (a 4,410-commit import otherwise
     /// pays 4,410 wasted notes lookups).
-    heddle_notes_present: std::sync::OnceLock<bool>,
+    heddle_notes_tree: std::sync::OnceLock<Option<SleyObjectId>>,
 }
 
 impl std::fmt::Debug for GitSource {
@@ -236,28 +236,14 @@ impl GitSource {
     /// namespaces, symbolic refs, and non-commit tags. The regular
     /// `collect_refs` view only includes commit-pointing native refs.
     pub fn collect_frozen_import_refs(&self) -> crate::Result<Vec<ImportRefIdentity>> {
-        repo::require_exact_git_ref_encoding(&self.repo).map_err(IngestError::from)?;
-        let refs = self.repo.references();
-        let mut raw: Vec<(String, SleyRefTarget)> = refs
-            .list_refs()
-            .map_err(|error| IngestError::Git(format!("list Git refs: {error}")))?
-            .into_iter()
-            .map(|reference| (reference.name, reference.target))
-            .collect();
-        if let Some(target) = refs
-            .read_ref("HEAD")
-            .map_err(|error| IngestError::Git(format!("read Git HEAD: {error}")))?
-        {
-            raw.push(("HEAD".into(), target));
-        }
+        let raw = repo::read_raw_git_refs(&self.repo)?;
+        self.cache_heddle_notes_tree(&raw)?;
         let mut out = Vec::with_capacity(raw.len());
-        for (name, target) in raw {
-            let raw_name = name.as_bytes().to_vec();
-            let (raw_target, peeled_commit) = match target {
-                SleyRefTarget::Symbolic(target) => {
-                    (GitRefTarget::Symbolic(target.into_bytes()), None)
-                }
-                SleyRefTarget::Direct(oid) => {
+        for reference in raw {
+            let raw_name = reference.name;
+            let (raw_target, peeled_commit) = match reference.target {
+                repo::RawGitRefTarget::Symbolic(target) => (GitRefTarget::Symbolic(target), None),
+                repo::RawGitRefTarget::Direct(oid) => {
                     let object_type = match self.repo.read_object(&oid) {
                         Ok(object) => match object.object_type {
                             GitObjectType::Commit => GitRefObjectType::Commit,
@@ -364,14 +350,10 @@ impl GitSource {
         // fall back to `open` for explicit `.git` dirs. Both errors are
         // surfaced through our own string-typed Git variant — we don't care
         // which one fired; the user cares whether the path was usable.
-        let repo = match SleyRepository::discover(path) {
-            Ok(r) => r,
-            Err(_) => SleyRepository::open(path)
-                .map_err(|e| IngestError::Git(format!("open {}: {e}", path.display())))?,
-        };
+        let repo = repo::open_git_import_source(path)?;
         Ok(Self {
             repo,
-            heddle_notes_present: std::sync::OnceLock::new(),
+            heddle_notes_tree: std::sync::OnceLock::new(),
         })
     }
 
@@ -418,10 +400,54 @@ impl GitSource {
     /// Whether `refs/notes/heddle` exists in the source repo, resolved once and
     /// memoized. Absence is the common case (most imports have no heddle notes),
     /// and lets [`Self::read_heddle_note_bytes`] skip the per-commit notes walk.
+    #[cfg(test)]
     fn heddle_notes_present(&self) -> bool {
-        *self
-            .heddle_notes_present
-            .get_or_init(|| matches!(self.repo.find_reference("refs/notes/heddle"), Ok(Some(_))))
+        self.heddle_notes_tree().ok().flatten().is_some()
+    }
+
+    fn cache_heddle_notes_tree(&self, raw: &[repo::RawGitRef]) -> crate::Result<()> {
+        let mut name = b"refs/notes/heddle".as_slice();
+        let mut seen = HashSet::new();
+        let mut tree = None;
+        while seen.insert(name) {
+            let Some(reference) = raw.iter().find(|reference| reference.name == name) else {
+                break;
+            };
+            match &reference.target {
+                repo::RawGitRefTarget::Direct(oid) => {
+                    let object = self
+                        .repo
+                        .read_object(oid)
+                        .map_err(|error| IngestError::Git(error.to_string()))?;
+                    tree = match object.object_type {
+                        GitObjectType::Commit => Some(
+                            self.repo
+                                .read_commit(oid)
+                                .map_err(|error| IngestError::Git(error.to_string()))?
+                                .tree,
+                        ),
+                        GitObjectType::Tree => Some(*oid),
+                        _ => {
+                            return Err(IngestError::Git(
+                                "Heddle notes ref does not point to a commit or tree".into(),
+                            ));
+                        }
+                    };
+                    break;
+                }
+                repo::RawGitRefTarget::Symbolic(target) => name = target,
+            }
+        }
+        let _ = self.heddle_notes_tree.set(tree);
+        Ok(())
+    }
+
+    fn heddle_notes_tree(&self) -> crate::Result<Option<SleyObjectId>> {
+        if let Some(tree) = self.heddle_notes_tree.get() {
+            return Ok(*tree);
+        }
+        self.cache_heddle_notes_tree(&repo::read_raw_git_refs(&self.repo)?)?;
+        Ok(self.heddle_notes_tree.get().copied().flatten())
     }
 
     fn resolve_ref_commit(&self, name: &str, target: &SleyRefTarget) -> RefResolution {
@@ -451,18 +477,39 @@ impl GitSource {
     /// summary. Callers who only need the heads should use
     /// [`Self::collect_refs`].
     pub fn collect_refs_detailed(&self) -> crate::Result<(Vec<RefHead>, RefDiscoveryStats)> {
+        let frozen = self.collect_frozen_import_refs()?;
+        self.collect_refs_from_frozen(&frozen)
+    }
+
+    /// Derive the native view from the same raw snapshot used for exclusions.
+    pub fn collect_refs_from_frozen(
+        &self,
+        frozen: &[ImportRefIdentity],
+    ) -> crate::Result<(Vec<RefHead>, RefDiscoveryStats)> {
         let mut out = Vec::new();
         let mut stats = RefDiscoveryStats::default();
-        repo::require_exact_git_ref_encoding(&self.repo).map_err(IngestError::from)?;
-
-        let refs = self
-            .repo
-            .references()
-            .list_refs()
-            .map_err(|e| IngestError::Git(format!("references: {e}")))?;
-
-        for reference in refs {
-            let full_name = reference.name;
+        for reference in frozen {
+            let Ok(full_name) = std::str::from_utf8(&reference.raw_name) else {
+                continue;
+            };
+            let full_name = full_name.to_owned();
+            let reference_target = match &reference.raw_target {
+                GitRefTarget::Direct { oid, .. } => {
+                    let bytes = match oid {
+                        GitObjectId::Sha1(bytes) => bytes.as_slice(),
+                        GitObjectId::Sha256(bytes) => bytes.as_slice(),
+                    };
+                    let oid = SleyObjectId::from_raw(self.repo.object_format(), bytes)
+                        .map_err(|error| IngestError::Git(error.to_string()))?;
+                    SleyRefTarget::Direct(oid)
+                }
+                GitRefTarget::Symbolic(target) => {
+                    let Ok(target) = std::str::from_utf8(target) else {
+                        continue;
+                    };
+                    SleyRefTarget::Symbolic(target.to_owned())
+                }
+            };
             let Some((namespace, short_name)) = classify_ref_name(&full_name) else {
                 continue;
             };
@@ -476,7 +523,7 @@ impl GitSource {
                 continue;
             }
 
-            let target = match self.resolve_ref_commit(&full_name, &reference.target) {
+            let target = match self.resolve_ref_commit(&full_name, &reference_target) {
                 RefResolution::Commit(target) => target,
                 RefResolution::PeelFailed => {
                     stats.peel_failed += 1;
@@ -489,7 +536,7 @@ impl GitSource {
             };
             // Enumeration already resolved direct refs, including packed refs
             // whose names exceed the host's loose-file component limit.
-            let object = match &reference.target {
+            let object = match &reference_target {
                 SleyRefTarget::Direct(oid) => *oid,
                 SleyRefTarget::Symbolic(_) => self.repo.rev_parse(&full_name).map_err(|error| {
                     IngestError::Git(format!("resolve Git ref '{full_name}': {error}"))
@@ -651,14 +698,21 @@ impl GitSource {
         // source repo has no `refs/notes/heddle` — the overwhelmingly common
         // case. This collapses the per-commit notes lookup to a single cached
         // ref-existence check for the whole import.
-        if !self.heddle_notes_present() {
+        let Some(tree) = self.heddle_notes_tree()? else {
             return Ok(None);
-        }
+        };
         let oid = parse_oid(self.repo.object_format(), sha)?;
-        let notes_ref = sley::notes::NotesRef::expand("refs/notes/heddle");
-        self.repo
-            .read_note_bytes(&notes_ref, &oid)
-            .map_err(|e| IngestError::Git(format!("read Heddle note for {sha}: {e}")))
+        let Some(blob) = sley::notes::read_note_from_tree(
+            self.repo.common_dir(),
+            self.repo.object_format(),
+            &tree,
+            &oid,
+        )
+        .map_err(|error| IngestError::Git(format!("read Heddle note for {sha}: {error}")))?
+        else {
+            return Ok(None);
+        };
+        self.read_blob(&blob.to_string()).map(Some)
     }
 
     /// Read the direct children of a git tree (non-recursive).
@@ -733,21 +787,29 @@ impl GitSource {
         // HEAD — its reflog captures every checkout/commit/reset the user
         // made through the working tree, which is exactly the honesty
         // signal we care about for the oplog.
-        let refs = self.repo.references();
-        collect_one_reflog(&refs, "HEAD", &mut out)?;
-
-        // Every local branch + tag.
-        for reference in refs
-            .list_refs()
-            .map_err(|e| IngestError::Git(format!("references: {e}")))?
-        {
-            if reference.name.starts_with("refs/heads/") || reference.name.starts_with("refs/tags/")
-            {
-                collect_one_reflog(&refs, &reference.name, &mut out)?;
-            }
-        }
+        let frozen = self.collect_frozen_import_refs()?;
+        self.collect_reflog_from_frozen(&frozen, &mut out)?;
 
         Ok(out)
+    }
+
+    /// Reuse the raw snapshot instead of rereading all loose ref files.
+    pub fn collect_reflog_from_frozen(
+        &self,
+        frozen: &[ImportRefIdentity],
+        out: &mut Vec<ReflogEntry>,
+    ) -> crate::Result<()> {
+        let refs = self.repo.references();
+        for reference in frozen {
+            if let Ok(name) = std::str::from_utf8(&reference.raw_name)
+                && (name == "HEAD"
+                    || name.starts_with("refs/heads/")
+                    || name.starts_with("refs/tags/"))
+            {
+                collect_one_reflog(&refs, name, out)?;
+            }
+        }
+        Ok(())
     }
 
     /// Iterate reflog entries only for the selected local branch/tag refs.
@@ -1133,10 +1195,19 @@ mod tests {
             .expect("write invalid ref");
         assert!(status.success());
         let source = GitSource::open(temp.path()).expect("source");
-        let error = source
-            .collect_frozen_import_refs()
-            .expect_err("malformed UTF-8 must fail before Sley String enumeration");
-        assert!(error.to_string().contains("ref name is not UTF-8"));
+        let refs = source.collect_frozen_import_refs().expect("raw discovery");
+        let invalid = refs
+            .iter()
+            .find(|reference| reference.raw_name == b"refs/heads/invalid-\xff")
+            .expect("raw name retained");
+        assert_eq!(objects::object::thread_replication::git_import_graph::classify_git_import_ref(invalid).expect("classification"), ImportRefDisposition::Unsupported { reason: objects::object::thread_replication::git_import_graph::ImportSkipReason::NonUtf8RefName });
+        assert!(
+            !source
+                .collect_refs()
+                .expect("native view")
+                .iter()
+                .any(|reference| reference.full_name.contains("invalid-"))
+        );
     }
 
     #[test]

@@ -14,7 +14,9 @@ pub fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
     // Native suffixes include the branch `@`; check them in a full namespace.
     let git_name = objects::name_encoding::git_name(name);
     let full = format!("refs/heads/{git_name}");
-    if sley_refs::check_refname_format(&full, false).is_err() || is_reserved_heddle_namespace(name)
+    if sley_refs::check_refname_format(&full, false).is_err()
+        || is_reserved_heddle_namespace(name)
+        || (name.starts_with("git%") && objects::name_encoding::native_git_name(&git_name) != name)
     {
         return Err(invalid(name));
     }
@@ -69,6 +71,13 @@ mod tests {
     #[test]
     fn allows_plain_ref() {
         assert!(validate_ref_name("refs/heads/main").is_ok());
+    }
+
+    #[test]
+    fn native_git_prefix_requires_canonical_mapping() {
+        assert!(validate_ref_name("git%foo").is_err());
+        let imported = objects::name_encoding::native_git_name("git%foo");
+        assert!(validate_ref_name(&imported).is_ok());
     }
 
     #[test]

@@ -193,6 +193,18 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
+    /// Import has already decoded portable notes and bound source OIDs in
+    /// ingest's durable map. Preserve cached/live export mappings without a
+    /// second String-based enumeration of the unfiltered source refs.
+    pub(crate) fn restore_ingest_mapping_cache(&mut self) -> GitProjectionResult<()> {
+        let cache = self.read_mapping_cache_from_disk()?;
+        let mut index = GitIdentityIndex::default();
+        index.fill_gaps_from_cache(&self.mapping);
+        index.fill_gaps_from_cache(&cache);
+        self.mapping = index.into_mapping();
+        Ok(())
+    }
+
     pub fn seed_ingest_identity_mappings_from_repo(
         &mut self,
         repo: &SleyRepository,

@@ -39,6 +39,7 @@ impl FilesystemThreadRecordStore {
         if thread_id.is_empty() {
             return Err(HeddleError::Config("thread id cannot be empty".to_string()));
         }
+        objects::name_encoding::verify_name_entry(&self.root, thread_id)?;
         Ok(self
             .root
             .join(objects::name_encoding::name_path(thread_id))
@@ -58,6 +59,7 @@ impl FilesystemThreadRecordStore {
     pub fn save_value<T: Serialize>(&self, thread_id: &str, value: &T) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.record_path(thread_id)?;
+        objects::name_encoding::write_name_entry(&self.root, thread_id)?;
         let content =
             toml::to_string_pretty(value).map_err(|e| HeddleError::Config(e.to_string()))?;
         Ok(write_file_atomic(&path, content.as_bytes())?)

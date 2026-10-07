@@ -262,7 +262,7 @@ fn run_import(
     for reference in &stats.skipped_refs {
         println!(
             "    skipped {}: {}",
-            String::from_utf8_lossy(&reference.raw_name),
+            reference.display_name(),
             reference.reason.description()
         );
     }

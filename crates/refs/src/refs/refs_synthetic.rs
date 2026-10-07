@@ -21,10 +21,8 @@ impl RefManager {
 
     fn synthetic_frontier_path(&self, name: &SyntheticFrontierName) -> std::path::PathBuf {
         self.synthetic_dir()
-            .join(objects::name_encoding::name_path(&format!(
-                "heddle/frontier/{}/{}",
-                objects::name_encoding::git_name(name.thread()),
-                name.change_id().to_string_full()
+            .join(objects::name_encoding::name_path(&synthetic_storage_name(
+                name,
             )))
             .join("value")
     }
@@ -36,6 +34,10 @@ impl RefManager {
         state: &StateId,
     ) -> Result<()> {
         self.write_chokepoint(|_lock| {
+            objects::name_encoding::write_name_entry(
+                &self.synthetic_dir(),
+                &synthetic_storage_name(name),
+            )?;
             let path = self.synthetic_frontier_path(name);
             let parent = path.parent().ok_or_else(|| {
                 HeddleError::Config("invalid synthetic frontier path".to_string())
@@ -48,6 +50,10 @@ impl RefManager {
 
     /// Fetch a synthetic frontier root by its type-distinct name.
     pub fn get_synthetic_frontier(&self, name: &SyntheticFrontierName) -> Result<Option<StateId>> {
+        objects::name_encoding::verify_name_entry(
+            &self.synthetic_dir(),
+            &synthetic_storage_name(name),
+        )?;
         let path = self.synthetic_frontier_path(name);
         match self.read_optional_string(&path)? {
             Some(contents) => parse_state_id_text(contents.trim())
@@ -87,6 +93,14 @@ impl RefManager {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+}
+
+fn synthetic_storage_name(name: &SyntheticFrontierName) -> String {
+    format!(
+        "heddle/frontier/{}/{}",
+        objects::name_encoding::git_name(name.thread()),
+        name.change_id().to_string_full()
+    )
 }
 
 #[cfg(test)]

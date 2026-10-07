@@ -49,8 +49,16 @@ pub fn decode_name(encoded: &str) -> Option<String> {
     (encode_name(&value) == encoded).then_some(value)
 }
 
+/// Maximum relative name path in bytes. With a 512-byte repository root,
+/// `.heddle/threads/` (17), a 255-byte checkout leaf plus separator (256),
+/// and 111 bytes for checkout-local Heddle metadata, the absolute path is
+/// at most 1024 bytes. Two encoded names in remote refs also fit this budget.
+pub const NAME_PATH_BUDGET: usize = 128;
+
 /// Bounded components and a terminal directory keep even long names disjoint.
 /// Each chunk is ASCII, at most 182 bytes; `entry` can never be another chunk.
+/// Long names use the full BLAKE3 digest of the exact native UTF-8 identity.
+/// Their entry must carry a `name` file, verified by the filesystem reader.
 pub fn name_path(value: &str) -> PathBuf {
     let source = git_name(value);
     let encoded = encode_name(&source);
@@ -66,7 +74,29 @@ pub fn name_path(value: &str) -> PathBuf {
         path.push(format!("n-{chunk}"));
     }
     path.push("entry");
-    path
+    if path.as_os_str().len() > NAME_PATH_BUDGET {
+        PathBuf::from(format!(
+            "h-{}/entry",
+            blake3::hash(value.as_bytes()).to_hex()
+        ))
+    } else {
+        path
+    }
+}
+
+/// Recognize the complete digest path; never accept a digest prefix or alias.
+pub fn is_digest_name_path(path: &Path) -> bool {
+    let mut parts = path.components();
+    let Some(digest) = parts.next().and_then(|part| part.as_os_str().to_str()) else {
+        return false;
+    };
+    digest.strip_prefix("h-").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) && parts.next().is_some_and(|part| part.as_os_str() == "entry")
+        && parts.next().is_none()
 }
 
 /// Decode only canonical storage paths, including exact UTF-8 identity.
@@ -133,10 +163,14 @@ mod tests {
             &native_git_name(&format!("heddle/{}", "界".repeat(333))),
         ] {
             let path = name_path(name);
-            assert_eq!(decode_name_path(&path).as_deref(), Some(name));
+            if is_digest_name_path(&path) {
+                assert!(decode_name_path(&path).is_none());
+            } else {
+                assert_eq!(decode_name_path(&path).as_deref(), Some(name));
+            }
             assert!(path.components().all(|part| part.as_os_str().len() <= 182));
             assert!(path.to_str().expect("ASCII path").is_ascii());
-            assert!(path.as_os_str().len() < 3500);
+            assert!(path.as_os_str().len() <= NAME_PATH_BUDGET);
         }
         assert_ne!(
             name_path("CON").to_string_lossy().to_lowercase(),

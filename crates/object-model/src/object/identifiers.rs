@@ -228,6 +228,16 @@ mod tests {
             "HEAD",
             ".",
             "team:scope",
+            "a~b",
+            "a^b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "a//b",
+            "a/",
+            "a.",
+            "a\x7f",
         ] {
             assert!(
                 ThreadName::from_git_branch(name).is_err(),

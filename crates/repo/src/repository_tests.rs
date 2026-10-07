@@ -386,6 +386,41 @@ fn test_custom_store_fixture_threads_a_custom_object_store() {
 }
 
 #[test]
+fn v5_open_and_init_leave_all_files_byte_identical() {
+    let temp = TempDir::new().expect("v5 fixture");
+    let heddle = temp.path().join(".heddle");
+    fs::create_dir_all(heddle.join("objects")).expect("objects");
+    fs::write(heddle.join("config.toml"), "[repository]\nversion = 5\n").expect("v5 config");
+    fs::write(
+        heddle.join(crate::local_metadata::DATABASE_NAME),
+        b"v5 database bytes",
+    )
+    .expect("database");
+    let before = snapshot_directory(temp.path());
+    assert!(Repository::open(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::open_for_oplog_recovery(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::init(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::init_default(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    let intent = crate::clone_intent::CloneIntent {
+        origin: "test".into(),
+        endpoint: "test".into(),
+        repository: "test".into(),
+        thread: None,
+        advertised_head: None,
+        depth: None,
+        lazy: false,
+    };
+    intent.create(temp.path()).expect("clone recovery fixture");
+    let before = snapshot_directory(temp.path());
+    assert!(Repository::init_clone(temp.path(), RepositorySourceAuthority::Native).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+}
+
+#[test]
 fn open_refuses_newer_repository_format_with_recovery_advice() {
     let temp_dir = TempDir::new().unwrap();
     crate::init_test_repository(temp_dir.path()).unwrap();

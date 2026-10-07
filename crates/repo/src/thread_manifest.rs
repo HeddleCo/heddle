@@ -163,9 +163,9 @@ impl ManifestFile {
     }
 }
 
-/// The v6 per-thread directory: portable percent-escaped UTF-8 in bounded
-/// chunks, followed by a distinct `entry` leaf. Thread directories are never
-/// ancestors of each other, even when long encodings share whole chunks.
+/// The v6 per-thread directory: portable percent-escaped UTF-8 or a digest
+/// entry carrying the exact name. Thread directories are never ancestors of
+/// each other, even when names share encoding or digest prefixes.
 /// Every sidecar and managed checkout uses this derivation.
 pub fn thread_dir(heddle_dir: &Path, thread: &str) -> PathBuf {
     heddle_dir
@@ -226,10 +226,14 @@ pub(crate) fn name_directories(
         };
         let relative = prefix.join(segment);
         if segment == "entry" {
-            if let Some(name) = objects::name_encoding::decode_name_path(&relative) {
+            let root = dir
+                .ancestors()
+                .nth(prefix.components().count())
+                .ok_or_else(|| io::Error::other("invalid name root"))?;
+            if let Some(name) = objects::name_encoding::read_name_entry(root, &relative)? {
                 out.push((name, entry.path()));
             }
-        } else if segment.starts_with("n-") || segment == "git" {
+        } else if segment.starts_with("n-") || segment.starts_with("h-") || segment == "git" {
             name_directories(&entry.path(), &relative, out)?;
         }
     }
@@ -295,6 +299,7 @@ pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedTh
 /// schema-version mismatch — callers should treat that as "rebuild
 /// the manifest from scratch", not as a corruption hazard.
 pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<ThreadManifest>> {
+    objects::name_encoding::verify_name_entry(&heddle_dir.join("threads"), thread)?;
     read_manifest_at(&manifest_path(heddle_dir, thread))
 }
 
@@ -376,6 +381,7 @@ pub fn manifest_for_worktree_root(
 /// thread's checkout, and there are no empty intermediate parents left to
 /// reap (the heddle#572 r2 recursive-drop hazard).
 pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result<bool> {
+    objects::name_encoding::verify_name_entry(&heddle_dir.join("threads"), thread)?;
     let dir = thread_dir(heddle_dir, thread);
     match fs::remove_dir_all(&dir) {
         Ok(()) => Ok(true),
@@ -582,6 +588,7 @@ pub fn write_manifest(
     manifest: &ThreadManifest,
 ) -> io::Result<()> {
     let path = manifest_path(heddle_dir, thread);
+    objects::name_encoding::write_name_entry(&heddle_dir.join("threads"), thread)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
     }
@@ -628,6 +635,33 @@ mod tests {
 
     fn cid() -> StateId {
         crate::test_state_id()
+    }
+
+    #[test]
+    fn longest_multibyte_names_fit_absolute_internal_paths() {
+        let root = PathBuf::from(format!("/{}/{}", "r".repeat(255), "r".repeat(255)));
+        let branch = format!("{}é", "界".repeat(337));
+        let tag = "界".repeat(338);
+        objects::object::ThreadName::from_git_branch(&branch).expect("longest multibyte branch");
+        objects::object::MarkerName::from_git_tag(&tag).expect("1024-byte full tag ref");
+        assert_eq!(format!("refs/heads/{branch}").len(), 1024);
+        assert_eq!(format!("refs/tags/{tag}").len(), 1024);
+        let heddle = root.join(".heddle");
+        let checkout = managed_checkout_path(&heddle, &branch, &root);
+        for path in [
+            checkout.join(".heddle/UNDO_RECOVERY"),
+            heddle
+                .join("refs/markers")
+                .join(objects::name_encoding::name_path(&tag))
+                .join("value.tmp-18446744073709551615"),
+        ] {
+            assert!(
+                path.as_os_str().len() <= 1024,
+                "{} bytes: {}",
+                path.as_os_str().len(),
+                path.display()
+            );
+        }
     }
 
     #[test]

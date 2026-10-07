@@ -14,6 +14,18 @@ use crate::FsMonitorConfig;
 
 pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 6;
 
+/// Read-only admission before any recovery or initialization can write.
+pub(crate) fn check_repository_format(path: &Path) -> Result<()> {
+    let contents = std::fs::read_to_string(path)?;
+    // A pending current-format installation can leave incomplete TOML;
+    // recovery restores that file before the full config reader validates it.
+    // A readable unsupported format must never enter recovery.
+    if let Ok(version) = repository_format_version(&contents, path) {
+        reject_unsupported_repo_format(path, version)?;
+    }
+    Ok(())
+}
+
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoConfig {

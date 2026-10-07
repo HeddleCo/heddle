@@ -275,6 +275,182 @@ pub fn is_reserved_git_remote_name(remote: &str) -> bool {
     remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
 }
 
+/// Import reads source objects by their real OIDs; replacement refs are
+/// excluded by import policy. Disable Sley's eager replacement-ref scan, which
+/// otherwise decodes unrelated packed names before namespace admission.
+pub fn open_git_import_source(path: &std::path::Path) -> objects::error::Result<sley::Repository> {
+    let options = sley::OpenOptions::new().replace_objects(false);
+    sley::Repository::open_with(path, options)
+        .or_else(|_| sley::Repository::open_with(path, options.exact_path(true)))
+        .map_err(|error| objects::error::HeddleError::InvalidObject(error.to_string()))
+}
+
+/// Raw identities at the Git boundary. Sley owns target/OID parsing; names
+/// remain bytes until each consumer has applied its namespace policy.
+#[derive(Debug, Clone)]
+pub struct RawGitRef {
+    pub name: Vec<u8>,
+    pub target: RawGitRefTarget,
+}
+
+#[derive(Debug, Clone)]
+pub enum RawGitRefTarget {
+    Direct(sley::ObjectId),
+    Symbolic(Vec<u8>),
+}
+
+/// Read each files-backend ref once, preserving non-UTF-8 identities and loose
+/// precedence over packed refs. The reftable backend remains owned by Sley.
+pub fn read_raw_git_refs(repository: &sley::Repository) -> objects::error::Result<Vec<RawGitRef>> {
+    use std::{collections::BTreeMap, fs, io, path::Path};
+
+    use objects::error::HeddleError;
+
+    fn parse_target(
+        format: sley::ObjectFormat,
+        name: &[u8],
+        bytes: &[u8],
+    ) -> Option<RawGitRefTarget> {
+        let value = bytes
+            .strip_suffix(b"\r\n")
+            .or_else(|| bytes.strip_suffix(b"\n"))
+            .unwrap_or(bytes);
+        if let Some(target) = value.strip_prefix(b"ref: ") {
+            return Some(RawGitRefTarget::Symbolic(target.to_vec()));
+        }
+        let name = std::str::from_utf8(name).unwrap_or("refs/heads/non-utf8");
+        let parsed = sley_refs::parse_loose_ref(format, name, bytes).ok()?;
+        match parsed.target {
+            sley_refs::RefTarget::Direct(oid) if !oid.as_bytes().iter().all(|byte| *byte == 0) => {
+                Some(RawGitRefTarget::Direct(oid))
+            }
+            _ => None,
+        }
+    }
+
+    fn loose(
+        format: sley::ObjectFormat,
+        dir: &Path,
+        prefix: &[u8],
+        out: &mut BTreeMap<Vec<u8>, RawGitRefTarget>,
+    ) -> io::Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = [prefix, b"/", entry.file_name().as_encoded_bytes()].concat();
+            if entry.file_type()?.is_dir() {
+                loose(format, &entry.path(), &name, out)?;
+            } else if !name.ends_with(b".lock") {
+                // A broken loose ref still shadows the packed value.
+                out.remove(&name);
+                let target = if entry.file_type()?.is_symlink() {
+                    Some(RawGitRefTarget::Symbolic(
+                        fs::read_link(entry.path())?
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ))
+                } else {
+                    parse_target(format, &name, &fs::read(entry.path())?)
+                };
+                if let Some(target) = target {
+                    out.insert(name, target);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let refs = repository.references();
+    if refs
+        .uses_reftable()
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+    {
+        return refs
+            .list_all_refs()
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))
+            .map(|refs| {
+                refs.into_iter()
+                    .map(|reference| RawGitRef {
+                        name: reference.name.into_bytes(),
+                        target: match reference.target {
+                            sley::ReferenceTarget::Direct(oid) => RawGitRefTarget::Direct(oid),
+                            sley::ReferenceTarget::Symbolic(name) => {
+                                RawGitRefTarget::Symbolic(name.into_bytes())
+                            }
+                        },
+                    })
+                    .collect()
+            });
+    }
+    let mut out = BTreeMap::new();
+    let packed_path = repository.common_dir().join("packed-refs");
+    let packed = match fs::read(&packed_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut utf8_packed = Vec::with_capacity(packed.len());
+    let mut excluded_last = false;
+    for line in packed.split_inclusive(|byte| *byte == b'\n') {
+        if line.starts_with(b"^") && excluded_last {
+            continue;
+        }
+        if !line.starts_with(b"#")
+            && !line.starts_with(b"^")
+            && let Some(space) = line.iter().position(|byte| *byte == b' ')
+        {
+            let name = line[space + 1..]
+                .strip_suffix(b"\n")
+                .unwrap_or(&line[space + 1..]);
+            excluded_last = std::str::from_utf8(name).is_err();
+            if excluded_last {
+                let oid = std::str::from_utf8(&line[..space])
+                    .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+                let oid = sley::ObjectId::from_hex(repository.object_format(), oid)
+                    .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+                out.insert(name.to_vec(), RawGitRefTarget::Direct(oid));
+                continue;
+            }
+        }
+        utf8_packed.extend_from_slice(line);
+    }
+    for packed in sley_refs::parse_packed_refs(repository.object_format(), &utf8_packed)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+    {
+        if let sley_refs::RefTarget::Direct(oid) = packed.reference.target {
+            out.insert(
+                packed.reference.name.into_bytes(),
+                RawGitRefTarget::Direct(oid),
+            );
+        }
+    }
+    loose(
+        repository.object_format(),
+        &repository.common_dir().join("refs"),
+        b"refs",
+        &mut out,
+    )?;
+    let head = repository.git_dir().join("HEAD");
+    match fs::read(&head) {
+        Ok(bytes) => {
+            if let Some(target) = parse_target(repository.object_format(), b"HEAD", &bytes) {
+                out.insert(b"HEAD".to_vec(), target);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(out
+        .into_iter()
+        .map(|(name, target)| RawGitRef { name, target })
+        .collect())
+}
+
 /// Refuse malformed UTF-8 before Sley's String enumeration can turn it into
 /// an identity. Literal U+FFFD is valid; no normalization or lossy decode occurs.
 pub fn require_exact_git_ref_encoding(repository: &sley::Repository) -> objects::error::Result<()> {

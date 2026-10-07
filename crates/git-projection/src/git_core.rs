@@ -2543,7 +2543,26 @@ pub fn collect_import_source_ref_updates(
     repo: &SleyRepository,
     refs: &[String],
 ) -> GitProjectionResult<Vec<RefUpdate>> {
-    let updates = collect_ref_updates(repo)?;
+    // Import exclusions are reported by ingest. Preserve raw identity here
+    // too, so residual capture never invents a replacement-character ref.
+    let mut updates = Vec::new();
+    for reference in repo::read_raw_git_refs(repo)? {
+        let (Ok(full), repo::RawGitRefTarget::Direct(target)) =
+            (std::str::from_utf8(&reference.name), reference.target)
+        else {
+            continue;
+        };
+        let name = GitRefName::new(full);
+        if let Some(namespace) = name.content_namespace()
+            && let Some(short) = name.short_name()
+        {
+            updates.push(RefUpdate {
+                name: short.to_owned(),
+                target,
+                namespace,
+            });
+        }
+    }
     if refs.is_empty() {
         return Ok(updates);
     }

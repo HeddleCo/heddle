@@ -198,7 +198,8 @@ pub use fsmonitor::{
 };
 pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
-    REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name, require_exact_git_ref_encoding,
+    REMOTE_NAME_FOR_LOCAL_GIT_REPO, RawGitRef, RawGitRefTarget, is_reserved_git_remote_name,
+    open_git_import_source, read_raw_git_refs, require_exact_git_ref_encoding,
 };
 pub use grant_audience::{GrantRole, audience_tier_for_grant, grant_can_see_tier};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};

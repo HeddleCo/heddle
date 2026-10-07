@@ -68,6 +68,11 @@ fn git_branch_alphabet_and_reserved_mapping_export_exact_refs() {
         "x'$(true)",
         "CON",
         "con",
+        "Foo",
+        "foo",
+        "caf\u{e9}",
+        "cafe\u{301}",
+        "git%foo",
     ] {
         git(
             source.path(),

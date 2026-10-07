@@ -1147,6 +1147,8 @@ impl RefManager {
     ) -> Result<()> {
         let path = self.remote_thread_path(remote, thread)?;
         let content = format_state_id_text(state);
+        objects::name_encoding::write_name_entry(&self.remotes_dir(), remote)?;
+        objects::name_encoding::write_name_entry(&self.remote_dir(remote)?, thread)?;
         let parent = path.parent().ok_or_else(|| {
             HeddleError::Config(format!(
                 "invalid remote thread path for {}/{}",

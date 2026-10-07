@@ -106,7 +106,7 @@ pub enum ImportSkipReason {
 impl ImportSkipReason {
     pub fn description(self) -> &'static str {
         match self {
-            Self::NonUtf8RefName => "non-UTF-8 ref name",
+            Self::NonUtf8RefName => "ref name is not valid UTF-8",
             Self::InvalidNativeName => "invalid Git ref name",
             Self::RemoteTracking => "remote-tracking ref",
             Self::Replace => "replace ref",
@@ -227,6 +227,15 @@ pub fn classify_git_import_ref(
 pub struct SkippedImportRef {
     pub raw_name: Vec<u8>,
     pub reason: ImportSkipReason,
+}
+
+impl SkippedImportRef {
+    /// Keep valid Unicode readable; escape invalid bytes rather than displaying
+    /// a replacement character that could name a different, valid Git ref.
+    pub fn display_name(&self) -> String {
+        std::str::from_utf8(&self.raw_name)
+            .map_or_else(|_| self.raw_name.escape_ascii().to_string(), str::to_owned)
+    }
 }
 
 /// Result of classifying a complete, raw-name-sorted frozen ref set.
