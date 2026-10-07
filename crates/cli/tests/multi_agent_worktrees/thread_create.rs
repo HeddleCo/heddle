@@ -76,8 +76,7 @@ fn test_thread_create_then_child_start() {
 }
 
 /// `thread create` must produce a ThreadManager-loadable record. We
-/// check both the on-disk shape (a `.heddle/thread_records/<hex>.toml`
-/// file) and the round-trip through the loader.
+/// check both the v6 on-disk record file and the round-trip through the loader.
 #[test]
 fn test_thread_create_writes_record() {
     let main = setup_repo("main.rs", "fn main() {}");
@@ -96,15 +95,13 @@ fn test_thread_create_writes_record() {
     assert_eq!(loaded.thread, name);
     assert_ne!(loaded.id, name, "native thread id is the genesis hash");
     let record_dir = main.path().join(".heddle").join("thread_records");
-    let record_files: Vec<_> = std::fs::read_dir(&record_dir)
-        .expect("thread_records directory")
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "toml"))
-        .collect();
+    let record_file = record_dir
+        .join(objects::name_encoding::name_path(&loaded.id))
+        .join("record.toml");
     assert!(
-        !record_files.is_empty(),
-        "thread create should write a record file under {}",
-        record_dir.display()
+        record_file.is_file(),
+        "thread create should write its record file at {}",
+        record_file.display()
     );
 
     // And the loader must surface the thread.

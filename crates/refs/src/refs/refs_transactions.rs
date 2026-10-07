@@ -840,7 +840,7 @@ mod tests {
         let lock = refs.lock_refs().unwrap();
         let result = refs.validate_commit_publish(&updates, &lock, || {
             generation.store(1, Ordering::Release);
-            std::fs::create_dir(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
+            std::fs::create_dir_all(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
             Ok(true)
         });
         drop(lock);

@@ -4292,7 +4292,7 @@ fn start_default_path_lands_under_heddle_threads() {
             .path()
             .join(".heddle")
             .join("threads")
-            .join(name)
+            .join(objects::name_encoding::name_path(name))
             .join(leaf);
         assert!(
             path.contains("/.heddle/threads/") && path.contains(name),
@@ -4442,7 +4442,7 @@ fn start_cannot_reuse_another_threads_reserved_checkout() {
         .path()
         .join(".heddle")
         .join("threads")
-        .join("owner")
+        .join(objects::name_encoding::name_path("owner"))
         .join(temp.path().file_name().unwrap());
     let err = heddle(
         &["start", "intruder", "--path", owner_root.to_str().unwrap()],
@@ -4482,7 +4482,7 @@ fn promote_materialized_thread_converts_in_place() {
         .path()
         .join(".heddle")
         .join("threads")
-        .join("promo")
+        .join(objects::name_encoding::name_path("promo"))
         .join(temp.path().file_name().unwrap());
     assert!(
         checkout.join(".heddle").exists(),
@@ -4507,7 +4507,9 @@ fn promote_materialized_thread_converts_in_place() {
     // The sidecar stayed OUTSIDE the checkout (a sibling of the checkout leaf).
     assert!(
         temp.path()
-            .join(".heddle/threads/promo/manifest.toml")
+            .join(".heddle/threads")
+            .join(objects::name_encoding::name_path("promo"))
+            .join("manifest.toml")
             .exists(),
         "manifest sidecar must remain a sibling of the checkout, not inside it"
     );
@@ -4538,7 +4540,7 @@ fn inside_thread_checkout_resolves_thread_not_parent_branch() {
             .path()
             .join(".heddle")
             .join("threads")
-            .join(&name)
+            .join(objects::name_encoding::name_path(&name))
             .join(temp.path().file_name().unwrap());
         assert!(
             checkout.join(".heddle").exists(),
@@ -9030,11 +9032,13 @@ fn global_exit_codes_and_failure_streams_are_predictable() {
 fn fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(
-        temp.path().join(".heddle/refs/threads/main"),
-        "bad-state-id",
-    )
-    .unwrap();
+    let path = temp
+        .path()
+        .join(".heddle/refs/threads")
+        .join(objects::name_encoding::name_path("main"))
+        .join("value");
+    std::fs::create_dir_all(path.parent().expect("ref directory")).unwrap();
+    std::fs::write(path, "bad-state-id").unwrap();
 
     let json = heddle_output(
         &["--output", "json", "maintenance", "fsck"],

@@ -101,7 +101,7 @@ pub struct ThreadStartPlan {
 /// Failures from pure thread create/start planning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadPlanError {
-    /// Thread name failed the safe-slug / reserved-structure rule.
+    /// Thread name failed the Git branch syntax / reserved namespace rule.
     InvalidName(ThreadIdError),
 }
 
@@ -159,11 +159,11 @@ impl std::error::Error for ThreadBaseError {}
 // Name validation / create + start preflight
 // ---------------------------------------------------------------------------
 
-/// Validate a thread name against the shared safe-slug rule.
+/// Validate a thread name against the shared Git branch rule.
 ///
 /// This is the single creation-boundary check used by start and create. It
-/// rejects empty names, shell metacharacters, `..` segments, and leading `/`
-/// or `-` (see [`repo::validate_thread_id`]).
+/// rejects Git-invalid names, exact `HEAD`, and the native reserved namespace
+/// (see [`repo::validate_thread_id`]).
 pub fn validate_thread_name(name: &str) -> Result<ThreadId, ThreadPlanError> {
     ThreadId::new(name).map_err(ThreadPlanError::from)
 }

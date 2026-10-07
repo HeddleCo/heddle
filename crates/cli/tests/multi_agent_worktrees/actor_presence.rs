@@ -63,7 +63,9 @@ fn fanout_unborn_git_head_leaves_no_lane_or_task() {
             "{error}"
         );
         assert_eq!(error["primary_command"], "heddle status", "{error}");
-        assert!(!main.path().join(".heddle/threads/feature%2Fa").exists());
+        assert!(
+            !repo::thread_manifest::thread_dir(&main.path().join(".heddle"), "feature/a").exists()
+        );
         assert!(!main.path().join(".heddle/agent-tasks").exists());
         let head = std::process::Command::new("git")
             .args(["rev-parse", "--verify", "HEAD"])
@@ -125,7 +127,9 @@ fn fanout_dirty_git_overlay_refuses_staged_unstaged_and_untracked_work() {
         );
         assert_eq!(error["primary_command"], "heddle status", "{error}");
         assert_eq!(git_at(main.path(), &["status", "--short"]), status_before);
-        assert!(!main.path().join(".heddle/threads/feature%2Fa").exists());
+        assert!(
+            !repo::thread_manifest::thread_dir(&main.path().join(".heddle"), "feature/a").exists()
+        );
         assert!(!main.path().join(".heddle/agent-tasks").exists());
     }
 }
@@ -742,9 +746,10 @@ fn git_index_failure_at_each_lane_rolls_back_entire_fanout() {
     ];
     for failed in ["a", "b", "c"] {
         let main = git_overlay_fixture(true);
-        let target = main
-            .path()
-            .join(format!(".heddle/threads/feature%2F{failed}"));
+        let target = repo::thread_manifest::thread_dir(
+            &main.path().join(".heddle"),
+            &format!("feature/{failed}"),
+        );
         let fault = heddle_output_with_env(
             &args,
             Some(main.path()),

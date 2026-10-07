@@ -1558,6 +1558,9 @@ pub struct AgentFanoutPlanArgs {
     pub title: String,
 
     /// Child Thread spec: `<thread>=<title>`. Heddle manages its checkout.
+    ///
+    /// Escape a name containing `=` as `[n-percent-escaped-name]=<title>`,
+    /// for example `[n-feat%2Fmcp%3Dtimeout]=Task`.
     #[arg(long, value_name = "THREAD=TITLE")]
     pub lane: Vec<String>,
 
@@ -1574,6 +1577,9 @@ pub struct AgentFanoutStartArgs {
     pub title: String,
 
     /// Child Thread spec: `<thread>=<title>`. Heddle manages its checkout.
+    ///
+    /// Escape a name containing `=` as `[n-percent-escaped-name]=<title>`,
+    /// for example `[n-feat%2Fmcp%3Dtimeout]=Task`.
     #[arg(long, value_name = "THREAD=TITLE")]
     pub lane: Vec<String>,
 

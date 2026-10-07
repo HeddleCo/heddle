@@ -107,7 +107,7 @@ impl ImportSkipReason {
     pub fn description(self) -> &'static str {
         match self {
             Self::NonUtf8RefName => "non-UTF-8 ref name",
-            Self::InvalidNativeName => "reserved native ref name",
+            Self::InvalidNativeName => "invalid Git ref name",
             Self::RemoteTracking => "remote-tracking ref",
             Self::Replace => "replace ref",
             Self::Pull => "pull ref",
@@ -132,13 +132,11 @@ pub fn classify_git_import_ref(
     reference: &ImportRefIdentity,
 ) -> std::result::Result<ImportRefDisposition, ImportRefFailure> {
     let name = reference.raw_name.as_slice();
-    if std::str::from_utf8(name).is_err()
-        || name.windows(3).any(|bytes| bytes == "\u{fffd}".as_bytes())
-    {
+    let Ok(utf8_name) = std::str::from_utf8(name) else {
         return Ok(ImportRefDisposition::Unsupported {
             reason: ImportSkipReason::NonUtf8RefName,
         });
-    }
+    };
     if name == b"HEAD" {
         return match &reference.raw_target {
             GitRefTarget::Symbolic(target)
@@ -173,9 +171,7 @@ pub fn classify_git_import_ref(
         GitRefTarget::Symbolic(_) => return Err(ImportRefFailure::UnknownRequiredTarget),
     };
     if name.starts_with(b"refs/heads/") && name.len() > b"refs/heads/".len() {
-        if ThreadName::try_new(String::from_utf8_lossy(&name[b"refs/heads/".len()..]).into_owned())
-            .is_err()
-        {
+        if ThreadName::from_git_branch(&utf8_name["refs/heads/".len()..]).is_err() {
             return Ok(ImportRefDisposition::Unsupported {
                 reason: ImportSkipReason::InvalidNativeName,
             });
@@ -193,9 +189,7 @@ pub fn classify_git_import_ref(
         };
     }
     if name.starts_with(b"refs/tags/") && name.len() > b"refs/tags/".len() {
-        if MarkerName::try_new(String::from_utf8_lossy(&name[b"refs/tags/".len()..]).into_owned())
-            .is_err()
-        {
+        if MarkerName::from_git_tag(&utf8_name["refs/tags/".len()..]).is_err() {
             return Ok(ImportRefDisposition::Unsupported {
                 reason: ImportSkipReason::InvalidNativeName,
             });
@@ -486,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_branch_is_skipped_before_native_emission() {
+    fn reserved_branch_is_admitted_for_escaped_native_emission() {
         let oid = GitObjectId::Sha1([8; 20]);
         let reference = ImportRefIdentity {
             raw_name: b"refs/heads/heddle/reserved".to_vec(),
@@ -498,9 +492,7 @@ mod tests {
         };
         assert!(matches!(
             classify_git_import_ref(&reference),
-            Ok(ImportRefDisposition::Unsupported {
-                reason: ImportSkipReason::InvalidNativeName
-            })
+            Ok(ImportRefDisposition::Branch)
         ));
     }
 }

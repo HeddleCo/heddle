@@ -18,7 +18,7 @@ pub mod worktree;
 pub use error::{HeddleError, RecoveryDetails};
 #[cfg(feature = "fs")]
 pub use heddle_fs_prims::{directory, fs_atomic, fs_clone, fs_ops, lock};
-pub use heddle_object_model::{error, object};
+pub use heddle_object_model::{error, name_encoding, object};
 pub use observe::{
     CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,
     WarningSink,

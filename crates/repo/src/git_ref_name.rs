@@ -275,9 +275,68 @@ pub fn is_reserved_git_remote_name(remote: &str) -> bool {
     remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
 }
 
+/// Refuse malformed UTF-8 before Sley's String enumeration can turn it into
+/// an identity. Literal U+FFFD is valid; no normalization or lossy decode occurs.
+pub fn require_exact_git_ref_encoding(repository: &sley::Repository) -> objects::error::Result<()> {
+    fn check_tree(path: &std::path::Path) -> objects::error::Result<()> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path)?;
+            if target.to_str().is_none() {
+                return Err(objects::error::HeddleError::InvalidRefName(
+                    "Git symbolic ref is not UTF-8; refusing lossy identity".into(),
+                ));
+            }
+        } else if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                if entry.file_name().to_str().is_none() {
+                    return Err(objects::error::HeddleError::InvalidRefName(
+                        "Git ref name is not UTF-8; refusing lossy identity".into(),
+                    ));
+                }
+                check_tree(&entry.path())?;
+            }
+        } else {
+            let bytes = std::fs::read(path)?;
+            std::str::from_utf8(&bytes).map_err(|_| {
+                objects::error::HeddleError::InvalidRefName(
+                    "Git ref framing is not UTF-8; refusing lossy identity".into(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+    check_tree(&repository.common_dir().join("refs"))?;
+    check_tree(&repository.common_dir().join("packed-refs"))?;
+    check_tree(&repository.git_dir().join("HEAD"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_git_symbolic_ref_refuses_non_utf8_target_before_enumeration() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let temp = tempfile::TempDir::new().expect("Git source");
+        let git = sley::Repository::init(temp.path()).expect("Git repository");
+        let refs = git.common_dir().join("refs/heads");
+        std::fs::create_dir_all(&refs).expect("heads");
+        std::os::unix::fs::symlink(
+            OsString::from_vec(b"missing-\xff".to_vec()),
+            refs.join("symbolic"),
+        )
+        .expect("dangling symbolic ref");
+        let error = require_exact_git_ref_encoding(&git).expect_err("no lossy target identity");
+        assert!(error.to_string().contains("symbolic ref is not UTF-8"));
+    }
 
     #[test]
     fn classifies_every_git_namespace_used_by_sync_and_projection() {

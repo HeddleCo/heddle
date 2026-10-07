@@ -3282,7 +3282,7 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
 }
 
 fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerResult {
-    let name_land_command = format!("heddle land --thread {thread}");
+    let name_land_command = format!("heddle land {}", repo::thread_flag(thread));
     let requested_name = |command: &str| {
         if command.starts_with("heddle land --thread ") {
             name_land_command.clone()

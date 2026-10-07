@@ -1170,9 +1170,15 @@ fn native_admission_before_ref_publish_survives_a_crash_between_them() {
     // would materialize the reconstructible snapshot, which is the publish step
     // this crash window is supposed to have skipped.
     assert_eq!(
-        fs::read_to_string(temp_dir.path().join(".heddle/refs/threads/main"))
-            .unwrap()
-            .trim(),
+        fs::read_to_string(
+            temp_dir
+                .path()
+                .join(".heddle/refs/threads")
+                .join(objects::name_encoding::name_path("main"))
+                .join("value")
+        )
+        .unwrap()
+        .trim(),
         baseline.id().to_string_full(),
         "the ref must not have moved before the crash"
     );
@@ -1409,7 +1415,11 @@ fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
 
     drop(repo);
     fs::write(
-        temp_dir.path().join(".heddle/refs/threads/main"),
+        temp_dir
+            .path()
+            .join(".heddle/refs/threads")
+            .join(objects::name_encoding::name_path("main"))
+            .join("value"),
         format!("{}\n", baseline.to_string_full()),
     )
     .unwrap();
@@ -3292,7 +3302,7 @@ fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
         opened.managed_checkout_path("child"),
         shared_heddle
             .join("threads")
-            .join("child")
+            .join(objects::name_encoding::name_path("child"))
             .join("source-repo"),
         "managed child threads should keep the original repo directory name, not the current checkout leaf"
     );

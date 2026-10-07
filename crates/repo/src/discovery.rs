@@ -179,16 +179,23 @@ pub(super) fn has_git_repository_at_root(root: &Path) -> bool {
 /// resolves them as a worktree before it climbs to the parent. A
 /// *virtualized* thread mounts a content-addressed projection there and
 /// writes no such pointer, so a bare upward walk would sail past the
-/// metadata-less mount and open the PARENT repo. The flat
-/// `thread_manifest::thread_dir` encoding guarantees `<encoded>` is exactly
-/// one path component, so any direct checkout leaf below it has the
-/// unambiguous `<leaf> → <encoded> → threads → .heddle` shape (heddle#572 r2).
+/// metadata-less mount and open the PARENT repo. The v6 encoding ends in
+/// `entry`; recognize only a canonical encoded name above that terminal.
 pub(super) fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
     for dir in bounded_ancestor_paths(start_path) {
         let dir = dir.as_path();
         if let Some(thread_dir) = dir.parent()
-            && let Some(threads) = thread_dir.parent()
-            && threads.file_name().and_then(|n| n.to_str()) == Some("threads")
+            && thread_dir.file_name().and_then(|name| name.to_str()) == Some("entry")
+            && let Some(threads) = thread_dir.ancestors().find(|ancestor| {
+                ancestor.file_name().and_then(|name| name.to_str()) == Some("threads")
+                    && ancestor
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        == Some(".heddle")
+            })
+            && let Ok(encoded) = thread_dir.strip_prefix(threads)
+            && objects::name_encoding::decode_name_path(encoded).is_some()
             && let Some(heddle) = threads.parent()
             && heddle.file_name().and_then(|n| n.to_str()) == Some(".heddle")
             && heddle.join("objects").is_dir()

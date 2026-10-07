@@ -19,8 +19,6 @@ use super::{RefManager, name::require_user_ref_name};
 use crate::fs_atomic::{create_dir_all_durable, write_file_atomic};
 
 const MAX_LOCK_WAIT_SECS: u64 = 10;
-const FLAT_THREADS_DIR_NAME: &str = "__heddle_flat";
-const FLAT_THREAD_SUFFIX: &str = ".ref";
 
 pub(super) struct RefsLock {
     file: File,
@@ -48,9 +46,6 @@ impl RefManager {
     }
     pub(super) fn threads_dir(&self) -> PathBuf {
         self.refs_dir().join("threads")
-    }
-    pub(super) fn flat_threads_dir(&self) -> PathBuf {
-        self.threads_dir().join(FLAT_THREADS_DIR_NAME)
     }
     pub(super) fn markers_dir(&self) -> PathBuf {
         self.refs_dir().join("markers")
@@ -90,46 +85,39 @@ impl RefManager {
     pub(crate) fn ref_summary_index_path(&self) -> PathBuf {
         self.refs_dir().join("ref-summary-index")
     }
-    /// On-disk path for a thread ref.
-    ///
-    /// Slashed names are stored in the flat layout (`threads/__heddle_flat/<hex>`),
-    /// which has been the only write target since v0.2.0 — no per-ref `statx`
-    /// fallback to a nested legacy layout is performed. Top-level (non-slashed)
-    /// names never needed nesting and are stored plainly at `threads/<name>`.
+    /// v6 stores every name with the same portable, bounded encoding.
     pub(super) fn thread_path(&self, name: &ThreadName) -> Result<PathBuf> {
         require_user_ref_name(name)?;
-        if name.contains('/') {
-            self.flat_thread_path(name)
-        } else {
-            self.plain_thread_path(name)
-        }
-    }
-    /// Plain (non-flat-encoded) path under `threads/` for a top-level thread
-    /// name. Only valid for non-slashed names; slashed names use the flat
-    /// layout via [`flat_thread_path`](Self::flat_thread_path).
-    pub(super) fn plain_thread_path(&self, name: &str) -> Result<PathBuf> {
-        require_user_ref_name(name)?;
-        Ok(self.threads_dir().join(name))
-    }
-    pub(super) fn flat_thread_path(&self, name: &str) -> Result<PathBuf> {
-        require_user_ref_name(name)?;
-        Ok(self.flat_threads_dir().join(encode_flat_thread_name(name)))
-    }
-    pub(super) fn decode_flat_thread_entry(&self, entry: &str) -> Option<String> {
-        let (prefix, encoded) = entry.split_once('/')?;
-        if prefix != FLAT_THREADS_DIR_NAME || encoded.contains('/') {
-            return None;
-        }
-        decode_flat_thread_name(encoded)
+        ThreadName::from_git_branch(&objects::name_encoding::git_name(name))
+            .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        Ok(self
+            .threads_dir()
+            .join(objects::name_encoding::name_path(name))
+            .join("value"))
     }
     pub(super) fn marker_path(&self, name: &str) -> Result<PathBuf> {
         require_user_ref_name(name)?;
-        Ok(self.markers_dir().join(name))
+        objects::object::MarkerName::from_git_tag(&objects::name_encoding::git_name(name))
+            .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        Ok(self
+            .markers_dir()
+            .join(objects::name_encoding::name_path(name))
+            .join("value"))
+    }
+    pub(super) fn remote_dir(&self, remote: &str) -> Result<PathBuf> {
+        require_user_ref_name(remote)?;
+        Ok(self
+            .remotes_dir()
+            .join(objects::name_encoding::name_path(remote)))
     }
     pub(super) fn remote_thread_path(&self, remote: &str, thread: &str) -> Result<PathBuf> {
-        require_user_ref_name(remote)?;
         require_user_ref_name(thread)?;
-        Ok(self.remotes_dir().join(remote).join(thread))
+        ThreadName::from_git_branch(&objects::name_encoding::git_name(thread))
+            .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
+        Ok(self
+            .remote_dir(remote)?
+            .join(objects::name_encoding::name_path(thread))
+            .join("value"))
     }
     pub(super) fn read_string(&self, path: &Path) -> Result<String> {
         let mut file = File::open(path)?;
@@ -234,34 +222,34 @@ impl RefManager {
         let suffix: u64 = rand::random();
         Ok(path.with_extension(format!("tmp-{}", suffix)))
     }
+    /// Traverse encoding chunks only; `entry` is a terminal name directory.
     pub(super) fn list_refs_recursive(&self, dir: &Path, prefix: &str) -> Result<Vec<ThreadName>> {
         let mut refs = Vec::new();
-
         if !dir.exists() {
             return Ok(refs);
         }
-
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            let path = entry.path();
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n,
-                None => continue,
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let segment = entry.file_name();
+            let Some(segment) = segment.to_str() else {
+                continue;
             };
-
-            let full_name = ThreadName::from(if prefix.is_empty() {
-                name.into()
+            let relative = if prefix.is_empty() {
+                segment.to_owned()
             } else {
-                format!("{}/{}", prefix, name)
-            });
-
-            if path.is_dir() {
-                refs.extend(self.list_refs_recursive(&path, &full_name)?);
-            } else if path.is_file() {
-                refs.push(full_name);
+                format!("{prefix}/{segment}")
+            };
+            if segment == "entry" {
+                if let Some(name) = objects::name_encoding::decode_name_path(Path::new(&relative)) {
+                    refs.push(ThreadName::new(name));
+                }
+            } else if segment.starts_with("n-") || segment == "git" {
+                refs.extend(self.list_refs_recursive(&entry.path(), &relative)?);
             }
         }
-
         refs.sort();
         Ok(refs)
     }
@@ -275,29 +263,6 @@ fn is_lock_contended(err: &io::Error) -> bool {
     }
 }
 
-pub(super) fn encode_flat_thread_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() * 2 + FLAT_THREAD_SUFFIX.len());
-    for byte in name.as_bytes() {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{:02x}", byte);
-    }
-    out.push_str(FLAT_THREAD_SUFFIX);
-    out
-}
-
-pub(super) fn decode_flat_thread_name(file_name: &str) -> Option<String> {
-    let encoded = file_name.strip_suffix(FLAT_THREAD_SUFFIX)?;
-    if encoded.len() % 2 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    for idx in (0..encoded.len()).step_by(2) {
-        let byte = u8::from_str_radix(&encoded[idx..idx + 2], 16).ok()?;
-        bytes.push(byte);
-    }
-    String::from_utf8(bytes).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{sync::mpsc, time::Duration};
@@ -305,6 +270,81 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn all_ref_namespaces_use_portable_exact_storage() {
+        let temp = TempDir::new().expect("temp");
+        let refs = RefManager::new(temp.path());
+        refs.init().expect("refs");
+        let state = crate::refs::fresh_state_id();
+        let long = "界".repeat(337);
+        let names = [
+            "a,b",
+            "ünicode/ブランチ",
+            "CON",
+            "con",
+            "x'$(true)",
+            "trailing\u{a0}",
+            long.as_str(),
+        ];
+        for name in names {
+            refs.set_thread(&ThreadName::new(name), &state)
+                .expect("thread");
+            refs.create_marker(&objects::object::MarkerName::new(name), &state)
+                .expect("marker");
+            refs.set_remote_thread("Origin", &ThreadName::new(name), &state)
+                .expect("remote thread");
+        }
+        refs.set_remote_thread("origin", &ThreadName::new("other"), &state)
+            .expect("case-distinct remote");
+        let reopened = RefManager::new(temp.path());
+        assert_eq!(reopened.list_threads().expect("threads").len(), names.len());
+        assert_eq!(reopened.list_markers().expect("markers").len(), names.len());
+        assert_eq!(
+            reopened
+                .list_remote_threads("Origin")
+                .expect("remote names")
+                .len(),
+            names.len()
+        );
+        assert_eq!(
+            reopened.list_remotes().expect("remotes"),
+            ["Origin", "origin"]
+        );
+        for name in names {
+            assert_eq!(
+                reopened
+                    .get_thread(&ThreadName::new(name))
+                    .expect("read thread"),
+                Some(state)
+            );
+            assert_eq!(
+                reopened
+                    .get_marker(&objects::object::MarkerName::new(name))
+                    .expect("read marker"),
+                Some(state)
+            );
+        }
+    }
+
+    #[test]
+    fn marker_storage_uses_the_full_tag_ref_byte_limit() {
+        let temp = TempDir::new().expect("temp");
+        let refs = RefManager::new(temp.path());
+        refs.init().expect("refs");
+        let state = crate::refs::fresh_state_id();
+        let name = "界".repeat(338);
+        assert_eq!(format!("refs/tags/{name}").len(), 1024);
+        let marker = objects::object::MarkerName::from_git_tag(&name).expect("full tag limit");
+        refs.create_marker(&marker, &state).expect("marker storage");
+        assert_eq!(
+            refs.list_markers().expect("list").as_slice(),
+            std::slice::from_ref(&marker)
+        );
+        assert_eq!(refs.get_marker(&marker).expect("read"), Some(state));
+        let too_long = objects::object::MarkerName::new(format!("{name}x"));
+        assert!(refs.create_marker(&too_long, &state).is_err());
+    }
 
     #[test]
     fn test_lock_refs_basic() {

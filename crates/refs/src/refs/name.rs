@@ -11,31 +11,11 @@ pub struct RefNameError {
 }
 
 pub fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
-    if name.is_empty() {
-        return Err(invalid(name));
-    }
-    if name.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return Err(invalid(name));
-    }
-    if name.contains("..") || name.contains("//") {
-        return Err(invalid(name));
-    }
-    if name.contains('\\') || name.starts_with('/') || name.ends_with('/') {
-        return Err(invalid(name));
-    }
-    if name.starts_with('.') {
-        return Err(invalid(name));
-    }
-    // Git refname rule: no path *component* may end in `.lock` (not just
-    // the whole ref) — `refs/heads/foo.lock/bar` would collide with the
-    // on-disk lockfile of `refs/heads/foo`.
-    if name
-        .split('/')
-        .any(|component| component.ends_with(".lock"))
+    // Native suffixes include the branch `@`; check them in a full namespace.
+    let git_name = objects::name_encoding::git_name(name);
+    let full = format!("refs/heads/{git_name}");
+    if sley_refs::check_refname_format(&full, false).is_err() || is_reserved_heddle_namespace(name)
     {
-        return Err(invalid(name));
-    }
-    if is_reserved_heddle_namespace(name) {
         return Err(invalid(name));
     }
     Ok(())

@@ -1668,6 +1668,94 @@ mod tests {
         seed_raw_tree_repo(path, &[("140000", "unknown")]);
     }
 
+    fn refname_round_trip(name: &str) {
+        refname_round_trip_input(name, name.len() > 240);
+    }
+
+    fn refname_round_trip_input(name: &str, packed: bool) {
+        let source = TempDir::new().expect("source");
+        let destination = TempDir::new().expect("destination");
+        let oid = seed_multibranch_repo(source.path());
+        let full = format!("refs/heads/{name}");
+        // Packed input also permits a Git-valid single component longer than
+        // the host filesystem's limit; Git itself writes this representation.
+        if packed {
+            std::fs::write(
+                source.path().join(".git/packed-refs"),
+                format!("{oid} {full}\n"),
+            )
+            .expect("packed Git ref");
+        } else {
+            git_output(source.path(), &["update-ref", &full, &oid], None);
+        }
+        let git = GitSource::open(source.path()).expect("open Git");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(destination.path());
+        refs.init().expect("init refs");
+        let mut map = ShaMap::new();
+        pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).expect("import");
+        let native = ThreadName::from_git_branch(name).expect("Git branch mapping");
+        let state = refs
+            .get_thread(&native)
+            .expect("read storage")
+            .expect("imported branch");
+        let head = refs::refs::Head::Attached {
+            thread: native.clone(),
+        };
+        refs.write_head(&head).expect("HEAD write");
+        assert_eq!(refs.read_head().expect("HEAD read"), head);
+        refs.pack_refs().expect("native packed refs");
+        let reopened = RefManager::new(destination.path());
+        assert!(reopened.list_threads().expect("listing").contains(&native));
+        assert_eq!(
+            reopened.get_thread(&native).expect("fetch ref"),
+            Some(state)
+        );
+        assert!(store.get_state(&state).expect("fetch state").is_some());
+    }
+
+    #[test]
+    #[ignore = "sley 0.11.0 trims Unicode packed-ref suffixes; HeddleCo/sley#243"]
+    fn refname_packed_git_nbsp_blocked_on_sley_243() {
+        refname_round_trip_input("trailing\u{a0}", true);
+    }
+
+    #[test]
+    fn refname_round_trip_equals() {
+        refname_round_trip("feat/mcp=timeout");
+    }
+    #[test]
+    fn refname_round_trip_comma() {
+        refname_round_trip("a,b");
+    }
+    #[test]
+    fn refname_round_trip_unicode() {
+        refname_round_trip("ünicode/ブランチ");
+    }
+    #[test]
+    fn refname_round_trip_at() {
+        refname_round_trip("@");
+    }
+    #[test]
+    fn refname_round_trip_plus() {
+        refname_round_trip("x+y");
+    }
+    #[test]
+    fn refname_round_trip_nbsp() {
+        refname_round_trip("trailing\u{a0}");
+    }
+    #[test]
+    fn refname_round_trip_replacement() {
+        refname_round_trip("literal\u{fffd}");
+    }
+    #[test]
+    fn refname_round_trip_long() {
+        refname_round_trip(&"界".repeat(337));
+    }
+    #[test]
+    fn refname_round_trip_reserved() {
+        refname_round_trip("heddle/foo");
+    }
     #[test]
     fn imports_commits_refs_and_tag_end_to_end() {
         let gitdir = TempDir::new().unwrap();
@@ -1777,11 +1865,16 @@ mod tests {
             "{stats:?}"
         );
         assert!(
-            stats
+            !stats
                 .skipped_refs
                 .iter()
-                .any(|reference| { reference.raw_name == b"refs/heads/heddle/reserved" }),
-            "{stats:?}"
+                .any(|reference| reference.raw_name == b"refs/heads/heddle/reserved")
+        );
+        let reserved = ThreadName::from_git_branch("heddle/reserved").expect("mapped name");
+        assert!(
+            refs.get_thread(&reserved)
+                .expect("reserved branch storage")
+                .is_some()
         );
     }
 

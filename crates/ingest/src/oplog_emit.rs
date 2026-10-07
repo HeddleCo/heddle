@@ -118,7 +118,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         let mut groups: Vec<(Vec<OpRecord>, Option<&str>)> = Vec::new();
 
         for entry in entries {
-            match classify(&entry.ref_name) {
+            match classify(&entry.ref_name)? {
                 RefKind::Head => self.emit_head(entry, scope, &mut groups, &mut stats)?,
                 RefKind::Branch(name) => {
                     self.emit_branch(entry, &name, scope, &mut groups, &mut stats)?
@@ -357,17 +357,21 @@ enum RefKind {
 /// Classify a reflog ref name into the three buckets the emitter cares
 /// about. Preserves the slashed-name suffix for branches (`feature/x`
 /// stays `feature/x`).
-fn classify(ref_name: &str) -> RefKind {
+fn classify(ref_name: &str) -> crate::Result<RefKind> {
     if ref_name == "HEAD" {
-        return RefKind::Head;
+        return Ok(RefKind::Head);
     }
     if let Some(rest) = ref_name.strip_prefix("refs/heads/") {
-        return RefKind::Branch(rest.to_string());
+        let name = ThreadName::from_git_branch(rest)
+            .map_err(|error| IngestError::Other(error.to_string()))?;
+        return Ok(RefKind::Branch(name.into_string()));
     }
     if let Some(rest) = ref_name.strip_prefix("refs/tags/") {
-        return RefKind::Tag(rest.to_string());
+        let name = MarkerName::from_git_tag(rest)
+            .map_err(|error| IngestError::Other(error.to_string()))?;
+        return Ok(RefKind::Tag(name.into_string()));
     }
-    RefKind::Other
+    Ok(RefKind::Other)
 }
 
 #[cfg(test)]

@@ -194,7 +194,7 @@ fn show_parenthetical_is_resolvable_spec_or_labeled_not_a_spec() {
         let labeled_err = heddle(&["show", paren], Some(temp.path()))
             .expect_err("labeled content_hash parenthetical is not a resolvable spec");
         assert!(
-            labeled_err.contains("State not found"),
+            labeled_err.contains("State not found") || labeled_err.contains("invalid ref name"),
             "show <printed-paren> should fail once the paren is labeled; got: {labeled_err}"
         );
         let hex_err = heddle(&["show", hex], Some(temp.path()))

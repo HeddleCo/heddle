@@ -18,6 +18,7 @@ use crate::{
 /// Sync Heddle threads to Git branches.
 pub fn sync_threads(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
+    repo::require_exact_git_ref_encoding(&repo)?;
     let mut stats = 0;
 
     let threads = bridge.heddle_repo.refs().list_threads()?;
@@ -36,6 +37,7 @@ pub fn sync_threads(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
 /// Sync Heddle markers to Git tags.
 pub fn sync_markers(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
+    repo::require_exact_git_ref_encoding(&repo)?;
     let mut stats = 0;
 
     let markers = bridge.heddle_repo.refs().list_markers()?;
@@ -54,6 +56,7 @@ pub fn sync_markers(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
 /// Sync Git branches to Heddle threads.
 pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
+    repo::require_exact_git_ref_encoding(&repo)?;
     let mut stats = 0;
 
     for reference in repo.references().list_refs().map_err(git_err)? {
@@ -64,14 +67,7 @@ pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
             continue;
         };
         if let Some(state_id) = bridge.mapping.get_heddle(target) {
-            if crate::git_frontier::is_reserved_heddle_git_ref(&reference.name)
-                || objects::object::is_reserved_heddle_namespace(name)
-            {
-                return Err(GitProjectionError::InvalidMapping(format!(
-                    "refused to import reserved heddle/ Git branch '{name}'"
-                )));
-            }
-            let tn = ThreadName::try_new(name)
+            let tn = ThreadName::from_git_branch(name)
                 .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge, &existing, &state_id)?
@@ -110,6 +106,7 @@ fn thread_can_adopt_change(
 /// Sync Git tags to Heddle markers.
 pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
+    repo::require_exact_git_ref_encoding(&repo)?;
     let mut stats = 0;
 
     for reference in repo.references().list_refs().map_err(git_err)? {
@@ -121,14 +118,7 @@ pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
         };
 
         if let Some(state_id) = bridge.mapping.get_heddle(oid) {
-            if crate::git_frontier::is_reserved_heddle_git_ref(&reference.name)
-                || objects::object::is_reserved_heddle_namespace(name)
-            {
-                return Err(GitProjectionError::InvalidMapping(format!(
-                    "refused to import reserved heddle/ Git tag '{name}'"
-                )));
-            }
-            let mn = MarkerName::try_new(name)
+            let mn = MarkerName::from_git_tag(name)
                 .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
             match bridge.heddle_repo.refs().get_marker(&mn) {
                 Ok(Some(existing)) if existing != state_id => bridge
@@ -154,7 +144,10 @@ pub fn sync_track_to_branch(
     track_name: &str,
     git_oid: SleyObjectId,
 ) -> GitProjectionResult<()> {
-    let branch_ref = format!("refs/heads/{}", track_name);
+    let branch_ref = format!(
+        "refs/heads/{}",
+        objects::name_encoding::git_name(track_name)
+    );
 
     if let Some(branch) = repo.find_reference(&branch_ref).map_err(git_err)? {
         let existing = branch.peeled_oid(repo).map_err(git_err)?;
@@ -202,7 +195,10 @@ pub(crate) fn force_rewind_track_to_branch(
     expected_old: SleyObjectId,
     git_oid: SleyObjectId,
 ) -> GitProjectionResult<()> {
-    let branch_ref = format!("refs/heads/{track_name}");
+    let branch_ref = format!(
+        "refs/heads/{}",
+        objects::name_encoding::git_name(track_name)
+    );
     set_reference_authorized(
         repo,
         &branch_ref,
@@ -219,7 +215,10 @@ pub fn sync_marker_to_tag(
     marker_name: &str,
     git_oid: SleyObjectId,
 ) -> GitProjectionResult<()> {
-    let tag_ref = format!("refs/tags/{}", marker_name);
+    let tag_ref = format!(
+        "refs/tags/{}",
+        objects::name_encoding::git_name(marker_name)
+    );
     if let Some(reference) = repo.find_reference(&tag_ref).map_err(git_err)? {
         let existing = peeled_oid(repo, &tag_ref, &reference.target)?;
         let Some(existing) = existing else {
