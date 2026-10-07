@@ -83,10 +83,10 @@ tree-sitter-symbols = [
     "semantic/lang-go",
     "semantic/lang-zig",
 ]
-# Alias so that `--workspace --features semantic` (used by the
-# Coverage CI job) resolves cleanly across all crates.  The dep is
-# declared with the `dep:` prefix, so Cargo does not auto-create an
-# implicit `semantic` feature; this line makes it explicit.
+# Explicit name for the optional `semantic` dep. `dep:` syntax does not
+# create an implicit feature, so `cargo test -p heddle-repo --features semantic`
+# needs this entry. Workspace coverage passes `semantic-analysis` (the
+# heddle-thread-api feature) rather than a bare `semantic` shim.
 semantic = ["tree-sitter-symbols"]
 # Rebuildable statistical retrieval sidecar. Kept separate from the durable
 # merkle semantic index and capture path.
