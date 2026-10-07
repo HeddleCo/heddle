@@ -305,7 +305,7 @@ impl ThreadReplica {
         )
     }
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn install_hybrid_import_with(
+    pub fn install_hybrid_import_with(
         directory: &Path,
         trust: &HostedTrust<impl Clock>,
         bundle_bytes: &[u8],

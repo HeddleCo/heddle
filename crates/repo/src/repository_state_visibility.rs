@@ -757,7 +757,21 @@ impl Repository {
         // lives in the same metadata store, so read it without re-acquiring.
         let floors = self.import_floor_reader_locked()?;
         let mut seen = HashSet::new();
-        let mut stack = vec![*state_id];
+        let threads = match &floors {
+            Some(connection) => {
+                crate::thread_replication::import_floor::threads_for(connection, state_id)
+                    .map_err(|error| anyhow::anyhow!("import floor record: {error}"))?
+            }
+            None => Vec::new(),
+        };
+        let mut stack: Vec<_> = if threads.is_empty() {
+            vec![(*state_id, None)]
+        } else {
+            threads
+                .into_iter()
+                .map(|thread| (*state_id, Some(thread)))
+                .collect()
+        };
         let mut decoded_bytes = 0usize;
         let unresolved = |id| {
             Some((
@@ -767,8 +781,8 @@ impl Repository {
                 },
             ))
         };
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
+        while let Some((id, thread)) = stack.pop() {
+            if !seen.insert((id, thread)) {
                 continue;
             }
             if seen.len() > 4096 {
@@ -789,18 +803,23 @@ impl Repository {
             if decoded_bytes > 16 * 1024 * 1024 {
                 return Ok(unresolved(id));
             }
-            // A HYBRID import floor is the signed boundary of converted Git
-            // history (heddle#2004): the import operation's signature covers
-            // the tip and, through its parent chain, every converted ancestor,
-            // and the host's lineage stops here too. Walking tens of thousands
-            // of converted commits would only hit the bound above and withhold
-            // a fully present history as "unresolved". A member below a tip
-            // answers for itself and stops the same way.
-            if let Some(floors) = &floors
-                && crate::thread_replication::import_floor::role(floors, &id)
-                    .map_err(|error| anyhow::anyhow!("import floor record: {error}"))?
-                    .is_some()
+            // Only floor members stop lineage. A continuation's empty floor
+            // still records a Tip, whose private causal parents must be read.
+            if let (Some(floors), Some(thread)) = (&floors, thread)
+                && matches!(
+                    crate::thread_replication::import_floor::role(floors, thread, &id)
+                        .map_err(|error| anyhow::anyhow!("import floor record: {error}"))?,
+                    Some(crate::thread_replication::import_floor::ImportFloorRole::Member { .. })
+                )
             {
+                for tier in
+                    crate::thread_replication::import_floor::member_tiers(floors, thread, &id)
+                        .map_err(|error| anyhow::anyhow!("import floor tiers: {error}"))?
+                {
+                    if should_withhold(id, &tier) {
+                        return Ok(Some((id, tier)));
+                    }
+                }
                 continue;
             }
             // A present shallow ancestor is the graft edge of a depth-limited
@@ -814,7 +833,7 @@ impl Repository {
                 {
                     continue;
                 }
-                stack.push(*parent);
+                stack.push((*parent, thread));
             }
         }
         Ok(None)
@@ -847,13 +866,14 @@ impl Repository {
     /// of a converted Git history, a converted ancestor inside one, or neither.
     pub fn import_floor_role(
         &self,
+        thread: ContentHash,
         state: &StateId,
     ) -> Result<Option<crate::thread_replication::import_floor::ImportFloorRole>> {
         let _serialization = self.installation_lock()?;
         let Some(floors) = self.import_floor_reader_locked()? else {
             return Ok(None);
         };
-        crate::thread_replication::import_floor::role(&floors, state)
+        crate::thread_replication::import_floor::role(&floors, thread, state)
             .map_err(|error| anyhow::anyhow!("import floor record: {error}"))
     }
 
@@ -1695,18 +1715,20 @@ mod tests {
             .unwrap();
         assert_eq!(members, CONVERTED);
         assert_eq!(
-            repo.import_floor_role(&tip.id()).unwrap(),
+            repo.import_floor_role(replica.thread_id(), &tip.id())
+                .unwrap(),
             Some(ImportFloorRole::Tip)
         );
         assert_eq!(
-            repo.import_floor_role(&chain[0].id()).unwrap(),
+            repo.import_floor_role(replica.thread_id(), &chain[0].id())
+                .unwrap(),
             Some(ImportFloorRole::Member { tip: tip.id() })
         );
         assert_eq!(
             repo.withholding_visibility_for_audience(&tip.id(), &audience)
                 .unwrap(),
             None,
-            "the walk stops at the signed import tip"
+            "the walk stops at the first converted floor member"
         );
         // A member answers for itself; the floor below it is covered too.
         assert_eq!(
@@ -1718,7 +1740,7 @@ mod tests {
             .collect_content_disclosure(&tip.id())
             .unwrap()
             .expect("resolved lineage");
-        assert_eq!(proof.states(), [tip.id()]);
+        assert_eq!(proof.states(), [tip.id(), chain[CONVERTED - 1].id()]);
         let checkout = TempDir::new().unwrap();
         assert!(matches!(
             repo.checkout_state_gated(&tip.id(), &tip, checkout.path(), &audience)
@@ -1742,6 +1764,107 @@ mod tests {
             repo.withholding_visibility_for_audience(&tip.id(), &crate::AudienceTier::Public)
                 .unwrap()
                 .is_some()
+        );
+        // A continuation has an empty floor and a causal parent T0. Its
+        // recorded Tip role must not conceal T0's private native history.
+        let continuation = State::new_snapshot(tip.tree, vec![tip.id()], author.clone())
+            .with_intent("continuation");
+        repo.store().put_state(&continuation).unwrap();
+        replica
+            .record_import_floor(
+                ContentHash::compute(b"continuation"),
+                &continuation,
+                &std::collections::BTreeSet::from([tip.id()]),
+                repo.store(),
+            )
+            .unwrap();
+        repo.put_state_visibility(sample_record(
+            tip.id(),
+            VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            repo.withholding_visibility_for_audience(
+                &continuation.id(),
+                &crate::AudienceTier::Public
+            )
+            .unwrap()
+            .map(|row| row.0),
+            Some(tip.id())
+        );
+        assert!(
+            repo.collect_content_disclosure(&continuation.id())
+                .unwrap()
+                .unwrap()
+                .states()
+                .contains(&tip.id())
+        );
+    }
+
+    #[test]
+    fn empty_import_floor_tip_walks_private_native_parent() {
+        use crypto::thread_operation::SignedGenesis;
+        use objects::object::thread_replication::{GenesisOwner, ThreadGenesis};
+
+        let (_directory, repo) = fresh_repo();
+        let base = repo
+            .store()
+            .get_state(&repo.head().expect("HEAD").expect("base"))
+            .expect("read")
+            .expect("State");
+        repo.put_state_visibility(sample_record(
+            base.id(),
+            VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        ))
+        .expect("private native parent");
+        let tip = State::new_snapshot(base.tree, vec![base.id()], base.attribution.clone())
+            .with_intent("continuation with no converted ancestors");
+        repo.store().put_state(&tip).expect("tip");
+        let signer = Ed25519Signer::from_seed(&[92; 32]).expect("signer");
+        let key = signer.public_key().try_into().expect("key");
+        let genesis = ThreadGenesis {
+            owner: GenesisOwner::LocalKey(key),
+            version: 1,
+            spool: uuid::Uuid::from_u128(32).to_string(),
+            parent: None,
+            base: base.id(),
+            name: "continuation".into(),
+            intent: "native frontier".into(),
+            creator: key,
+            nonce: vec![3],
+        };
+        let replica = crate::thread_replication::ThreadReplica::create(
+            repo.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).expect("genesis"),
+        )
+        .expect("Thread");
+        assert_eq!(
+            replica
+                .record_import_floor(
+                    ContentHash::compute(b"empty floor"),
+                    &tip,
+                    &std::collections::BTreeSet::from([base.id()]),
+                    repo.store(),
+                )
+                .expect("empty floor"),
+            0
+        );
+        assert_eq!(
+            repo.withholding_visibility_for_audience(&tip.id(), &crate::AudienceTier::Public)
+                .expect("visibility")
+                .map(|row| row.0),
+            Some(base.id())
+        );
+        assert!(
+            repo.collect_content_disclosure(&tip.id())
+                .expect("proof")
+                .expect("resolved")
+                .states()
+                .contains(&base.id())
         );
     }
 

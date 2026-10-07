@@ -347,10 +347,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         let mut operations = Vec::new();
         let mut receipt_records = Vec::new();
         let mut dependencies = Vec::new();
-        let mut ancestry = AncestryInput {
-            pages: Vec::new(),
-            excluded_tips: self.state.excluded_tips.clone(),
-        };
+        let mut ancestry = AncestryInput::new(self.state.excluded_tips.clone());
         let mut metadata_bytes = 0usize;
         let mut complete = false;
         while let Some(item) = self.next().await? {
@@ -390,7 +387,15 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                     dependencies.push(record);
                 }
                 // Frame-level bounds were charged in `Validation::accept`.
-                Item::ImportAncestry(page) => ancestry.pages.push(page),
+                Item::ImportAncestry(page) => ancestry.push(
+                    page,
+                    self.state
+                        .ready
+                        .thread
+                        .as_ref()
+                        .ok_or(Error::Invalid("Thread absent"))?,
+                    directory.path(),
+                )?,
                 Item::Complete(_) => complete = true,
                 Item::Sidecar(_) => return Err(Error::Invalid("source staging excludes sidecars")),
             }
@@ -403,6 +408,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
             file.sync_all().await?;
         }
         drop(files);
+        ancestry.finish()?;
         let mut ready = self.state.ready;
         if let Some(carriers) = &carriers {
             ready.import_authority = Some(carriers.bundle().clone());
@@ -660,7 +666,7 @@ fn validate_disclosure_artifacts(
         foreign,
         ancestry,
     } = input;
-    if !ancestry.pages.is_empty() && carriers.is_none() {
+    if !ancestry.is_empty() && carriers.is_none() {
         return Err(Error::Invalid(
             "import ancestry requires independently authenticated import carriers",
         ));
@@ -747,7 +753,7 @@ fn validate_disclosure_artifacts(
         .map_err(preparation)?
         .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
         .map_err(preparation)?;
-        if !ancestry.pages.is_empty() {
+        if !ancestry.is_empty() {
             return Err(Error::Invalid(
                 "initial source cannot carry import ancestry",
             ));
@@ -908,7 +914,8 @@ fn validate_disclosure_artifacts(
                     .try_into()
                     .map_err(|_| Error::Invalid("selected revision identity width"))?,
             );
-            let (tip, canonical) = ancestry::selected_page_tip(&ancestry.pages, selected_state)?
+            let (tip, canonical) = ancestry
+                .selected_page_tip(selected_state, directory.path())?
                 .ok_or(Error::Invalid("selected source proof absent"))?;
             let owner = decoded
                 .iter()
@@ -1164,9 +1171,6 @@ fn validate_disclosure_artifacts(
         .map_err(preparation)?;
         Vec::new()
     };
-    if !verified_ancestry.states.is_empty() {
-        write_ancestry_pack(directory.path(), &verified_ancestry.states)?;
-    }
     // Dependency-first installation makes foreign source authority available
     // before admitting a local integration. Cycles cannot settle this graph.
     let mut ready_ids: BTreeSet<_> = edges
@@ -1223,31 +1227,6 @@ fn validate_disclosure_artifacts(
         partial_trees,
         ancestry: verified_ancestry.floors,
     })
-}
-/// Stage verified converted ancestors as their own native pack beside the
-/// source pack. They are address-checked States only; install reads both.
-fn write_ancestry_pack(directory: &Path, states: &BTreeMap<StateId, Vec<u8>>) -> Result<(), Error> {
-    use heddle_pack::store::pack::{ObjectType, PackObjectId, StreamingPackBuilder};
-    let output = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(directory.join("ancestry.pack"))?;
-    let mut builder = StreamingPackBuilder::new(
-        output,
-        directory.join("ancestry.idx"),
-        Default::default(),
-        directory.join("ancestry-buckets"),
-    )
-    .map_err(preparation)?;
-    for (id, bytes) in states {
-        builder
-            .add_id(PackObjectId::StateId(*id), ObjectType::State, bytes)
-            .map_err(preparation)?;
-    }
-    let (output, _) = builder.finalize().map_err(preparation)?;
-    drop(output);
-    Ok(())
 }
 fn source_frontier_is_installable(
     thread: ContentHash,

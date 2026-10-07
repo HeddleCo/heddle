@@ -16,19 +16,16 @@ pub struct CompactFrameCompression {
 }
 
 impl CompactFrameCompression {
-    /// Fast adoption compression (owner decision 2026-10-07). Measured on the
-    /// ripgrep frames: level 19 cost 9.3 s of CPU, level 3 with long-distance
-    /// matching 0.15 s, for +15.6% stored bytes. Adoption and local repack
-    /// both use this; the slow level is an explicit opt-in.
+    /// Local repack policy: retain the pre-adoption level 19 encoder.
     pub const DEFAULT: Self = Self {
-        level: 3,
+        level: 19,
         window_log: 27,
         long_distance_matching: true,
     };
-    /// The pre-2026-10-07 lineage-solid policy (level 19), kept for callers
-    /// that measured a reason to spend the CPU.
-    pub const SOLID: Self = Self {
-        level: 19,
+    /// Fast zstd for adoption/import packs only (owner decision 2026-10-07).
+    /// Weft adoption_pack must pass this to `compress_compact_frame_with`.
+    pub const ADOPTION: Self = Self {
+        level: 3,
         window_log: 27,
         long_distance_matching: true,
     };
@@ -104,9 +101,13 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_is_fast_level_three_with_long_distance_matching() {
+    fn local_default_is_level_nineteen_and_adoption_is_level_three() {
         let options = CompactFrameCompression::DEFAULT;
-        assert_eq!(options.level, 3);
+        let adoption = CompactFrameCompression::ADOPTION;
+        assert_eq!(options.level, 19);
+        assert_eq!(adoption.level, 3);
+        assert_eq!(adoption.window_log, 27);
+        assert!(adoption.long_distance_matching);
         assert_eq!(options.window_log, 27);
         assert!(options.long_distance_matching);
         let input = lineage_input();
@@ -118,18 +119,21 @@ mod tests {
     }
 
     #[test]
-    fn level_nineteen_frames_still_decode_after_the_default_moved() {
+    fn pre_change_level_nineteen_fixture_and_adoption_frames_decode() {
         let input = lineage_input();
-        let solid = compress_compact_frame_with(&input, CompactFrameCompression::SOLID).unwrap();
-        let fast = compress_compact_frame_with(&input, CompactFrameCompression::DEFAULT).unwrap();
-        assert!(has_zstd_magic(&solid) && has_zstd_magic(&fast));
+        // Encoded once by the unmodified encoder from 660f99cbe9360b6f
+        // (level 19, window_log 27, LDM, checksum and pledged input size).
+        let solid = include_bytes!("../../../tests/fixtures/compact-level19.zstd");
+        let fast = compress_compact_frame_with(&input, CompactFrameCompression::ADOPTION).unwrap();
+        assert!(has_zstd_magic(solid) && has_zstd_magic(&fast));
         assert_ne!(
-            solid, fast,
+            solid.as_slice(),
+            fast.as_slice(),
             "the two levels must exercise different encoders"
         );
         // A store written at level 19 before the policy change decodes with
         // the same reader as a fast frame; decoding carries no level.
-        assert_eq!(decompress_pack_payload(&solid, input.len()).unwrap(), input);
+        assert_eq!(decompress_pack_payload(solid, input.len()).unwrap(), input);
         assert_eq!(decompress_pack_payload(&fast, input.len()).unwrap(), input);
     }
 
@@ -170,7 +174,7 @@ mod tests {
             .collect();
         for options in [
             CompactFrameCompression::DEFAULT,
-            CompactFrameCompression::SOLID,
+            CompactFrameCompression::ADOPTION,
         ] {
             assert_eq!(compress_compact_frame_with(&input, options).unwrap(), input);
         }

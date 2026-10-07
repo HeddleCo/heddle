@@ -317,6 +317,7 @@ fn page_set(
         .iter()
         .enumerate()
         .map(|(index, chunk)| ImportAncestryPage {
+            floor_tiers: Some(ImportFloorTierSummary::default()),
             thread: Some(ThreadRef {
                 spool: Some(SpoolRef {
                     id: spool_id(history),
@@ -487,6 +488,15 @@ fn stage(
     pages: Vec<ImportAncestryPage>,
     excluded_tips: BTreeSet<StateId>,
 ) -> Result<StagedSource, Error> {
+    let mut ancestry = AncestryInput::new(excluded_tips);
+    for page in pages {
+        ancestry.push(
+            page,
+            transfer.ready.thread.as_ref().expect("thread"),
+            transfer.directory.path(),
+        )?;
+    }
+    ancestry.finish()?;
     validate_with_receipts_and_carriers(
         transfer.directory,
         transfer.ready,
@@ -494,10 +504,7 @@ fn stage(
         vec![],
         vec![],
         Some(transfer.carriers),
-        AncestryInput {
-            pages,
-            excluded_tips,
-        },
+        ancestry,
     )
 }
 fn receiver(history: &ImportedHistory, directory: &Path) -> Repository {
@@ -518,6 +525,13 @@ fn receiver(history: &ImportedHistory, directory: &Path) -> Repository {
     repository
 }
 fn install(history: &ImportedHistory, repository: &Repository, staged: StagedSource) -> StateId {
+    try_install(history, repository, staged).expect("hosted install")
+}
+fn try_install(
+    history: &ImportedHistory,
+    repository: &Repository,
+    staged: StagedSource,
+) -> Result<StateId, Error> {
     let trust = HostedTrust::open(
         repository.heddle_dir(),
         &history.root.authority,
@@ -534,9 +548,7 @@ fn install(history: &ImportedHistory, repository: &Repository, staged: StagedSou
         history.bundle.clone(),
         |_: &ImportPublicProofBundleV1, _: i64, _: &TrustTransaction<'_>| Ok(()),
     );
-    staged
-        .install_hosted(repository, &trust, &authority, 1350)
-        .expect("hosted install")
+    staged.install_hosted(repository, &trust, &authority, 1350)
 }
 fn checkout_files(repository: &Repository, state: &State, dest: &Path) -> Vec<String> {
     let outcome = repository
@@ -572,7 +584,7 @@ fn fresh_clone_installs_the_converted_history_and_an_older_commit_fetches_lazily
 
     // 1. Fresh clone: the floor travels in three pages (odd page size so the
     //    last page is partial), every ancestor installs, the walk stops at the
-    //    import tip, and the checkout holds the real file.
+    //    floor members, and the checkout holds the real file.
     let pages = page_set(
         &history,
         history.ancestors(),
@@ -607,14 +619,14 @@ fn fresh_clone_installs_the_converted_history_and_an_older_commit_fetches_lazily
     }
     assert_eq!(
         repository
-            .import_floor_role(&tip.id())
+            .import_floor_role(history.thread, &tip.id())
             .expect("role")
             .expect("recorded"),
         ImportFloorRole::Tip
     );
     assert_eq!(
         repository
-            .import_floor_role(&history.chain[OLDER].id())
+            .import_floor_role(history.thread, &history.chain[OLDER].id())
             .expect("role"),
         Some(ImportFloorRole::Member { tip: tip.id() })
     );
@@ -904,4 +916,327 @@ fn ancestry_pages_reject_tampered_missing_extra_and_misattributed_states() {
         attempt(pages).contains("carries the tip, frontier or genesis base"),
         "tip among members"
     );
+}
+
+#[test]
+fn imported_member_obeys_publication_private_tier_without_sidecars() {
+    let history = imported_history(4, 2);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let repository = receiver(&history, receiver_dir.path());
+    let mut pages = page_set(
+        &history,
+        history.ancestors(),
+        import_ancestry_page::Coverage::Floor,
+        2,
+    );
+    for page in &mut pages {
+        page.floor_tiers = Some(ImportFloorTierSummary {
+            rows: vec![import_floor_tier_summary::Row {
+                tier: import_floor_tier_summary::row::Tier::Private as i32,
+                label: "security".into(),
+                tier_rows: 1,
+            }],
+        });
+    }
+    let staged = stage(
+        &history,
+        transfer(&history, scratch.path(), history.tip()),
+        pages,
+        BTreeSet::new(),
+    )
+    .expect("stage");
+    install(&history, &repository, staged);
+    let member = history.chain[2].id();
+    assert!(
+        repository
+            .withholding_visibility_for_audience(&member, &repo::AudienceTier::Public)
+            .expect("walk")
+            .is_some()
+    );
+    assert!(
+        repository
+            .collect_content_disclosure(&member)
+            .expect("proof")
+            .expect("resolved")
+            .for_audience(&repo::AudienceTier::Public)
+            .is_none()
+    );
+}
+
+#[test]
+fn ancestry_staging_retains_bounded_allocations() {
+    let history = imported_history(512, 2);
+    #[cfg(target_os = "linux")]
+    let baseline_peak =
+        (std::env::var_os("HEDDLE_ANCESTRY_RSS_PROBE").is_some()).then(peak_resident_bytes);
+    let mut input = AncestryInput::default();
+    let directory = tempfile::tempdir().expect("directory");
+    for mut page in page_set(
+        &history,
+        history.ancestors(),
+        import_ancestry_page::Coverage::Floor,
+        1,
+    ) {
+        // Large canonical States must leave memory after each page, regardless
+        // of how little graph metadata they carry.
+        for ancestor in &mut page.states {
+            let mut state =
+                State::decode_current_msgpack(&ancestor.canonical_state).expect("state");
+            state.intent = Some("x".repeat(64 * 1024));
+            ancestor.canonical_state = state.encode_current_msgpack().expect("encode");
+            ancestor.id.as_mut().expect("id").value = state.id().as_bytes().to_vec();
+        }
+        let thread = page.thread.clone().expect("thread");
+        input.push(page, &thread, directory.path()).expect("page");
+        assert!(input.retained_allocations() < 1024 * 1024);
+    }
+    let retained = input.retained_allocations();
+    println!("retained parent graph allocations: {retained} bytes");
+    input.finish().expect("finish");
+    #[cfg(target_os = "linux")]
+    if let Some(baseline) = baseline_peak {
+        let growth = peak_resident_bytes().saturating_sub(baseline);
+        println!("peak resident memory growth for 512 large States: {growth} bytes");
+        assert!(growth < 16 * 1024 * 1024, "peak RSS growth: {growth}");
+    }
+    let reader = objects::store::pack::PackReader::open(
+        &directory.path().join("ancestry.pack"),
+        &directory.path().join("ancestry.idx"),
+    )
+    .expect("staged pack");
+    let mut persisted = 0;
+    reader
+        .visit_objects(|_, kind, bytes| {
+            assert_eq!(kind, objects::store::pack::ObjectType::State);
+            persisted += bytes.len();
+            Ok(())
+        })
+        .expect("read staged States");
+    assert!(
+        persisted > 32 * 1024 * 1024,
+        "canonical payloads must all reach disk"
+    );
+    assert!(
+        retained < 1024 * 1024,
+        "retained canonical allocations: {retained}"
+    );
+}
+
+#[test]
+fn shared_git_history_selects_a_tip_independently_of_page_order() {
+    let history = imported_history(4, 2);
+    let mut pages = page_set(
+        &history,
+        history.ancestors(),
+        import_ancestry_page::Coverage::Floor,
+        4,
+    );
+    let mut shared = pages[0].clone();
+    shared.tip.as_mut().expect("tip").value = vec![93; 32];
+    shared.signed_operation_digest = vec![94; 32];
+    pages.push(shared);
+    let mut selections = Vec::new();
+    for reverse in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut input = AncestryInput::default();
+        let mut ordered = pages.clone();
+        if reverse {
+            ordered.reverse();
+        }
+        for page in ordered {
+            let thread = page.thread.clone().expect("thread");
+            input.push(page, &thread, directory.path()).expect("page");
+        }
+        input.finish().expect("finish");
+        selections.push(
+            input
+                .selected_page_tip(history.chain[2].id(), directory.path())
+                .expect("selection")
+                .expect("shared ancestor"),
+        );
+    }
+    assert_eq!(selections[0], selections[1]);
+    assert_eq!(
+        selections[0].1,
+        history.chain[2].encode_current_msgpack().expect("state")
+    );
+}
+
+#[test]
+fn ancestry_headers_require_identical_valid_whole_floor_tiers() {
+    let history = imported_history(4, 2);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let floor = || {
+        page_set(
+            &history,
+            history.ancestors(),
+            import_ancestry_page::Coverage::Floor,
+            2,
+        )
+    };
+    let attempt = |pages| {
+        stage(
+            &history,
+            transfer(&history, scratch.path(), history.tip()),
+            pages,
+            BTreeSet::new(),
+        )
+        .err()
+        .expect("reject")
+        .to_string()
+    };
+    let mut pages = floor();
+    pages[0].floor_tiers = None;
+    assert!(attempt(pages).contains("tier summary absent"));
+    let row = import_floor_tier_summary::Row {
+        tier: 2,
+        label: "legal".into(),
+        tier_rows: 3,
+    };
+    for rows in [
+        vec![import_floor_tier_summary::Row {
+            tier_rows: 0,
+            ..row.clone()
+        }],
+        vec![import_floor_tier_summary::Row {
+            tier: 0,
+            ..row.clone()
+        }],
+        vec![row.clone(), row.clone()],
+    ] {
+        let mut pages = floor();
+        for page in &mut pages {
+            page.floor_tiers = Some(ImportFloorTierSummary { rows: rows.clone() });
+        }
+        assert!(attempt(pages).contains("invalid import floor tier summary"));
+    }
+    let mut pages = floor();
+    pages[1].floor_tiers = Some(ImportFloorTierSummary { rows: vec![row] });
+    assert!(attempt(pages).contains("disagree about their floor"));
+}
+
+#[test]
+fn path_into_fresh_clone_requires_fetching_the_import_tip_first() {
+    let history = imported_history(8, 2);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let repository = receiver(&history, receiver_dir.path());
+    let path: Vec<_> = history.chain[2..8].iter().rev().cloned().collect();
+    let staged = stage(
+        &history,
+        transfer(&history, scratch.path(), &history.chain[2]),
+        page_set(&history, &path, import_ancestry_page::Coverage::Path, 2),
+        BTreeSet::new(),
+    )
+    .expect("proved path");
+    let error = try_install(&history, &repository, staged)
+        .expect_err("fresh PATH cannot install a full floor");
+    assert!(
+        error.to_string().contains("fetch the import tip first"),
+        "{error}"
+    );
+}
+
+#[test]
+fn path_refreshes_the_whole_floor_summary_and_can_remove_constraints() {
+    let history = imported_history(8, 4);
+    let scratch = tempfile::tempdir().expect("scratch");
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let repository = receiver(&history, receiver_dir.path());
+    let full = stage(
+        &history,
+        transfer(&history, scratch.path(), history.tip()),
+        page_set(
+            &history,
+            history.ancestors(),
+            import_ancestry_page::Coverage::Floor,
+            4,
+        ),
+        BTreeSet::new(),
+    )
+    .expect("floor");
+    install(&history, &repository, full);
+    let path: Vec<_> = history.chain[4..8].iter().rev().cloned().collect();
+    for constrained in [true, false] {
+        let mut pages = page_set(&history, &path, import_ancestry_page::Coverage::Path, 2);
+        if constrained {
+            for page in &mut pages {
+                page.floor_tiers = Some(ImportFloorTierSummary {
+                    rows: vec![import_floor_tier_summary::Row {
+                        tier: 2,
+                        label: "legal".into(),
+                        tier_rows: 3,
+                    }],
+                });
+            }
+        }
+        let staged = stage(
+            &history,
+            transfer(&history, scratch.path(), &history.chain[4]),
+            pages,
+            BTreeSet::from([history.tip().id()]),
+        )
+        .expect("path");
+        install(&history, &repository, staged);
+        // This member did not travel on the path. The summary still covers it.
+        assert_eq!(
+            repository
+                .withholding_visibility_for_audience(
+                    &history.chain[0].id(),
+                    &repo::AudienceTier::Public
+                )
+                .expect("visibility")
+                .is_some(),
+            constrained
+        );
+        assert!(
+            repository
+                .withholding_visibility_for_audience(
+                    &history.chain[0].id(),
+                    &repo::AudienceTier::Restricted("legal".into())
+                )
+                .expect("label audience")
+                .is_none()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peak_resident_bytes() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .expect("process memory")
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .expect("peak resident memory")
+        .split_whitespace()
+        .next()
+        .expect("peak size")
+        .parse::<usize>()
+        .expect("KiB")
+        * 1024
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ancestry_staging_peak_memory_is_bounded() {
+    // A single-test subprocess excludes allocations by concurrent test cases.
+    // Kernel high-water RSS includes transient decoding and writer allocations,
+    // and catches retained payloads even if the graph's accounting is unchanged.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "fetch::hosted::import_ancestry_tests::ancestry_staging_retains_bounded_allocations",
+            "--nocapture",
+        ])
+        .env("HEDDLE_ANCESTRY_RSS_PROBE", "1")
+        .output()
+        .expect("isolated memory test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{stdout}");
 }

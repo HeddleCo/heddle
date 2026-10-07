@@ -556,9 +556,9 @@ impl ThreadReplica {
     pub fn is_import_floor_member(&self, state: &StateId) -> Result<bool> {
         import_floor::is_member_in(&*self.connect()?, self.thread, state)
     }
-    /// Record a verified import floor outside a hosted install, for a
-    /// receiver that verified the converted ancestry itself. `store` must
-    /// hold every member; the walk stops at `frontier`.
+    /// Test helper: record installed ancestry without verifying its receipt.
+    /// `store` must hold every member; the walk stops at `frontier`.
+    #[cfg(test)]
     pub fn record_import_floor(
         &self,
         operation: ContentHash,

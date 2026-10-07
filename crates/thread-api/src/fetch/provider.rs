@@ -67,6 +67,8 @@ pub struct ProviderPlanSession<
     plan: ProviderPlan,
     ready: TransferReady,
     originals: Vec<Item>,
+    ancestry: super::staging::AncestryInput,
+    ancestry_directory: tempfile::TempDir,
     sender: Sender<W, FetchClientFrame>,
     messages: Messages<R, FetchServerFrame>,
     state: Validation,
@@ -342,15 +344,20 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
         let directory = tempfile::Builder::new()
             .prefix("provider-download-")
             .tempdir_in(scratch)?;
+        if !self.ancestry.is_empty() {
+            for name in ["ancestry.pack", "ancestry.idx"] {
+                std::fs::copy(
+                    self.ancestry_directory.path().join(name),
+                    directory.path().join(name),
+                )?;
+            }
+        }
         std::fs::hard_link(pack, directory.path().join("source.pack"))?;
         std::fs::hard_link(index, directory.path().join("source.idx"))?;
         let mut operations = Vec::new();
         let mut receipt_records = Vec::new();
         let mut dependencies = Vec::new();
-        let mut ancestry = super::staging::AncestryInput {
-            pages: Vec::new(),
-            excluded_tips: self.state.excluded_tips.clone(),
-        };
+        let ancestry = self.ancestry;
         for item in self.originals {
             match item {
                 Item::Operations(batch) => {
@@ -360,7 +367,6 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                     }
                 }
                 Item::ThreadGenesis(record) => dependencies.push(record),
-                Item::ImportAncestry(page) => ancestry.pages.push(page),
                 _ => {
                     return Err(Error::Invalid(
                         "provider source originals differ from Ready",
@@ -573,6 +579,10 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
         signer: &impl ProviderConsentSigner,
     ) -> Result<ProviderPlanSession<W, R>, Error> {
         let mut originals = Vec::new();
+        let ancestry_directory = tempfile::Builder::new()
+            .prefix("provider-download-")
+            .tempdir()?;
+        let mut ancestry = super::staging::AncestryInput::new(self.state.excluded_tips.clone());
         let offer = loop {
             let frame = self
                 .messages
@@ -583,7 +593,18 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                 Some(fetch_server_frame::Body::Operations(_))
                 | Some(fetch_server_frame::Body::ThreadGenesis(_))
                 | Some(fetch_server_frame::Body::ImportAncestry(_)) => {
-                    originals.push(self.state.accept(frame)?);
+                    match self.state.accept(frame)? {
+                        Item::ImportAncestry(page) => ancestry.push(
+                            page,
+                            self.state
+                                .ready
+                                .thread
+                                .as_ref()
+                                .ok_or(Error::Invalid("Thread absent"))?,
+                            ancestry_directory.path(),
+                        )?,
+                        original => originals.push(original),
+                    }
                 }
                 Some(fetch_server_frame::Body::ProviderOffer(offer)) => break offer,
                 _ => return Err(Error::Invalid("unexpected frame before provider Offer")),
@@ -625,10 +646,13 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
             ));
         };
         candidate.admit(&plan)?;
+        ancestry.finish()?;
         Ok(ProviderPlanSession {
             ready: self.state.ready.clone(),
             plan,
             originals,
+            ancestry,
+            ancestry_directory,
             sender: self.sender,
             messages: self.messages,
             state: self.state,

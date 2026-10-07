@@ -302,6 +302,7 @@ fn import_ancestry_pages_need_import_authority_and_stay_within_bounds() {
     let (open, ready, endpoint, _) = fixture();
     let thread = ready.thread.clone();
     let page = |states: usize| ImportAncestryPage {
+        floor_tiers: Some(ImportFloorTierSummary::default()),
         thread: thread.clone(),
         tip: Some(WireStateId { value: vec![9; 32] }),
         signed_operation_digest: vec![3; 32],
