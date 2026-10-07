@@ -699,6 +699,97 @@ fn fresh_clone_installs_the_converted_history_and_an_older_commit_fetches_lazily
 }
 
 #[test]
+fn native_continuation_on_an_imported_tip_publishes_without_ancestry() {
+    let mut history = imported_history(8, 2);
+    let author = signer(&fixture_json(), "job");
+    let (tree, blob) = file_tree("README.md", b"native continuation\n", 0x53);
+    let state = State::new_snapshot(
+        tree.hash(),
+        vec![history.tip().id()],
+        Attribution::human(Principal::new("native author", "author@example.test")),
+    );
+    let operation = ThreadOperation {
+        version: 1,
+        thread: history.thread,
+        parents: BTreeSet::from([history
+            .signed
+            .verify()
+            .expect("import operation")
+            .id()
+            .expect("id")]),
+        publisher: author.public_key().try_into().expect("key"),
+        body: ThreadOperationBody::Capture(AuthoredCapture::local(
+            state.encode_current_msgpack().expect("State").into(),
+        )),
+    };
+    let signed = SignedOperation::sign(&operation, &author).expect("native original");
+    history.trees.insert(state.id(), (tree, blob));
+    let scratch = tempfile::tempdir().expect("scratch");
+    let transfer = transfer(&history, scratch.path(), &state);
+    let packs = [
+        ("source.pack", pack_extent::Kind::NativePack),
+        ("source.idx", pack_extent::Kind::NativeIndex),
+    ]
+    .into_iter()
+    .map(|(name, kind)| {
+        let data = std::fs::read(transfer.directory.path().join(name)).expect("artifact");
+        let address = ObjectAddress {
+            algorithm: "blake3".into(),
+            digest: blake3::hash(&data).as_bytes().to_vec(),
+        };
+        PackExtent {
+            pack: Some(address.clone()),
+            kind: kind as i32,
+            offset: 0,
+            length: data.len() as u64,
+            extent_digest: Some(address),
+        }
+    })
+    .collect();
+    let opening = PublishContentOpen {
+        thread: transfer.ready.thread,
+        revision: transfer.ready.current,
+        packs,
+        import_authority: Some(history.bundle.clone()),
+        protocol: Some(crate::hybrid::protocol()),
+        ..Default::default()
+    };
+    let operations = [history.signed, signed]
+        .into_iter()
+        .map(|signed| SignedRecord {
+            format: objects::object::thread_replication::OPERATION_FORMAT.into(),
+            signatures: vec![RecordSignature {
+                public_key: signed.verify().expect("operation").publisher.to_vec(),
+                signature: signed.signature,
+            }],
+            canonical_record: signed.canonical,
+        })
+        .collect();
+    let originals = crate::publication::PublicationOriginals {
+        geneses: vec![transfer.ready.thread_genesis.expect("genesis")],
+        operations: vec![ReplicationOperations {
+            operations,
+            import_authority: opening.import_authority.clone(),
+            ..Default::default()
+        }],
+    };
+    assert!(!transfer.directory.path().join("ancestry.pack").exists());
+    let validated = crate::publication::validate_source_artifacts_with_import_carriers(
+        transfer.directory,
+        &opening,
+        originals,
+        transfer.carriers,
+    )
+    .expect("publication retains the import proof without requiring its ancestry pages");
+    assert_eq!(validated.state().id(), state.id());
+    assert_eq!(validated.operations().len(), 2);
+    assert_eq!(
+        validated.import_authority(),
+        opening.import_authority.as_ref()
+    );
+}
+
+#[test]
 fn a_converted_history_without_its_ancestry_does_not_stage() {
     // The pre-alpha.42 shape: only the tip travels. This is the exact failure
     // weft#2617 observed as an embargo placeholder; it must now fail closed

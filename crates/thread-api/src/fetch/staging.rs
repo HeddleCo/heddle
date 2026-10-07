@@ -447,6 +447,7 @@ struct DisclosureInput {
     carriers: Option<crypto::import_authority::VerifiedImportCarriers>,
     foreign: Vec<ForeignDependencyV1>,
     ancestry: AncestryInput,
+    require_import_ancestry: bool,
 }
 
 #[cfg(test)]
@@ -514,6 +515,7 @@ pub(super) fn validate_with_receipts_and_carriers(
                 .unwrap_or_default(),
             carriers,
             ancestry,
+            require_import_ancestry: true,
         },
     )?;
     // Install reads the ready genesis, including claims omitted above.
@@ -646,6 +648,9 @@ pub(crate) fn validate_artifacts(
             foreign,
             carriers,
             ancestry: AncestryInput::default(),
+            // Publication retains the import floor at both endpoints; only a
+            // Fetch receiver needs its converted ancestors to travel again.
+            require_import_ancestry: false,
         },
     )
 }
@@ -665,6 +670,7 @@ fn validate_disclosure_artifacts(
         carriers,
         foreign,
         ancestry,
+        require_import_ancestry,
     } = input;
     if !ancestry.is_empty() && carriers.is_none() {
         return Err(Error::Invalid(
@@ -1143,6 +1149,7 @@ fn validate_disclosure_artifacts(
         &import_floors,
         thread,
         selected_in_floor.then_some(state.id()),
+        require_import_ancestry,
     )?;
     let pack = PackReader::open(
         &directory.path().join("source.pack"),

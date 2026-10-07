@@ -242,6 +242,7 @@ pub(super) fn verify(
     floors: &[ImportFloorInput],
     thread: &ThreadRef,
     selected: Option<StateId>,
+    require_import_ancestry: bool,
 ) -> Result<VerifiedAncestry, Error> {
     let seed =
         heddle_object_model::object::thread_replication::initial_base::synthetic_initial_base()
@@ -261,7 +262,8 @@ pub(super) fn verify(
             .collect();
         let key = (tip, floor.digest.clone());
         let Some(set) = input.sets.get(&key) else {
-            if required.is_empty() || input.excluded_tips.contains(&tip) {
+            if !require_import_ancestry || required.is_empty() || input.excluded_tips.contains(&tip)
+            {
                 continue;
             }
             return Err(Error::Invalid(
