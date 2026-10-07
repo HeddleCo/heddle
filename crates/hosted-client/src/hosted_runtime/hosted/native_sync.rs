@@ -1612,6 +1612,23 @@ impl HostedClient {
         } else {
             thread_api::hybrid::sync_protocol()
         };
+        // A recorded HYBRID import floor is complete converted Git history
+        // this replica already verified and installed (heddle#2004). Naming
+        // its tips lets the endpoint omit tens of thousands of States on a
+        // later pull; staging still proves any floor it does receive, and a
+        // revision below a tip still arrives with its parent-chain proof.
+        let exclude_revisions = match (
+            reference.spool.as_ref(),
+            ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?),
+        ) {
+            (Some(spool), Ok(replica)) => replica
+                .import_floor_tips()
+                .map_err(replica_err)?
+                .into_iter()
+                .map(|tip| revision_ref(spool, tip))
+                .collect(),
+            _ => Vec::new(),
+        };
         let open = preferred_fetch_open(
             FetchOpen {
                 thread: Some(reference.clone()),
@@ -1621,6 +1638,7 @@ impl HostedClient {
                 protocol,
                 selection: Some(TransferSelection {
                     facets: vec![contract::SharedFacet::Source as i32],
+                    exclude_revisions,
                     ..Default::default()
                 }),
                 ..Default::default()

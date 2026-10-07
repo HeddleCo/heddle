@@ -753,6 +753,9 @@ impl Repository {
         mut visit: impl FnMut(&objects::object::State) -> Result<usize>,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
         let _serialization = self.installation_lock()?;
+        // The lock above already serializes installation; the floor record
+        // lives in the same metadata store, so read it without re-acquiring.
+        let floors = self.import_floor_reader_locked()?;
         let mut seen = HashSet::new();
         let mut stack = vec![*state_id];
         let mut decoded_bytes = 0usize;
@@ -786,6 +789,20 @@ impl Repository {
             if decoded_bytes > 16 * 1024 * 1024 {
                 return Ok(unresolved(id));
             }
+            // A HYBRID import floor is the signed boundary of converted Git
+            // history (heddle#2004): the import operation's signature covers
+            // the tip and, through its parent chain, every converted ancestor,
+            // and the host's lineage stops here too. Walking tens of thousands
+            // of converted commits would only hit the bound above and withhold
+            // a fully present history as "unresolved". A member below a tip
+            // answers for itself and stops the same way.
+            if let Some(floors) = &floors
+                && crate::thread_replication::import_floor::role(floors, &id)
+                    .map_err(|error| anyhow::anyhow!("import floor record: {error}"))?
+                    .is_some()
+            {
+                continue;
+            }
             // A present shallow ancestor is the graft edge of a depth-limited
             // clone. Missing parents past that edge are not an unresolved
             // embargo on the query root. A missing parent of the query root
@@ -801,6 +818,43 @@ impl Repository {
             }
         }
         Ok(None)
+    }
+
+    /// Read-only metadata connection for the import floor record, opened
+    /// while the caller already holds the installation lock. `None` when the
+    /// store has no local metadata at all (no hosted history was installed).
+    fn import_floor_reader_locked(&self) -> Result<Option<rusqlite::Connection>> {
+        let path = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let connection = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .with_context(|| format!("open '{}'", path.display()))?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // A store below the floor schema has no record to consult; opening
+        // for write (any ThreadReplica access) migrates it.
+        if version < crate::local_metadata::SCHEMA_VERSION {
+            return Ok(None);
+        }
+        Ok(Some(connection))
+    }
+
+    /// How `state` relates to recorded HYBRID import floors: the signed tip
+    /// of a converted Git history, a converted ancestor inside one, or neither.
+    pub fn import_floor_role(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<crate::thread_replication::import_floor::ImportFloorRole>> {
+        let _serialization = self.installation_lock()?;
+        let Some(floors) = self.import_floor_reader_locked()? else {
+            return Ok(None);
+        };
+        crate::thread_replication::import_floor::role(&floors, state)
+            .map_err(|error| anyhow::anyhow!("import floor record: {error}"))
     }
 
     /// Walk every visibility sidecar file in the repo. Returns
@@ -1539,6 +1593,156 @@ mod tests {
                 "proof and live gate must agree for ancestor {tier:?}"
             );
         }
+    }
+
+    /// heddle#2004: a HYBRID import floor is a signed boundary. With every
+    /// converted commit present, the walk used to descend through all of them
+    /// and give up at 4096 (`unresolved-ancestor`), so any import above that
+    /// size showed only the embargo placeholder. The first assertion is that
+    /// pre-fix behaviour (the control); the recorded floor then stops the walk.
+    #[test]
+    fn native_visibility_walk_stops_at_a_recorded_import_floor() {
+        use crypto::thread_operation::SignedGenesis;
+        use objects::object::{Blob, Tree, TreeEntry, thread_replication::ThreadGenesis};
+
+        use crate::thread_replication::{ThreadReplica, import_floor::ImportFloorRole};
+        const CONVERTED: usize = 5_000;
+        let dir = TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        let blob = Blob::new(b"fn main() {}\n".to_vec());
+        repo.store().put_blob(&blob).unwrap();
+        let tree = Tree::from_entries_salted_v4(
+            vec![TreeEntry::file("main.rs", blob.hash(), false).unwrap()],
+            vec![[7; 32]],
+        )
+        .unwrap();
+        repo.store().put_tree(&tree).unwrap();
+        let author = objects::object::Attribution::human(Principal::new("git author", ""));
+        let mut chain: Vec<State> = Vec::with_capacity(CONVERTED + 1);
+        // One pack, as a Fetch installs the floor; loose writes would fsync
+        // five thousand times.
+        let mut builder = objects::store::pack::PackBuilder::for_repack(Default::default(), 0);
+        for index in 0..=CONVERTED {
+            let parents = chain.last().map(|s| vec![s.id()]).unwrap_or_default();
+            let state = State::new_snapshot(tree.hash(), parents, author.clone())
+                .with_intent(format!("converted commit {index}"));
+            builder.add_id(
+                objects::store::pack::PackObjectId::StateId(state.id()),
+                objects::store::pack::ObjectType::State,
+                state.encode_current_msgpack().unwrap(),
+            );
+            chain.push(state);
+        }
+        let (pack, index, _) = builder.build().unwrap();
+        let staged = TempDir::new().unwrap();
+        std::fs::write(staged.path().join("floor.pack"), pack).unwrap();
+        std::fs::write(staged.path().join("floor.idx"), index).unwrap();
+        repo.store()
+            .install_pack_streaming(
+                &staged.path().join("floor.pack"),
+                &staged.path().join("floor.idx"),
+            )
+            .unwrap();
+        let tip = chain.last().unwrap().clone();
+        let audience = crate::AudienceTier::Internal;
+        // Control: every State is installed, and still the bounded walk
+        // withholds the tip as an unresolved private ancestor.
+        let withheld = repo
+            .withholding_visibility_for_audience(&tip.id(), &audience)
+            .unwrap()
+            .expect("the 4096-State bound withholds a present history");
+        assert_eq!(
+            withheld.1,
+            VisibilityTier::Private {
+                scope_label: UNRESOLVED_ANCESTOR_SCOPE.into()
+            }
+        );
+        let placeholder = TempDir::new().unwrap();
+        assert!(matches!(
+            repo.checkout_state_gated(&tip.id(), &tip, placeholder.path(), &audience)
+                .unwrap(),
+            crate::CheckoutMaterialization::Withheld { .. }
+        ));
+        assert!(placeholder.path().join("HEDDLE-EMBARGO.txt").exists());
+
+        // Record the floor as a verified import install does.
+        let signer = Ed25519Signer::from_seed(&[91; 32]).unwrap();
+        let genesis = ThreadGenesis {
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().unwrap(),
+            ),
+            version: 1,
+            spool: uuid::Uuid::from_u128(31).to_string(),
+            parent: None,
+            base: repo.head().unwrap().unwrap(),
+            name: "imported".into(),
+            intent: "converted history".into(),
+            creator: signer.public_key().try_into().unwrap(),
+            nonce: vec![2],
+        };
+        let replica = ThreadReplica::create(
+            repo.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).unwrap(),
+        )
+        .unwrap();
+        let members = replica
+            .record_import_floor(
+                ContentHash::compute(b"import operation"),
+                &tip,
+                &std::collections::BTreeSet::new(),
+                repo.store(),
+            )
+            .unwrap();
+        assert_eq!(members, CONVERTED);
+        assert_eq!(
+            repo.import_floor_role(&tip.id()).unwrap(),
+            Some(ImportFloorRole::Tip)
+        );
+        assert_eq!(
+            repo.import_floor_role(&chain[0].id()).unwrap(),
+            Some(ImportFloorRole::Member { tip: tip.id() })
+        );
+        assert_eq!(
+            repo.withholding_visibility_for_audience(&tip.id(), &audience)
+                .unwrap(),
+            None,
+            "the walk stops at the signed import tip"
+        );
+        // A member answers for itself; the floor below it is covered too.
+        assert_eq!(
+            repo.withholding_visibility_for_audience(&chain[CONVERTED / 2].id(), &audience)
+                .unwrap(),
+            None
+        );
+        let proof = repo
+            .collect_content_disclosure(&tip.id())
+            .unwrap()
+            .expect("resolved lineage");
+        assert_eq!(proof.states(), [tip.id()]);
+        let checkout = TempDir::new().unwrap();
+        assert!(matches!(
+            repo.checkout_state_gated(&tip.id(), &tip, checkout.path(), &audience)
+                .unwrap(),
+            crate::CheckoutMaterialization::Materialized { .. }
+        ));
+        assert_eq!(
+            std::fs::read(checkout.path().join("main.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
+        assert!(!checkout.path().join("HEDDLE-EMBARGO.txt").exists());
+        // The tip's own embargo still withholds; the floor does not widen it.
+        repo.put_state_visibility(sample_record(
+            tip.id(),
+            VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        ))
+        .unwrap();
+        assert!(
+            repo.withholding_visibility_for_audience(&tip.id(), &crate::AudienceTier::Public)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

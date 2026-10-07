@@ -1399,6 +1399,9 @@ pub(super) fn install_selected_in(
                 {
                     return Err(Error::Hybrid(Reject::Scope));
                 }
+                if let Some(bound) = imports.get(&id) {
+                    record_import_floor_in(context, closure, &thread, &id, bound, store)?;
+                }
             }
             objects::object::thread_replication::ownership_claim::FORMAT => {
                 replica.install_verified_claim_in(context.sql(), &record)?;
@@ -1422,6 +1425,36 @@ pub(super) fn install_selected_in(
         return Err(Error::Hybrid(Reject::Scope));
     }
     Ok(replicas.into_values().collect())
+}
+
+/// A delegated import's converted Git ancestors are States below its tip,
+/// not operations. The first installation of the tip walks them in the staged
+/// store and records the floor; a Thread that already recorded this tip (a
+/// later pull or a lazily fetched older commit, whose Fetch omitted the
+/// floor) keeps its record. An uninstalled ancestor fails the whole install.
+fn record_import_floor_in(
+    context: &TrustTransaction<'_>,
+    closure: &NativeClosure,
+    thread: &ContentHash,
+    operation: &ContentHash,
+    bound: &objects::object::thread_replication::delegated_import::DelegatedImport,
+    store: &impl ObjectStore,
+) -> Result<()> {
+    let converted = bound.converted();
+    let Some(tip) = converted.source_state()? else {
+        return Ok(());
+    };
+    if super::import_floor::recorded_in(context.sql(), *thread, tip.id())? {
+        return Ok(());
+    }
+    let mut frontier = BTreeSet::new();
+    for parent in &converted.parents {
+        if let Some(state) = closure.operation(parent)?.source_state()? {
+            frontier.insert(state.id());
+        }
+    }
+    super::import_floor::record_in(context.sql(), *thread, *operation, &tip, &frontier, store)?;
+    Ok(())
 }
 
 // Reuse native closure checks on installed originals without admitting or

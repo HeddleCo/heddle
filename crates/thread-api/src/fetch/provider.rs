@@ -347,6 +347,10 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
         let mut operations = Vec::new();
         let mut receipt_records = Vec::new();
         let mut dependencies = Vec::new();
+        let mut ancestry = super::staging::AncestryInput {
+            pages: Vec::new(),
+            excluded_tips: self.state.excluded_tips.clone(),
+        };
         for item in self.originals {
             match item {
                 Item::Operations(batch) => {
@@ -356,6 +360,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                     }
                 }
                 Item::ThreadGenesis(record) => dependencies.push(record),
+                Item::ImportAncestry(page) => ancestry.pages.push(page),
                 _ => {
                     return Err(Error::Invalid(
                         "provider source originals differ from Ready",
@@ -380,6 +385,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                 dependencies,
                 receipt_records,
                 carriers,
+                ancestry,
             )
         })
         .await
@@ -575,7 +581,8 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                 .ok_or(Error::Invalid("provider Offer required"))?;
             match frame.body {
                 Some(fetch_server_frame::Body::Operations(_))
-                | Some(fetch_server_frame::Body::ThreadGenesis(_)) => {
+                | Some(fetch_server_frame::Body::ThreadGenesis(_))
+                | Some(fetch_server_frame::Body::ImportAncestry(_)) => {
                     originals.push(self.state.accept(frame)?);
                 }
                 Some(fetch_server_frame::Body::ProviderOffer(offer)) => break offer,

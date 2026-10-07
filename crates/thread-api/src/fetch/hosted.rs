@@ -17,6 +17,10 @@ use repo::{
 
 use super::{Error, StagedSource};
 
+#[cfg(test)]
+#[path = "import_ancestry_tests.rs"]
+mod import_ancestry_tests;
+
 pub struct HostedPublication<'a> {
     pub replica: &'a ThreadReplica,
     pub prepared: repo::thread_replication::source_publication::PreparedPublication<'a>,
@@ -438,7 +442,7 @@ pub(crate) mod tests {
         },
     };
 
-    struct ReceiverClock;
+    pub(super) struct ReceiverClock;
     impl Clock for ReceiverClock {
         fn now_millis(&self) -> repo::thread_replication::Result<i64> {
             Ok(1_350_000)
@@ -447,7 +451,7 @@ pub(crate) mod tests {
             Ok(0)
         }
     }
-    fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
+    pub(super) fn record<T: Message + Default>(fixture: &serde_json::Value, name: &str) -> T {
         let vector = fixture["wire_vectors"]
             .get(name)
             .or_else(|| fixture["signed_vectors"].get(name))
@@ -623,6 +627,7 @@ pub(crate) mod tests {
             vec![],
             vec![],
             Some(carriers),
+            Default::default(),
         )
         .expect("selected structural source");
         let root = RootSelection {

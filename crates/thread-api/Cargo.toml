@@ -75,6 +75,7 @@ uuid = { workspace = true, features = ["js"], optional = true }
 
 [dev-dependencies]
 rusqlite.workspace = true
+rmp-serde.workspace = true
 serde_json.workspace = true
 tracing-subscriber.workspace = true
 anyhow = "1"

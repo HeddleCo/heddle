@@ -20,6 +20,7 @@ mod genesis_admission;
 pub mod hosted_trust;
 #[cfg(test)]
 mod hosted_trust_tests;
+pub mod import_floor;
 pub mod install_artifacts;
 mod integration;
 pub mod listing;
@@ -170,6 +171,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
     connection.execute_batch(source_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
     connection.execute_batch(hosted_trust::SCHEMA)?;
+    import_floor::initialize_schema(connection)?;
     connection.execute_batch(listing::SCHEMA)
 }
 
@@ -542,6 +544,33 @@ impl ThreadReplica {
     }
     pub fn thread_id(&self) -> ContentHash {
         self.thread
+    }
+    /// Recorded HYBRID import tips whose converted ancestry this replica
+    /// holds completely. A Fetch names them in
+    /// `TransferSelection.exclude_revisions` so the endpoint omits the floor.
+    pub fn import_floor_tips(&self) -> Result<Vec<StateId>> {
+        import_floor::tips_in(&*self.connect()?, self.thread)
+    }
+    /// Whether `state` is a recorded converted Git ancestor of an import tip
+    /// in this Thread.
+    pub fn is_import_floor_member(&self, state: &StateId) -> Result<bool> {
+        import_floor::is_member_in(&*self.connect()?, self.thread, state)
+    }
+    /// Record a verified import floor outside a hosted install, for a
+    /// receiver that verified the converted ancestry itself. `store` must
+    /// hold every member; the walk stops at `frontier`.
+    pub fn record_import_floor(
+        &self,
+        operation: ContentHash,
+        tip: &State,
+        frontier: &BTreeSet<StateId>,
+        store: &impl ObjectStore,
+    ) -> Result<usize> {
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let members = import_floor::record_in(&tx, self.thread, operation, tip, frontier, store)?;
+        tx.commit()?;
+        Ok(members)
     }
     pub fn genesis(&self) -> Result<ThreadGenesis> {
         self.genesis_in(&*self.connect()?)

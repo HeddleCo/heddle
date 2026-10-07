@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -114,18 +114,23 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
                 .map_err(|error| Error::Initialization(error.to_string()))?;
             crate::device_runs::migrate_report_event_schema(&tx)?;
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         2 => {
             crate::device_runs::migrate_report_event_schema(&tx)?;
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         3 => {
             crate::device_run_outbox::initialize_schema(&tx)?;
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
-        4..=6 => {
+        4..=7 => {
+            // Version 8 adds the HYBRID import floor record (heddle#2004).
+            crate::thread_replication::import_floor::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
