@@ -92,11 +92,25 @@ fn require_projfs() {
 /// it to fire before the test ends.
 fn build_fixture() -> (TempDir, Repository) {
     let repo_dir = TempDir::new().expect("tempdir for repo");
-    let repo = Repository::init_default(repo_dir.path()).expect("init_default");
+    let repo = init_test_repository(repo_dir.path());
     fs::write(repo_dir.path().join("hello.txt"), b"world").expect("write hello.txt");
     repo.snapshot(Some("fixture".into()), None)
         .expect("snapshot fixture");
     (repo_dir, repo)
+}
+
+/// Initialise a fixture repository with a configured principal. Identity is
+/// never fabricated, so any test that records history must declare one.
+/// Same shape as `mount::tests::init_test_repository`: write the principal
+/// into this repo's config rather than a process-wide env var.
+fn init_test_repository(path: &Path) -> Repository {
+    let repo = Repository::init_default(path).expect("init_default");
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config
+        .save(&repo.heddle_dir().join("config.toml"))
+        .expect("save test principal");
+    Repository::open(path).expect("reopen with principal")
 }
 
 /// Mount the fixture via ProjFS and return the session + an empty

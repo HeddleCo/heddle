@@ -80,7 +80,7 @@ gate. Heddle's adapter behavior remains covered by the consuming crates.
 
 ```bash
 cargo llvm-cov --locked --workspace \
-  --features git-overlay,native,semantic,zstd \
+  --features git-overlay,native,semantic-analysis,zstd,heddle-cli/ci \
   --lcov --output-path lcov.info
 
 cargo run -p heddle-devtools --quiet -- \

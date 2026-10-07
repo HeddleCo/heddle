@@ -121,7 +121,7 @@ struct Fixture {
 
 fn create_fixture() -> Fixture {
     let temp = TempDir::new().expect("temp repo");
-    let repo = Repository::init_default(temp.path()).expect("init repo");
+    let repo = init_test_repository(temp.path());
     let store = TimelineStore::open(repo.heddle_dir()).expect("open timeline store");
     let state0 = repo.head().expect("initial head").expect("initial state");
     let state1 = write_state(&repo, temp.path(), "tracked.txt", "one\n");
@@ -175,6 +175,20 @@ fn native(call: &str) -> NativeToolCallRefV1 {
         message_id: Some("message-1".to_string()),
         tool_call_id: call.to_string(),
     }
+}
+
+/// Identity is never fabricated, so a fixture that records history must
+/// declare one. Same shape as the other repo integration-test helper:
+/// write the principal into this repo's config rather than a process-wide
+/// env var (these tests spawn child processes and run in parallel).
+fn init_test_repository(path: &Path) -> Repository {
+    let repo = Repository::init_default(path).expect("init repo");
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config
+        .save(&repo.heddle_dir().join("config.toml"))
+        .expect("save test principal");
+    Repository::open(path).expect("reopen with principal")
 }
 
 fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> StateId {
