@@ -48,9 +48,11 @@ jobs:
 
       # `--all-features` would enable `heddle-cli/weft-client`, which from
       # OSS resolves to the reservation stub and won't compile. Cover the OSS
-      # feature set instead.
+      # feature set instead. `heddle-thread-api` exposes this as
+      # `semantic-analysis` (`dep:semantic` hides an implicit `semantic`
+      # feature), so the workspace list uses that name.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd,heddle-cli/ci --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic-analysis,zstd,heddle-cli/ci --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
