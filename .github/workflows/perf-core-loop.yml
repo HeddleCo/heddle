@@ -24,7 +24,6 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "false"
-  TMPDIR: /home/scratch
   HEDDLE_PERF_BASELINE: ci-blacksmith-4vcpu-ubuntu-2404
 
 jobs:
@@ -35,6 +34,10 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
+    # 10k/100k fixtures and release compiles write through TMPDIR.
+    # runner.temp is on the job disk and already exists before rustup runs.
+    env:
+      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v7
 
@@ -46,11 +49,6 @@ jobs:
         with:
           shared-key: perf-core-loop-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
-
-      - name: Prepare benchmark scratch space
-        run: |
-          sudo mkdir -p /home/scratch
-          sudo chown "$(id -u):$(id -g)" /home/scratch
 
       - name: Compile release harness (out of band)
         run: |
