@@ -919,6 +919,45 @@ PY
   done <<< "$consumer_report"
 fi
 
+# The capability-verifier npm manifest is committed source. `npm run build`
+# rewrites it from Cargo metadata, and release-plz only bumps Cargo.toml, so
+# a release can leave this file behind the workspace version. The release
+# workflow packs whatever this file says after that rewrite; the committed
+# copy must already match so reviewers and release-plz PRs see one version.
+npm_manifest="crates/capability-verifier/npm/package.json"
+if [[ ! -f "$npm_manifest" ]]; then
+  err "missing $npm_manifest"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' 2>/dev/null; then
+  err "python3 tomllib is required to compare the npm manifest with the workspace version"
+else
+  npm_version_report=$(python3 - "$npm_manifest" <<'PY'
+import json
+import sys
+import tomllib
+
+manifest = sys.argv[1]
+with open("Cargo.toml", "rb") as f:
+    workspace_version = tomllib.load(f)["workspace"]["package"]["version"]
+with open(manifest, encoding="utf-8") as f:
+    npm_version = json.load(f)["version"]
+if not isinstance(workspace_version, str) or not isinstance(npm_version, str):
+    print(f"error: workspace or npm version is not a string ({manifest})")
+elif npm_version != workspace_version:
+    print(
+        f"error: {manifest} version {npm_version} differs from "
+        f"workspace {workspace_version}"
+    )
+else:
+    print(f"ok: {manifest} version matches workspace ({workspace_version})")
+PY
+)
+  if [[ "$npm_version_report" == ok:* ]]; then
+    ok "${npm_version_report#ok: }"
+  else
+    err "${npm_version_report#error: }"
+  fi
+fi
+
 if (( fail )); then
   echo "publish-pipeline check FAILED" >&2
   exit 1
