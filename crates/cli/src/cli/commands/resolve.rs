@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Resolve command implementation.
 
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -711,7 +711,12 @@ fn resolve_file_with_version(
         .get_state(side)?
         .ok_or_else(|| anyhow!("{} state not found", if ours { "Our" } else { "Their" }))?;
     let tree = repo.require_tree(&state.tree)?;
-    if let Some(entry) = tree.get(path) {
+    let selected_path = Path::new(path);
+    if let Some(parent) = selected_path.parent()
+        && let Some(tree) = repo.resolve_subtree(&tree, parent)?
+        && let Some(name) = selected_path.file_name().and_then(|name| name.to_str())
+        && let Some(entry) = tree.get(name)
+    {
         write_resolved_entry(repo, path, entry)?;
     }
 
