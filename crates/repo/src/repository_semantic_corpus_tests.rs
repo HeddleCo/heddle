@@ -341,7 +341,7 @@ fn missing_index_is_incomplete() {
 }
 
 #[test]
-fn index_listed_parse_miss_is_incomplete() {
+fn index_listed_missing_source_tree_is_an_error() {
     let file = SemanticFileNode::new(
         "rust",
         "0",
@@ -376,18 +376,21 @@ fn index_listed_parse_miss_is_incomplete() {
     blobs.insert(tree_hash, tree_bytes);
     let source = IndexOnlySource { blobs };
 
+    let missing = ContentHash::compute(b"missing-source-tree");
+    let error = populate_new_function_corpus(
+        &source,
+        Some(&root),
+        &missing,
+        SemanticParseCache::shared(),
+        &mut CorpusBudget::default(),
+        &mut BTreeMap::new(),
+    )
+    .expect_err("a missing source tree cannot supply an empty function corpus");
     assert!(
-        !populate_new_function_corpus(
-            &source,
-            Some(&root),
-            &ContentHash::compute(b"missing-source-tree"),
-            SemanticParseCache::shared(),
-            &mut CorpusBudget::default(),
-            &mut BTreeMap::new(),
-        )
-        .unwrap(),
-        "a listed function file that fails to parse must fail-close the corpus"
+        matches!(&error, crate::HeddleError::MissingObject { object_type, id } if object_type == "tree" && id == &missing.to_hex()),
+        "{error:?}"
     );
+    assert!(error.to_string().contains("not available locally"));
 }
 
 struct CountingSource {

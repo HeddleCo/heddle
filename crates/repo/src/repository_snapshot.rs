@@ -375,9 +375,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
         let Some(state) = self.repo.store.get_state(&committed_state)? else {
             return Ok(this_run);
         };
-        let Some(tree) = self.repo.store.get_tree(&state.tree)? else {
-            return Ok(this_run);
-        };
+        let tree = self.repo.require_tree(&state.tree)?;
         Ok(SnapshotExecution {
             state,
             tree,

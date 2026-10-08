@@ -283,6 +283,7 @@ impl<'a> ReasoningPipeline<'a> {
                     continue;
                 }
                 Err(PipelineFileError::ShaMap(error)) => return Err(error.into()),
+                Err(PipelineFileError::Store(error)) => return Err(error.into()),
                 Err(PipelineFileError::Other(e)) => {
                     warn!(sha, error = %e, "diff_trees failed, skipping");
                     self.stats.skipped_git_errors += 1;
@@ -544,7 +545,7 @@ impl<'a> ReasoningPipeline<'a> {
             "",
             &mut changed,
         )
-        .map_err(|e| PipelineFileError::Other(e.to_string()))?;
+        .map_err(|error| PipelineFileError::Store(objects::HeddleError::from(error)))?;
         changed.sort();
         changed.dedup();
         Ok(changed)
@@ -861,11 +862,11 @@ fn diff_tree_files<S: ObjectSource + ?Sized>(
     }
 
     let from_tree = match from_hash {
-        Some(hash) => store.get_tree(hash)?,
+        Some(hash) => Some(ObjectSource::require_tree(store, hash)?),
         None => None,
     };
     let to_tree = match to_hash {
-        Some(hash) => store.get_tree(hash)?,
+        Some(hash) => Some(ObjectSource::require_tree(store, hash)?),
         None => None,
     };
 
@@ -961,9 +962,7 @@ fn collect_tree_file_paths<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<String>,
 ) -> Result<(), anyhow::Error> {
-    let Some(tree) = store.get_tree(root)? else {
-        return Ok(());
-    };
+    let tree = ObjectSource::require_tree(store, root)?;
     for entry in tree.entries() {
         collect_entry_files(store, entry, prefix, out)?;
     }
@@ -1002,11 +1001,7 @@ fn walk_tree<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut std::collections::BTreeMap<String, ContentHash>,
 ) -> Result<(), anyhow::Error> {
-    let Some(tree) = store.get_tree(hash)? else {
-        // Empty tree hash resolves to None; that's fine — nothing to
-        // collect, caller handles it as an empty side.
-        return Ok(());
-    };
+    let tree = ObjectSource::require_tree(store, hash)?;
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
             entry.name().to_string()
@@ -1047,10 +1042,12 @@ fn walk_tree<S: ObjectSource + ?Sized>(
 
 /// Narrow internal error so the pipeline can distinguish "this commit
 /// isn't in the sha map" (expected — count it) from "the store
-/// exploded" (unexpected — log and move on).
+/// is missing a recorded object" (fail closed) or a Git read failed (log
+/// and move on).
 enum PipelineFileError {
     UntranslatedTree,
     ShaMap(crate::ShaMapError),
+    Store(objects::HeddleError),
     Other(String),
 }
 

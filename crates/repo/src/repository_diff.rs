@@ -13,8 +13,7 @@ use super::{Repository, Result};
 impl Repository {
     /// Get the difference between two trees.
     pub fn diff_trees(&self, from: &ContentHash, to: &ContentHash) -> Result<FileChangeSet> {
-        diff_trees(&self.store, from, to)
-            .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))
+        diff_trees(&self.store, from, to).map_err(HeddleError::from)
     }
 
     /// Diff two trees with internal iteration, invoking `visitor` for each
@@ -34,7 +33,6 @@ impl Repository {
     where
         V: FnMut(FileChange) -> ControlFlow<B>,
     {
-        diff_trees_visit(&self.store, from, to, visitor)
-            .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))
+        diff_trees_visit(&self.store, Some(from), to, visitor).map_err(HeddleError::from)
     }
 }

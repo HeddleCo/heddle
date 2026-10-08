@@ -770,14 +770,7 @@ fn walk_tree_for_blob(
             let Some(tree_hash) = entry.tree_hash() else {
                 continue;
             };
-            let Some(subtree) = repo
-                .store()
-                .get_tree(&tree_hash)
-                .with_context(|| format!("load subtree {}", tree_hash.short()))?
-            else {
-                // Missing subtree object — treat as unreachable, don't fail.
-                continue;
-            };
+            let subtree = repo.require_tree(&tree_hash)?;
             walk_tree_for_blob(repo, &subtree, &path, target, out)?;
         }
     }

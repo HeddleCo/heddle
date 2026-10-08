@@ -258,7 +258,7 @@ pub enum HeddleError {
         found: ContentHash,
     },
     #[error(
-        "missing {object_type} object: {id} (run `heddle maintenance fsck --full` to inspect store integrity)"
+        "missing {object_type} object: {id} is not available locally (run `heddle maintenance fsck --full` to inspect store integrity)"
     )]
     MissingObject { object_type: String, id: String },
     #[error("invalid tree entry: {0}")]
@@ -342,6 +342,15 @@ impl From<heddle_format::compression::CompressionError> for HeddleError {
 
 /// Result type for repository/storage-adjacent operations.
 pub type Result<T> = std::result::Result<T, HeddleError>;
+
+impl From<anyhow::Error> for HeddleError {
+    fn from(error: anyhow::Error) -> Self {
+        match error.downcast::<Self>() {
+            Ok(error) => error,
+            Err(error) => Self::InvalidObject(error.to_string()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

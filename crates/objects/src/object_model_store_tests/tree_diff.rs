@@ -268,7 +268,7 @@ fn test_visit_matches_collect_order() {
         .collect();
 
     let mut visited = Vec::new();
-    let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+    let flow = diff_trees_visit(&store, Some(&from_hash), &to_hash, |change| {
         visited.push(change.into_tuple());
         ControlFlow::<()>::Continue(())
     })
@@ -286,7 +286,7 @@ fn test_visit_identical_trees_never_calls_visitor() {
         vec![("a.txt", create_blob(&store, "content"), EntryType::Blob)],
     );
     let mut count = 0usize;
-    let flow = diff_trees_visit(&store, &hash, &hash, |_change| {
+    let flow = diff_trees_visit(&store, Some(&hash), &hash, |_change| {
         count += 1;
         ControlFlow::<()>::Continue(())
     })
@@ -316,7 +316,7 @@ fn test_visit_early_exit_stops_walk() {
     );
 
     let mut seen = Vec::new();
-    let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+    let flow = diff_trees_visit(&store, Some(&from_hash), &to_hash, |change| {
         seen.push(change.path.clone());
         if change.path == "c.txt" {
             ControlFlow::Break("found c")
@@ -351,7 +351,7 @@ fn test_visit_early_exit_inside_subtree() {
     );
 
     let mut seen = Vec::new();
-    let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+    let flow = diff_trees_visit(&store, Some(&from_hash), &to_hash, |change| {
         seen.push(change.path.clone());
         ControlFlow::Break(())
     })
@@ -446,7 +446,7 @@ fn test_deep_tree_diff_uses_constant_native_stack_async() {
 
             let flow = block_on_current_thread(diff_trees_visit_async(
                 &store,
-                &from_hash,
+                Some(&from_hash),
                 &to_hash,
                 |change| {
                     changes.push(change.into_tuple());
@@ -516,13 +516,41 @@ fn missing_historical_trees_fail_closed_async() {
         (nested, empty),
         (empty, nested),
     ] {
-        let error = block_on_current_thread(diff_trees_visit_async(&source, &from, &to, |_| {
-            ControlFlow::<()>::Continue(())
-        }))
-        .expect_err("async diff must not fabricate content");
+        let error =
+            block_on_current_thread(diff_trees_visit_async(&source, Some(&from), &to, |_| {
+                ControlFlow::<()>::Continue(())
+            }))
+            .expect_err("async diff must not fabricate content");
         assert!(
             matches!(error.downcast_ref::<crate::HeddleError>(), Some(crate::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &missing.to_hex()),
             "{error:?}"
         );
     }
+}
+
+#[test]
+fn parentless_diff_uses_an_explicit_absent_baseline() {
+    let store = InMemoryStore::new();
+    let blob = create_blob(&store, "first state");
+    let tree = create_tree(&store, vec![("file.txt", blob, EntryType::Blob)]);
+    assert!(
+        ObjectStore::get_tree(&store, &Tree::new().hash())
+            .unwrap()
+            .is_none()
+    );
+    let mut changes = Vec::new();
+    let flow = diff_trees_visit(&store, None, &tree, |change| {
+        changes.push(change.into_tuple());
+        ControlFlow::<()>::Continue(())
+    })
+    .unwrap();
+    assert!(flow.is_continue());
+    assert_eq!(changes, vec![("file.txt".to_string(), DiffKind::Added)]);
+    let error = diff_trees_visit(&store, None, &Tree::new().hash(), |_| {
+        ControlFlow::<()>::Continue(())
+    })
+    .expect_err("an absent baseline must not hide a missing recorded empty tree");
+    assert!(
+        matches!(error.downcast_ref::<crate::HeddleError>(), Some(crate::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &Tree::new().hash().to_hex())
+    );
 }

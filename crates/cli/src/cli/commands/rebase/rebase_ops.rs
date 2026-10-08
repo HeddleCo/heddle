@@ -524,15 +524,9 @@ fn try_auto_merge_textual_change(
     incoming: &ContentHash,
     path: &str,
 ) -> Result<Option<ContentHash>> {
-    let Some(base_blob) = repo.store().get_blob(base)? else {
-        return Ok(None);
-    };
-    let Some(current_blob) = repo.store().get_blob(current)? else {
-        return Ok(None);
-    };
-    let Some(incoming_blob) = repo.store().get_blob(incoming)? else {
-        return Ok(None);
-    };
+    let base_blob = repo.require_blob(base)?;
+    let current_blob = repo.require_blob(current)?;
+    let incoming_blob = repo.require_blob(incoming)?;
 
     let Some(merged) = auto_merge_text_lines(
         base_blob.content(),
@@ -608,15 +602,9 @@ fn blob_contains_both(
     current: &ContentHash,
     parent: &ContentHash,
 ) -> Result<bool> {
-    let Some(candidate_blob) = repo.store().get_blob(candidate)? else {
-        return Ok(false);
-    };
-    let Some(current_blob) = repo.store().get_blob(current)? else {
-        return Ok(false);
-    };
-    let Some(parent_blob) = repo.store().get_blob(parent)? else {
-        return Ok(false);
-    };
+    let candidate_blob = repo.require_blob(candidate)?;
+    let current_blob = repo.require_blob(current)?;
+    let parent_blob = repo.require_blob(parent)?;
     let candidate = candidate_blob.content();
     Ok(!current_blob.content().is_empty()
         && !parent_blob.content().is_empty()

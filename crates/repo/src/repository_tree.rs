@@ -139,12 +139,7 @@ fn rewrite_single_tracked_file(
         };
         let child = match cached_trees.get(&child_hash) {
             Some(tree) => tree.clone(),
-            None => {
-                let Some(tree) = repo.store().get_tree(&child_hash)? else {
-                    return Ok(None);
-                };
-                tree
-            }
+            None => repo.require_tree(&child_hash)?,
         };
         let Some(updated_child) = rewrite_single_tracked_file(
             repo,

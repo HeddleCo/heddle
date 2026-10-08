@@ -60,6 +60,7 @@ fn cmd_show_with_output_kind(
     let id = resolve_state_id(&repo, &state_spec)?;
 
     let state = require_resolved_state(&repo, &id)?;
+    repo.require_tree(&state.tree)?;
 
     let output = ShowOutput {
         output_kind,

@@ -203,11 +203,18 @@ fn assert_historical_tree_unavailable(args: &[&str], temp: &TempDir, tree: &str)
             output.stdout.is_empty(),
             "must not render fabricated content"
         );
-        assert_missing_tree_error(&stderr, tree);
         assert!(stderr.contains("not available locally"), "{stderr}");
         if json {
             let envelope: serde_json::Value = serde_json::from_str(&stderr).unwrap();
             assert_eq!(envelope["kind"], "repository_integrity_error");
+            assert!(
+                envelope["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(tree)),
+                "{stderr}"
+            );
+        } else {
+            assert_missing_tree_error(&stderr, tree);
         }
     }
 }
@@ -233,7 +240,7 @@ fn test_show_missing_historical_tree_is_not_empty() {
 
 #[test]
 fn test_diff_missing_historical_blob_is_not_empty() {
-    let (temp, first, second, _) = historical_tree_fixture();
+    let (temp, _, second, _) = historical_tree_fixture();
     // The fixture promoted every blob to loose storage while removing packs.
     let hash = objects::object::Blob::from_slice(b"second\n").hash();
     let hex = hash.to_hex();
@@ -259,6 +266,7 @@ fn test_diff_missing_historical_blob_is_not_empty() {
         stderr.contains("blob") && stderr.contains("not available locally"),
         "{stderr}"
     );
-    assert!(stderr.contains(&format!("hs-{}", &hex[..8])), "{stderr}");
-    let _ = first;
+    assert!(stderr.contains(&hex), "{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(envelope["kind"], "repository_integrity_error");
 }

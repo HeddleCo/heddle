@@ -2,7 +2,8 @@
 //! Repository capture, attachment, and backfill for the semantic index.
 #![cfg(feature = "tree-sitter-symbols")]
 
-use crate::{HeddleError, Repository, Result, StateAttachmentKind};
+use std::collections::HashMap;
+
 #[cfg(test)]
 use objects::object::SemanticTreeNode;
 use objects::{
@@ -10,33 +11,28 @@ use objects::{
     store::ObjectStore,
 };
 use semantic::{
-    index_assembly::{ParentIndex, SemanticIndexBuilder},
+    index_assembly::{ParentIndex, SemanticAssemblyError, SemanticIndexBuilder},
     semantic_index::{EXTRACTOR_VERSION, grammar_version_by_name},
 };
 #[cfg(test)]
 use semantic::{parser::Language, semantic_index::extract_semantic_file};
-use std::collections::HashMap;
 use tracing::warn;
+
+use crate::{HeddleError, Repository, Result, StateAttachmentKind};
 
 type DeferredSemanticIndex = (Option<ContentHash>, Vec<(ContentHash, Vec<u8>)>);
 
 impl Repository {
     /// Compute a state's semantic index during capture and persist all node
-    /// blobs, returning the root blob hash to attach. Never fails the snapshot:
-    /// any error is logged and `Ok(None)` returned.
+    /// blobs, returning the root blob hash to attach. Index extraction errors
+    /// are logged and `Ok(None)` returned. Missing source objects remain errors;
+    /// an unavailable tree cannot supply an empty index.
     pub(crate) fn compute_and_persist_semantic_index(
         &self,
         prior: Option<&State>,
         new: &State,
     ) -> Result<Option<ContentHash>> {
-        let tree = match self.store().get_tree(&new.tree) {
-            Ok(Some(tree)) => tree,
-            Ok(None) => return Ok(None),
-            Err(err) => {
-                warn!(error = %err, "semantic index: could not load state tree; skipping");
-                return Ok(None);
-            }
-        };
+        let tree = self.require_tree(&new.tree)?;
         self.compute_and_persist_semantic_index_for_tree(prior, &tree, None, None)
     }
 
@@ -93,6 +89,9 @@ impl Repository {
                     }
                 }
             }
+            Err(SemanticAssemblyError::Storage(err @ HeddleError::MissingObject { .. })) => {
+                Err(err)
+            }
             Err(err) => {
                 warn!(error = %err, "semantic index: build failed; skipping");
                 Ok((None, Vec::new()))
@@ -121,9 +120,7 @@ impl Repository {
         let Some(root) = self.attached_semantic_index(&parent.id())? else {
             return Ok(None);
         };
-        let Some(source_tree) = self.store().get_tree(&parent.tree)? else {
-            return Ok(None);
-        };
+        let source_tree = self.require_tree(&parent.tree)?;
         let semantic_tree = self.load_semantic_tree(&root.tree)?;
         Ok(Some(ParentIndex {
             source_tree,
@@ -285,9 +282,7 @@ impl Repository {
         let Some(state) = self.store().get_state(state_id)? else {
             return Ok(None);
         };
-        let Some(tree) = self.store().get_tree(&state.tree)? else {
-            return Ok(None);
-        };
+        let tree = self.require_tree(&state.tree)?;
         let mut builder = SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION);
         let (root, _) = builder.build_root(&tree, None)?;
         let root_hash = self.persist_resolved_semantic_edges(None, root)?;

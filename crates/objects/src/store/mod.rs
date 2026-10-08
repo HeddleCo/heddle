@@ -251,6 +251,24 @@ pub enum PartialTreeWrite {
 /// such as Weft's local filesystem backend without coupling its S3 backend to
 /// the native store implementation.
 pub trait ObjectStore: SidecarStore + Send + Sync {
+    /// Resolve a recorded tree hash without inventing an empty baseline.
+    fn require_tree(&self, hash: &ContentHash) -> Result<Tree> {
+        self.get_tree(hash)?
+            .ok_or_else(|| HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: hash.to_hex(),
+            })
+    }
+
+    /// Resolve a recorded blob hash without inventing content.
+    fn require_blob(&self, hash: &ContentHash) -> Result<Blob> {
+        self.get_blob(hash)?
+            .ok_or_else(|| HeddleError::MissingObject {
+                object_type: "blob".to_string(),
+                id: hash.to_hex(),
+            })
+    }
+
     fn get_annotated_tag(&self, _hash: &ContentHash) -> Result<Option<AnnotatedTag>> {
         Ok(None)
     }

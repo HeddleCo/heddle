@@ -288,9 +288,8 @@ impl Repository {
             // The stub itself is untracked and so never in either set (heddle#316
             // CLASS 1).
             let mut withheld_leaves = BTreeSet::new();
-            if let Some(tree) = self.store().get_tree(&state.tree)? {
-                collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
-            }
+            let tree = self.require_tree(&state.tree)?;
+            collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
             self.reconcile_materialized_root(dest, &canonical, &BTreeSet::new(), &withheld_leaves)?;
             // Persist the clobber-proof per-root record: a withheld materialize
             // leaves ONLY the untracked courtesy stub, so the tracked-leaf set is

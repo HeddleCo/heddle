@@ -741,7 +741,7 @@ impl Repository {
             Some(state) => state,
             None => return Ok(None),
         };
-        self.store.get_tree(&state.tree)
+        Ok(Some(self.require_tree(&state.tree)?))
     }
 
     pub fn head(&self) -> Result<Option<StateId>> {
@@ -935,12 +935,7 @@ impl Repository {
     /// Pair with [`Repository::require_blob`] for the blob side of the
     /// same contract.
     pub fn require_tree(&self, hash: &ContentHash) -> Result<Tree> {
-        self.store
-            .get_tree(hash)?
-            .ok_or_else(|| HeddleError::MissingObject {
-                object_type: "tree".to_string(),
-                id: hash.to_hex(),
-            })
+        objects::store::ObjectSource::require_tree(&self.store, hash)
     }
 
     pub fn require_blob(&self, hash: &ContentHash) -> Result<objects::object::Blob> {
@@ -972,7 +967,10 @@ impl Repository {
             });
         }
 
-        Err(HeddleError::NotFound(hash.to_hex()))
+        Err(HeddleError::MissingObject {
+            object_type: "blob".to_string(),
+            id: hash.to_hex(),
+        })
     }
 
     /// Register a `BlobHydrator` to fetch blobs on demand from the

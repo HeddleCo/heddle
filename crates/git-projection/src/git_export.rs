@@ -235,10 +235,7 @@ pub fn export_tree(
     repo: &SleyRepository,
     tree_hash: &ContentHash,
 ) -> GitProjectionResult<ObjectId> {
-    let tree = heddle_repo
-        .store()
-        .get_tree(tree_hash)?
-        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
+    let tree = heddle_repo.require_tree(tree_hash)?;
 
     if tree.has_git_layout() {
         let mut body = Vec::new();
@@ -297,10 +294,7 @@ fn export_entry(
             return repo.write_blob(stub_text.as_bytes()).map_err(git_err);
         }
 
-        let blob = heddle_repo
-            .store()
-            .get_blob(hash)?
-            .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
+        let blob = heddle_repo.require_blob(hash)?;
         repo.write_blob(blob.content()).map_err(git_err)
     };
     let exported = match entry.target() {

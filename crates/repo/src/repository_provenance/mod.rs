@@ -93,24 +93,18 @@ impl Repository {
         // attributed to *its* author rather than to whoever pressed
         // the merge button. Octopus merges (3+ parents) fall out for
         // free.
-        let parent_states: Vec<State> = state
+        let parent_states = state
             .parents
             .iter()
-            .filter_map(|id| self.store.get_state(id).unwrap_or_default())
-            .collect();
-        if state.parents.len() != parent_states.len() {
-            // A parent we couldn't load shouldn't break the build —
-            // happens with incremental imports where a parent predates
-            // the imported window. The walk continues with whatever we
-            // could find; lines that came in via the missing parent
-            // fall through to the current-state attribution rather
-            // than crediting an arbitrary surviving parent.
-            tracing::debug!(
-                state = %state.id(),
-                missing = state.parents.len() - parent_states.len(),
-                "some parent states unavailable while building provenance"
-            );
-        }
+            .map(|id| {
+                self.store
+                    .get_state(id)?
+                    .ok_or_else(|| HeddleError::MissingObject {
+                        object_type: "state".to_string(),
+                        id: id.to_string_full(),
+                    })
+            })
+            .collect::<Result<Vec<State>>>()?;
 
         // Resolve each parent's tree + recursive provenance root
         // before we hand the slice to the snapshot builder. The
@@ -119,9 +113,7 @@ impl Repository {
         // collapses to one walk.
         let mut parent_refs: Vec<snapshot::ParentRef<'_>> = Vec::with_capacity(parent_states.len());
         for parent_state in &parent_states {
-            let Some(tree) = self.store.get_tree(&parent_state.tree)? else {
-                continue;
-            };
+            let tree = self.require_tree(&parent_state.tree)?;
             let provenance_root = self.get_state_provenance_root_cached(parent_state, cache)?;
             parent_refs.push(snapshot::ParentRef {
                 state: parent_state,
@@ -168,9 +160,7 @@ impl Repository {
         let Some(blob_hash) = self.lookup_tree_leaf(root, path)? else {
             return Ok(None);
         };
-        let Some(blob) = self.store.get_blob(&blob_hash)? else {
-            return Ok(None);
-        };
+        let blob = self.require_blob(&blob_hash)?;
         let provenance: FileProvenance =
             rmp_serde::from_slice(blob.content()).map_err(|error| {
                 HeddleError::InvalidObject(format!("invalid provenance blob: {error}"))

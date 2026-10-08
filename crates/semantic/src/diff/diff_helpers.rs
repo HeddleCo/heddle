@@ -11,7 +11,7 @@ use objects::{
 pub(super) struct TreeBlobContentLoader<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     root_hash: ContentHash,
-    trees: RefCell<HashMap<ContentHash, Option<Tree>>>,
+    trees: RefCell<HashMap<ContentHash, Tree>>,
 }
 
 impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
@@ -24,9 +24,7 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
     }
 
     pub(super) fn load_content(&self, path: &Path) -> Result<Option<String>, anyhow::Error> {
-        let Some(root) = self.get_tree(&self.root_hash)? else {
-            return Ok(None);
-        };
+        let root = self.get_tree(&self.root_hash)?;
         let Some(blob) = self.get_blob_at_path(&root, &path.display().to_string())? else {
             return Ok(None);
         };
@@ -38,12 +36,12 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
         self.trees.borrow().len()
     }
 
-    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>, anyhow::Error> {
+    fn get_tree(&self, hash: &ContentHash) -> Result<Tree, anyhow::Error> {
         if let Some(tree) = self.trees.borrow().get(hash).cloned() {
             return Ok(tree);
         }
 
-        let tree = self.store.get_tree(hash)?;
+        let tree = self.store.require_tree(hash)?;
         self.trees.borrow_mut().insert(*hash, tree.clone());
         Ok(tree)
     }
@@ -67,7 +65,7 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
 
             if index + 1 == parts.len() {
                 return match entry.blob_hash() {
-                    Some(blob_hash) => Ok(self.store.get_blob(&blob_hash)?),
+                    Some(blob_hash) => Ok(Some(self.store.require_blob(&blob_hash)?)),
                     None => Ok(None),
                 };
             }
@@ -75,9 +73,7 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
             let Some(tree_hash) = entry.tree_hash() else {
                 return Ok(None);
             };
-            let Some(subtree) = self.get_tree(&tree_hash)? else {
-                return Ok(None);
-            };
+            let subtree = self.get_tree(&tree_hash)?;
             current_tree = Cow::Owned(subtree);
         }
 

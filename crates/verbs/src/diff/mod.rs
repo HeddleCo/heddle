@@ -148,12 +148,12 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
     };
 
     let from_tree = if let Some(ref state) = from_state {
-        repo.store().get_tree(&state.tree)?
+        Some(repo.require_tree(&state.tree)?)
     } else {
         None
     };
     let to_tree = if let Some(ref state) = to_state {
-        repo.store().get_tree(&state.tree)?
+        Some(repo.require_tree(&state.tree)?)
     } else {
         None
     };
@@ -325,7 +325,7 @@ fn file_changes_from_change_set(
                     &change.kind.to_string(),
                 )
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?
     } else {
         changes
             .iter()
@@ -345,7 +345,8 @@ fn file_changes_from_change_set(
                 let binary = diff_result.as_ref().err().is_some_and(is_binary_diff_error);
                 let (raw_lines, eol) = match diff_result {
                     Ok((lines, eol)) => (Some(lines), eol),
-                    Err(_) => (None, FileEolState::default()),
+                    Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default()),
+                    Err(error) => return Err(error),
                 };
                 let (lines, line_counts) = if options.stat && !patch_text_needed {
                     let counts = change_line_counts(raw_lines.as_deref());
@@ -359,7 +360,7 @@ fn file_changes_from_change_set(
 
                 let kind = effective_kind.to_string();
                 let (old_mode, mode) =
-                    change_file_modes(repo, from_tree, to_tree, &change.path, &kind);
+                    change_file_modes(repo, from_tree, to_tree, &change.path, &kind)?;
                 let symlink = symlink_change_for_paths(
                     repo,
                     from_tree,
@@ -369,8 +370,8 @@ fn file_changes_from_change_set(
                     &change.path,
                     old_mode,
                     mode,
-                );
-                FileChange {
+                )?;
+                Ok(FileChange {
                     path: change.path.clone(),
                     kind,
                     binary: binary && symlink.is_none(),
@@ -381,9 +382,9 @@ fn file_changes_from_change_set(
                     old_mode,
                     symlink,
                     ..Default::default()
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?
     };
     let file_changes = sort_changes_by_path(file_changes);
     let file_changes = expand_type_changes(
@@ -422,7 +423,7 @@ pub fn diff_worktree_status(
         repo,
         from_tree.as_ref(),
         options.unified,
-    );
+    )?;
     let changes = match repo {
         Some(repo) => expand_type_changes(
             repo,
@@ -749,11 +750,7 @@ fn plain_git_lookup_blob_and_mode(
     git_repo: &SleyRepository,
     path: &std::path::Path,
 ) -> Result<Option<(Blob, FileMode)>> {
-    let tree_path = plain_git_tree_path(path);
-    let Ok(entry) = git_repo.resolve_path("HEAD", &tree_path) else {
-        return Ok(None);
-    };
-    let Some(entry_mode) = entry.mode else {
+    let Some((oid, entry_mode)) = plain_git_lookup_entry(git_repo, path)? else {
         return Ok(None);
     };
     let mode = match EntryKind::from_mode(entry_mode) {
@@ -762,15 +759,61 @@ fn plain_git_lookup_blob_and_mode(
         Some(EntryKind::Blob) => FileMode::Normal,
         _ => return Ok(None),
     };
-    let object = git_repo.read_object(&entry.oid)?;
+    let object = git_repo.read_object(&oid).map_err(plain_git_object_error)?;
     Ok(Some((Blob::new(object.body.clone()), mode)))
 }
 
-fn plain_git_tree_path(path: &std::path::Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+// Sley's resolve_path currently treats unreadable subtrees as absent paths.
+// Read each tree through its strict API so missing objects remain errors.
+fn plain_git_lookup_entry(
+    git_repo: &SleyRepository,
+    path: &Path,
+) -> Result<Option<(sley::ObjectId, u32)>> {
+    let root = git_repo
+        .resolve_path("HEAD", "")
+        .map_err(plain_git_object_error)?;
+    let mut tree_id = root.oid;
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let tree = git_repo
+            .read_tree(&tree_id)
+            .map_err(plain_git_object_error)?;
+        let name = component.as_os_str().as_encoded_bytes();
+        let Some(entry) = tree
+            .entries
+            .into_iter()
+            .find(|entry| entry.name.as_bytes() == name)
+        else {
+            return Ok(None);
+        };
+        if components.peek().is_none() {
+            return Ok(Some((entry.oid, entry.mode)));
+        }
+        if EntryKind::from_mode(entry.mode) != Some(EntryKind::Tree) {
+            return Ok(None);
+        }
+        tree_id = entry.oid;
+    }
+    Ok(None)
+}
+
+fn plain_git_object_error(error: sley::GitError) -> anyhow::Error {
+    match error {
+        sley::GitError::NotFound(sley::NotFoundKind::Object { oid, kind, .. }) => {
+            HeddleError::MissingObject {
+                object_type: match kind {
+                    sley::MissingObjectKind::Tree => "tree",
+                    sley::MissingObjectKind::Blob => "blob",
+                    sley::MissingObjectKind::Commit => "commit",
+                    _ => "git",
+                }
+                .to_string(),
+                id: oid.to_string(),
+            }
+            .into()
+        }
+        error => error.into(),
+    }
 }
 
 /// Classify the HEAD-tree side of a plain-Git path. A tracked entry is a
@@ -786,11 +829,10 @@ fn plain_git_old_side_kind(
     if !head_has_tree {
         return Ok(SideKind::Absent);
     }
-    let tree_path = plain_git_tree_path(path);
-    let Ok(entry) = git_repo.resolve_path("HEAD", &tree_path) else {
+    let Some((_, mode)) = plain_git_lookup_entry(git_repo, path)? else {
         return Ok(SideKind::Absent);
     };
-    Ok(match entry.mode.and_then(EntryKind::from_mode) {
+    Ok(match EntryKind::from_mode(mode) {
         Some(EntryKind::Symlink) => SideKind::Symlink,
         Some(EntryKind::Tree) => SideKind::Dir,
         _ => SideKind::Regular,
@@ -912,7 +954,7 @@ fn file_changes_from_status(
     repo: Option<&Repository>,
     from_tree: Option<&Tree>,
     unified: usize,
-) -> Vec<FileChange> {
+) -> Result<Vec<FileChange>> {
     let mut changes = Vec::with_capacity(status.change_count());
     for path in &status.modified {
         changes.push(make_status_file_change(
@@ -923,7 +965,7 @@ fn file_changes_from_status(
             repo,
             from_tree,
             unified,
-        ));
+        )?);
     }
     for path in &status.added {
         changes.push(make_status_file_change(
@@ -934,7 +976,7 @@ fn file_changes_from_status(
             repo,
             from_tree,
             unified,
-        ));
+        )?);
     }
     for path in &status.deleted {
         changes.push(make_status_file_change(
@@ -945,9 +987,9 @@ fn file_changes_from_status(
             repo,
             from_tree,
             unified,
-        ));
+        )?);
     }
-    changes
+    Ok(changes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -959,7 +1001,7 @@ fn make_status_file_change(
     repo: Option<&Repository>,
     from_tree: Option<&Tree>,
     unified: usize,
-) -> FileChange {
+) -> Result<FileChange> {
     let path_str = path.display().to_string();
     // Reclassify a `modified` path that is now a directory (file→dir type
     // change) into a deletion so the renderer emits `+++ /dev/null` and
@@ -997,18 +1039,18 @@ fn make_status_only_change(
     to_tree: Option<&Tree>,
     path_str: &str,
     kind: &str,
-) -> FileChange {
+) -> Result<FileChange> {
     let (old_mode, mode) = match repo {
-        Some(repo) => change_file_modes(repo, from_tree, to_tree, path_str, kind),
+        Some(repo) => change_file_modes(repo, from_tree, to_tree, path_str, kind)?,
         None => (None, None),
     };
-    FileChange {
+    Ok(FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
         mode,
         old_mode,
         ..Default::default()
-    }
+    })
 }
 
 /// Build a worktree-side `FileChange` with its hunk vector, EOL metadata,
@@ -1022,21 +1064,17 @@ fn build_worktree_change(
     kind: &str,
     diff_kind: DiffKind,
     unified: usize,
-) -> FileChange {
-    let (old_mode, mode) = change_file_modes(repo, from_tree, None, path_str, kind);
+) -> Result<FileChange> {
+    let (old_mode, mode) = change_file_modes(repo, from_tree, None, path_str, kind)?;
     let (lines, eol, binary) = match get_worktree_diff(repo, from_tree, path_str, &diff_kind) {
         Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
-        // Worktree read errors on a status-listed file mean the file
-        // vanished between the status scan and the diff attempt. Fall back
-        // to status-only; the renderer prints the file header without a
-        // body, matching git's behaviour for transient races.
-        Err(_) => (None, FileEolState::default(), false),
+        Err(error) => return Err(error),
     };
     let symlink = symlink_change_for_paths(
         repo, from_tree, None, kind, path_str, path_str, old_mode, mode,
-    );
-    FileChange {
+    )?;
+    Ok(FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
         binary: binary && symlink.is_none(),
@@ -1046,7 +1084,7 @@ fn build_worktree_change(
         old_mode,
         symlink,
         ..Default::default()
-    }
+    })
 }
 
 /// The object kind a path resolves to on one side of a diff.
@@ -1185,7 +1223,7 @@ fn expand_type_changes(
                         DiffKind::Deleted,
                         want_hunks,
                         unified,
-                    ));
+                    )?);
                 }
             }
         } else {
@@ -1197,7 +1235,7 @@ fn expand_type_changes(
                 DiffKind::Deleted,
                 want_hunks,
                 unified,
-            ));
+            )?);
         }
 
         // Add the new side: every leaf under a directory, else the single
@@ -1219,7 +1257,7 @@ fn expand_type_changes(
                         DiffKind::Added,
                         want_hunks,
                         unified,
-                    ));
+                    )?);
                 }
             }
         } else {
@@ -1231,7 +1269,7 @@ fn expand_type_changes(
                 DiffKind::Added,
                 want_hunks,
                 unified,
-            ));
+            )?);
         }
     }
     Ok(output)
@@ -1245,7 +1283,7 @@ fn make_type_change_part(
     diff_kind: DiffKind,
     want_hunks: bool,
     unified: usize,
-) -> FileChange {
+) -> Result<FileChange> {
     let kind = diff_kind.to_string();
     if !want_hunks {
         return make_status_only_change(Some(repo), from_tree, to_tree, path_str, &kind);
@@ -1269,13 +1307,13 @@ fn build_state_change(
     kind: &str,
     diff_kind: DiffKind,
     unified: usize,
-) -> FileChange {
-    let (old_mode, mode) = change_file_modes(repo, from_tree, Some(to_tree), path_str, kind);
+) -> Result<FileChange> {
+    let (old_mode, mode) = change_file_modes(repo, from_tree, Some(to_tree), path_str, kind)?;
     let (lines, eol, binary) = match get_state_diff(repo, from_tree, to_tree, path_str, &diff_kind)
     {
         Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
-        Err(_) => (None, FileEolState::default(), false),
+        Err(error) => return Err(error),
     };
     let symlink = symlink_change_for_paths(
         repo,
@@ -1286,8 +1324,8 @@ fn build_state_change(
         path_str,
         old_mode,
         mode,
-    );
-    FileChange {
+    )?;
+    Ok(FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
         binary: binary && symlink.is_none(),
@@ -1297,7 +1335,7 @@ fn build_state_change(
         old_mode,
         symlink,
         ..Default::default()
-    }
+    })
 }
 
 /// Resolve `path` to its subtree if it names a directory in `tree`,
@@ -1316,9 +1354,7 @@ fn dir_subtree_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Opt
         let Some(hash) = entry.tree_hash() else {
             return Ok(None);
         };
-        let Some(subtree) = repo.store().get_tree(&hash)? else {
-            return Ok(None);
-        };
+        let subtree = repo.require_tree(&hash)?;
         if parts.peek().is_none() {
             return Ok(Some(subtree));
         }
@@ -1338,9 +1374,8 @@ fn collect_subtree_blob_paths(
     for entry in subtree.entries() {
         let child_path = format!("{prefix}/{}", entry.name());
         if entry.is_tree() {
-            if let Some(hash) = entry.tree_hash()
-                && let Some(nested) = repo.store().get_tree(&hash)?
-            {
+            if let Some(hash) = entry.tree_hash() {
+                let nested = repo.require_tree(&hash)?;
                 collect_subtree_blob_paths(repo, &nested, &child_path, out)?;
             }
         } else {
@@ -1354,10 +1389,8 @@ fn head_from_tree(repo: &Repository) -> Result<Option<Tree>> {
     let Some(head_id) = repo.head()? else {
         return Ok(None);
     };
-    let Some(state) = repo.store().get_state(&head_id)? else {
-        return Ok(None);
-    };
-    Ok(repo.store().get_tree(&state.tree)?)
+    let state = require_resolved_state(repo, &head_id)?;
+    Ok(Some(repo.require_tree(&state.tree)?))
 }
 
 /// Compute a state-to-state diff payload without printing.
@@ -1381,23 +1414,13 @@ pub fn compute_state_diff(
     semantic: bool,
     unified: usize,
 ) -> Result<DiffReport> {
-    let from_state = repo.store().get_state(from_state_id)?;
-    let from_tree = if let Some(ref state) = from_state {
-        repo.store().get_tree(&state.tree)?
-    } else {
-        None
-    };
+    let from_state = require_resolved_state(repo, from_state_id)?;
+    let from_tree = repo.require_tree(&from_state.tree)?;
 
     let to_state = require_resolved_state(repo, to_state_id)?;
-    let to_tree = repo
-        .store()
-        .get_tree(&to_state.tree)?
-        .ok_or_else(|| anyhow!("Tree not found for state {}", to_state_id.short()))?;
+    let to_tree = repo.require_tree(&to_state.tree)?;
 
-    let from_hash = from_state
-        .as_ref()
-        .map(|s| s.tree)
-        .unwrap_or_else(|| Tree::new().hash());
+    let from_hash = from_state.tree;
 
     let semantic_diff_result: Option<SemanticDiffResult> = if semantic {
         Some(run_semantic_diff(repo, &from_hash, &to_state.tree)?)
@@ -1416,7 +1439,7 @@ pub fn compute_state_diff(
         .map(|change| {
             build_state_change(
                 repo,
-                from_tree.as_ref(),
+                Some(&from_tree),
                 &to_tree,
                 &change.path,
                 &change.kind.to_string(),
@@ -1424,11 +1447,11 @@ pub fn compute_state_diff(
                 unified,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let file_changes = sort_changes_by_path(file_changes);
     let file_changes = expand_type_changes(
         repo,
-        from_tree.as_ref(),
+        Some(&from_tree),
         Some(&to_tree),
         file_changes,
         true,
@@ -1436,7 +1459,7 @@ pub fn compute_state_diff(
     )?;
     let file_changes = detect_clear_renames(
         repo,
-        from_tree.as_ref(),
+        Some(&from_tree),
         Some(&to_tree),
         file_changes,
         true,
@@ -1476,16 +1499,9 @@ pub fn compute_tree_diff(
     semantic: bool,
     unified: usize,
 ) -> Result<DiffReport> {
-    let from_state = repo.store().get_state(from_state_id)?;
-    let from_tree = if let Some(ref state) = from_state {
-        repo.store().get_tree(&state.tree)?
-    } else {
-        None
-    };
-    let from_hash = from_state
-        .as_ref()
-        .map(|s| s.tree)
-        .unwrap_or_else(|| Tree::new().hash());
+    let from_state = require_resolved_state(repo, from_state_id)?;
+    let from_tree = repo.require_tree(&from_state.tree)?;
+    let from_hash = from_state.tree;
 
     let to_hash = repo.store().put_tree(to_tree)?;
 
@@ -1506,7 +1522,7 @@ pub fn compute_tree_diff(
         .map(|change| {
             build_state_change(
                 repo,
-                from_tree.as_ref(),
+                Some(&from_tree),
                 to_tree,
                 &change.path,
                 &change.kind.to_string(),
@@ -1514,11 +1530,11 @@ pub fn compute_tree_diff(
                 unified,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let file_changes = sort_changes_by_path(file_changes);
     let file_changes = expand_type_changes(
         repo,
-        from_tree.as_ref(),
+        Some(&from_tree),
         Some(to_tree),
         file_changes,
         true,
@@ -1526,7 +1542,7 @@ pub fn compute_tree_diff(
     )?;
     let file_changes = detect_clear_renames(
         repo,
-        from_tree.as_ref(),
+        Some(&from_tree),
         Some(to_tree),
         file_changes,
         true,
@@ -1579,7 +1595,7 @@ pub fn compute_projected_tree_diff(
                 unified,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let file_changes = sort_changes_by_path(file_changes);
     let file_changes = expand_type_changes(
         repo,
@@ -1975,17 +1991,19 @@ fn symlink_change_for_paths(
     new_path: &str,
     old_mode: Option<FileMode>,
     mode: Option<FileMode>,
-) -> Option<SymlinkChange> {
+) -> Result<Option<SymlinkChange>> {
     let (old_is_link, new_is_link) = symlink_sides(kind, old_mode, mode);
     let old = old_is_link
-        .then(|| blob_from_tree(repo, from_tree, old_path).ok().flatten())
+        .then(|| blob_from_tree(repo, from_tree, old_path))
+        .transpose()?
         .flatten()
         .map(|blob| blob.content().to_vec());
     let new = new_is_link
-        .then(|| new_blob_for_rename(repo, to_tree, new_path).ok().flatten())
+        .then(|| new_blob_for_rename(repo, to_tree, new_path))
+        .transpose()?
         .flatten()
         .map(|blob| blob.content().to_vec());
-    make_symlink_change(old, new)
+    Ok(make_symlink_change(old, new))
 }
 fn detect_clear_renames(
     repo: &Repository,
@@ -2197,7 +2215,7 @@ fn detect_clear_renames_with_stats(
                 &change.path,
                 change.old_mode,
                 change.mode,
-            );
+            )?;
             if change.symlink.is_some() {
                 change.binary = false;
             }
@@ -2630,8 +2648,8 @@ fn find_entry_recursive(
         }
     } else if entry.is_tree()
         && let Some(hash) = entry.tree_hash()
-        && let Some(subtree) = repo.store().get_tree(&hash)?
     {
+        let subtree = repo.require_tree(&hash)?;
         return find_entry_recursive(repo, &subtree, &parts[1..]);
     }
 
@@ -2675,25 +2693,26 @@ fn change_file_modes(
     to_tree: Option<&Tree>,
     path: &str,
     kind: &str,
-) -> (Option<FileMode>, Option<FileMode>) {
-    let old_side = || {
-        from_tree
-            .and_then(|tree| find_entry_in_tree(repo, tree, path).ok().flatten())
-            .map(|entry| entry.mode())
-    };
-    let new_side = || match to_tree {
-        Some(tree) => find_entry_in_tree(repo, tree, path)
-            .ok()
+) -> Result<(Option<FileMode>, Option<FileMode>)> {
+    let old_side = || -> Result<Option<FileMode>> {
+        Ok(from_tree
+            .map(|tree| find_entry_in_tree(repo, tree, path))
+            .transpose()?
             .flatten()
-            .map(|entry| entry.mode()),
-        None => worktree_file_mode(&repo.root().join(path)),
+            .map(|entry| entry.mode()))
     };
-    match kind {
-        "added" => (None, new_side()),
-        "deleted" => (None, old_side()),
-        "modified" => (old_side(), new_side()),
+    let new_side = || -> Result<Option<FileMode>> {
+        Ok(match to_tree {
+            Some(tree) => find_entry_in_tree(repo, tree, path)?.map(|entry| entry.mode()),
+            None => worktree_file_mode(&repo.root().join(path)),
+        })
+    };
+    Ok(match kind {
+        "added" => (None, new_side()?),
+        "deleted" => (None, old_side()?),
+        "modified" => (old_side()?, new_side()?),
         _ => (None, None),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2710,6 +2729,81 @@ mod tests {
         RenameDetectionStats, change_line_counts, detect_clear_renames_with_stats, lcs_len,
         prepare_rename_blob, rename_similarity, unified_hunks,
     };
+
+    #[test]
+    fn plain_git_missing_subtree_is_not_absent() {
+        let temp = TempDir::new().expect("create Git fixture");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("run Git fixture command");
+            assert!(
+                output.status.success(),
+                "{:?}: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output")
+                .trim()
+                .to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir(temp.path().join("nested")).expect("create directory");
+        std::fs::write(temp.path().join("nested/file.txt"), "content\n").expect("write file");
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        let subtree = git(&["rev-parse", "HEAD:nested"]);
+        {
+            let repo = sley::Repository::discover(temp.path()).expect("open Git fixture");
+            assert!(
+                super::plain_git_lookup_blob_and_mode(
+                    &repo,
+                    std::path::Path::new("nested/file.txt")
+                )
+                .expect("read present file")
+                .is_some()
+            );
+            assert!(
+                super::plain_git_lookup_blob_and_mode(
+                    &repo,
+                    std::path::Path::new("nested/absent.txt")
+                )
+                .expect("absent path")
+                .is_none()
+            );
+        }
+        std::fs::remove_file(
+            temp.path()
+                .join(".git/objects")
+                .join(&subtree[..2])
+                .join(&subtree[2..]),
+        )
+        .expect("remove historical subtree");
+        let repo = sley::Repository::discover(temp.path()).expect("reopen Git fixture");
+        for error in [
+            super::plain_git_lookup_blob_and_mode(&repo, std::path::Path::new("nested/file.txt"))
+                .expect_err("missing subtree must fail"),
+            super::plain_git_old_side_kind(&repo, true, std::path::Path::new("nested/file.txt"))
+                .expect_err("missing subtree must not be an absent side"),
+        ] {
+            assert!(
+                matches!(error.downcast_ref::<objects::HeddleError>(), Some(objects::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &subtree),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("not available locally"));
+        }
+    }
 
     type RenameSummary = Vec<(String, String, Option<String>, Option<f64>)>;
 

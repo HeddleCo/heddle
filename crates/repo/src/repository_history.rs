@@ -9,7 +9,7 @@ use std::{
 #[cfg(feature = "async-source")]
 use objects::{object::diff_trees_visit_async, store::AsyncObjectSource};
 use objects::{
-    object::{ContentHash, State, StateId, Tree, diff_trees_visit},
+    object::{ContentHash, State, StateId, diff_trees_visit},
     store::ObjectSource,
 };
 use tracing::{instrument, trace};
@@ -178,9 +178,7 @@ where
         return Ok(Vec::new());
     }
 
-    let mut session = graph
-        .history_session(start)
-        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+    let mut session = graph.history_session(start).map_err(HeddleError::from)?;
     let walk_result = (|| -> Result<Vec<StateId>> {
         let mut candidate_ids = Vec::new();
         let mut current = Some(start);
@@ -228,7 +226,7 @@ where
             // computes missing filters and keeps them dirty in memory.
             session
                 .ensure_bloom_populated(state_id)
-                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+                .map_err(HeddleError::from)?;
             if session
                 .node_bloom(&state_id)
                 .is_some_and(|bloom| !query.changed_paths.bloom_maybe_matches(bloom))
@@ -284,14 +282,14 @@ where
     let base_tree = parent_tree_hash(&source, state)?;
     // Early-exit: stop diffing the moment the first change matches the
     // filter, rather than materializing the whole change list to scan it.
-    let flow = diff_trees_visit(&source, &base_tree, &state.tree, |change| {
+    let flow = diff_trees_visit(&source, base_tree.as_ref(), &state.tree, |change| {
         if changed_paths.matches(&change.path) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         }
     })
-    .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))?;
+    .map_err(HeddleError::from)?;
     let matched = flow.is_break();
     trace!(
         state = %state.id(),
@@ -301,7 +299,7 @@ where
     Ok(matched)
 }
 
-fn parent_tree_hash<S>(source: &S, state: &State) -> Result<ContentHash>
+fn parent_tree_hash<S>(source: &S, state: &State) -> Result<Option<ContentHash>>
 where
     S: ObjectSource + ?Sized,
 {
@@ -310,9 +308,9 @@ where
             let parent = source
                 .get_state(parent_id)?
                 .ok_or(HeddleError::StateNotFound(*parent_id))?;
-            Ok(parent.tree)
+            Ok(Some(parent.tree))
         }
-        None => Ok(Tree::new().hash()),
+        None => Ok(None),
     }
 }
 
@@ -391,7 +389,7 @@ where
 {
     let source = super::history_instrumentation::AsyncHistoryObjectSource::new(source);
     let base_tree = parent_tree_hash_async(&source, state).await?;
-    let flow = diff_trees_visit_async(&source, &base_tree, &state.tree, |change| {
+    let flow = diff_trees_visit_async(&source, base_tree.as_ref(), &state.tree, |change| {
         if changed_paths.matches(&change.path) {
             ControlFlow::Break(())
         } else {
@@ -399,12 +397,12 @@ where
         }
     })
     .await
-    .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))?;
+    .map_err(HeddleError::from)?;
     Ok(flow.is_break())
 }
 
 #[cfg(feature = "async-source")]
-async fn parent_tree_hash_async<S>(source: &S, state: &State) -> Result<ContentHash>
+async fn parent_tree_hash_async<S>(source: &S, state: &State) -> Result<Option<ContentHash>>
 where
     S: AsyncObjectSource + Sync + ?Sized,
 {
@@ -414,9 +412,9 @@ where
                 .get_state(parent_id)
                 .await?
                 .ok_or(HeddleError::StateNotFound(*parent_id))?;
-            Ok(parent.tree)
+            Ok(Some(parent.tree))
         }
-        None => Ok(Tree::new().hash()),
+        None => Ok(None),
     }
 }
 
