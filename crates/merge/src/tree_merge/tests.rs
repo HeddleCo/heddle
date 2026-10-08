@@ -465,3 +465,46 @@ fn pure_rename_coexists_with_unrelated_addition() {
     );
     assert_missing(&store, &result.tree, "foo.rs");
 }
+
+/// heddle#2018: base was imported from Git with `100664 a.txt`; ours
+/// recaptured the directory (canonical modes, same content); theirs deleted
+/// `a.txt`. The raw mode is not a change, so this is a clean delete.
+#[test]
+fn recaptured_raw_mode_is_not_a_modification() {
+    use objects::object::RawGitMode;
+
+    let store = InMemoryStore::new();
+    let a = store.put_blob(&Blob::from_slice(b"a\n")).unwrap();
+    let b = store.put_blob(&Blob::from_slice(b"b\n")).unwrap();
+    let imported = TreeEntry::file("a.txt", a, false)
+        .unwrap()
+        .with_raw_git_mode(RawGitMode::parse(b"100664").unwrap())
+        .unwrap();
+    let base = Tree::from_git_entries(vec![
+        imported.clone(),
+        TreeEntry::file("b.txt", b, false).unwrap(),
+    ])
+    .unwrap();
+    let ours = fixture_tree(
+        &store,
+        &[("a.txt", b"a\n", false), ("b.txt", b"b\n", false)],
+    );
+    let theirs = fixture_tree(&store, &[("b.txt", b"b\n", false)]);
+
+    for (ours, theirs) in [(&ours, &theirs), (&theirs, &ours)] {
+        let result = merge(&store, &base, ours, theirs);
+        assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+        assert_missing(&store, &result.tree, "a.txt");
+    }
+
+    // Both sides agree on the content; one kept the raw mode, one did not.
+    let kept = Tree::from_git_entries(vec![imported, TreeEntry::file("b.txt", b, false).unwrap()])
+        .unwrap();
+    let edited = fixture_tree(
+        &store,
+        &[("a.txt", b"a\n", false), ("b.txt", b"edited\n", false)],
+    );
+    let result = merge(&store, &base, &kept, &edited);
+    assert!(result.conflicts.is_empty(), "{:?}", result.conflicts);
+    assert_eq!(content_at(&store, &result.tree, "b.txt"), b"edited\n");
+}

@@ -70,6 +70,14 @@ mod owner_authorization;
 mod owner_authorization_tests;
 pub mod reference_projection;
 mod spool_creation;
+
+/// Format of the Git import identity map (`.heddle/ingest/sha_map.sqlite`),
+/// stored as SQLite `user_version`. Format 1 maps non-canonical Git trees to
+/// native trees that record their Git layout (heddle#2018); an older map
+/// (`user_version` 0) holds normalised ids for those trees and must be rebuilt
+/// by re-importing. The importer stamps it on a new, empty map.
+pub const GIT_IMPORT_MAP_FORMAT: i32 = 1;
+
 pub use spool_creation::{
     SpoolCreationIntent, admit_fresh_spool_creation, sign_delegated_spool_creation,
     sign_mint_root_attachment, verify_spool_owner_genesis,

@@ -4,7 +4,7 @@
 use super::{super::tree_canonical::decode_entry_at, *};
 use crate::{
     compact,
-    object::{ContentHash, TREE_HEADER_LEN, Tree, TreeEntry, TreeScheme, tree_delta},
+    object::{ContentHash, TREE_HEADER_LEN, Tree, TreeEntry, tree_delta},
 };
 
 fn hash(label: &str) -> ContentHash {
@@ -149,6 +149,32 @@ fn layout_roundtrips_through_htr4_streamed_and_msgpack() {
     assert_eq!(decoded.hash(), id);
 }
 
+#[test]
+fn layout_survives_positional_msgpack_and_rejects_unknown_fields() {
+    // A positional encoder must not shift `git_mode` into the skipped spool
+    // slots: the tree always serializes as a map.
+    let tree = layout_tree();
+    let positional = rmp_serde::to_vec(&tree).unwrap();
+    assert_eq!(rmp_serde::to_vec_named(&tree).unwrap(), positional);
+    let decoded: Tree = rmp_serde::from_slice(&positional).unwrap();
+    assert_eq!(decoded, tree);
+
+    // A field this binary does not understand is refused, not dropped.
+    #[derive(serde::Serialize)]
+    struct Future {
+        version: u8,
+        entries: Vec<u8>,
+        future_layout: u8,
+    }
+    let future = rmp_serde::to_vec_named(&Future {
+        version: 3,
+        entries: Vec::new(),
+        future_layout: 1,
+    })
+    .unwrap();
+    assert!(rmp_serde::from_slice::<Tree>(&future).is_err());
+}
+
 #[cfg(feature = "zstd")]
 #[test]
 fn layout_roundtrips_through_blocked_htr4() {
@@ -163,19 +189,44 @@ fn layout_roundtrips_through_blocked_htr4() {
 }
 
 #[test]
-fn raw_modes_roundtrip_through_salted_v4() {
-    let entries = vec![
-        file("a").with_raw_git_mode(mode("100664")).unwrap(),
-        file("b"),
-    ];
-    let tree = Tree::from_entries_salted_v4(entries, vec![[1; 32], [2; 32]]).unwrap();
+fn salted_v4_trees_never_carry_a_layout() {
+    // A salted tree is native: building one drops recorded raw modes, so a
+    // capture produces the same leaves whichever walker path built it.
+    let raw = file("a").with_raw_git_mode(mode("100664")).unwrap();
+    let tree =
+        Tree::from_entries_salted_v4(vec![raw.clone(), file("b")], vec![[1; 32], [2; 32]]).unwrap();
     let plain =
         Tree::from_entries_salted_v4(vec![file("a"), file("b")], vec![[1; 32], [2; 32]]).unwrap();
-    assert_ne!(tree.hash(), plain.hash());
-    let body = tree.encode_canonical().unwrap();
-    let decoded = Tree::decode_canonical(&body).unwrap();
-    assert_eq!(decoded, tree);
-    assert_eq!(decoded.scheme(), TreeScheme::V4Salted);
+    assert_eq!(tree.hash(), plain.hash());
+    assert!(!tree.has_git_layout());
+    // And a decoded V4 body may not smuggle one in.
+    let error =
+        Tree::try_from_decoded_entries_salted_v4(vec![raw, file("b")], vec![[1; 32], [2; 32]])
+            .expect_err("raw mode on v4");
+    assert!(error.to_string().contains("v4 trees"), "{error}");
+}
+
+#[test]
+fn native_construction_drops_raw_modes() {
+    // Every capture walker path builds its directories with `from_entries`;
+    // whether an entry was cloned from the imported tree (raw mode) or
+    // rebuilt from disk, the native tree is the same.
+    let cloned = Tree::from_entries(vec![
+        file("a.txt").with_raw_git_mode(mode("100664")).unwrap(),
+        file("b.txt"),
+    ]);
+    let rebuilt = Tree::from_entries(vec![file("a.txt"), file("b.txt")]);
+    assert_eq!(cloned, rebuilt);
+    assert_eq!(cloned.hash(), rebuilt.hash());
+}
+
+#[test]
+fn same_meaning_ignores_the_raw_mode_but_not_the_target() {
+    let raw = file("a").with_raw_git_mode(mode("100664")).unwrap();
+    assert_ne!(raw, file("a"));
+    assert!(raw.same_meaning(&file("a")));
+    assert!(!raw.same_meaning(&TreeEntry::file("a", hash("a"), true).unwrap()));
+    assert!(!raw.same_meaning(&TreeEntry::file("a", hash("other"), false).unwrap()));
 }
 
 #[test]
@@ -192,19 +243,15 @@ fn salt_less_forms_refuse_a_layout_tree() {
 }
 
 #[test]
-fn mutation_drops_the_source_order_but_keeps_raw_modes() {
+fn mutation_drops_the_whole_layout() {
     let mut tree = layout_tree();
     tree.insert(file("c.txt"));
-    assert!(tree.source_positions().is_empty());
-    assert_eq!(
-        tree.get("a.txt").and_then(TreeEntry::raw_git_mode),
-        Some(mode("100664"))
-    );
+    assert!(!tree.has_git_layout());
     tree.validate().unwrap();
 
     let mut removed = layout_tree();
     removed.remove("b.txt");
-    assert!(removed.source_positions().is_empty());
+    assert!(!removed.has_git_layout());
     removed.validate().unwrap();
 }
 

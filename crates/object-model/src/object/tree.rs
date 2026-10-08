@@ -312,7 +312,8 @@ pub struct TreeEntry {
     name: String,
     target: TreeEntryTarget,
     // The source Git mode, recorded only when it differs from the mode Git
-    // writes for `target` (heddle#2018). Checkout and diff ignore it.
+    // writes for `target` (heddle#2018). Checkout, diff and merge ignore it
+    // (see `same_meaning`). Only V3 trees imported from Git carry it.
     git_mode: Option<RawGitMode>,
 }
 
@@ -359,6 +360,18 @@ impl TreeEntry {
     /// The recorded source Git mode, present only when it is not canonical.
     pub fn raw_git_mode(&self) -> Option<RawGitMode> {
         self.git_mode
+    }
+
+    /// Whether two entries mean the same thing: same name, kind, executable
+    /// bit and target. Ignores the recorded source Git mode, which only
+    /// affects export. Merge and other semantic comparisons use this; `==`
+    /// compares the encoded entry.
+    pub fn same_meaning(&self, other: &Self) -> bool {
+        self.name == other.name && self.target == other.target
+    }
+
+    fn drop_raw_git_mode(&mut self) {
+        self.git_mode = None;
     }
 
     /// The mode to write for this entry in a Git tree: the recorded source
@@ -591,7 +604,7 @@ pub struct Tree {
     // Empty unless the tree was imported from a Git tree whose entries were
     // not in Git's canonical order (heddle#2018); then it is a permutation of
     // `0..entries.len()` that differs from Git's order. V3 only. Any mutation
-    // drops it: an edited tree has no source to reproduce.
+    // drops it and every raw mode: an edited tree has no source to reproduce.
     source_positions: Arc<Vec<u32>>,
 }
 
@@ -605,7 +618,12 @@ impl Tree {
         }
     }
 
+    /// Build a native tree. A native tree has Git's canonical layout, so any
+    /// recorded source Git mode on the entries is dropped, the way Git's index
+    /// normalises modes: only a tree imported from Git
+    /// ([`Self::from_git_entries`]) or reused verbatim by hash keeps a layout.
     pub fn from_entries(mut entries: Vec<TreeEntry>) -> Self {
+        entries.iter_mut().for_each(TreeEntry::drop_raw_git_mode);
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             entries: Arc::new(entries),
@@ -660,10 +678,13 @@ impl Tree {
     /// sorted together by entry name so the parallel-vector invariant holds.
     /// The sticky-salt *inheritance* policy is a later capture-leg concern —
     /// this constructor carries whatever salts it is given.
+    /// Like [`Self::from_entries`], a salted tree is native and drops any
+    /// recorded source Git mode; V4 trees never carry a Git layout.
     pub fn from_entries_salted_v4(
-        entries: Vec<TreeEntry>,
+        mut entries: Vec<TreeEntry>,
         salts: Vec<[u8; 32]>,
     ) -> Result<Self, TreeError> {
+        entries.iter_mut().for_each(TreeEntry::drop_raw_git_mode);
         if entries.len() != salts.len() {
             return Err(TreeError::InvalidStructure(format!(
                 "v4 tree has {} entries but {} salts",
@@ -796,6 +817,11 @@ impl Tree {
                         self.salts.len()
                     )));
                 }
+                if self.entries.iter().any(|entry| entry.git_mode.is_some()) {
+                    return Err(TreeError::InvalidStructure(
+                        "v4 trees do not record a git source layout".into(),
+                    ));
+                }
             }
         }
         let mut previous_name: Option<&str> = None;
@@ -862,10 +888,15 @@ impl Tree {
     }
 
     /// An edited tree has no source tree to reproduce, so it takes Git's
-    /// canonical order. Raw modes stay with their entries.
-    fn drop_source_order(&mut self) {
+    /// canonical layout, as a native tree does.
+    fn drop_git_layout(&mut self) {
         if !self.source_positions.is_empty() {
             self.source_positions = Arc::new(Vec::new());
+        }
+        if self.entries.iter().any(|entry| entry.git_mode.is_some()) {
+            Arc::make_mut(&mut self.entries)
+                .iter_mut()
+                .for_each(TreeEntry::drop_raw_git_mode);
         }
     }
 
@@ -881,8 +912,9 @@ impl Tree {
         self.entries.get(index)
     }
 
-    pub fn insert(&mut self, entry: TreeEntry) {
-        self.drop_source_order();
+    pub fn insert(&mut self, mut entry: TreeEntry) {
+        self.drop_git_layout();
+        entry.drop_raw_git_mode();
         match self.scheme {
             TreeScheme::V3Flat => {
                 let entries = Arc::make_mut(&mut self.entries);
@@ -922,7 +954,7 @@ impl Tree {
 
     pub fn remove(&mut self, name: &str) -> Option<TreeEntry> {
         let pos = self.entries.iter().position(|e| e.name == name)?;
-        self.drop_source_order();
+        self.drop_git_layout();
         if matches!(self.scheme, TreeScheme::V4Salted) {
             Arc::make_mut(&mut self.salts).remove(pos);
         }
@@ -1253,22 +1285,29 @@ impl PartialTree {
 
 // ── Durable V2 tree encoding ───────────────────────────────────────
 
-#[derive(Serialize, Deserialize)]
+// Both durable msgpack structs serialize by hand as maps (below), so a
+// positional (`rmp_serde::to_vec`) encoder
+// can never shift a later optional field into a skipped one's slot. Unknown
+// fields are refused: a binary that does not understand a newer field (such
+// as the Git layout) must not decode the tree without it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EncodedTreeV2 {
     version: u8,
     entries: Vec<EncodedTreeEntryV2>,
     // Parallel per-entry salts for a V4 salted tree. `default` keeps V3 bodies
     // byte-identical (the field is omitted entirely for V3), so existing
     // on-disk caches (`worktree-current-tree.bin`, hot sidecars) are unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     salts: Option<Vec<[u8; 32]>>,
     // Parallel per-entry Git source positions (heddle#2018). Omitted unless the
     // tree records a non-canonical source order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     source_positions: Option<Vec<u32>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EncodedTreeEntryV2 {
     name: String,
     kind: u8,
@@ -1279,13 +1318,61 @@ struct EncodedTreeEntryV2 {
     // Child-spool pointer for SPOOLLINK entries. `default`
     // keeps the encoding backward-compatible: pre-SPOOLLINK payloads simply
     // omit these fields.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     spool_id: Option<SpoolId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     spool_state_id: Option<StateId>,
     // Source Git mode digits (heddle#2018), only when not canonical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     git_mode: Option<String>,
+}
+
+// The hand-written maps below match the derived named form byte for byte
+// (pinned by the golden corpus): same keys, same order, absent optionals
+// omitted.
+impl Serialize for EncodedTreeV2 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let len =
+            2 + usize::from(self.salts.is_some()) + usize::from(self.source_positions.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("version", &self.version)?;
+        map.serialize_entry("entries", &self.entries)?;
+        if let Some(salts) = &self.salts {
+            map.serialize_entry("salts", salts)?;
+        }
+        if let Some(positions) = &self.source_positions {
+            map.serialize_entry("source_positions", positions)?;
+        }
+        map.end()
+    }
+}
+
+impl Serialize for EncodedTreeEntryV2 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let len = 6
+            + usize::from(self.spool_id.is_some())
+            + usize::from(self.spool_state_id.is_some())
+            + usize::from(self.git_mode.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("kind", &self.kind)?;
+        map.serialize_entry("hash", &self.hash)?;
+        map.serialize_entry("executable", &self.executable)?;
+        map.serialize_entry("git_format", &self.git_format)?;
+        map.serialize_entry("git_oid", &self.git_oid)?;
+        if let Some(spool_id) = &self.spool_id {
+            map.serialize_entry("spool_id", spool_id)?;
+        }
+        if let Some(state_id) = &self.spool_state_id {
+            map.serialize_entry("spool_state_id", state_id)?;
+        }
+        if let Some(git_mode) = &self.git_mode {
+            map.serialize_entry("git_mode", git_mode)?;
+        }
+        map.end()
+    }
 }
 
 impl Serialize for Tree {

@@ -187,6 +187,14 @@ impl ShaMap {
         Ok(map)
     }
 
+    /// The map's format ([`repo::GIT_IMPORT_MAP_FORMAT`] for a map this
+    /// importer created; 0 for one written before heddle#2018).
+    pub fn format(&self) -> Result<i32, ShaMapError> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    }
+
     /// Total number of records (commits + trees + blobs).
     pub fn len(&self) -> usize {
         self.conn
@@ -644,6 +652,12 @@ fn initialize_schema(conn: &Connection) -> Result<(), ShaMapError> {
     if !sha_map_has_column(conn, "lossy_entries")? {
         conn.execute_batch("ALTER TABLE sha_map ADD COLUMN lossy_entries TEXT;")?;
     }
+    // Only a map with no rows yet can be stamped current: rows written by an
+    // older importer keep its format, so readers can refuse them.
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM sha_map", [], |row| row.get(0))?;
+    if rows == 0 {
+        conn.pragma_update(None, "user_version", repo::GIT_IMPORT_MAP_FORMAT)?;
+    }
     Ok(())
 }
 
@@ -862,6 +876,30 @@ mod tests {
             reloaded.get_tree_lossy_entries(sha).unwrap().unwrap(),
             entries
         );
+    }
+
+    #[test]
+    fn new_maps_are_stamped_and_old_maps_keep_their_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh.sqlite");
+        assert_eq!(
+            ShaMap::open(&fresh).unwrap().format().unwrap(),
+            repo::GIT_IMPORT_MAP_FORMAT
+        );
+        assert_eq!(ShaMap::new().format().unwrap(), repo::GIT_IMPORT_MAP_FORMAT);
+
+        // A pre-#2018 map: rows present, user_version 0. Reopening must not
+        // relabel those rows as current.
+        let old = dir.path().join("old.sqlite");
+        {
+            let conn = Connection::open(&old).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sha_map (git_sha TEXT PRIMARY KEY NOT NULL, kind INTEGER NOT NULL, heddle_repr TEXT NOT NULL);
+                 INSERT INTO sha_map VALUES ('1111111111111111111111111111111111111111', 1, 'x');",
+            )
+            .unwrap();
+        }
+        assert_eq!(ShaMap::open(&old).unwrap().format().unwrap(), 0);
     }
 
     #[test]

@@ -573,3 +573,26 @@ fn repack_with_a_loose_v4_tree_succeeds_and_keeps_it_retrievable() {
         "a v4 salted tree must never enter the NPK1 pack"
     );
 }
+
+/// heddle#2018 canonical guard: the NPK1 bytes for ordinary trees are the
+/// bytes this corpus packed to before the Git-layout extension existed.
+#[test]
+fn canonical_npk1_generation_matches_pinned_bytes() {
+    let (_temp, store) = store();
+    for version in 0..12 {
+        store
+            .put_tree(&related_tree(version, 48))
+            .expect("put hot tree");
+    }
+    repack(&store);
+    let bytes = std::fs::read(only_npk1_path(&store)).expect("read NPK1 generation");
+    let actual = format!("{}:{}", bytes.len(), ContentHash::compute(&bytes).to_hex());
+    println!("npk1 {actual}");
+    // Record blocks are zstd-compressed only with the `zstd` feature.
+    let expected = if cfg!(feature = "zstd") {
+        "4234:0e6c1a3e388cc010c0e42745510e001b0dddd79d34bec73cdf3a7c58bbe1322e"
+    } else {
+        "4253:d51e1624a5820d35881fa29e3e5df406f82590602f746ea0f2c6b20f6152a8c2"
+    };
+    assert_eq!(actual, expected);
+}

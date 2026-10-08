@@ -300,6 +300,71 @@ mod tests {
         );
     }
 
+    /// heddle#2018: an imported directory reaches the capture chokepoint
+    /// either verbatim (monitor proof reuses the imported tree, raw modes and
+    /// all) or rebuilt from disk (canonical entries). Both must capture the
+    /// same root: the layout is not part of a native capture.
+    #[test]
+    fn imported_layout_captures_the_same_root_on_every_walker_path() {
+        use objects::object::{Blob, RawGitMode, Tree, TreeEntry};
+
+        let (temp, repo) = native_repo();
+        fs::create_dir(temp.path().join("dir")).unwrap();
+        fs::write(temp.path().join("dir/x.txt"), b"x\n").unwrap();
+        fs::write(temp.path().join("a.txt"), b"a\n").unwrap();
+        let parent = repo.snapshot(Some("first".into()), None).unwrap();
+        let parent_tree = repo
+            .store()
+            .get_tree(&parent.tree)
+            .unwrap()
+            .expect("parent");
+
+        let raw = |digits: &[u8]| RawGitMode::parse(digits).unwrap();
+        let x = Blob::from_slice(b"x\n").hash();
+        let a = Blob::from_slice(b"a\n").hash();
+        // As imported from Git and reused verbatim by the walker.
+        let imported_dir = Tree::from_git_entries(vec![
+            TreeEntry::file("x.txt", x, false)
+                .unwrap()
+                .with_raw_git_mode(raw(b"100664"))
+                .unwrap(),
+        ])
+        .unwrap();
+        let imported_root = Tree::from_git_entries(vec![
+            TreeEntry::directory("dir", imported_dir.hash())
+                .unwrap()
+                .with_raw_git_mode(raw(b"040000"))
+                .unwrap(),
+            TreeEntry::file("a.txt", a, false)
+                .unwrap()
+                .with_raw_git_mode(raw(b"100664"))
+                .unwrap(),
+        ])
+        .unwrap();
+        assert!(imported_root.has_git_layout() && imported_dir.has_git_layout());
+        repo.store().put_tree(&imported_dir).unwrap();
+        // As rebuilt from disk by the walker.
+        let rebuilt_dir = Tree::from_entries(vec![TreeEntry::file("x.txt", x, false).unwrap()]);
+        let rebuilt_root = Tree::from_entries(vec![
+            TreeEntry::directory("dir", rebuilt_dir.hash()).unwrap(),
+            TreeEntry::file("a.txt", a, false).unwrap(),
+        ]);
+        repo.store().put_tree(&rebuilt_dir).unwrap();
+
+        let (verbatim, _) = repo
+            .v4ify_capture_tree(&imported_root, &[], Some(&parent_tree))
+            .unwrap();
+        let (rebuilt, _) = repo
+            .v4ify_capture_tree(&rebuilt_root, &[], Some(&parent_tree))
+            .unwrap();
+        assert_eq!(verbatim.hash(), rebuilt.hash());
+        assert_eq!(
+            verbatim.hash(),
+            parent.tree,
+            "a no-op recapture keeps the root id"
+        );
+    }
+
     #[test]
     fn v4_recapture_with_no_change_is_identical_id() {
         let (temp, repo) = native_repo();

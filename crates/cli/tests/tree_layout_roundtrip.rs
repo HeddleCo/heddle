@@ -13,7 +13,10 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize, path::Path, process::Command, sync::Arc};
 
-use cli::Repository;
+#[path = "support/mod.rs"]
+mod support;
+
+use cli::{ObjectStore, Repository};
 use heddle_git_projection::git_core::GitProjection;
 use objects::store::{
     FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule, RepackScheduler,
@@ -159,6 +162,41 @@ fn build_corpus(dir: &Path) -> BTreeMap<String, String> {
     );
     let child = commit(dir, &unsorted_child, Some(&root), "unsorted descendant");
     branches.insert("unsorted".to_string(), child);
+
+    // Every other non-canonical mode Git reads, each in its own tree so a
+    // regression names the mode: group/other bits on files (`100775`,
+    // `100744`, `100645` — Git reads only the owner execute bit), a symlink
+    // with permission bits, a zero-padded gitlink, and a tree that is both
+    // unsorted and has a raw mode.
+    let link = blob(dir, "a.txt");
+    let odd_modes = [
+        ("mode-100775", vec![("100775", "run.sh", a.as_str())]),
+        ("mode-100744", vec![("100744", "run.sh", a.as_str())]),
+        ("mode-100645", vec![("100645", "data.txt", a.as_str())]),
+        ("mode-120777", vec![("120777", "link", link.as_str())]),
+        (
+            "mode-0160000",
+            vec![(
+                "0160000",
+                "vendor",
+                "0808080808080808080808080808080808080808",
+            )],
+        ),
+        (
+            "unsorted-and-raw",
+            vec![
+                ("100664", "z.txt", a.as_str()),
+                ("040000", "dir", leaf.as_str()),
+            ],
+        ),
+    ];
+    for (branch, entries) in odd_modes {
+        let tree = raw_tree(dir, &entries);
+        let root = commit(dir, &tree, None, branch);
+        let wrapper = raw_tree(dir, &[("100644", "keep.txt", &b), ("40000", "odd", &tree)]);
+        let child = commit(dir, &wrapper, Some(&root), &format!("{branch} descendant"));
+        branches.insert(branch.to_string(), child);
+    }
 
     for (branch, tip) in &branches {
         git(dir, &["update-ref", &format!("refs/heads/{branch}"), tip]);
@@ -322,4 +360,125 @@ fn duplicate_tree_entry_names_are_rejected_naming_the_tree() {
         message.contains("same"),
         "error must name the duplicate entry: {message}"
     );
+}
+
+/// A native capture on top of an imported non-canonical tree is a new native
+/// commit: it takes Git's canonical layout (as Git's index would), lands on
+/// the original commit as parent, and leaves every imported commit exact.
+#[test]
+fn native_capture_over_an_imported_layout_exports_canonically() {
+    let source_home = TempDir::new().expect("source");
+    let source = source_home.path();
+    let branches = build_corpus(source);
+
+    let heddle_home = TempDir::new().expect("heddle");
+    let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+    let mut bridge = GitProjection::new(&repo);
+    import(&mut bridge, &repo, source, true);
+    drop(bridge);
+    drop(repo);
+
+    let repo = Repository::open(heddle_home.path()).expect("reopen");
+    let thread = objects::object::ThreadName::from_git_branch("mode-100664").expect("thread");
+    let tip = repo
+        .refs()
+        .get_thread(&thread)
+        .expect("read thread")
+        .expect("imported thread");
+    repo.goto_discard_local(&tip)
+        .expect("materialize imported tip");
+    std::fs::write(heddle_home.path().join("native.txt"), "native\n").expect("edit");
+    let captured = repo
+        .snapshot_with_attribution(
+            Some("native capture".into()),
+            None,
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Heddle Conformance",
+                "conformance@heddle.test",
+            )),
+        )
+        .expect("capture over imported layout");
+    let captured_tree = repo
+        .store()
+        .get_tree(&captured.tree)
+        .expect("read tree")
+        .expect("captured tree");
+    assert_eq!(
+        captured_tree.scheme(),
+        objects::object::TreeScheme::V4Salted
+    );
+    assert!(!captured_tree.has_git_layout());
+    assert_eq!(captured.parents, vec![tip], "captured on the imported tip");
+    repo.refs()
+        .set_thread(&thread, &captured.state_id)
+        .expect("advance the thread");
+    drop(repo);
+
+    let repo = Repository::open(heddle_home.path()).expect("reopen");
+    let mut bridge = GitProjection::new(&repo);
+    let dest_home = TempDir::new().expect("dest");
+    let dest = dest_home.path().join("export");
+    let stats = bridge.export_to_path(&dest).expect("export");
+    assert!(stats.failed_refs.is_empty(), "{:?}", stats.failed_refs);
+
+    let exported_tip = git(&dest, &["rev-parse", "refs/heads/mode-100664"]);
+    assert_eq!(
+        git(&dest, &["rev-parse", &format!("{exported_tip}^")]),
+        branches["mode-100664"],
+        "the native commit's parent is the exact imported commit"
+    );
+    let listing = git(&dest, &["ls-tree", "-r", &exported_tip]);
+    assert!(listing.contains("100644 blob"), "{listing}");
+    assert!(
+        !listing.contains("100664"),
+        "a native capture writes canonical modes: {listing}"
+    );
+    for (branch, tip) in branches.iter().filter(|(name, _)| *name != "mode-100664") {
+        assert_eq!(
+            &git(&dest, &["rev-parse", &format!("refs/heads/{branch}")]),
+            tip
+        );
+    }
+}
+
+/// A Git-overlay repository reads a non-canonical tree through `.git` and
+/// gets the same native tree the importer maps it to.
+#[test]
+fn overlay_reads_a_noncanonical_tree_end_to_end() {
+    let home = TempDir::new().expect("overlay");
+    let dir = home.path();
+    let branches = build_corpus(dir);
+    // The 100664 branch is sorted, so Git can check it out.
+    git(dir, &["checkout", "-q", "mode-100664"]);
+    support::heddle(&["init"], Some(dir)).expect("heddle init overlay");
+    let state = ingest::bind_single_git_commit_overlay(
+        dir,
+        dir,
+        &branches["mode-100664"],
+        ingest::ImportOptions::default(),
+    )
+    .expect("bind overlay tip");
+
+    let repo = Repository::open(dir).expect("open overlay");
+    let state = repo
+        .store()
+        .get_state(&state)
+        .expect("read state")
+        .expect("overlay state");
+    let root = repo
+        .store()
+        .get_tree(&state.tree)
+        .expect("read root through .git")
+        .expect("root tree");
+    let sub = root
+        .get("sub")
+        .and_then(objects::object::TreeEntry::tree_hash)
+        .expect("sub");
+    let sub = repo
+        .store()
+        .get_tree(&sub)
+        .expect("read odd subtree through .git")
+        .expect("sub tree");
+    assert!(sub.has_git_layout(), "the 100664 entry is recorded");
+    support::heddle(&["status"], Some(dir)).expect("status on the overlay");
 }

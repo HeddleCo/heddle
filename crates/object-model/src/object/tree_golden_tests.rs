@@ -120,3 +120,95 @@ fn canonical_tree_corpus_matches_pinned_ids_and_bytes() {
     }
     assert_eq!(actual, GOLDEN);
 }
+
+/// The remaining canonical forms: an HDC1 delta, an HRT1 redacted
+/// projection and (with zstd) a block-compressed HTR4 body. Captured before
+/// the Git-layout extension existed, like `GOLDEN`.
+fn render_other_forms() -> Vec<String> {
+    let corpus = corpus();
+    let anchor = &corpus[2].1;
+    let mut current = anchor.clone();
+    current.insert(TreeEntry::file("README.md", hash("readme-2"), false).unwrap());
+    current.insert(TreeEntry::file("zz-new", hash("zz-new"), true).unwrap());
+    let ops = crate::object::tree_delta(anchor, &current);
+    let delta = crate::object::encode_tree_delta(anchor.hash(), anchor, &current, &ops).unwrap();
+
+    let v4 = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("a.txt", hash("a"), false).unwrap(),
+            TreeEntry::directory("dir", hash("dir")).unwrap(),
+            TreeEntry::file("run", hash("run"), true).unwrap(),
+        ],
+        vec![[1; 32], [2; 32], [3; 32]],
+    )
+    .unwrap();
+    let hidden = v4.v4_leaf_hash_for("dir").unwrap();
+    let partial = PartialTree::project(&v4, &std::iter::once(hidden).collect()).unwrap();
+    let redacted = crate::object::encode_redacted_projection(&partial).unwrap();
+
+    #[allow(unused_mut)]
+    let mut lines = vec![
+        format!("hdc1 {}:{}", delta.len(), digest(&delta)),
+        format!("hrt1 {}:{}", redacted.len(), digest(&redacted)),
+    ];
+    #[cfg(feature = "zstd")]
+    {
+        let blocked = corpus[3].1.encode_canonical_blocked(3, 0).unwrap();
+        lines.push(format!(
+            "htr4-blocked {}:{}",
+            blocked.len(),
+            digest(&blocked)
+        ));
+    }
+    lines
+}
+
+const GOLDEN_OTHER_FORMS: &[&str] = &[
+    "hdc1 146:9204f87671da29a6167fdf39b8ebc4a4c8cf574703a225e5e81563e69f1c5de3",
+    "hrt1 232:85272f14c630c2973245fdf8fcaa4a3963baf678a263205262a55f28270039a6",
+];
+#[cfg(feature = "zstd")]
+const GOLDEN_BLOCKED: &str =
+    "htr4-blocked 1551:53513dcb34c11f6ab20e78aa496bb8370f96af754b29ea4794562f77d35969cc";
+
+#[test]
+fn canonical_delta_redacted_and_blocked_forms_match_pinned_bytes() {
+    let actual = render_other_forms();
+    for line in &actual {
+        println!("{line}");
+    }
+    assert_eq!(&actual[..2], GOLDEN_OTHER_FORMS);
+    #[cfg(feature = "zstd")]
+    assert_eq!(actual[2], GOLDEN_BLOCKED);
+}
+
+/// A tree that records a Git layout (heddle#2018), pinned in its trailer
+/// form: `b.txt` before `a.txt` (source order) and a `100664` file. Each
+/// frame's mode byte carries the layout flags (`0xc0` = raw mode + position,
+/// `0x40` = position only), and the trailer follows the target: `u32` LE mode
+/// value, a leading-zero count, then the `u32` LE source position.
+#[test]
+fn layout_tree_matches_pinned_id_and_bytes() {
+    let mode = crate::object::RawGitMode::parse(b"100664").unwrap();
+    let tree = Tree::from_git_entries(vec![
+        TreeEntry::file("b.txt", hash("b"), false).unwrap(),
+        TreeEntry::file("a.txt", hash("a"), false)
+            .unwrap()
+            .with_raw_git_mode(mode)
+            .unwrap(),
+    ])
+    .unwrap();
+    let body = tree.encode_canonical().unwrap();
+    let actual = format!("id={} htr4={}", tree.hash(), hex::encode(&body));
+    println!("{actual}");
+    assert_eq!(actual, LAYOUT_GOLDEN);
+}
+
+const LAYOUT_GOLDEN: &str = concat!(
+    "id=10918952092182b3a78447253c6c8cc28c7ad32cc18d118a6453643f6f0cb0b5 htr4=485",
+    "452340410918952092182b3a78447253c6c8cc28c7ad32cc18d118a6453643f6f0cb0b502000",
+    "0000000000067000000000000005d0000000000000032000000c0000500612e74787417762fd",
+    "dd969a453925d65717ac3eea21320b66b54342fde15128d6caf21215fb481000000010000002",
+    "d00000040000500622e74787410e5cf3d3c8a4f9f3468c8cc58eea84892a22fdadbc1acb2241",
+    "0190044c1d55300000000",
+);

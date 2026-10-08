@@ -65,6 +65,17 @@ impl GitOverlayObjectSource {
             .map_err(db_error)
     }
 
+    /// The identity map's format (SQLite `user_version`); 0 before heddle#2018.
+    fn map_format(&self) -> Result<i32> {
+        let mut mapping = self.mapping()?;
+        let Some(connection) = self.open_mapping(&mut mapping)? else {
+            return Ok(crate::GIT_IMPORT_MAP_FORMAT);
+        };
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(db_error)
+    }
+
     fn heddle_for_git(&self, oid: &ObjectId, kind: i64) -> Result<Option<String>> {
         let mut mapping = self.mapping()?;
         let Some(connection) = self.open_mapping(&mut mapping)? else {
@@ -239,6 +250,17 @@ impl ExternalObjectSource for GitOverlayObjectSource {
         }
         let tree = Tree::from_git_entries(entries)
             .map_err(|error| HeddleError::InvalidObject(format!("Git tree {git_sha}: {error}")))?;
+        // A map from before heddle#2018 stored a normalised id for exactly
+        // the trees that record a Git layout. Its rows cannot be trusted for
+        // them; the identity map has to be rebuilt.
+        if tree.has_git_layout() && self.map_format()? < crate::GIT_IMPORT_MAP_FORMAT {
+            return Err(HeddleError::Config(format!(
+                "Git tree {git_sha} has a non-canonical mode or entry order, and this \
+                 repository's Git import map predates exact Git tree layouts (heddle#2018); \
+                 re-import required: recreate the repository or re-adopt its Git history \
+                 with this Heddle version"
+            )));
+        }
         if tree.hash() != *hash {
             return Err(HeddleError::Corruption {
                 expected: *hash,
@@ -348,15 +370,21 @@ mod tests {
         connection
     }
 
-    /// heddle#2018: a non-canonical source tree read through the overlay must
-    /// translate to the same native tree the importer stored — raw modes and
-    /// source order included — or the id check rejects it as corruption.
-    #[test]
-    fn noncanonical_git_tree_reads_through_with_its_layout() {
+    /// A source tree with a `100664` entry out of Git's order, its blobs, and
+    /// the native tree the current importer maps it to.
+    struct LayoutFixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        heddle_dir: PathBuf,
+        tree_oid: ObjectId,
+        rows: Vec<(String, i64, String)>,
+        expected: Tree,
+        normalised: Tree,
+    }
+
+    fn layout_fixture() -> LayoutFixture {
         let temp = tempfile::TempDir::new().unwrap();
         let git = SleyRepository::init(temp.path()).unwrap();
-        let heddle_dir = temp.path().join(".heddle");
-        let connection = mapping_table(&heddle_dir);
         let a = git.write_blob(b"a\n").unwrap();
         let b = git.write_blob(b"b\n").unwrap();
         let mut body = Vec::new();
@@ -380,12 +408,36 @@ mod tests {
             TreeEntry::file("a.txt", a_hash, false).unwrap(),
         ])
         .unwrap();
-        assert!(expected.has_git_layout());
-        for (git_sha, kind, heddle_repr) in [
-            (a.to_string(), KIND_BLOB, a_hash.to_hex()),
-            (b.to_string(), KIND_BLOB, b_hash.to_hex()),
-            (tree_oid.to_string(), KIND_TREE, expected.hash().to_hex()),
-        ] {
+        // What a pre-#2018 importer stored: modes and order normalised.
+        let normalised = Tree::from_entries(vec![
+            TreeEntry::file("b.txt", b_hash, false).unwrap(),
+            TreeEntry::file("a.txt", a_hash, false).unwrap(),
+        ]);
+        LayoutFixture {
+            root: temp.path().to_path_buf(),
+            heddle_dir: temp.path().join(".heddle"),
+            _temp: temp,
+            tree_oid,
+            rows: vec![
+                (a.to_string(), KIND_BLOB, a_hash.to_hex()),
+                (b.to_string(), KIND_BLOB, b_hash.to_hex()),
+            ],
+            expected,
+            normalised,
+        }
+    }
+
+    fn write_map(fixture: &LayoutFixture, tree: &Tree, format: i32) {
+        let connection = mapping_table(&fixture.heddle_dir);
+        connection
+            .pragma_update(None, "user_version", format)
+            .unwrap();
+        let tree_row = (
+            fixture.tree_oid.to_string(),
+            KIND_TREE,
+            tree.hash().to_hex(),
+        );
+        for (git_sha, kind, heddle_repr) in fixture.rows.iter().chain([&tree_row]) {
             connection
                 .execute(
                     "INSERT INTO sha_map (git_sha, kind, heddle_repr) VALUES (?, ?, ?)",
@@ -393,14 +445,42 @@ mod tests {
                 )
                 .unwrap();
         }
-        drop(connection);
+    }
 
-        let source = GitOverlayObjectSource::new(temp.path().to_path_buf(), heddle_dir);
+    /// heddle#2018: a non-canonical source tree read through the overlay must
+    /// translate to the same native tree the importer stored — raw modes and
+    /// source order included — or the id check rejects it as corruption.
+    #[test]
+    fn noncanonical_git_tree_reads_through_with_its_layout() {
+        let fixture = layout_fixture();
+        assert!(fixture.expected.has_git_layout());
+        write_map(&fixture, &fixture.expected, crate::GIT_IMPORT_MAP_FORMAT);
+        let source = GitOverlayObjectSource::new(fixture.root.clone(), fixture.heddle_dir.clone());
         let tree = source
-            .get_tree(&expected.hash())
+            .get_tree(&fixture.expected.hash())
             .expect("layout tree reads through")
             .expect("mapped tree");
-        assert_eq!(tree, expected);
+        assert_eq!(tree, fixture.expected);
+    }
+
+    /// A map written before heddle#2018 holds the normalised id of a
+    /// non-canonical tree. Reading it must ask for a re-import, not report
+    /// corruption and not serve the normalised tree.
+    #[test]
+    fn pre_layout_map_asks_for_a_reimport() {
+        let fixture = layout_fixture();
+        write_map(&fixture, &fixture.normalised, 0);
+        let source = GitOverlayObjectSource::new(fixture.root.clone(), fixture.heddle_dir.clone());
+        let error = source
+            .get_tree(&fixture.normalised.hash())
+            .expect_err("pre-#2018 map");
+        assert!(
+            !matches!(error, HeddleError::Corruption { .. }),
+            "must not be reported as corruption: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("re-import"), "{message}");
+        assert!(message.contains(&fixture.tree_oid.to_string()), "{message}");
     }
 
     #[test]
