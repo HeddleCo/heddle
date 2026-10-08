@@ -46,6 +46,10 @@ impl PerfFixture {
         let repo = Repository::open(&root).expect("open perf fixture");
         let mut config = repo.config().clone();
         config.worktree.fsmonitor.mode = FsMonitorMode::Native;
+        // Child commands receive HEDDLE_PRINCIPAL_* via base_command. In-process
+        // history setup reads the repository, so the fixture must record the
+        // same principal on the repo itself.
+        config.set_principal(PERF_PRINCIPAL_NAME, PERF_PRINCIPAL_EMAIL);
         config
             .save(&repo.heddle_dir().join("config.toml"))
             .expect("enable native monitor");
