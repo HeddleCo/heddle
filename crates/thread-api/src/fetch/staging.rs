@@ -27,6 +27,7 @@ pub struct StagedSource {
     // Close proof files before removing their owning staging directory.
     #[cfg(feature = "native")]
     pub(super) partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
+    _scratch_lease: heddle_pack::store::pack::ScratchLease,
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
     pub(super) operations: Vec<SignedOperation>,
@@ -343,6 +344,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         let directory = tempfile::Builder::new()
             .prefix("thread-download-")
             .tempdir_in(scratch)?;
+        let _scratch_lease = heddle_pack::store::pack::ScratchLease::acquire(directory.path())?;
         let mut files = [
             tokio::fs::File::create(directory.path().join("source.pack")).await?,
             tokio::fs::File::create(directory.path().join("source.idx")).await?,
@@ -524,6 +526,7 @@ pub(super) fn validate_with_receipts_and_carriers(
     // Install reads the ready genesis, including claims omitted above.
     ready.thread_genesis = Some(value.genesis.clone());
     Ok(StagedSource {
+        _scratch_lease: value._scratch_lease,
         directory: value.directory,
         ready,
         #[cfg(feature = "native")]
@@ -545,6 +548,7 @@ pub struct ValidatedSourceArtifacts {
     pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
     #[cfg(feature = "native")]
     partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
+    _scratch_lease: heddle_pack::store::pack::ScratchLease,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
     genesis: ThreadGenesisRecord,
@@ -595,6 +599,7 @@ impl ValidatedSourceArtifacts {
         }
         ready.thread_genesis = Some(self.genesis);
         Ok(StagedSource {
+            _scratch_lease: self._scratch_lease,
             directory: self.directory,
             ready,
             #[cfg(feature = "native")]
@@ -680,6 +685,7 @@ fn validate_disclosure_artifacts(
         ancestry,
         require_import_ancestry,
     } = input;
+    let scratch_lease = heddle_pack::store::pack::ScratchLease::acquire(directory.path())?;
     if !ancestry.is_empty() && carriers.is_none() {
         return Err(Error::Invalid(
             "import ancestry requires independently authenticated import carriers",
@@ -776,6 +782,7 @@ fn validate_disclosure_artifacts(
         return Ok(ValidatedSourceArtifacts {
             import_authority: None,
             native_authority: None,
+            _scratch_lease: scratch_lease,
             directory,
             operations,
             genesis: original.clone(),
@@ -1231,6 +1238,7 @@ fn validate_disclosure_artifacts(
     Ok(ValidatedSourceArtifacts {
         import_authority: None,
         native_authority: None,
+        _scratch_lease: scratch_lease,
         directory,
         genesis: genesis_record,
         operations: ordered,

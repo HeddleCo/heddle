@@ -158,7 +158,7 @@ impl ObjectSource for Source {
     }
 }
 
-fn pipeline(count: usize) {
+fn pipeline(count: usize, measure_only: bool) {
     let _run = RUN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -196,6 +196,7 @@ fn pipeline(count: usize) {
         .expect("validate exact source");
     let validate = start.elapsed() - prepare;
     drop(reader);
+    let install_start = Instant::now();
     let installed = store
         .install_pack_streaming(
             &directory.path().join("source.pack"),
@@ -214,13 +215,14 @@ fn pipeline(count: usize) {
         .find(|line| line.starts_with("VmHWM:"))
         .unwrap_or("RSS unavailable");
     eprintln!(
-        "Fetch objects={} prepare={prepare:?} validate={validate:?} total={:?} peak_allocated={} bytes {rss}",
+        "Fetch objects={} prepare={prepare:?} validate={validate:?} install={:?} total={:?} peak_allocated={} bytes {rss}",
         stats.object_count,
+        install_start.elapsed(),
         start.elapsed(),
         peak
     );
     #[cfg(target_os = "linux")]
-    {
+    if !measure_only {
         let peak_rss_kib: usize = rss
             .split_whitespace()
             .nth(1)
@@ -240,17 +242,76 @@ fn pipeline(count: usize) {
 
 #[test]
 fn fetch_250k_source_uses_byte_budget() {
-    pipeline(247_498);
+    let _run = RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("fixture");
+    let state = fixture(directory.path(), 247_498);
+    let source = Source(
+        PackReader::open(
+            &directory.path().join("input.pack"),
+            &directory.path().join("input.idx"),
+            directory.path(),
+        )
+        .expect("source"),
+    );
+    assert_eq!(source.0.object_count(), 250_000);
+    let mut decoded_bytes = 0_u64;
+    source
+        .0
+        .visit_objects(|_, _, bytes| {
+            decoded_bytes += bytes.len() as u64;
+            Ok(())
+        })
+        .expect("measure decoded source");
+    let store = FsStore::new(directory.path().join("destination"));
+    store.init().expect("store");
+    let result = (|| -> Result<()> {
+        let scratch =
+            objects::store::pack::ScratchDir::new(&store.root().join("tmp"), "fetch-byte-budget-")?;
+        build_source_pack(
+            builder(scratch.path(), "source"),
+            &source,
+            &state,
+            decoded_bytes - 1,
+        )?;
+        store.install_pack_streaming(
+            &scratch.path().join("source.pack"),
+            &scratch.path().join("source.idx"),
+        )?;
+        Ok(())
+    })();
+    assert!(
+        matches!(result, Err(objects::store::HeddleError::InvalidObject(ref message)) if message == "source pack decoded byte budget exceeded"),
+        "{result:?}"
+    );
+    assert!(store.list_blobs().expect("blobs").is_empty());
+    assert!(store.list_trees().expect("trees").is_empty());
+    assert!(store.list_states().expect("states").is_empty());
+    assert_eq!(
+        std::fs::read_dir(store.root().join("packs"))
+            .expect("packs")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(store.root().join("tmp"))
+            .expect("scratch")
+            .count(),
+        0
+    );
 }
 
 #[test]
 fn fetch_250k_source_memory_is_bounded() {
-    pipeline(247_498);
+    pipeline(247_498, false);
 }
 
 #[test]
 fn fetch_100k_source_memory_is_bounded() {
-    pipeline(98_998);
+    pipeline(98_998, false);
 }
 
 #[test]
@@ -399,5 +460,126 @@ fn streaming_install_rejects_duplicate_ids_hiding_tampered_records() {
         !store
             .has_blob_locally(&blob.hash())
             .expect("store stays empty")
+    );
+}
+
+// Opt-in measurement, not part of the regression gate. Run with --release
+// --ignored --exact fetch_1m_source_release_timing --nocapture.
+#[test]
+#[ignore = "one-million-object release timing on the shared build host"]
+fn fetch_1m_source_release_timing() {
+    pipeline(989_999, true);
+}
+
+#[test]
+fn source_closure_rejects_a_tree_referenced_as_a_blob() {
+    let _run = RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("fixture");
+    let store = FsStore::new(directory.path().join("destination"));
+    store.init().expect("store");
+    let tree_as_blob = Tree::new();
+    let root = Tree::from_entries(vec![
+        TreeEntry::file("wrong-type", tree_as_blob.hash(), false).expect("entry"),
+    ]);
+    let state = State::new_snapshot(
+        root.hash(),
+        vec![],
+        Attribution::human(Principal::new("owner", "owner@example.test")),
+    );
+    let result = (|| -> Result<()> {
+        let scratch =
+            objects::store::pack::ScratchDir::new(&store.root().join("tmp"), "wrong-type-")?;
+        let mut output = builder(scratch.path(), "source");
+        for tree in [&root, &tree_as_blob] {
+            output.add_id(
+                PackObjectId::Hash(tree.hash()),
+                ObjectType::Tree,
+                tree.encode_canonical()?,
+            )?;
+        }
+        output.add_id(
+            PackObjectId::StateId(state.id()),
+            ObjectType::State,
+            state.encode_current_msgpack()?,
+        )?;
+        output.finalize()?;
+        let reader = PackReader::open(
+            &scratch.path().join("source.pack"),
+            &scratch.path().join("source.idx"),
+            scratch.path(),
+        )?;
+        reader.validate_source_closure(&state, 256 * 1024 * 1024)?;
+        store.install_pack_streaming(
+            &scratch.path().join("source.pack"),
+            &scratch.path().join("source.idx"),
+        )?;
+        Ok(())
+    })();
+    assert!(
+        matches!(result, Err(objects::store::HeddleError::InvalidObject(ref message)) if message.contains("type mismatch")),
+        "{result:?}"
+    );
+    assert!(store.list_states().expect("empty store").is_empty());
+    assert!(store.list_trees().expect("empty store").is_empty());
+    assert_eq!(
+        std::fs::read_dir(store.root().join("tmp"))
+            .expect("scratch")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn source_closure_rejects_duplicate_ids_and_cleans_failed_fetch_scratch() {
+    let _run = RUN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let directory = tempfile::tempdir().expect("fixture");
+    let state = fixture(directory.path(), 1);
+    let input = PackReader::open(
+        &directory.path().join("input.pack"),
+        &directory.path().join("input.idx"),
+        directory.path(),
+    )
+    .expect("reader");
+    let store = FsStore::new(directory.path().join("destination"));
+    store.init().expect("store");
+    let result = (|| -> Result<()> {
+        let scratch =
+            objects::store::pack::ScratchDir::new(&store.root().join("tmp"), "duplicate-fetch-")?;
+        let mut output = builder(scratch.path(), "source");
+        input.visit_objects(|id, kind, bytes| {
+            output.add_id(id, kind, bytes)?;
+            if kind == ObjectType::Blob {
+                output.add_id(id, kind, bytes)?;
+            }
+            Ok(())
+        })?;
+        output.finalize()?;
+        let reader = PackReader::open(
+            &scratch.path().join("source.pack"),
+            &scratch.path().join("source.idx"),
+            scratch.path(),
+        )?;
+        reader.validate_source_closure(&state, 256 * 1024 * 1024)?;
+        store.install_pack_streaming(
+            &scratch.path().join("source.pack"),
+            &scratch.path().join("source.idx"),
+        )?;
+        Ok(())
+    })();
+    assert!(
+        matches!(result, Err(objects::store::HeddleError::InvalidObject(ref message)) if message.contains("repeated") || message.contains("duplicate")),
+        "{result:?}"
+    );
+    assert!(store.list_states().expect("empty store").is_empty());
+    assert!(store.list_blobs().expect("empty store").is_empty());
+    assert_eq!(
+        std::fs::read_dir(store.root().join("tmp"))
+            .expect("scratch")
+            .count(),
+        0
     );
 }

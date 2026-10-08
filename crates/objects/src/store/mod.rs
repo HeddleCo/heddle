@@ -663,7 +663,7 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
         Ok(())
     }
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
-        let reader = pack::PackReader::from_slice(pack_data, index_data)?;
+        let reader = pack::PackReader::from_slice_in_memory(pack_data, index_data)?;
         let ids = reader.list_ids()?;
         for id in &ids {
             let Some((obj_type, data)) = reader.get_object(id)? else {

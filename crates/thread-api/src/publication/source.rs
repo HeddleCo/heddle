@@ -34,7 +34,7 @@ pub struct PublicationOptions {
 }
 
 pub struct SourcePack {
-    directory: tempfile::TempDir,
+    directory: heddle_pack::store::pack::ScratchDir,
     revision: StateId,
     artifacts: [PackExtent; 2],
 }
@@ -118,9 +118,7 @@ impl SourcePack {
         scratch_root: &Path,
         budget: SourceBudget,
     ) -> Result<(Self, bool), Error> {
-        let directory = tempfile::Builder::new()
-            .prefix("thread-source-")
-            .tempdir_in(scratch_root)?;
+        let directory = heddle_pack::store::pack::ScratchDir::new(scratch_root, "thread-source-")?;
         let pack_path = directory.path().join("source.pack");
         let index_path = directory.path().join("source.idx");
         let pack = OpenOptions::new()

@@ -48,7 +48,7 @@ fn reader(entries: Vec<(PackObjectId, ObjectType, Vec<u8>)>) -> PackReader<'stat
         builder.add_id(id, kind, data);
     }
     let (pack, index, _) = builder.build().expect("pack");
-    PackReader::from_bytes(pack, index).expect("reader")
+    PackReader::from_bytes(pack, index, &std::env::temp_dir()).expect("reader")
 }
 
 #[test]
@@ -369,8 +369,8 @@ fn publication_rejects_unindexed_bytes_even_when_selected_objects_are_complete()
     )
     .expect("unindexed record");
     append_container_checksum(&mut pack);
-    let reader =
-        PackReader::from_bytes(pack, index).expect("well-formed container with trailing record");
+    let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir())
+        .expect("well-formed container with trailing record");
     assert!(
         reader.validate_source_closure(&state, 65536).is_err(),
         "an unindexed record must not cross the selected disclosure boundary"
@@ -426,7 +426,11 @@ fn export_selected(
     )?;
     let (pack, stats) = build_source_pack(builder, source, state, max_bytes)?;
     assert_eq!(stats.object_count, 3);
-    PackReader::from_bytes(pack.into_inner(), std::fs::read(index_path)?)
+    PackReader::from_bytes(
+        pack.into_inner(),
+        std::fs::read(index_path)?,
+        &std::env::temp_dir(),
+    )
 }
 #[test]
 fn source_export_reads_only_selected_content_and_emits_a_complete_pack() {
@@ -463,4 +467,33 @@ fn source_export_checks_address_and_budget_before_publication() {
         export_selected(&source, &state, 65536).is_err(),
         "producer must reject a corrupt source address"
     );
+}
+
+#[test]
+fn buffered_source_readers_keep_validation_scratch_under_the_supplied_root() {
+    let (state, entries) = fixture();
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    for (id, kind, bytes) in entries {
+        builder.add_id(id, kind, bytes);
+    }
+    let (pack, index, _) = builder.build().expect("pack");
+    let directory = tempfile::tempdir().expect("store");
+    let scratch = directory.path().join("tmp");
+    let borrowed = PackReader::from_slice(&pack, &index, &scratch).expect("borrowed reader");
+    let owned = PackReader::from_bytes(pack.clone(), &index, &scratch).expect("owned reader");
+    for reader in [&borrowed, &owned] {
+        let closure = reader
+            .validate_visible_source_closure(&state, 65536)
+            .expect("closure");
+        assert_eq!(
+            std::fs::read_dir(&scratch).expect("scratch files").count(),
+            1,
+            "proof scratch lives in the caller's root"
+        );
+        drop(closure);
+        assert_eq!(
+            std::fs::read_dir(&scratch).expect("clean scratch").count(),
+            0
+        );
+    }
 }

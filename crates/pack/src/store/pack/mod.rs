@@ -18,6 +18,7 @@ mod pack_reader;
 #[cfg(feature = "source-transfer")]
 mod reference_pack;
 mod repack;
+mod scratch;
 mod shared;
 #[cfg(feature = "source-transfer")]
 mod source_pack;
@@ -44,6 +45,7 @@ pub use repack::{
     RepackOperation, RepackOutcome, RepackPolicy, RepackReason, RepackReport, RepackResourceLimits,
     RepackSchedule, RepackScheduler,
 };
+pub use scratch::{ScratchDir, ScratchLease, sweep_scratch};
 pub use shared::{
     PACK_CHECKSUM_LEN, PackContainerSpec, PackEntryHeader, PackObjectId, PackObjectRecord,
     append_container_checksum, compress_pack_payload, decode_tagged_entry_header,

@@ -13,15 +13,18 @@ use crate::store::Result;
 pub struct PackInventory {
     index: PackIndex,
     _file: NamedTempFile,
+    _scratch: super::ScratchDir,
 }
 impl PackInventory {
     pub fn copy_from_index(index_path: &Path, scratch_root: &Path) -> Result<Self> {
-        let mut file = NamedTempFile::new_in(scratch_root)?;
+        let scratch = super::ScratchDir::new(scratch_root, "pack-inventory-")?;
+        let mut file = NamedTempFile::new_in(scratch.path())?;
         std::io::copy(&mut File::open(index_path)?, file.as_file_mut())?;
         let bytes = Bytes::from_owner(unsafe { memmap2::MmapOptions::new().map(file.as_file())? });
         Ok(Self {
             index: PackIndex::from_owned_bytes(bytes)?,
             _file: file,
+            _scratch: scratch,
         })
     }
     pub fn len(&self) -> usize {

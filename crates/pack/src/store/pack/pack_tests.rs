@@ -99,7 +99,7 @@ fn test_pack_reader_refuses_v3_pack_with_recreation_advice() {
     pack_data.truncate(pack_data.len() - super::PACK_CHECKSUM_LEN);
     super::append_container_checksum(&mut pack_data);
 
-    let error = match PackReader::from_bytes(pack_data, index_data) {
+    let error = match PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()) {
         Ok(_) => panic!("legacy pack version must be refused"),
         Err(error) => error,
     };
@@ -117,7 +117,7 @@ fn test_pack_reader_refuses_v3_index_with_recreation_advice() {
     });
     index_data[4..8].copy_from_slice(&3_u32.to_be_bytes());
 
-    let error = match PackReader::from_bytes(pack_data, index_data) {
+    let error = match PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()) {
         Ok(_) => panic!("legacy pack index version must be refused"),
         Err(error) => error,
     };
@@ -131,7 +131,11 @@ fn test_pack_reader_refuses_newer_version_with_upgrade_advice() {
     pack_data[4..8].copy_from_slice(&5_u32.to_be_bytes());
     super::append_container_checksum(&mut pack_data);
 
-    let error = match PackReader::from_bytes(pack_data, PackIndex::new().to_bytes()) {
+    let error = match PackReader::from_bytes(
+        pack_data,
+        PackIndex::new().to_bytes(),
+        &std::env::temp_dir(),
+    ) {
         Ok(_) => panic!("future pack version must be refused"),
         Err(error) => error,
     };
@@ -150,7 +154,7 @@ fn test_annotated_tag_pack_entry_roundtrips_with_distinct_id_kind() {
     );
     let (pack_data, index_data, _) = builder.build().unwrap();
 
-    let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
     assert_eq!(
         reader
             .get_object(&PackObjectId::AnnotatedTag(hash))
@@ -334,8 +338,8 @@ fn re_representation_preserves_logical_id_and_changes_representation_hash() {
     let representation_b = PackRepresentationHash::compute(&pack_b);
     assert_ne!(representation_a, representation_b);
 
-    let reader_a = PackReader::from_bytes(pack_a, index_a).unwrap();
-    let reader_b = PackReader::from_bytes(pack_b, index_b).unwrap();
+    let reader_a = PackReader::from_bytes(pack_a, index_a, &std::env::temp_dir()).unwrap();
+    let reader_b = PackReader::from_bytes(pack_b, index_b, &std::env::temp_dir()).unwrap();
     assert_eq!(reader_a.logical_id().unwrap(), logical_a);
     assert_eq!(reader_b.logical_id().unwrap(), logical_b);
     assert_eq!(reader_a.representation_hash(), representation_a);
@@ -378,7 +382,8 @@ fn test_pack_reader_rejects_compressed_size_that_overflows_record_end() {
         super::varint::encode_type_and_size(ObjectType::Blob, 1, record);
         super::varint::encode_varint(u64::MAX, record);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let error = reader
         .get_hashed_object(&hash)
@@ -413,7 +418,8 @@ fn test_pack_reader_rejects_uncompressed_size_above_pack_object_limit() {
         super::varint::encode_varint(1, record);
         record.push(0);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let error = reader
         .get_hashed_object(&hash)
@@ -433,7 +439,8 @@ fn test_pack_reader_rejects_truncated_compressed_size_varint() {
         super::varint::encode_type_and_size(ObjectType::Blob, 4, record);
         record.push(0x80);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let error = reader
         .get_hashed_object(&hash)
@@ -454,7 +461,8 @@ fn test_pack_reader_rejects_compressed_size_past_content_end() {
         super::varint::encode_varint(10, record);
         record.extend_from_slice(b"abc");
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let error = reader
         .get_hashed_object(&hash)
@@ -476,7 +484,8 @@ fn test_pack_reader_decodes_well_formed_manual_record() {
         super::varint::encode_varint(payload.len() as u64, record);
         record.extend_from_slice(&payload);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let (obj_type, data) = reader
         .get_hashed_object(&hash)
@@ -550,7 +559,8 @@ fn test_pack_reader_rejects_compressed_record_claiming_huge_uncompressed_size() 
         super::varint::encode_varint(compressed.len() as u64, record);
         record.extend_from_slice(&compressed);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let error = reader
         .get_hashed_object(&hash)
@@ -595,7 +605,8 @@ fn test_pack_reader_decodes_compressed_object_larger_than_initial_hint() {
         super::varint::encode_varint(compressed.len() as u64, record);
         record.extend_from_slice(&compressed);
     });
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir())
+        .expect("container is well-formed");
 
     let (obj_type, data) = reader
         .get_hashed_object(&hash)
@@ -1020,7 +1031,7 @@ fn repack_window_and_path_hints_improve_ratio_and_roundtrip() {
     assert!(narrow.compression_ratio > wide.compression_ratio);
     assert!(narrow_pack.len() > wide_pack.len());
 
-    let reader = PackReader::from_bytes(wide_pack, wide_index).unwrap();
+    let reader = PackReader::from_bytes(wide_pack, wide_index, &std::env::temp_dir()).unwrap();
     for object in &objects {
         let (obj_type, data) = reader
             .get_hashed_object(&object.hash)
@@ -1252,7 +1263,7 @@ fn build_retaining_objects_returns_original_payloads_and_valid_pack() {
         }));
     }
 
-    let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+    let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
     for (hash, expected) in payloads {
         assert_eq!(
             reader.get_hashed_object(&hash).unwrap(),

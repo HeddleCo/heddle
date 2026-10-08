@@ -12,10 +12,37 @@ use crate::store::{Result, StoreError};
 
 pub(super) struct OffsetIndex {
     data: Bytes,
-    _file: NamedTempFile,
+    _file: Option<NamedTempFile>,
+    _scratch: Option<super::ScratchDir>,
 }
 impl OffsetIndex {
-    pub fn new(index: &PackIndex, root: &Path) -> Result<Self> {
+    pub fn new(index: &PackIndex, root: Option<&Path>) -> Result<Self> {
+        // At most 1 MiB of physical-order records for ordinary small packs.
+        // Larger whole-pack transfers still use bounded external sorting.
+        if root.is_none() || index.len() <= 1024 * 1024 / 16 {
+            let mut records = Vec::with_capacity(index.len());
+            for (ordinal, entry) in index.iter().enumerate() {
+                records.push((entry?.offset, ordinal as u64));
+            }
+            records.sort_unstable();
+            let mut data = Vec::with_capacity(records.len() * 16);
+            for (offset, ordinal) in records {
+                data.extend_from_slice(&offset.to_be_bytes());
+                data.extend_from_slice(&ordinal.to_be_bytes());
+            }
+            return Ok(Self {
+                data: Bytes::from(data),
+                _file: None,
+                _scratch: None,
+            });
+        }
+        let scratch = super::ScratchDir::new(
+            root.ok_or_else(|| {
+                StoreError::InvalidObject("disk offset index requires scratch".into())
+            })?,
+            "pack-offsets-",
+        )?;
+        let root = scratch.path();
         let mut input = NamedTempFile::new_in(root)?;
         {
             let mut writer = BufWriter::new(input.as_file_mut());
@@ -31,7 +58,11 @@ impl OffsetIndex {
         } else {
             Bytes::from_owner(unsafe { memmap2::MmapOptions::new().map(file.as_file())? })
         };
-        Ok(Self { data, _file: file })
+        Ok(Self {
+            data,
+            _file: Some(file),
+            _scratch: Some(scratch),
+        })
     }
     fn record(&self, index: usize) -> Result<(u64, usize)> {
         let bytes = self

@@ -1062,10 +1062,9 @@ impl HostedClient {
         }
         let scratch_root = repo.store().root().join("tmp");
         objects::fs_atomic::create_private_dir_all(&scratch_root).map_err(native_error)?;
-        let scratch = tempfile::Builder::new()
-            .prefix("heddle-source-transfer-")
-            .tempdir_in(&scratch_root)
-            .map_err(native_error)?;
+        let scratch =
+            objects::store::pack::ScratchDir::new(&scratch_root, "heddle-source-transfer-")
+                .map_err(native_error)?;
         let pack = SourcePack::prepare_with_references(
             repo.store(),
             &state,
@@ -1648,10 +1647,9 @@ impl HostedClient {
         );
         let scratch_root = repo.store().root().join("tmp");
         objects::fs_atomic::create_private_dir_all(&scratch_root).map_err(native_error)?;
-        let scratch = tempfile::Builder::new()
-            .prefix("heddle-source-transfer-")
-            .tempdir_in(&scratch_root)
-            .map_err(native_error)?;
+        let scratch =
+            objects::store::pack::ScratchDir::new(&scratch_root, "heddle-source-transfer-")
+                .map_err(native_error)?;
         let staged = self
             .fetch_native_source(
                 repo,

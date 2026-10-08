@@ -36,6 +36,7 @@ pub(super) fn validate(
 pub struct VisibleSourceClosure {
     proofs: tempfile::NamedTempFile,
     partial_tree_count: usize,
+    _scratch: super::ScratchDir,
 }
 impl VisibleSourceClosure {
     pub fn partial_tree_count(&self) -> usize {
@@ -69,9 +70,11 @@ pub(super) fn validate_disclosure(
     allow_partial: bool,
 ) -> Result<VisibleSourceClosure> {
     let canonical = selected.encode_current_msgpack()?;
+    let scratch = super::ScratchDir::new(reader.scratch_root()?, "source-closure-")?;
     let mut verified = VisibleSourceClosure {
-        proofs: tempfile::NamedTempFile::new_in(reader.scratch_root())?,
+        proofs: tempfile::NamedTempFile::new_in(scratch.path())?,
         partial_tree_count: 0,
+        _scratch: scratch,
     };
     let mut decoded = 0;
     reader.visit_objects(|id, kind, data| {
@@ -99,7 +102,7 @@ pub(super) fn validate_disclosure(
         }
         Ok(())
     })?;
-    let mut visited = super::disk_graph::DiskGraph::new(reader.scratch_root())?;
+    let mut visited = super::disk_graph::DiskGraph::new(verified._scratch.path())?;
     if let Some(visibility) = visibility {
         visibility.validate(selected)?;
         for entry in &visibility.entries {
@@ -155,7 +158,7 @@ pub(super) fn validate_disclosure(
         super::reference_pack::visit(
             &ReferenceReader(reader),
             reference,
-            reader.scratch_root(),
+            verified._scratch.path(),
             |hash, _| {
                 visited.insert(PackObjectId::Hash(hash), ObjectType::Blob)?;
                 Ok(())

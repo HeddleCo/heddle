@@ -105,7 +105,7 @@ pub struct PackReader<'a> {
     data: PackData<'a>,
     index: PackIndex,
     offsets: OnceLock<super::offset_index::OffsetIndex>,
-    scratch_root: PathBuf,
+    scratch_root: Option<PathBuf>,
     content_end: usize,
     #[cfg(test)]
     compact_frame_reads: AtomicUsize,
@@ -148,7 +148,7 @@ impl PackReader<'static> {
             verify_supported_container_layout(&pack_bytes)?
         };
         let index = PackIndex::from_owned_bytes(index_data)?;
-        let scratch_root = scratch_root.to_path_buf();
+        let scratch_root = Some(scratch_root.to_path_buf());
         let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Owned(pack_bytes),
@@ -161,11 +161,15 @@ impl PackReader<'static> {
         })
     }
 
-    pub fn from_bytes(pack_data: impl Into<Bytes>, index_data: impl AsRef<[u8]>) -> Result<Self> {
+    pub fn from_bytes(
+        pack_data: impl Into<Bytes>,
+        index_data: impl AsRef<[u8]>,
+        scratch_root: &Path,
+    ) -> Result<Self> {
         let pack_data = pack_data.into();
         let (_, _, content_end) = verify_supported_container(&pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
-        let scratch_root = std::env::temp_dir();
+        let scratch_root = Some(scratch_root.to_path_buf());
         let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Owned(pack_data),
@@ -180,10 +184,22 @@ impl PackReader<'static> {
 }
 
 impl<'a> PackReader<'a> {
-    pub fn from_slice(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
+    /// Buffered stores without a filesystem keep the physical index in memory.
+    /// Source-transfer validation requires a constructor with a scratch root.
+    pub fn from_slice_in_memory(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
+        let mut reader = Self::from_slice(pack_data, index_data, Path::new(""))?;
+        reader.scratch_root = None;
+        Ok(reader)
+    }
+
+    pub fn from_slice(
+        pack_data: &'a [u8],
+        index_data: impl AsRef<[u8]>,
+        scratch_root: &Path,
+    ) -> Result<Self> {
         let (_, _, content_end) = verify_supported_container(pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
-        let scratch_root = std::env::temp_dir();
+        let scratch_root = Some(scratch_root.to_path_buf());
         let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Borrowed(pack_data),
@@ -202,8 +218,8 @@ impl<'a> PackReader<'a> {
         if let Some(index) = self.offsets.get() {
             return Ok(index);
         }
-        std::fs::create_dir_all(&self.scratch_root)?;
-        let index = super::offset_index::OffsetIndex::new(&self.index, &self.scratch_root)?;
+        let index =
+            super::offset_index::OffsetIndex::new(&self.index, self.scratch_root.as_deref())?;
         // A concurrent reader may win initialization. Dropping our unused
         // candidate closes its mapping and removes its temporary file.
         let _ = self.offsets.set(index);
@@ -248,8 +264,10 @@ impl<'a> PackReader<'a> {
         super::source_pack::validate_disclosure(self, selected, max_decoded_bytes, &[], None, true)
     }
     #[cfg(feature = "source-transfer")]
-    pub(super) fn scratch_root(&self) -> &Path {
-        &self.scratch_root
+    pub(super) fn scratch_root(&self) -> Result<&Path> {
+        self.scratch_root.as_deref().ok_or_else(|| {
+            StoreError::InvalidObject("source validation requires a scratch root".into())
+        })
     }
     pub fn object_count(&self) -> usize {
         self.index.len()

@@ -148,6 +148,7 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// Directory holding the 512 bucket files. Owned by the builder
     /// so we can clean up on `Drop` if `finalize` is never called.
     bucket_dir: PathBuf,
+    scratch_lease: Option<super::ScratchLease>,
     /// Buckets `[variant][prefix_byte]` → optional buffered file.
     /// Lazily opened on first write and capped with LRU eviction so a
     /// large import cannot exhaust the process fd limit.
@@ -289,6 +290,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             debug_assert!(!durable);
             std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
         }
+        let scratch_lease = super::ScratchLease::acquire(&bucket_dir)?;
         let header_offset = pack_writer.stream_position().map_err(StoreError::from)?;
 
         // Write a placeholder header with `count = 0` unless the caller knows
@@ -332,6 +334,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             total_compressed: 0,
             compression,
             bucket_dir,
+            scratch_lease: Some(scratch_lease),
             bucket_writers: (0..TOTAL_BUCKETS).map(|_| None).collect(),
             open_bucket_writers: 0,
             bucket_access_tick: 0,
@@ -820,6 +823,8 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         for path in self.bucket_paths.iter() {
             let _ = std::fs::remove_file(path);
         }
+        self.scratch_lease.take();
+        let _ = std::fs::remove_file(self.bucket_dir.join(super::scratch::LEASE_FILE));
         let _ = std::fs::remove_dir(&self.bucket_dir);
         self.finalized = true;
 
@@ -886,6 +891,8 @@ impl<W: Write + Read + Seek> Drop for StreamingPackBuilder<W> {
         for path in self.bucket_paths.iter() {
             let _ = std::fs::remove_file(path);
         }
+        self.scratch_lease.take();
+        let _ = std::fs::remove_file(self.bucket_dir.join(super::scratch::LEASE_FILE));
         let _ = std::fs::remove_dir(&self.bucket_dir);
     }
 }
@@ -979,7 +986,7 @@ mod tests {
 
         assert_eq!(stats.object_count, 0);
         // PackReader can parse the empty pack and reports zero objects.
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         assert!(reader.list_ids().unwrap().is_empty());
         // Bucket dir was removed.
         assert!(
@@ -998,7 +1005,7 @@ mod tests {
         let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
 
         assert_eq!(stats.object_count, 1);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         let id = PackObjectId::Hash(hash);
         assert!(reader.has_object(&id).unwrap());
         let (got_type, got_data) = reader.get_object(&id).unwrap().unwrap();
@@ -1021,7 +1028,7 @@ mod tests {
         let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
 
         assert_eq!(stats.object_count, 1);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         let id = PackObjectId::StateId(cid);
         let (ty, data) = reader.get_object(&id).unwrap().unwrap();
         assert_eq!(ty, ObjectType::State);
@@ -1048,7 +1055,7 @@ mod tests {
             .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
             .unwrap();
         let (pack, index, stats) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         assert_eq!(stats.object_count, 2);
         assert_eq!(
@@ -1102,7 +1109,7 @@ mod tests {
             .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
             .unwrap();
         let (pack, index, _) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         let error = reader.get_object(&ids[1]).unwrap_err();
         assert!(
@@ -1127,7 +1134,7 @@ mod tests {
             .add_shared_frame(&ids, ObjectType::Blob, frame.len(), &frame)
             .unwrap();
         let (pack, index, stats) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         assert_eq!(stats.object_count, bodies.len() as u64);
         assert_eq!(
@@ -1160,7 +1167,7 @@ mod tests {
         let hash = ContentHash::compute_typed("blob", &body);
         builder.add(hash, ObjectType::Blob, body.clone()).unwrap();
         let (pack, index, _) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         assert_eq!(
             reader.get_object(&PackObjectId::Hash(hash)).unwrap(),
@@ -1190,7 +1197,7 @@ mod tests {
             .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
             .unwrap();
         let (pack, index, _) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         for id in ids {
             let error = reader.get_object(&id).unwrap_err();
@@ -1219,7 +1226,7 @@ mod tests {
             .add_shared_frame(&ids, ObjectType::Blob, frame.len(), &frame)
             .unwrap();
         let (pack, index, _) = finalize_cursor(builder, &index_path);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
 
         for id in ids {
             let error = reader.get_object(&id).unwrap_err();
@@ -1253,7 +1260,7 @@ mod tests {
 
         let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
         assert_eq!(stats.object_count, 3);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         assert_eq!(
             reader
                 .get_object(&PackObjectId::Hash(blob_hash))
@@ -1300,7 +1307,7 @@ mod tests {
         let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
         assert_eq!(stats.object_count, 10_000);
 
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         assert_eq!(reader.list_ids().unwrap().len(), 10_000);
         // Spot-check ten across the range.
         for i in [0, 1, 99, 1234, 5_000, 9_999] {
@@ -1360,7 +1367,7 @@ mod tests {
 
         let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
         assert_eq!(stats.object_count, TOTAL_BUCKETS as u64);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         for id in ids {
             assert!(reader.has_object(&id).unwrap(), "missing id {id:?}");
         }
@@ -1402,7 +1409,8 @@ mod tests {
             classic.add_id(*id, *ty, data.clone());
         }
         let (classic_pack, classic_index, _) = classic.build().unwrap();
-        let classic_reader = PackReader::from_bytes(classic_pack, classic_index).unwrap();
+        let classic_reader =
+            PackReader::from_bytes(classic_pack, classic_index, &std::env::temp_dir()).unwrap();
 
         let tmp = tempfile::TempDir::new().unwrap();
         let bucket_dir = tmp.path().join("buckets");
@@ -1414,7 +1422,8 @@ mod tests {
             streaming.add_id(*id, *ty, data.clone()).unwrap();
         }
         let (streaming_pack, streaming_index, _) = finalize_cursor(streaming, &idx_path);
-        let streaming_reader = PackReader::from_bytes(streaming_pack, streaming_index).unwrap();
+        let streaming_reader =
+            PackReader::from_bytes(streaming_pack, streaming_index, &std::env::temp_dir()).unwrap();
 
         // Same set of ids in the same sorted order — that's the
         // contract for binary search to work.
@@ -1447,7 +1456,7 @@ mod tests {
         // Flip one byte in the body. The trailer checksum must reject.
         let body_byte = 18; // past the 16-byte header
         pack_data[body_byte] ^= 0xff;
-        let result = PackReader::from_bytes(pack_data, index_data);
+        let result = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir());
         assert!(
             result.is_err(),
             "PackReader should reject pack with mutated body"
@@ -1470,7 +1479,7 @@ mod tests {
         // Header count is bytes 8..16 (big-endian).
         let count = u64::from_be_bytes(pack_data[8..16].try_into().unwrap());
         assert_eq!(count, 7);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         assert_eq!(reader.list_ids().unwrap().len(), 7);
     }
 
@@ -1507,7 +1516,7 @@ mod tests {
 
         assert_eq!(stats.object_count, 2);
         assert_eq!(u64::from_be_bytes(pack_data[8..16].try_into().unwrap()), 2);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         assert!(reader.has_object(&PackObjectId::Hash(hash)).unwrap());
         assert!(reader.has_object(&PackObjectId::Hash(second_hash)).unwrap());
     }
@@ -1634,7 +1643,7 @@ mod tests {
         let pack_bytes = std::fs::read(&pack_path).unwrap();
         // Pack on disk holds the whole compressed payload + headers
         // + trailer. Confirm it round-trips.
-        let reader = PackReader::from_bytes(pack_bytes, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_bytes, index_data, &std::env::temp_dir()).unwrap();
         let (_ty, got) = reader
             .get_object(&PackObjectId::Hash(hash))
             .unwrap()
@@ -1731,7 +1740,7 @@ mod tests {
             stats.total_compressed,
             stats.total_uncompressed
         );
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         let (_ty, got) = reader
             .get_object(&PackObjectId::Hash(hash))
             .unwrap()
@@ -1783,7 +1792,7 @@ mod tests {
         let (pack, index, stats) = finalize_cursor(builder, &index_path);
 
         assert_eq!(stats.total_compressed, stats.total_uncompressed);
-        let reader = PackReader::from_bytes(pack, index).unwrap();
+        let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir()).unwrap();
         assert_eq!(
             reader.get_object(&id).unwrap(),
             Some((ObjectType::StateAttachment, payload))
@@ -1859,7 +1868,8 @@ mod tests {
         let (_, _) = b.finalize().unwrap();
         let pack_bytes = std::fs::read(&pack_path).unwrap();
         let index_bytes = std::fs::read(&idx_path).unwrap();
-        let reader = PackReader::from_bytes(pack_bytes, index_bytes).unwrap();
+        let reader =
+            PackReader::from_bytes(pack_bytes, index_bytes, &std::env::temp_dir()).unwrap();
         let (_ty, got) = reader
             .get_object(&PackObjectId::Hash(hash))
             .unwrap()
@@ -1884,7 +1894,7 @@ mod tests {
             added.push(id);
         }
         let (pack_data, index_data, _) = finalize_cursor(b, &idx_path);
-        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        let reader = PackReader::from_bytes(pack_data, index_data, &std::env::temp_dir()).unwrap();
         let mut got = reader.list_ids().unwrap();
         // PackReader's list_ids returns index order — should already be
         // sorted because we sort on finalize.

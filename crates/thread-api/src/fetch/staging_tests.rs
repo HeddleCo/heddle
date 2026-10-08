@@ -1178,3 +1178,86 @@ fn source_staging_binds_signed_entry_privacy_to_selected_salted_closure() {
         }
     }
 }
+
+#[test]
+fn partial_source_with_withheld_blob_is_rejected_and_failed_fetch_cleans_scratch() {
+    use objects::store::ObjectStore;
+    let destination = tempfile::tempdir().expect("destination");
+    let repository = repo::Repository::init_default(destination.path()).expect("repository");
+    let scratch = repository.store().root().join("tmp");
+    std::fs::create_dir_all(&scratch).expect("store scratch");
+    let (directory, mut ready, operations, state) = fixture(&scratch, false);
+    let reader = PackReader::open(
+        &directory.path().join("source.pack"),
+        &directory.path().join("source.idx"),
+        directory.path(),
+    )
+    .expect("original pack");
+    let (_, bytes) = reader
+        .get_hashed_object(&state.tree)
+        .expect("tree read")
+        .expect("tree");
+    let tree = Tree::decode_canonical(&bytes).expect("salted tree");
+    let hidden = std::collections::HashSet::from([tree.v4_leaf_hash_at(0).expect("withheld leaf")]);
+    let partial = objects::object::PartialTree::project(&tree, &hidden).expect("proof");
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    reader
+        .visit_objects(|id, kind, bytes| {
+            if kind == ObjectType::Tree {
+                builder.add_id(
+                    id,
+                    kind,
+                    objects::object::encode_redacted_projection(&partial)?,
+                );
+            } else {
+                // Keep the actual withheld leaf's blob, not an unrelated extra.
+                builder.add_id(id, kind, bytes.to_vec());
+            }
+            Ok(())
+        })
+        .expect("malicious partial disclosure");
+    let (bytes, index, _) = builder.build().expect("checksummed disclosure");
+    drop(reader);
+    std::fs::write(directory.path().join("source.pack"), bytes).expect("pack");
+    std::fs::write(directory.path().join("source.idx"), index).expect("index");
+    let reader = PackReader::open(
+        &directory.path().join("source.pack"),
+        &directory.path().join("source.idx"),
+        directory.path(),
+    )
+    .expect("malicious pack");
+    assert!(
+        reader
+            .validate_visible_source_closure(&state, 65536)
+            .is_err(),
+        "withheld content cannot accompany its valid partial proof"
+    );
+    drop(reader);
+    ready.full_closure_available = false;
+    let result = validate(directory, ready, operations, vec![]);
+    if let Ok(staged) = result {
+        staged
+            .install_source_objects(&repository)
+            .expect("expose accidental installation");
+        panic!("staging accepted a withheld blob");
+    }
+    assert!(
+        !repository
+            .store()
+            .has_state(&state.id())
+            .expect("no selected State")
+    );
+    assert!(
+        !repository
+            .store()
+            .has_partial_tree(&state.tree)
+            .expect("no partial cache entry")
+    );
+    assert!(
+        !repository
+            .store()
+            .has_blob_locally(&Blob::new(b"selected source".to_vec()).hash())
+            .expect("withheld blob absent")
+    );
+    assert_eq!(std::fs::read_dir(&scratch).expect("scratch").count(), 0);
+}

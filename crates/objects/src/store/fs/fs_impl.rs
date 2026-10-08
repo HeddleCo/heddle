@@ -48,6 +48,14 @@ use crate::{
 /// reporting the compressed size of every loose blob.
 const BLOB_HEADER_PEEK: usize = 13;
 
+fn pack_is_corrupt(validation: Result<()>) -> Result<bool> {
+    match validation {
+        Ok(()) => Ok(false),
+        Err(HeddleError::InvalidObject(_) | HeddleError::Corruption { .. }) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     tree.validate()?;
     Ok(tree)
@@ -1297,18 +1305,17 @@ impl FsStore {
             match path.extension().and_then(|value| value.to_str()) {
                 Some("pack") => {
                     let index = path.with_extension("idx");
-                    let valid =
+                    let validation =
                         crate::store::pack::PackReader::open(&path, &index, &self.root.join("tmp"))
-                            .and_then(|reader| validate_pack(self, &reader))
-                            .is_ok();
-                    if !valid {
-                        let _ = fs::remove_file(&path);
-                        let _ = fs::remove_file(&index);
+                            .and_then(|reader| validate_pack(self, &reader));
+                    if pack_is_corrupt(validation)? {
+                        fs::remove_file(&path)?;
+                        fs::remove_file(&index)?;
                         removed += 1;
                     }
                 }
-                Some("npk") if super::npk1::Npk1Pack::open(&path).is_err() => {
-                    let _ = fs::remove_file(&path);
+                Some("npk") if pack_is_corrupt(super::npk1::Npk1Pack::open(&path).map(|_| ()))? => {
+                    fs::remove_file(&path)?;
                     removed += 1;
                 }
                 _ => {}
@@ -2181,7 +2188,11 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, pack_data, index_data))]
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
-        let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
+        let reader = crate::store::pack::PackReader::from_slice(
+            pack_data,
+            index_data,
+            &self.root.join("tmp"),
+        )?;
         let ids = validate_and_list_pack(self, &reader)?;
         let state_entries = self.states_needing_loose_copies(&reader, &ids)?;
         let attachment_entries = attachment_entries_from_pack(&reader, &ids)?;
@@ -2242,14 +2253,16 @@ impl ObjectStore for FsStore {
         index_path: &Path,
     ) -> Result<crate::store::pack::PackInventory> {
         use std::io::{BufReader, BufWriter, Read, Write};
-        let scratch = self.root.join("tmp");
-        fs::create_dir_all(&scratch)?;
-        let inventory = crate::store::pack::PackInventory::copy_from_index(index_path, &scratch)?;
+        let directory =
+            crate::store::pack::ScratchDir::new(&self.root.join("tmp"), "pack-install-")?;
+        let scratch = directory.path();
+        let inventory =
+            crate::store::pack::PackInventory::copy_from_index(index_path, &self.root.join("tmp"))?;
         // Mirrors and attachments are also staged on disk. Validate every
         // object before publishing either immutable files or derived metadata.
-        let mut metadata = tempfile::NamedTempFile::new_in(&scratch)?;
+        let mut metadata = tempfile::NamedTempFile::new_in(scratch)?;
         {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path, &scratch)?;
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path, scratch)?;
             let mut writer = BufWriter::new(metadata.as_file_mut());
             visit_validated_pack(self, &reader, |id, kind, data| {
                 let retain = match id {
