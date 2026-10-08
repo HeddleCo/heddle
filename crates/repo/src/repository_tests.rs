@@ -3690,5 +3690,104 @@ fn test_incremental_goto_replaces_ignored_symlink_instead_of_writing_through_it(
         "goto must never write through an ignored symlink"
     );
     assert!(fs::symlink_metadata(root.join("link")).unwrap().is_dir());
-    assert_eq!(fs::read_to_string(root.join("link/file")).unwrap(), "inside\n");
+    assert_eq!(
+        fs::read_to_string(root.join("link/file")).unwrap(),
+        "inside\n"
+    );
+}
+
+/// heddle#2017 review: deleting through a symlink. A state tracks
+/// `link/secret`; the worktree then holds `link` as an ignored symlink to an
+/// outside directory that has a `secret` of its own. Moving to a state without
+/// `link/secret` (incremental and full rematerialize) must never delete the
+/// outside file.
+#[test]
+#[cfg(unix)]
+fn test_goto_never_deletes_through_an_ignored_symlink() {
+    for discard in [false, true] {
+        let (temp_dir, repo) = create_test_repo();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "outside\n").unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        let base = repo.snapshot(Some("base".into()), None).unwrap();
+        fs::create_dir(root.join("link")).unwrap();
+        fs::write(root.join("link/secret"), "tracked\n").unwrap();
+        repo.snapshot(Some("tracked".into()), None).unwrap();
+        fs::remove_dir_all(root.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        fs::create_dir_all(root.join(".heddle/info")).unwrap();
+        fs::write(root.join(".heddle/info/exclude"), "/link\n").unwrap();
+
+        let result = if discard {
+            repo.goto_discard_local(&base.id())
+        } else {
+            repo.goto_verified_clean(&base.id())
+        };
+
+        result.unwrap();
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "outside\n",
+            "goto (discard={discard}) deleted a file through the `link` symlink"
+        );
+    }
+}
+
+/// heddle#2017 review P2-a: like Git ≥ 2.32, an in-tree `.heddleignore` or
+/// `.gitignore` that is a symlink is not followed; its target's lines are
+/// not ignore rules.
+#[test]
+#[cfg(unix)]
+fn test_symlinked_ignore_files_are_not_followed() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("rules"), "from-outside-rule\n").unwrap();
+    for name in [".heddleignore", ".gitignore"] {
+        std::os::unix::fs::symlink(outside.path().join("rules"), temp_dir.path().join(name))
+            .unwrap();
+    }
+
+    let patterns = repo.ignore_patterns().unwrap();
+
+    assert!(
+        !patterns
+            .iter()
+            .any(|pattern| pattern == "from-outside-rule"),
+        "a symlinked ignore file was followed: {patterns:?}"
+    );
+}
+
+/// A FIFO or device in place of `.heddleignore` must not hang or exhaust
+/// memory: only a regular file is read, and only up to a bounded size.
+#[test]
+#[cfg(unix)]
+fn test_ignore_file_must_be_a_bounded_regular_file() {
+    let (temp_dir, repo) = create_test_repo();
+    let fifo = temp_dir.path().join(".heddleignore");
+    let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o644) }, 0);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let root = temp_dir.path().to_path_buf();
+    std::thread::spawn(move || {
+        let repo = Repository::open(&root).unwrap();
+        let _ = tx.send(repo.ignore_patterns().map(|patterns| patterns.len()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(10));
+    assert!(
+        matches!(outcome, Ok(Ok(_))),
+        "reading a FIFO .heddleignore must neither hang nor fail: {outcome:?}"
+    );
+
+    fs::remove_file(&fifo).unwrap();
+    let mut oversized = "big-rule\n".repeat((2 << 20) / 9);
+    oversized.push_str("tail-rule\n");
+    fs::write(&fifo, oversized).unwrap();
+    let patterns = repo.ignore_patterns().unwrap();
+    assert!(
+        !patterns.iter().any(|pattern| pattern == "tail-rule"),
+        "an ignore file over the size cap must not be loaded"
+    );
 }
