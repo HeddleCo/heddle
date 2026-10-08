@@ -618,6 +618,12 @@ impl Repository {
     ) -> Result<()> {
         let path = dir.join(entry.name());
         let rel_path = rel_dir.join(entry.name());
+        // Never write a `.git` alias at any depth, a root `.heddle` alias or
+        // a `.gitmodules` symlink, whatever the tree says (heddle#2028).
+        let symlink = matches!(entry.target(), TreeEntryTarget::Symlink { .. });
+        if crate::skip_reserved_worktree_write(&rel_path, symlink) {
+            return Ok(());
+        }
         match entry.target() {
             TreeEntryTarget::Blob { hash, executable } => {
                 plan.file_count += 1;

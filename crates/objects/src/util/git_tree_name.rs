@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git tree-entry name classification shared by import engines.
 
-use crate::object::validate_tree_entry_name;
+use crate::object::{ReservedMetadataName, reserved_tree_entry_name, validate_tree_entry_name};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitTreeNameClassification {
@@ -22,7 +22,30 @@ pub enum GitTreeNameLossyAction {
     Converted,
 }
 
-pub fn classify_git_tree_name(raw_name: &[u8]) -> GitTreeNameClassification {
+/// Classify one Git tree entry name for import. `at_root` says the entry is
+/// a direct child of a commit's root tree, where `.heddle` is reserved too;
+/// `symlink` says it is a symlink, which `.gitmodules` may not be (see
+/// [`reserved_tree_entry_name`]).
+///
+/// A reserved name is an `Err`: import must fail, and not even `--lossy`
+/// may drop it, because the tree is hostile rather than unrepresentable.
+pub fn classify_git_tree_name(
+    raw_name: &[u8],
+    at_root: bool,
+    symlink: bool,
+) -> Result<GitTreeNameClassification, ReservedMetadataName> {
+    // Checked on the raw bytes, before any lossy conversion could hide or
+    // create an alias.
+    match reserved_tree_entry_name(raw_name, at_root, symlink) {
+        Some(reason) => Err(reason),
+        None => Ok(classify_git_tree_name_representable(raw_name)),
+    }
+}
+
+/// Classify only whether a Git tree entry name is representable, without
+/// the reserved-name check. For read-only projections of Git history, which
+/// never write a worktree (checkout still refuses reserved names).
+pub fn classify_git_tree_name_representable(raw_name: &[u8]) -> GitTreeNameClassification {
     let (name, utf8_lossy) = match std::str::from_utf8(raw_name) {
         Ok(name) => (name.to_string(), false),
         Err(_) => (String::from_utf8_lossy(raw_name).into_owned(), true),
@@ -70,10 +93,12 @@ mod tests {
             "a\\b",
             "ctrl\u{0001}",
             "del\u{7f}",
+            ".git",
+            ".heddle",
         ];
         for c in cases {
             let classified_representable = matches!(
-                classify_git_tree_name(c.as_bytes()),
+                classify_git_tree_name_representable(c.as_bytes()),
                 GitTreeNameClassification::Representable(_)
             );
             let validator_accepts = validate_tree_entry_name(c).is_ok();
@@ -87,14 +112,14 @@ mod tests {
     #[test]
     fn backslash_name_is_not_representable() {
         assert!(matches!(
-            classify_git_tree_name(b"foo\\bar"),
+            classify_git_tree_name_representable(b"foo\\bar"),
             GitTreeNameClassification::NeedsLossy(_)
         ));
     }
 
     #[test]
     fn invalid_utf8_is_converted_not_dropped() {
-        match classify_git_tree_name(&[b'a', 0xff, b'b']) {
+        match classify_git_tree_name_representable(&[b'a', 0xff, b'b']) {
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 assert_eq!(lossy.action, GitTreeNameLossyAction::Converted);
             }
@@ -108,11 +133,47 @@ mod tests {
         // conversion replaces the 0xff but the backslash survives, so the
         // converted name is still rejected by validate_tree_entry_name and
         // must be Dropped — never silently persisted as Converted.
-        match classify_git_tree_name(b"bad\\\xff") {
+        match classify_git_tree_name_representable(b"bad\\\xff") {
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 assert_eq!(lossy.action, GitTreeNameLossyAction::Dropped);
             }
             other => panic!("expected NeedsLossy/Dropped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reserved_names_fail_rather_than_go_lossy() {
+        let cases: [(&[u8], bool, bool); 10] = [
+            (b".git", false, false),
+            (b".GIT", false, false),
+            (b".git::$INDEX_ALLOCATION", false, false),
+            (b"git~1", false, false),
+            (b".git\\hooks", false, false),
+            (b".git\xff", false, false),
+            (b".heddle", true, false),
+            (b".HEDDLE", true, false),
+            (b".gitmodules", false, true),
+            (b"GITMOD~1", false, true),
+        ];
+        for (raw, at_root, symlink) in cases {
+            assert!(
+                classify_git_tree_name(raw, at_root, symlink).is_err(),
+                "{raw:?}"
+            );
+        }
+        // A nested `.heddle` is ordinary content.
+        assert_eq!(
+            classify_git_tree_name(b".heddle", false, false),
+            Ok(GitTreeNameClassification::Representable(
+                ".heddle".to_string()
+            ))
+        );
+        // A regular `.gitmodules` file is ordinary.
+        assert_eq!(
+            classify_git_tree_name(b".gitmodules", true, false),
+            Ok(GitTreeNameClassification::Representable(
+                ".gitmodules".to_string()
+            ))
+        );
     }
 }

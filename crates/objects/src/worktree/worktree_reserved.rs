@@ -7,16 +7,50 @@
 //! `.identity.lock`, `.identity.tmp.*`, `.last-turn.tmp.*`). Gitignore
 //! last-match-wins would otherwise let `!.heddle/` pull that tree into
 //! capture. Nested `.heddle/` directories (fixtures) stay ordinary content.
+//!
+//! Metadata-directory aliases (heddle#2028) are reserved the same way:
+//! `.git` and its case, NTFS and HFS+ spellings at every depth, and those of
+//! `.heddle` at the root. Checkout never writes them, so capture must
+//! never record them; a nested `.git` is another repository, as in Git.
 
 use std::path::{Component, Path};
 
-/// Whether `path` is a reserved worktree-root Heddle artifact.
+use crate::{
+    error::HeddleError,
+    object::{ReservedPathComponent, reserved_path_component, reserved_tree_entry_name},
+};
+
+/// Whether `path` is a reserved worktree-root Heddle artifact, or passes
+/// through a metadata-directory alias (`.git` at any depth, `.heddle` at the
+/// root; see [`crate::object::reserved_tree_entry_name`]).
 ///
-/// Root-anchored only: `examples/calculator/.heddle/` is not reserved.
-/// Leading `./` is skipped so `./.heddle/identity.toml` matches.
+/// The Heddle artifacts are root-anchored only: `examples/calculator/.heddle/`
+/// is not reserved. Leading `./` is skipped so `./.heddle/identity.toml`
+/// matches.
 #[must_use]
 pub fn is_reserved_worktree_path(path: &Path) -> bool {
     first_normal_component(path).is_some_and(is_reserved_root_name)
+        || reserved_path_component(path.as_os_str().as_encoded_bytes(), false).is_some()
+}
+
+/// The reserved component of a worktree write to `rel_path`, if any: a
+/// `.git` alias at any depth, a `.heddle` alias at the root, or a
+/// `.gitmodules` alias when `symlink` (heddle#2028).
+pub fn reserved_worktree_write(rel_path: &Path, symlink: bool) -> Option<ReservedPathComponent> {
+    reserved_path_component(rel_path.as_os_str().as_encoded_bytes(), symlink)
+}
+
+/// Refuse a worktree write whose worktree-relative path is reserved (see
+/// [`reserved_worktree_write`]). For commands that write one path the user
+/// named; whole-tree writers skip such paths with a warning instead.
+pub fn check_worktree_write_path(rel_path: &Path, symlink: bool) -> Result<(), HeddleError> {
+    match reserved_worktree_write(rel_path, symlink) {
+        Some(reason) => Err(HeddleError::ReservedWorktreePath {
+            path: rel_path.to_path_buf(),
+            reason,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Whether a directory child is reserved without allocating a joined path.
@@ -28,7 +62,9 @@ pub fn is_reserved_directory_child(parent: &Path, name: &str) -> bool {
     if is_reserved_worktree_path(parent) {
         return true;
     }
-    is_worktree_root(parent) && is_reserved_root_name(std::ffi::OsStr::new(name))
+    let at_root = is_worktree_root(parent);
+    (at_root && is_reserved_root_name(std::ffi::OsStr::new(name)))
+        || reserved_tree_entry_name(name.as_bytes(), at_root, false).is_some()
 }
 
 fn is_reserved_root_name(name: &std::ffi::OsStr) -> bool {
@@ -63,7 +99,9 @@ fn first_normal_component(path: &Path) -> Option<&std::ffi::OsStr> {
 mod tests {
     use std::path::Path;
 
-    use super::{is_reserved_directory_child, is_reserved_worktree_path};
+    use super::{
+        check_worktree_write_path, is_reserved_directory_child, is_reserved_worktree_path,
+    };
 
     #[test]
     fn reserves_root_heddle_tree_and_identity() {
@@ -151,5 +189,53 @@ mod tests {
             Path::new("examples/foo"),
             ".heddle.identity"
         ));
+    }
+
+    #[test]
+    fn reserves_metadata_directory_aliases() {
+        for path in [
+            ".git",
+            ".git/hooks/pre-commit",
+            "a/.git/hooks/x",
+            "a/b/.GIT/config",
+            "src/GIT~1",
+            ".git::$INDEX_ALLOCATION/x",
+            ".HEDDLE/config.toml",
+            ".heddle./config.toml",
+            "HEDDLE~1/hooks/pre-capture",
+        ] {
+            assert!(
+                is_reserved_worktree_path(Path::new(path)),
+                "expected reserved: {path}"
+            );
+            assert!(
+                check_worktree_write_path(Path::new(path), false).is_err(),
+                "expected write refused: {path}"
+            );
+        }
+        assert!(is_reserved_directory_child(Path::new("vendor/lib"), ".git"));
+        assert!(check_worktree_write_path(Path::new("sub/.gitmodules"), true).is_err());
+        assert!(check_worktree_write_path(Path::new("sub/.gitmodules"), false).is_ok());
+        assert!(is_reserved_directory_child(Path::new(""), ".HEDDLE"));
+        assert!(!is_reserved_directory_child(
+            Path::new("examples"),
+            ".HEDDLE"
+        ));
+    }
+
+    #[test]
+    fn writes_to_ordinary_dotfiles_are_allowed() {
+        for path in [
+            ".github/workflows/ci.yml",
+            ".gitignore",
+            ".heddleignore",
+            "examples/calculator/.heddle/config.toml",
+            "src/main.rs",
+        ] {
+            assert!(
+                check_worktree_write_path(Path::new(path), false).is_ok(),
+                "expected write allowed: {path}"
+            );
+        }
     }
 }

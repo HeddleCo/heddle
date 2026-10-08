@@ -64,6 +64,13 @@ pub fn cmd_revert(
 
     ensure_worktree_clean(&repo, "revert")?;
 
+    // Skip, with a warning, paths Heddle never writes (heddle#2028).
+    let mut writable = objects::object::FileChangeSet::new();
+    writable.extend(changes.into_iter().filter(|change| {
+        !repo::skip_reserved_worktree_write(std::path::Path::new(&change.path), false)
+    }));
+    let changes = writable;
+
     let mut files_affected: Vec<String> = Vec::new();
 
     apply_inverse_changes(

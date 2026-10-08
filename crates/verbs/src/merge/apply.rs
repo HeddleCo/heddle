@@ -51,8 +51,13 @@ pub fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     let merged_entries: HashMap<&str, &TreeEntry> =
         tree.entries().iter().map(|e| (e.name(), e)).collect();
 
-    // Drop tree-entries that don't survive into the merged tree.
+    // Drop tree-entries that don't survive into the merged tree. A root
+    // metadata alias is never removed or replaced (heddle#2028): on disk it
+    // is the repository's own metadata, not tracked content.
     for (name, current) in &current_entries {
+        if repo::skip_reserved_worktree_write(Path::new(name), false) {
+            continue;
+        }
         if !merged_entries.contains_key(name) {
             let path = repo.root().join(name);
             remove_path_for_drop(repo, &path, current, &current_tree)?;
@@ -65,6 +70,7 @@ pub fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     for (name, merged) in &merged_entries {
         if let Some(current) = current_entries.get(name)
             && current.entry_type() != merged.entry_type()
+            && !repo::skip_reserved_worktree_write(Path::new(name), false)
         {
             let path = repo.root().join(name);
             remove_path_for_type_change(repo, &path, current, merged, &current_tree)?;

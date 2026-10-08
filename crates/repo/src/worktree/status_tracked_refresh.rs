@@ -106,6 +106,12 @@ fn refresh_tracked_directory(
     let mut subtree_clean = true;
     for entry in entries {
         let child_rel_path = join_relative_path(rel_path, entry.name());
+        // Checkout never writes a reserved metadata path (heddle#2028), so
+        // its absence or difference on disk is not a change.
+        if objects::worktree::reserved_worktree_write(&child_rel_path, entry.is_symlink()).is_some()
+        {
+            continue;
+        }
         if ctx
             .monitor
             .can_filter_directory_children(rel_path, ctx.index)

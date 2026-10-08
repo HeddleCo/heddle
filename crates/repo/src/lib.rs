@@ -96,6 +96,8 @@ pub use crypto::owner_root::{
     verify_spool_owner_observation,
 };
 mod repository;
+mod reserved_worktree_paths;
+pub use reserved_worktree_paths::skip_reserved_worktree_write;
 mod repository_key_binding;
 mod repository_redaction;
 #[path = "repository_resolve_for_command.rs"]

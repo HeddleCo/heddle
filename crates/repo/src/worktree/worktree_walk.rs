@@ -12,11 +12,12 @@ use objects::{
     error::{HeddleError, Result},
     object::{ContentHash, Tree, TreeEntry},
     store::ObjectStore,
-    worktree::is_reserved_directory_child,
+    worktree::{is_reserved_directory_child, reserved_worktree_write},
 };
 
 use crate::{
     repository::Repository,
+    reserved_worktree_paths::note_skipped_reserved_path,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{IndexEntry as CachedWorktreeEntry, IndexEntryKind as CachedEntryKind},
 };
@@ -214,7 +215,16 @@ fn walk_directory<P: WorktreeWalkPolicy>(
             // Reserved-path hard-deny (heddle#1413): root `.heddle/` is
             // identity/engine state. User ignore rules cannot un-ignore it.
             if is_reserved_directory_child(directory.rel_path, name) {
+                note_skipped_reserved_path(&directory.rel_path.join(name));
                 continue;
+            }
+            // A `.gitmodules` symlink is never recorded either (heddle#2028).
+            if matches!(entry.kind, ListedDirEntryKind::Symlink) {
+                let path = directory.rel_path.join(name);
+                if reserved_worktree_write(&path, true).is_some() {
+                    note_skipped_reserved_path(&path);
+                    continue;
+                }
             }
             if ignore_matcher.should_prune_directory_child(directory.rel_path, name) {
                 continue;
@@ -234,11 +244,13 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                 && tree_entries[next_tree_entry].name() < name
             {
                 let missing_entry = &tree_entries[next_tree_entry];
-                policy.visit_missing(
-                    &directory.rel_path.join(missing_entry.name()),
-                    missing_entry,
-                    &mut state,
-                )?;
+                if !is_reserved_tree_entry(directory.rel_path, missing_entry) {
+                    policy.visit_missing(
+                        &directory.rel_path.join(missing_entry.name()),
+                        missing_entry,
+                        &mut state,
+                    )?;
+                }
                 next_tree_entry += 1;
             }
             let tree_entry = tree_entries
@@ -331,11 +343,20 @@ fn walk_directory<P: WorktreeWalkPolicy>(
 
     if check_missing {
         for entry in &tree_entries[next_tree_entry..] {
-            policy.visit_missing(&directory.rel_path.join(entry.name()), entry, &mut state)?;
+            if !is_reserved_tree_entry(directory.rel_path, entry) {
+                policy.visit_missing(&directory.rel_path.join(entry.name()), entry, &mut state)?;
+            }
         }
     }
 
     policy.leave_directory(&directory, tree, state)
+}
+
+/// Whether a recorded tree entry is one checkout never writes
+/// (heddle#2028). Its absence from the worktree is not a deletion: the walk
+/// skips it on both sides, so status stays clean after such a checkout.
+fn is_reserved_tree_entry(parent: &Path, entry: &TreeEntry) -> bool {
+    reserved_worktree_write(&parent.join(entry.name()), entry.is_symlink()).is_some()
 }
 
 pub(crate) fn list_directory(

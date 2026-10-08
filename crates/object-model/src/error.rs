@@ -274,6 +274,13 @@ pub enum HeddleError {
     /// withheld leaves.
     #[error("redacted tree: {0}")]
     RedactedTree(String),
+    /// A worktree write would create a path through a repository metadata
+    /// directory (heddle#2028): `.git` at any depth, or the root `.heddle`.
+    #[error("refusing to write '{}': {reason}", path.display())]
+    ReservedWorktreePath {
+        path: std::path::PathBuf,
+        reason: crate::object::ReservedPathComponent,
+    },
 }
 
 impl From<TreeStreamError> for HeddleError {

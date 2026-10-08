@@ -406,6 +406,9 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        if crate::skip_reserved_worktree_write(rel_path, entry.entry_type() == EntryType::Symlink) {
+            return Ok(());
+        }
         match entry.entry_type() {
             EntryType::Blob => {
                 plan.stats.changed_count += 1;
@@ -455,6 +458,10 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        // A `.gitmodules` symlink may be removed; only writing one is unsafe.
+        if crate::skip_reserved_worktree_write(rel_path, false) {
+            return Ok(());
+        }
         match entry.entry_type() {
             EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 plan.stats.changed_count += 1;
@@ -484,6 +491,12 @@ impl Repository {
         to_entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        // Neither side writes or removes through a metadata directory
+        // (heddle#2028). A removal is skipped as well: on disk such a path is
+        // a nested repository's own metadata, not Heddle content.
+        if crate::skip_reserved_worktree_write(rel_path, false) {
+            return Ok(());
+        }
         if from_entry.entry_type() == EntryType::Tree && to_entry.entry_type() == EntryType::Tree {
             let from_hash = from_entry.require_content_hash();
             let to_hash = to_entry.require_content_hash();
@@ -535,6 +548,9 @@ impl Repository {
                 return Ok(());
             }
 
+            if crate::skip_reserved_worktree_write(rel_path, true) {
+                return Ok(());
+            }
             plan.stats.changed_count += 1;
             plan.removals.push(self.root().join(rel_path));
             plan.writes.push(WorktreeWriteOp::Symlink {
@@ -1111,6 +1127,12 @@ fn remove_tracked_descendants_inner(
 ) -> Result<()> {
     for entry in source_subtree.entries() {
         let child = dir.join(entry.name());
+        // Never remove through a metadata directory (heddle#2028): on disk a
+        // nested `.git` is that repository's own metadata.
+        let rel_child = child.strip_prefix(repo.root()).unwrap_or(&child);
+        if crate::skip_reserved_worktree_write(rel_child, false) {
+            continue;
+        }
         match entry.entry_type() {
             // Native child-spool edge: never materialized to the worktree in
             // this phase, so there is no descendant file to remove.
