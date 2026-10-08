@@ -146,12 +146,11 @@ impl ImportSourceRefs {
             return Err(ImportSourceRefError::NoBranches);
         }
         for ref_name in &branches {
-            verbs::validate_thread_name(&ref_name["refs/heads/".len()..]).map_err(|error| {
-                ImportSourceRefError::InvalidBranch {
+            objects::object::ThreadName::from_git_branch(&ref_name["refs/heads/".len()..])
+                .map_err(|error| ImportSourceRefError::InvalidBranch {
                     ref_name: ref_name.clone(),
                     reason: error.to_string(),
-                }
-            })?;
+                })?;
         }
         Ok(Self {
             branches,
@@ -630,16 +629,35 @@ mod tests {
     }
 
     #[test]
+    fn source_refs_accept_exact_git_branch_corpus_with_known_oids() {
+        for name in [
+            "feat/mcp=timeout",
+            "a,b",
+            "ünicode/ブランチ",
+            "@",
+            "x+y",
+            "trailing\u{a0}",
+            "literal\u{fffd}",
+            "heddle/foo",
+            &"界".repeat(337),
+        ] {
+            let full = format!("refs/heads/{name}");
+            let refs = ImportSourceRefs::from_targets(vec![(full.clone(), vec![7; 20])])
+                .expect("Git-valid source");
+            assert_eq!(
+                refs.branches().next(),
+                Some((full.as_str(), Some([7; 20].as_slice())))
+            );
+        }
+    }
+
+    #[test]
     fn source_refs_reject_empty_and_invalid_branch_names_and_bound_all_tags() {
         assert!(matches!(
             ImportSourceRefs::from_names(["refs/tags/v1".into()]),
             Err(ImportSourceRefError::NoBranches)
         ));
-        for ref_name in [
-            "refs/heads/-flag",
-            "refs/heads/heddle/frontier/main/hc-1",
-            "refs/heads/bad name",
-        ] {
+        for ref_name in ["refs/heads/-flag", "refs/heads/bad name"] {
             assert!(
                 matches!(ImportSourceRefs::from_names([ref_name.into()]), Err(ImportSourceRefError::InvalidBranch { ref_name: rejected, .. }) if rejected == ref_name)
             );

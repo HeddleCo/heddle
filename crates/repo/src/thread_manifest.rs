@@ -163,27 +163,14 @@ impl ManifestFile {
     }
 }
 
-/// The single per-thread directory under `<heddle_dir>/threads/`, keyed
-/// off the thread name through a **prefix-safe single-segment encoding**
-/// ([`encode_thread_segment`]). A slashed id never becomes a directory
-/// prefix of another: `feature/foo` maps to `threads/feature%2Ffoo`, NOT
-/// `threads/feature/foo`, so it can neither nest under nor swallow a
-/// `feature` (or `feature/f`) thread. Because the encoding is injective
-/// and yields exactly one path component, two distinct ids always land in
-/// disjoint sibling directories, and none can ever be an ancestor of
-/// another (closing the prefix-nesting + recursive-drop class, heddle#572
-/// r2).
-///
-/// This is the ONE derivation every thread-path consumer keys off — the
-/// `manifest.toml` sidecar, the worktree checkout root
-/// (`<dir>/<repo-name>`) for all three workspace modes, the harness
-/// subagent/root-actor paths, and
-/// the promote default — so the manifest and the checkout can never
-/// diverge or collide for a given thread.
+/// The v6 per-thread directory: portable percent-escaped UTF-8 or a digest
+/// entry carrying the exact name. Thread directories are never ancestors of
+/// each other, even when names share encoding or digest prefixes.
+/// Every sidecar and managed checkout uses this derivation.
 pub fn thread_dir(heddle_dir: &Path, thread: &str) -> PathBuf {
     heddle_dir
         .join("threads")
-        .join(encode_thread_segment(thread))
+        .join(objects::name_encoding::name_path(thread))
 }
 
 /// Managed checkout leaf for a materialized/virtualized thread.
@@ -207,64 +194,50 @@ pub fn managed_checkout_path(heddle_dir: &Path, thread: &str, repo_root: &Path) 
     thread_dir(heddle_dir, thread).join(managed_checkout_leaf(repo_root))
 }
 
-/// Encode a thread id into a single, filesystem-safe, prefix-free path
-/// segment. Percent-encodes every byte that is unsafe as a lone path
-/// component — the separators `/` and `\`, the Windows-hostile `:`, the
-/// `%` escape itself, and anything outside the safe slug set — so the
-/// mapping is injective and reversible ([`decode_thread_segment`]) and
-/// each id occupies one disjoint leaf under `threads/`. The common safe
-/// slug characters (alphanumerics and `_ - . @ + =`) pass through for
-/// readability, so `v1.2`, `team@scope`, and `wip+1=2` stay legible while
-/// `feature/foo` becomes `feature%2Ffoo`.
-///
-/// The whole-segment `.` / `..` results are escaped specially: a thread
-/// id of exactly `.` (which [`crate::validate_thread_id`] permits) or `..`
-/// (which it rejects, but unchecked/deserialized ids could still carry)
-/// would otherwise be a current-/parent-dir component that escapes or
-/// aliases `threads/`.
+/// Reversible portable percent escaping, shared with v6 ref storage.
 pub fn encode_thread_segment(thread: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(thread.len());
-    for &b in thread.as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@' | b'+' | b'=') {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0f) as usize] as char);
-        }
-    }
-    match out.as_str() {
-        "." => "%2E".to_string(),
-        ".." => "%2E%2E".to_string(),
-        _ => out,
-    }
+    objects::name_encoding::encode_name(thread)
 }
 
-/// Inverse of [`encode_thread_segment`]: recover the thread id from its
-/// on-disk directory segment. Returns `None` for a malformed segment (a
-/// truncated/`%`-escape with non-hex digits, or bytes that don't form
-/// valid UTF-8) so the manifest walk skips foreign directories rather than
-/// inventing a bogus thread name.
+/// Strict inverse of the shared portable name encoding.
 pub fn decode_thread_segment(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
+    objects::name_encoding::decode_name(segment)
+}
+
+/// Walk only encoding chunks, stopping before each managed checkout.
+pub(crate) fn name_directories(
+    dir: &Path,
+    prefix: &Path,
+    out: &mut Vec<(String, PathBuf)>,
+) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(enrich_fs_error(dir, "listing", error)),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let segment = entry.file_name();
+        let Some(segment) = segment.to_str() else {
+            continue;
+        };
+        let relative = prefix.join(segment);
+        if segment == "entry" {
+            let root = dir
+                .ancestors()
+                .nth(prefix.components().count())
+                .ok_or_else(|| io::Error::other("invalid name root"))?;
+            if let Some(name) = objects::name_encoding::read_name_entry(root, &relative)? {
+                out.push((name, entry.path()));
             }
-            let hi = (bytes[i + 1] as char).to_digit(16)?;
-            let lo = (bytes[i + 2] as char).to_digit(16)?;
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
+        } else if segment.starts_with("n-") || segment.starts_with("h-") || segment == "git" {
+            name_directories(&entry.path(), &relative, out)?;
         }
     }
-    String::from_utf8(out).ok()
+    Ok(())
 }
 
 /// Where this thread's manifest lives on disk, given the repo's
@@ -299,35 +272,14 @@ pub struct MaterializedThreadSummary {
 /// manifests are silently skipped — callers that care can re-read
 /// individual manifests via [`read_manifest`].
 ///
-/// A single-level scan: every thread occupies exactly one directory
-/// `threads/<encoded>/` (the prefix-safe [`thread_dir`] encoding), so the
-/// thread name is the *decoded* directory segment and there is nothing to
-/// recurse into. Directories whose segment doesn't decode (foreign / hand-
-/// placed) are skipped. This also keeps the scan out of each thread's
-/// managed checkout, which has no thread `manifest.toml` of its own.
+/// Walk encoding chunks and stop at terminal name directories, keeping the
+/// scan out of managed checkouts and preserving exact decoded identity.
 pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedThreadSummary>> {
-    let threads_dir = heddle_dir.join("threads");
-    let entries = match fs::read_dir(&threads_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
-    };
+    let mut entries = Vec::new();
+    name_directories(&heddle_dir.join("threads"), Path::new(""), &mut entries)?;
     let mut summaries = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let Some(segment) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some(name) = decode_thread_segment(&segment) else {
-            continue;
-        };
-        // Read the manifest directly from this dir rather than re-deriving
-        // its path from `name` — robust to any segment whose decode→encode
-        // isn't byte-identical (e.g. a hand-placed lowercase escape).
-        if let Ok(Some(m)) = read_manifest_at(&entry.path().join("manifest.toml")) {
+    for (name, path) in entries {
+        if let Ok(Some(m)) = read_manifest_at(&path.join("manifest.toml")) {
             summaries.push(MaterializedThreadSummary {
                 thread: name,
                 state_id: m.state_id,
@@ -347,6 +299,7 @@ pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedTh
 /// schema-version mismatch — callers should treat that as "rebuild
 /// the manifest from scratch", not as a corruption hazard.
 pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<ThreadManifest>> {
+    objects::name_encoding::verify_name_entry(&heddle_dir.join("threads"), thread)?;
     read_manifest_at(&manifest_path(heddle_dir, thread))
 }
 
@@ -396,23 +349,10 @@ pub fn manifest_for_worktree_root(
     heddle_dir: &Path,
     canonical_worktree_root: &Path,
 ) -> io::Result<Option<ThreadManifest>> {
-    let threads_dir = heddle_dir.join("threads");
-    let entries = match fs::read_dir(&threads_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
-    };
-    // Single-level scan: every thread's `manifest.toml` lives exactly one
-    // level deep at `threads/<encoded>/manifest.toml` (flat [`thread_dir`]
-    // layout). Match on the recorded `worktree_path`, so the thread name is
-    // irrelevant; skip anything unparseable or schema-stale — the reconcile
-    // caller is conservative by design.
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = entry.path().join("manifest.toml");
+    let mut entries = Vec::new();
+    name_directories(&heddle_dir.join("threads"), Path::new(""), &mut entries)?;
+    for (_, dir) in entries {
+        let path = dir.join("manifest.toml");
         if let Ok(text) = fs::read_to_string(&path)
             && let Ok(manifest) = toml::from_str::<ThreadManifest>(&text)
             && manifest.schema_version == SCHEMA_VERSION
@@ -441,6 +381,7 @@ pub fn manifest_for_worktree_root(
 /// thread's checkout, and there are no empty intermediate parents left to
 /// reap (the heddle#572 r2 recursive-drop hazard).
 pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result<bool> {
+    objects::name_encoding::verify_name_entry(&heddle_dir.join("threads"), thread)?;
     let dir = thread_dir(heddle_dir, thread);
     match fs::remove_dir_all(&dir) {
         Ok(()) => Ok(true),
@@ -647,6 +588,7 @@ pub fn write_manifest(
     manifest: &ThreadManifest,
 ) -> io::Result<()> {
     let path = manifest_path(heddle_dir, thread);
+    objects::name_encoding::write_name_entry(&heddle_dir.join("threads"), thread)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
     }
@@ -693,6 +635,69 @@ mod tests {
 
     fn cid() -> StateId {
         crate::test_state_id()
+    }
+
+    #[test]
+    fn longest_multibyte_names_fit_absolute_internal_paths() {
+        let root = PathBuf::from(format!("/{}/{}", "r".repeat(255), "r".repeat(255)));
+        let branch = format!("{}é", "界".repeat(337));
+        let tag = "界".repeat(338);
+        objects::object::ThreadName::from_git_branch(&branch).expect("longest multibyte branch");
+        objects::object::MarkerName::from_git_tag(&tag).expect("1024-byte full tag ref");
+        assert_eq!(format!("refs/heads/{branch}").len(), 1024);
+        assert_eq!(format!("refs/tags/{tag}").len(), 1024);
+        let heddle = root.join(".heddle");
+        let checkout = managed_checkout_path(&heddle, &branch, &root);
+        for path in [
+            checkout.join(".heddle/UNDO_RECOVERY"),
+            heddle
+                .join("refs/markers")
+                .join(objects::name_encoding::name_path(&tag))
+                .join("value.tmp-18446744073709551615"),
+        ] {
+            assert!(
+                path.as_os_str().len() <= 1024,
+                "{} bytes: {}",
+                path.as_os_str().len(),
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn long_and_windows_hostile_manifests_list_and_drop_independently() {
+        let temp = TempDir::new().expect("temp");
+        let long = "界".repeat(337);
+        let sibling = format!("{long}x");
+        let names = [
+            long.as_str(),
+            sibling.as_str(),
+            "CON",
+            "con",
+            "x'$(true)",
+            "a,b",
+            "trailing\u{a0}",
+        ];
+        for name in names {
+            let manifest = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/worktree"));
+            write_manifest(temp.path(), name, &manifest).expect("write bounded storage");
+        }
+        assert_eq!(
+            list_thread_manifests(temp.path()).expect("list").len(),
+            names.len()
+        );
+        remove_thread_manifest_dir(temp.path(), &long).expect("drop long thread");
+        assert!(
+            read_manifest(temp.path(), &sibling)
+                .expect("sibling intact")
+                .is_some()
+        );
+        assert_eq!(
+            list_thread_manifests(temp.path())
+                .expect("list after drop")
+                .len(),
+            names.len() - 1
+        );
     }
 
     #[test]
@@ -753,7 +758,10 @@ mod tests {
         let dir = thread_dir(heddle, "feature/foo");
         // The slash is percent-encoded into ONE path segment, so the id can
         // never nest under (or swallow) another thread's directory.
-        assert_eq!(dir, Path::new("/repo/.heddle/threads/feature%2Ffoo"));
+        assert_eq!(
+            dir,
+            Path::new("/repo/.heddle/threads/n-feature%2Ffoo/entry")
+        );
         // The manifest is a child of the shared per-thread dir, so a managed
         // checkout leaf is its sibling.
         assert_eq!(
@@ -769,7 +777,7 @@ mod tests {
         let repo_root = Path::new("/workspace/repo");
         assert_eq!(
             managed_checkout_path(heddle, "feature/foo", repo_root),
-            Path::new("/workspace/repo/.heddle/threads/feature%2Ffoo/repo")
+            Path::new("/workspace/repo/.heddle/threads/n-feature%2Ffoo/entry/repo")
         );
     }
 

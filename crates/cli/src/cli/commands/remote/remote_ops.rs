@@ -458,7 +458,8 @@ fn execute_authoritative_git_pull_inner(
         }
         None => None,
     };
-    let old_state = repo.refs().get_thread(&ThreadName::new(local_branch))?;
+    let native_branch = ThreadName::from_git_branch(local_branch)?;
+    let old_state = repo.refs().get_thread(&native_branch)?;
 
     progress.set_phase("streaming Git objects");
     let mut sley_progress = GitPullProgress {
@@ -599,7 +600,7 @@ fn execute_authoritative_git_pull_inner(
         }
     }
     if old_state.as_ref() != Some(&new_state)
-        && let Err(error) = repo.set_thread_recorded(&ThreadName::new(local_branch), &new_state)
+        && let Err(error) = repo.set_thread_recorded(&native_branch, &new_state)
     {
         let rollback = changed.then(|| {
             rollback_git_pull_branch(repo, &git, &local_ref, old_oid, new_oid, materialized, true)
@@ -1944,19 +1945,26 @@ fn git_remote_external_config_advice(name: &str, path: &Path) -> anyhow::Error {
 }
 
 fn set_git_overlay_default(git: &SleyRepository, branch: &str, name: &str) -> Result<()> {
-    let branch_remote = format!("branch.{branch}.remote");
-    let branch_merge = format!("branch.{branch}.merge");
     let merge_target = git
         .config_snapshot()?
         .get("branch", Some(branch), "merge")
-        .map(str::to_string)
+        .map(str::to_owned)
         .unwrap_or_else(|| format!("refs/heads/{branch}"));
-    let mut plan = ConfigEditPlan::new(git.common_dir().join("config"))
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
         .with_operation(ConfigEdit::set("remote.pushDefault", name)?)
+        .with_operation(ConfigEdit::Set {
+            section: "branch".into(),
+            subsection: Some(branch.into()),
+            name: "remote".into(),
+            value: name.into(),
+        })
+        .with_operation(ConfigEdit::Set {
+            section: "branch".into(),
+            subsection: Some(branch.into()),
+            name: "merge".into(),
+            value: merge_target,
+        })
         .with_fsync(true);
-    plan = plan
-        .with_operation(ConfigEdit::set(&branch_remote, name)?)
-        .with_operation(ConfigEdit::set(&branch_merge, merge_target)?);
     git.apply_config_edit_plan(plan).map_err(anyhow::Error::new)
 }
 

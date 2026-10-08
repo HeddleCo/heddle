@@ -46,6 +46,66 @@ fn ingest_into_bridge(
     .map_err(|error| error.to_string())
 }
 
+#[test]
+fn git_branch_alphabet_and_reserved_mapping_export_exact_refs() {
+    let source = TempDir::new().expect("source");
+    git(source.path(), &["init", "-b", "main"]);
+    std::fs::write(source.path().join("payload"), "ref identity").expect("payload");
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "-m", "refs"]);
+    let oid = git(source.path(), &["rev-parse", "HEAD"])
+        .trim_end_matches('\n')
+        .to_owned();
+    for name in [
+        "feat/mcp=timeout",
+        "a,b",
+        "ünicode/ブランチ",
+        "@",
+        "x+y",
+        "literal\u{fffd}",
+        "heddle/foo",
+        "git%n-heddle%2Ffoo",
+        "x'$(true)",
+        "CON",
+        "con",
+        "Foo",
+        "foo",
+        "caf\u{e9}",
+        "cafe\u{301}",
+        "git%foo",
+    ] {
+        git(
+            source.path(),
+            &["update-ref", &format!("refs/heads/{name}"), &oid],
+        );
+        git(
+            source.path(),
+            &["update-ref", &format!("refs/tags/{name}"), &oid],
+        );
+    }
+    assert_roundtrip_fidelity("full-branch-alphabet", source.path());
+}
+
+#[test]
+#[ignore = "blocked upstream: sley 0.11.0 write validation rejects trailing Unicode whitespace (owner tracking: sley#243)"]
+fn git_nbsp_branch_export_blocked_on_sley_write_validation() {
+    let source = TempDir::new().expect("source");
+    git(source.path(), &["init", "-b", "main"]);
+    std::fs::write(source.path().join("payload"), "ref identity").expect("payload");
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "-m", "refs"]);
+    let oid = git(source.path(), &["rev-parse", "HEAD"]);
+    git(
+        source.path(),
+        &[
+            "update-ref",
+            "refs/heads/trailing\u{a0}",
+            oid.trim_end_matches('\n'),
+        ],
+    );
+    assert_roundtrip_fidelity("trailing-nbsp-export", source.path());
+}
+
 /// Deterministic identity + dates so every fixture produces stable SHAs
 /// regardless of when/where the test runs. A drifting SHA here would be a
 /// test bug, not a fidelity bug — pin everything.
@@ -220,11 +280,29 @@ fn assert_roundtrip_fidelity_opts_via(case: &str, source: &Path, lossy: bool, di
         );
     }
 
+    for name in source_refs
+        .keys()
+        .filter_map(|name| name.strip_prefix("refs/heads/"))
+    {
+        let thread = ThreadName::from_git_branch(name).expect("source branch");
+        assert!(
+            repo.refs()
+                .get_thread(&thread)
+                .expect("native branch")
+                .is_some(),
+            "[{case}] missing native branch {name:?}"
+        );
+    }
     let dest_home = TempDir::new().expect("dest temp");
     let dest = dest_home.path().join("export");
-    bridge
+    let stats = bridge
         .export_to_path(&dest)
         .unwrap_or_else(|e| panic!("[{case}] export_to_path failed: {e}"));
+    assert!(
+        stats.failed_refs.is_empty(),
+        "[{case}] failed exports: {:?}",
+        stats.failed_refs
+    );
     assert!(
         !repo.heddle_dir().join("git").exists(),
         "[{case}] export scratch repository must remain ephemeral"

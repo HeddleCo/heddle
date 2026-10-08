@@ -159,6 +159,35 @@ impl MarkerName {
     }
 }
 
+/// Invalid external Git ref syntax or the signed full-ref resource limit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid Git ref name: {0}")]
+pub struct GitRefNameError(pub String);
+
+impl ThreadName {
+    /// Validate a short Git branch and map only native namespace collisions.
+    pub fn from_git_branch(name: &str) -> Result<Self, GitRefNameError> {
+        if name == "HEAD"
+            || name.len() + "refs/heads/".len() > 1024
+            || sley_refs::BranchRefNameBuf::from_branch_name(name).is_err()
+        {
+            return Err(GitRefNameError(name.to_owned()));
+        }
+        Ok(Self(crate::name_encoding::native_git_name(name)))
+    }
+}
+
+impl MarkerName {
+    /// Validate an external tag in its full namespace before native mapping.
+    pub fn from_git_tag(name: &str) -> Result<Self, GitRefNameError> {
+        let full = format!("refs/tags/{name}");
+        if full.len() > 1024 || sley_refs::check_refname_format(&full, false).is_err() {
+            return Err(GitRefNameError(full));
+        }
+        Ok(Self(crate::name_encoding::native_git_name(name)))
+    }
+}
+
 string_newtype!(
     /// Checkout/lane scope identifier for scoped operations.
     Scope
@@ -167,6 +196,56 @@ string_newtype!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_branch_admission_matches_git_and_rejects_invalid_names() {
+        for name in [
+            "feat/mcp=timeout",
+            "a,b",
+            "ünicode/ブランチ",
+            "@",
+            "x+y",
+            "trailing\u{a0}",
+            "literal\u{fffd}",
+            "heddle/foo",
+            &"界".repeat(337),
+        ] {
+            let output = std::process::Command::new("git")
+                .args(["check-ref-format", "--branch", name])
+                .output()
+                .expect("Git oracle");
+            assert!(output.status.success(), "Git rejects {name:?}");
+            let native = ThreadName::from_git_branch(name).expect("Sley branch");
+            assert_eq!(crate::name_encoding::git_name(&native), name);
+        }
+        for name in [
+            "a..b",
+            "a@{b",
+            "a.lock",
+            "a.lock/b",
+            "a\n",
+            "-flag",
+            "HEAD",
+            ".",
+            "team:scope",
+            "a~b",
+            "a^b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "a//b",
+            "a/",
+            "a.",
+            "a\x7f",
+        ] {
+            assert!(
+                ThreadName::from_git_branch(name).is_err(),
+                "accepted {name:?}"
+            );
+        }
+        assert!(ThreadName::from_git_branch(&"界".repeat(338)).is_err());
+    }
 
     #[test]
     fn thread_name_display() {

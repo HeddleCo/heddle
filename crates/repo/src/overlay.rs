@@ -412,7 +412,8 @@ impl Repository {
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
-            let thread_name = ThreadName::from(name.as_str());
+            let thread_name = ThreadName::from_git_branch(&name)
+                .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
             let history_imported = if imported_threads.contains(&thread_name) {
                 // Read the thread ref once; the mapped + checkpointed
                 // checks each used to re-read it, which doubled the
@@ -492,7 +493,8 @@ impl Repository {
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
-            let marker_name = MarkerName::from(name.as_str());
+            let marker_name = MarkerName::from_git_tag(&name)
+                .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?;
             let history_imported = if imported_markers.contains(&marker_name) {
                 matches!(
                     (self.refs().get_marker(&marker_name)?, mapped_state.as_ref()),
@@ -540,7 +542,7 @@ impl Repository {
         let Some(git_repo) = self.git_overlay_sley_repository()? else {
             return Ok(None);
         };
-        let full_name = format!("refs/heads/{name}");
+        let full_name = format!("refs/heads/{}", objects::name_encoding::git_name(name));
         let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
@@ -620,7 +622,7 @@ impl Repository {
         let Some(git_repo) = self.git_overlay_sley_repository()? else {
             return Ok(None);
         };
-        let full_name = format!("refs/tags/{name}");
+        let full_name = format!("refs/tags/{}", objects::name_encoding::git_name(name));
         let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
@@ -1505,7 +1507,8 @@ pub(super) fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>>
 pub(super) fn detect_git_head(path: &Path) -> Result<Option<Head>> {
     if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
         return Ok(Some(Head::Attached {
-            thread: ThreadName::from(thread),
+            thread: ThreadName::from_git_branch(&thread)
+                .map_err(|error| HeddleError::InvalidRefName(error.to_string()))?,
         }));
     }
     Ok(None)
@@ -1529,7 +1532,7 @@ pub(super) fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String
             continue;
         }
         let raw = fs::read_to_string(&branch_path)?;
-        let value = raw.trim();
+        let value = objects::name_encoding::strip_ref_line_ending(&raw);
         let ref_name = GitRefName::new(value);
         if ref_name.content_namespace() == Some(GitRefContentNamespace::Branch)
             && let Some(short) = ref_name.short_name()

@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+sley-refs.workspace = true
 api.workspace = true
 anyhow.workspace = true
 base32.workspace = true

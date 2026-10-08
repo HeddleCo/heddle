@@ -377,7 +377,7 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
     let current_lane = repo.current_lane()?;
     let next_action = current_lane
         .as_deref()
-        .map(|thread| format!("heddle agent reserve --thread {thread}"));
+        .map(|thread| format!("heddle agent reserve {}", repo::thread_flag(thread)));
     let next_action_template = next_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {

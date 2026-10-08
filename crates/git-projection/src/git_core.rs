@@ -213,6 +213,21 @@ fn remote_name_from_remote_ref(ref_name: &str) -> Option<&str> {
 }
 
 fn validate_refspec_ref(ref_name: &str) -> GitProjectionResult<()> {
+    if !ref_name.is_empty() {
+        // Refspec patterns allow one wildcard. Validate its literal skeleton.
+        if ref_name.matches('*').count() > 1 {
+            return Err(GitProjectionError::InvalidMapping(format!(
+                "invalid Git refspec: {ref_name}"
+            )));
+        }
+        let literal = ref_name.replace('*', "pattern");
+        sley_refs::check_refname_format(&literal, false)
+            .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
+        if let Some(short) = literal.strip_prefix("refs/heads/") {
+            ThreadName::from_git_branch(short)
+                .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
+        }
+    }
     if let Some(remote) = remote_name_from_remote_ref(ref_name) {
         reject_reserved_git_remote_name(remote)?;
     }
@@ -227,6 +242,7 @@ fn validate_refspec_ref(ref_name: &str) -> GitProjectionResult<()> {
 /// Heddle's notes content namespace; the symbolic `HEAD` and
 /// `refs/remotes/<remote>/HEAD` entries are not treated as refs.
 pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
+    sley_refs::check_refname_format(ref_name, false).ok()?;
     RefSpec::new(None, ref_name, false).ok()?;
     GitRefName::new(ref_name).git_projection_ref()
 }
@@ -647,7 +663,7 @@ impl CheckoutWrite {
             ));
         }
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let branch_ref = format!("refs/heads/{thread}");
+        let branch_ref = format!("refs/heads/{}", objects::name_encoding::git_name(thread));
         let head_path = git_dir.join("HEAD");
         let index_path = git_dir.join("index");
         let previous_head = read_optional_file(&head_path)?;
@@ -2425,13 +2441,21 @@ fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
 }
 
 pub(crate) fn collect_ref_updates(repo: &SleyRepository) -> GitProjectionResult<Vec<RefUpdate>> {
+    repo::require_exact_git_ref_encoding(repo)?;
     let mut updates = Vec::new();
 
     for reference in repo.references().list_refs().map_err(git_err)? {
         let ReferenceTarget::Direct(target) = reference.target else {
             continue;
         };
+        sley_refs::check_refname_format(&reference.name, false).map_err(git_err)?;
         let ref_name = GitRefName::new(&reference.name);
+        if ref_name.content_namespace() == Some(RefNamespace::Branch)
+            && let Some(branch) = ref_name.short_name()
+        {
+            ThreadName::from_git_branch(branch)
+                .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+        }
         if let Some(namespace) = ref_name.content_namespace()
             && let Some(name) = ref_name.short_name()
         {
@@ -2519,7 +2543,26 @@ pub fn collect_import_source_ref_updates(
     repo: &SleyRepository,
     refs: &[String],
 ) -> GitProjectionResult<Vec<RefUpdate>> {
-    let updates = collect_ref_updates(repo)?;
+    // Import exclusions are reported by ingest. Preserve raw identity here
+    // too, so residual capture never invents a replacement-character ref.
+    let mut updates = Vec::new();
+    for reference in repo::read_raw_git_refs(repo)? {
+        let (Ok(full), repo::RawGitRefTarget::Direct(target)) =
+            (std::str::from_utf8(&reference.name), reference.target)
+        else {
+            continue;
+        };
+        let name = GitRefName::new(full);
+        if let Some(namespace) = name.content_namespace()
+            && let Some(short) = name.short_name()
+        {
+            updates.push(RefUpdate {
+                name: short.to_owned(),
+                target,
+                namespace,
+            });
+        }
+    }
     if refs.is_empty() {
         return Ok(updates);
     }
@@ -2631,25 +2674,19 @@ fn read_exported_refs_at(path: &Path) -> GitProjectionResult<HashMap<String, Obj
         Ok(text) => {
             let mut map = HashMap::new();
             for line in text.lines() {
-                let line = line.trim();
                 if line.is_empty() {
                     continue;
                 }
                 // `<full ref name> <published tip oid>`. The tip is the OID heddle
                 // last published for that ref here — the ownership token the force
-                // decision consults (heddle#316 r12). A pre-r12 legacy record
-                // stored only the name; parse its tip when present and fall back to
-                // null otherwise. A null tip can never equal a live `old`, so a
-                // legacy ref is never force-rewound (the safe direction) while it
-                // still participates in the delete-set.
-                let mut parts = line.split_whitespace();
-                let Some(name) = parts.next() else {
+                // decision consults (heddle#316 r12). V6 accepts only this
+                // complete record, and splits at the ASCII framing separator.
+                let Some((name, oid)) = line.rsplit_once(' ') else {
                     continue;
                 };
-                let tip = parts
-                    .next()
-                    .and_then(|token| token.parse::<ObjectId>().ok())
-                    .unwrap_or_else(|| ObjectId::null(ObjectFormat::Sha1));
+                let Ok(tip) = oid.parse::<ObjectId>() else {
+                    continue;
+                };
                 map.insert(name.to_string(), tip);
             }
             Ok(map)

@@ -531,21 +531,15 @@ impl RefManager {
         if !remotes_dir.exists() {
             return Ok(Vec::new());
         }
-        let mut remotes = Vec::new();
-        for entry in std::fs::read_dir(remotes_dir)? {
-            let entry = entry?;
-            if entry.path().is_dir()
-                && let Some(name) = entry.file_name().to_str()
-            {
-                remotes.push(name.to_string());
-            }
-        }
-        remotes.sort();
-        Ok(remotes)
+        Ok(self
+            .list_refs_recursive(&remotes_dir, "")?
+            .into_iter()
+            .map(ThreadName::into_string)
+            .collect())
     }
 
     pub(super) fn list_remote_threads_from_storage(&self, remote: &str) -> Result<Vec<ThreadName>> {
-        self.list_refs_recursive(&self.remotes_dir().join(remote), "")
+        self.list_refs_recursive(&self.remote_dir(remote)?, "")
     }
 
     pub(super) fn try_read_ref_summary_index(&self) -> Option<RefSummaryIndex> {
@@ -642,14 +636,8 @@ impl RefManager {
     fn scan_loose_threads(&self) -> Result<BTreeMap<String, StateId>> {
         let mut loose = BTreeMap::new();
         for name in self.list_refs_recursive(&self.threads_dir(), "")? {
-            let name_str = name.to_string();
-            let Some(decoded) = self
-                .decode_flat_thread_entry(&name_str)
-                .or_else(|| (!name_str.starts_with("__heddle_flat/")).then_some(name_str))
-            else {
-                continue;
-            };
-            let tname = ThreadName::new(&decoded);
+            let decoded = name.to_string();
+            let tname = name;
             if let Some(state_id) =
                 self.read_state_id_at(&self.thread_path(&tname)?, "thread", &decoded)?
             {

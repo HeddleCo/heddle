@@ -504,7 +504,7 @@ fn run_git_import(
             .skipped_refs
             .iter()
             .map(|reference| SkippedRefOutput {
-                name: String::from_utf8_lossy(&reference.raw_name).into_owned(),
+                name: reference.display_name(),
                 reason: reference.reason.description().to_string(),
             })
             .collect(),

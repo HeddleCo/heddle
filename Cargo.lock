@@ -2156,8 +2156,8 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.31.0-alpha.42"
-source = "git+https://github.com/HeddleCo/api?rev=fec3e7a3012c49c5ca785bb170353b66fc8bd67e#fec3e7a3012c49c5ca785bb170353b66fc8bd67e"
+version = "0.31.0-alpha.44"
+source = "git+https://github.com/HeddleCo/api?rev=0428aae9b47fa49357b6c57bebc96146d329169a#0428aae9b47fa49357b6c57bebc96146d329169a"
 dependencies = [
  "blake3",
  "bytes",
@@ -2573,6 +2573,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sley",
+ "sley-refs",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -2643,6 +2644,7 @@ dependencies = [
  "serde_json",
  "sley-core",
  "sley-object",
+ "sley-refs",
  "thiserror 2.0.18",
  "toml 1.1.6+spec-1.1.0",
  "uuid",
@@ -2677,6 +2679,7 @@ dependencies = [
  "serde_json",
  "similar",
  "sley-core",
+ "sley-refs",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.6+spec-1.1.0",
@@ -2736,6 +2739,7 @@ dependencies = [
  "rmp-serde",
  "schemars",
  "serde",
+ "sley-refs",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -2776,6 +2780,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sley",
+ "sley-refs",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.6+spec-1.1.0",

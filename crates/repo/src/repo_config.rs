@@ -12,7 +12,19 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use crate::FsMonitorConfig;
 
-pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 5;
+pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 6;
+
+/// Read-only admission before any recovery or initialization can write.
+pub(crate) fn check_repository_format(path: &Path) -> Result<()> {
+    let contents = std::fs::read_to_string(path)?;
+    // A pending current-format installation can leave incomplete TOML;
+    // recovery restores that file before the full config reader validates it.
+    // A readable unsupported format must never enter recovery.
+    if let Ok(version) = repository_format_version(&contents, path) {
+        reject_unsupported_repo_format(path, version)?;
+    }
+    Ok(())
+}
 
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,6 +780,28 @@ format = "auto"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn format_5_is_rebuild_only_and_preservation_advice_is_explicit() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("config.toml");
+        let fixture = "[repository]\nversion = 5\nsource_authority = \"native\"\n";
+        std::fs::write(&path, fixture).expect("v5 config");
+        let error = RepoConfig::load_for_repository(&path).expect_err("v5 refused");
+        let message = error.to_string();
+        for required in [
+            "re-clone",
+            "re-import",
+            "uncommitted",
+            "untracked",
+            "every checkout",
+            ".heddle",
+            "coordination",
+        ] {
+            assert!(message.contains(required), "missing {required}: {message}");
+        }
+        assert_eq!(std::fs::read_to_string(path).expect("unchanged"), fixture);
     }
 
     #[test]

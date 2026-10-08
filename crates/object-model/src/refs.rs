@@ -25,7 +25,6 @@ impl PackedRefsModel {
     pub fn parse(contents: &str) -> Self {
         let mut packed = Self::new();
         for line in contents.lines() {
-            let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -101,5 +100,23 @@ impl PackedRefsModel {
 impl Default for PackedRefsModel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_refs_keep_exact_unicode_suffixes() {
+        let state = StateId::from_bytes([3; 32]);
+        let name = "trailing\u{a0}";
+        let mut refs = PackedRefsModel::new();
+        refs.set_thread(name, state);
+        refs.set_marker(name, state);
+        let parsed = PackedRefsModel::parse(&refs.to_text().replace('\n', "\r\n"));
+        assert_eq!(parsed.get_thread(name), Some(state));
+        assert_eq!(parsed.get_marker(name), Some(state));
+        assert_eq!(parsed.get_thread("trailing"), None);
     }
 }

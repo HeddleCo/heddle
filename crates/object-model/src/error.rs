@@ -179,7 +179,7 @@ pub enum HeddleError {
         supported: u32,
     },
     #[error(
-        "repository at {path} predates format v{required} (found v{found}); recreate it or re-adopt its Git history with this Heddle version"
+        "repository at {path} predates format v{required} (found v{found}); re-clone or re-import into a new directory. First copy uncommitted and untracked work from every checkout, and back up the entire .heddle directory (including local threads, discussions, context, coordination and operation history). Keep the old repository until recovery is verified; do not edit its format version"
     )]
     RepositoryFormatTooOld {
         path: std::path::PathBuf,

@@ -4,6 +4,7 @@
 pub mod blame;
 pub mod config_types;
 pub mod fault_inject;
+pub mod name_encoding;
 pub mod observe;
 pub mod operation_dedup;
 pub mod progress;

@@ -842,14 +842,19 @@ fn git_remote_names(root: &Path) -> Result<Vec<String>> {
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {
     let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
-    let branch_remote = format!("branch.{branch}.remote");
-    let branch_merge = format!("branch.{branch}.merge");
     let plan = ConfigEditPlan::new(git.common_dir().join("config"))
-        .with_operation(ConfigEdit::set(&branch_remote, remote)?)
-        .with_operation(ConfigEdit::set(
-            &branch_merge,
-            format!("refs/heads/{branch}"),
-        )?)
+        .with_operation(ConfigEdit::Set {
+            section: "branch".into(),
+            subsection: Some(branch.into()),
+            name: "remote".into(),
+            value: remote.into(),
+        })
+        .with_operation(ConfigEdit::Set {
+            section: "branch".into(),
+            subsection: Some(branch.into()),
+            name: "merge".into(),
+            value: format!("refs/heads/{branch}"),
+        })
         .with_fsync(true);
     git.apply_config_edit_plan(plan)
         .map_err(anyhow::Error::new)?;

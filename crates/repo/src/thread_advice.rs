@@ -15,15 +15,9 @@ pub const THREAD_STATE_BLOCKER_PREFIX: &str = "thread state check failed:";
 /// value containing whitespace or shell metacharacters yields a runnable
 /// command (and tokenizes correctly through the CLI's next_action validator).
 ///
-/// Applied defensively at EVERY breadcrumb construction site — to thread ids
-/// as well as file paths — because not every id reaching a breadcrumb is a
-/// freshly-validated [`crate::ThreadId`]. [`ThreadId::new_unchecked`] (used for
-/// `Deserialize` and `ThreadRecord::thread_id`), historical/persisted records,
-/// and `heddle agent reserve --thread` all bypass [`crate::validate_thread_id`].
-/// Creation-time validation stays as a UX / early-reject layer, but the SAFETY
-/// guarantee is the emit-quoting here: a clean slug (`feature/x`) passes through
-/// bare and renders unchanged, while an unsafe id is single-quoted into one
-/// token so it can never split into extra args and break the breadcrumb.
+/// Use at breadcrumb construction sites for names and paths. Git-valid names
+/// can contain shell punctuation, and rendering also accepts raw diagnostic
+/// strings. Safety comes from quoting at this boundary.
 pub fn shell_quote(arg: &str) -> String {
     let safe = !arg.is_empty()
         && arg.bytes().all(|b| {
@@ -51,16 +45,7 @@ pub enum RecommendedAction {
 
 impl RecommendedAction {
     pub fn command(&self, thread_id: &str) -> Option<String> {
-        // Quote `thread_id` defensively: not every id reaching this function is
-        // a freshly-validated `ThreadId`. `new_unchecked` (Deserialize /
-        // `ThreadRecord::thread_id`), historical/persisted records, and
-        // `heddle agent reserve --thread` all bypass `validate_thread_id`, so an
-        // unsafe id (whitespace / shell metacharacter) can reach here. A clean
-        // slug passes through bare (unchanged); an unsafe one becomes a single
-        // quoted token so the breadcrumb stays runnable and survives the CLI's
-        // next_action validator. (heddle#464 — defense-in-depth: quote at the
-        // emit boundary; creation-time validation stays as a UX/early-reject
-        // layer, but safety does not depend on it being covered everywhere.)
+        // Git validity does not imply shell safety; quote each emitted argument.
         match self {
             Self::Capture => Some("heddle capture -m \"...\"".to_string()),
             Self::Ready => Some(format!("heddle ready {}", thread_flag(thread_id))),
@@ -392,12 +377,10 @@ mod tests {
     fn command_quotes_unsafe_unvalidated_thread_id() {
         for unsafe_id in ["bad;echo pwn", "my feature", "a$(x)"] {
             // Construct the id the way a persisted/historical record does —
-            // straight through `new_unchecked`, skipping validation.
-            let historical =
-                serde_json::from_str::<crate::ThreadId>(&serde_json::to_string(unsafe_id).unwrap())
-                    .unwrap();
+            // directly as a renderer input, skipping creation validation.
+            let historical = unsafe_id;
             let rendered = RecommendedAction::Sync
-                .command(historical.as_str())
+                .command(historical)
                 .expect("sync breadcrumb");
             assert_eq!(rendered, format!("heddle sync --thread '{unsafe_id}'"));
             // Guard: the offending id must not appear bare (the P1 bug).
@@ -431,21 +414,21 @@ mod tests {
     // binds the value); the positional form needs the `--` end-of-options marker.
     #[test]
     fn leading_dash_thread_ids_use_equals_and_separator_forms() {
-        let id = serde_json::from_str::<crate::ThreadId>("\"-foo\"").unwrap();
+        let id = "-foo";
         assert_eq!(
-            RecommendedAction::Sync.command(id.as_str()).as_deref(),
+            RecommendedAction::Sync.command(id).as_deref(),
             Some("heddle sync --thread=-foo")
         );
         assert_eq!(
-            RecommendedAction::Ready.command(id.as_str()).as_deref(),
+            RecommendedAction::Ready.command(id).as_deref(),
             Some("heddle ready --thread=-foo")
         );
         assert_eq!(
-            RecommendedAction::Land.command(id.as_str()).as_deref(),
+            RecommendedAction::Land.command(id).as_deref(),
             Some("heddle land --thread=-foo")
         );
         assert_eq!(
-            RecommendedAction::Promote.command(id.as_str()).as_deref(),
+            RecommendedAction::Promote.command(id).as_deref(),
             Some("heddle thread promote -- -foo")
         );
         // Clean slugs are unchanged (space form, bare).
