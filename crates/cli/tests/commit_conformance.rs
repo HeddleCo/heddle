@@ -332,9 +332,12 @@ fn extract_commit_bundle(dir: &Path) -> PathBuf {
 /// Import every commit reachable in `source` through the real `GitProjection`, then
 /// assert each reconstructs byte-identically AND its framed SHA-1 reproduces the
 /// original commit SHA.
-fn assert_all_commits_reconstruct(case: &str, source: &Path) {
-    // A corrupt fixture would make the comparison meaningless.
+/// A corrupt fixture would make the comparison meaningless.
+fn assert_fsck_strict(source: &Path) {
     git(source, &["fsck", "--full", "--strict"]);
+}
+
+fn assert_all_commits_reconstruct(case: &str, source: &Path) {
     let shas = all_commit_shas(source);
     assert!(!shas.is_empty(), "[{case}] no commits to reconstruct");
 
@@ -404,7 +407,6 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
 /// BEFORE reconstruction, so a regenerated object appearing there can only have
 /// come from Heddle state.
 fn assert_all_commits_export_from_state(case: &str, source: &Path) {
-    git(source, &["fsck", "--full", "--strict"]);
     let shas = all_commit_shas(source);
     assert!(!shas.is_empty(), "[{case}] no commits to reconstruct");
 
@@ -516,6 +518,7 @@ fn commit_conformance_plain_corpus_survives_native_repack() {
         "C8 octopus (3-parent) case missing"
     );
 
+    assert_fsck_strict(dir);
     assert_all_commits_reconstruct("plain-corpus", dir);
 }
 
@@ -546,6 +549,7 @@ fn commit_conformance_signed_and_mergetag() {
         "C9 fixture lost a signed commit (no gpgsig header in any commit)"
     );
 
+    assert_fsck_strict(&source);
     assert_all_commits_reconstruct("signed-and-mergetag", &source);
 }
 
@@ -558,6 +562,7 @@ fn export_from_state_plain_corpus() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     build_plain_corpus(dir);
+    assert_fsck_strict(dir);
     assert_all_commits_export_from_state("plain-corpus", dir);
 }
 
@@ -568,5 +573,113 @@ fn export_from_state_plain_corpus() {
 fn export_from_state_signed_and_mergetag() {
     let tmp = TempDir::new().unwrap();
     let source = extract_commit_bundle(tmp.path());
+    assert_fsck_strict(&source);
     assert_all_commits_export_from_state("signed-and-mergetag", &source);
+}
+
+/// Hand-write each `(ref, author, committer)` identity pair as a parentless
+/// commit on the empty tree (`git commit` refuses most of these shapes) and
+/// return the commit ids in order. Git's own fsck rejects some of them, so
+/// callers do not run `--strict`.
+fn build_identity_shape_repo(dir: &Path, shapes: &[(&str, &[u8], &[u8])]) -> Vec<String> {
+    git(dir, &["init", "-q", "--initial-branch=main"]);
+    let tree = git(dir, &["hash-object", "-w", "-t", "tree", "--stdin"]);
+    assert_eq!(tree, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    shapes
+        .iter()
+        .map(|(name, author, committer)| {
+            let mut commit = format!("tree {tree}\nauthor ").into_bytes();
+            commit.extend_from_slice(author);
+            commit.extend_from_slice(b"\ncommitter ");
+            commit.extend_from_slice(committer);
+            commit.extend_from_slice(format!("\n\nshape {name}\n").as_bytes());
+            let sha = hash_object(dir, "commit", &commit);
+            git(dir, &["update-ref", &format!("refs/heads/{name}"), &sha]);
+            sha
+        })
+        .collect()
+}
+
+/// Header shapes that reconstruct byte-for-byte (heddle#2016): git's `-0000`
+/// ("unknown zone") on either actor, and an author with an empty name.
+#[test]
+fn commit_conformance_identity_shapes_keep_commit_id() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let shas = build_identity_shape_repo(
+        dir,
+        &[
+            // git_shape_05e
+            (
+                "negative-zero-both",
+                b"Zed <zed@example.com> 1700000000 -0000",
+                b"Zed <zed@example.com> 1700000001 -0000",
+            ),
+            (
+                "negative-zero-author-only",
+                b"Zed <zed@example.com> 1700000002 -0000",
+                b"Zed <zed@example.com> 1700000002 +0000",
+            ),
+            // git_shape_05c
+            (
+                "empty-author-name",
+                b"<only@email.example> 1700000003 +0000",
+                b"Zed <zed@example.com> 1700000003 +0000",
+            ),
+            (
+                "empty-committer-name",
+                b"Zed <zed@example.com> 1700000004 +0000",
+                b"<only@email.example> 1700000004 -0000",
+            ),
+        ],
+    );
+    for (sha, needle) in shas.iter().zip([
+        b"author Zed <zed@example.com> 1700000000 -0000\n".as_slice(),
+        b"committer Zed <zed@example.com> 1700000002 +0000\n",
+        b"\nauthor <only@email.example> 1700000003 +0000\n",
+        b"\ncommitter <only@email.example> 1700000004 -0000\n",
+    ]) {
+        assert!(
+            contains(&cat_commit(dir, sha), needle),
+            "fixture lost {needle:?}"
+        );
+    }
+    assert_all_commits_reconstruct("identity-shapes", dir);
+    assert_all_commits_export_from_state("identity-shapes", dir);
+}
+
+/// Identities Heddle cannot rebuild byte-exactly are refused at import with an
+/// error naming the commit and the header, rather than imported into a State
+/// that would export under a different commit id (heddle#2016).
+#[test]
+fn commit_conformance_unrepresentable_identities_are_rejected_naming_the_commit() {
+    let cases: [(&str, &[u8], &str); 3] = [
+        ("no-email", b"Zed 1700000000 +0000", "not a valid identity"),
+        (
+            "huge-timestamp",
+            b"Zed <zed@example.com> 99999999999999 +0000",
+            "out of range",
+        ),
+        (
+            "empty-name-with-space",
+            b" <only@email.example> 1700000000 +0000",
+            "empty name followed by a space",
+        ),
+    ];
+    for (name, author, reason) in cases {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let committer: &[u8] = b"Zed <zed@example.com> 1700000000 +0000";
+        let sha = build_identity_shape_repo(dir, &[(name, author, committer)]).remove(0);
+
+        let heddle_home = TempDir::new().unwrap();
+        let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+        let mut git_projection = GitProjection::new(&repo);
+        let error = ingest_into_git_projection(&mut git_projection, dir)
+            .expect_err("unrepresentable identity must not import");
+        assert!(
+            error.contains(&sha) && error.contains("author") && error.contains(reason),
+            "[{name}] error must name commit {sha}, the header, and `{reason}`: {error}"
+        );
+    }
 }

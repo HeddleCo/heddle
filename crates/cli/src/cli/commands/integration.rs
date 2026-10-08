@@ -813,6 +813,7 @@ fn install_claude(
             .join(".claude")
             .join("settings.json"),
     };
+    guard_repo_scoped_file(repo, scope, &settings_path)?;
     let mut root: Value = if settings_path.exists() {
         serde_json::from_str(&fs::read_to_string(&settings_path)?)?
     } else {
@@ -925,10 +926,12 @@ fn install_opencode(
             .join("plugins")
             .join("heddle.js"),
     };
+    let timeline_manifest_path = plugin_path.with_file_name("heddle.timeline.json");
+    guard_repo_scoped_file(repo, scope, &plugin_path)?;
+    guard_repo_scoped_file(repo, scope, &timeline_manifest_path)?;
     if let Some(parent) = plugin_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let timeline_manifest_path = plugin_path.with_file_name("heddle.timeline.json");
     let heddle_raw = HeddleInvocation::raw(path_mode)?;
     let baked_repo = match scope {
         IntegrationScope::Repo => Some(repo.root().display().to_string()),
@@ -1129,7 +1132,7 @@ fn uninstall_one(
         "claude-code" => {
             if let Some(path) = existing.paths.first() {
                 let settings_path = PathBuf::from(path);
-                if settings_path.exists() {
+                if repo_file_is_safe_to_touch(repo, &settings_path) && settings_path.exists() {
                     let mut root: Value =
                         serde_json::from_str(&fs::read_to_string(&settings_path)?)?;
                     if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
@@ -1163,7 +1166,10 @@ fn uninstall_one(
         "opencode" => {
             for path in &existing.paths {
                 let path = PathBuf::from(path);
-                if path.exists() {
+                if path.starts_with(repo.root()) {
+                    // Never through a symlinked parent (heddle#2017).
+                    objects::nofollow::remove_leaf_beneath(repo.root(), &path)?;
+                } else if path.exists() {
                     fs::remove_file(path)?;
                 }
             }
@@ -1174,6 +1180,37 @@ fn uninstall_one(
         .integrations
         .retain(|entry| entry.harness != harness);
     Ok(())
+}
+
+/// Repo-scope integration files sit at repository conventions
+/// (`.claude/settings.json`, `.opencode/plugins/`) that a tracked symlink may
+/// redirect outside the repository. Refuse to read or write through one
+/// rather than follow it: the target could be anything on the machine, and
+/// reading it back into the worktree would let the next capture carry it out
+/// (heddle#2017). Missing directories are created without following.
+fn guard_repo_scoped_file(repo: &Repository, scope: &IntegrationScope, path: &Path) -> Result<()> {
+    if matches!(scope, IntegrationScope::Repo) {
+        objects::nofollow::prepare_regular_file_beneath(repo.root(), path).with_context(|| {
+            format!(
+                "repo-scope integration path {} is redirected by a symlink; install with user scope instead",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Whether an uninstall may read and rewrite `path`: anything outside the
+/// repository is the user's own config; inside it, only a regular file
+/// reached without a symlink.
+fn repo_file_is_safe_to_touch(repo: &Repository, path: &Path) -> bool {
+    if !path.starts_with(repo.root()) {
+        return true;
+    }
+    objects::nofollow::NoFollowDirectories::new(repo.root())
+        .parent_is_real_directory(path)
+        .unwrap_or(false)
+        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn upsert_manifest(manifest: &mut IntegrationManifest, entry: InstalledIntegration) {
@@ -1562,6 +1599,95 @@ mod tests {
         );
 
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Absolute);
+    }
+
+    /// heddle#2017 review P2-b: a repository may track `.claude` or
+    /// `.opencode` as a symlink to a directory outside it. A repo-scope
+    /// install or uninstall must never read, write or remove through it.
+    #[test]
+    #[cfg(unix)]
+    fn repo_scope_install_never_writes_through_tracked_symlinks() {
+        let (_temp, repo) = init_repo();
+        let outside = tempfile::TempDir::new().unwrap();
+        let claude_outside = outside.path().join("claude");
+        let opencode_outside = outside.path().join("opencode");
+        fs::create_dir_all(&claude_outside).unwrap();
+        fs::create_dir_all(opencode_outside.join("plugins")).unwrap();
+        fs::write(
+            claude_outside.join("settings.json"),
+            "{\"secret\": \"outside\"}",
+        )
+        .unwrap();
+        fs::write(opencode_outside.join("plugins/heddle.js"), "outside plugin").unwrap();
+        std::os::unix::fs::symlink(&claude_outside, repo.root().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&opencode_outside, repo.root().join(".opencode")).unwrap();
+        let mut manifest = IntegrationManifest::default();
+
+        let claude = install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            false,
+            PathMode::Relative,
+        );
+        let opencode = install_opencode(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            false,
+            PathMode::Relative,
+        );
+
+        assert!(
+            claude.is_err() && opencode.is_err(),
+            "{claude:?} {opencode:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(claude_outside.join("settings.json")).unwrap(),
+            "{\"secret\": \"outside\"}"
+        );
+        assert_eq!(fs::read_dir(&claude_outside).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(opencode_outside.join("plugins"))
+                .unwrap()
+                .count(),
+            1,
+            "nothing may be written beside the outside plugin"
+        );
+
+        // An uninstall recorded against those paths removes nothing outside.
+        let recorded = |harness: &str, paths: Vec<PathBuf>| InstalledIntegration {
+            harness: harness.to_string(),
+            scope: IntegrationScope::Repo,
+            method: "test".to_string(),
+            paths: paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            status: "installed".to_string(),
+            heddle_version: env!("CARGO_PKG_VERSION").to_string(),
+            path_mode: PathMode::Relative,
+        };
+        manifest.integrations = vec![
+            recorded(
+                "claude-code",
+                vec![repo.root().join(".claude/settings.json")],
+            ),
+            recorded(
+                "opencode",
+                vec![repo.root().join(".opencode/plugins/heddle.js")],
+            ),
+        ];
+        let _ = uninstall_one(&repo, &mut manifest, "claude-code");
+        let _ = uninstall_one(&repo, &mut manifest, "opencode");
+        assert_eq!(
+            fs::read_to_string(claude_outside.join("settings.json")).unwrap(),
+            "{\"secret\": \"outside\"}"
+        );
+        assert_eq!(
+            fs::read_to_string(opencode_outside.join("plugins/heddle.js")).unwrap(),
+            "outside plugin"
+        );
     }
 
     #[test]

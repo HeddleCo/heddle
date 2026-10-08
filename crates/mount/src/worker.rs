@@ -313,6 +313,7 @@ pub fn run_worker(args: WorkerArgs) -> Result<()> {
     // Open repo + construct the mount. Errors before MountReady
     // get sent to the supervisor so the user sees a clean message
     // rather than just "worker exited with status 1".
+    config::UserConfig::register_default_safe_repositories();
     let mount_result = (|| -> Result<crate::FuseShell> {
         let repo = Repository::open(&args.repo_root)
             .with_context(|| format!("open repo at {}", args.repo_root.display()))?;

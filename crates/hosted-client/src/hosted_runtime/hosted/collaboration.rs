@@ -91,6 +91,26 @@ fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
 }
 
+/// Once observations must make progress through Complete on every page. Live
+/// observations retain their unbounded wait between committed updates.
+async fn collaboration_progress<T, E: std::fmt::Display>(
+    timeout: Option<std::time::Duration>,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, ProtocolError> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| {
+                ProtocolError::InvalidState(format!(
+                    "collaboration observation timed out after {}s without progress",
+                    timeout.as_secs_f64()
+                ))
+            })?
+            .map_err(native_error),
+        None => future.await.map_err(native_error),
+    }
+}
+
 const COLLABORATION_PAGE_SIZE: u32 = 64;
 
 fn once_observe() -> ObserveOptions {
@@ -1007,19 +1027,39 @@ impl HostedClient {
 
     pub(crate) async fn observe_collaboration_events(
         &self,
+        request: ObserveCollaborationRequest,
+    ) -> Result<Vec<collaboration_event::Payload>, ProtocolError> {
+        self.observe_collaboration_events_with_timeout(request, self.context.progress_timeout())
+            .await
+    }
+
+    pub(super) async fn observe_collaboration_events_with_timeout(
+        &self,
         mut request: ObserveCollaborationRequest,
+        progress_timeout: std::time::Duration,
     ) -> Result<Vec<collaboration_event::Payload>, ProtocolError> {
         ensure_observe_page(&mut request);
-        let remote = self.native().await.map_err(native_error)?;
+        let progress_timeout = request
+            .observe
+            .as_ref()
+            .filter(|options| options.mode == ObservationMode::Once as i32)
+            .map(|_| progress_timeout);
+        let remote = collaboration_progress(progress_timeout, self.native()).await?;
         let mut payloads = Vec::new();
         loop {
-            let mut observation = remote
-                .observe::<rpc::CollaborationServiceObserveCollaboration>(request.clone(), None)
-                .await
-                .map_err(native_error)?;
+            let mut observation = collaboration_progress(
+                progress_timeout,
+                remote.observe::<rpc::CollaborationServiceObserveCollaboration>(
+                    request.clone(),
+                    None,
+                ),
+            )
+            .await?;
             let mut exhausted = true;
             let mut next_page = Vec::new();
-            while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+            while let Some(batch) =
+                collaboration_progress(progress_timeout, observation.next_commit()).await?
+            {
                 if let Some(page) = &batch.page {
                     exhausted = page.exhausted;
                     next_page = page.next_page.clone();

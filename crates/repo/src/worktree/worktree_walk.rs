@@ -4,7 +4,7 @@
 use std::{
     fs::{self, File},
     io::Read,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
@@ -150,20 +150,9 @@ pub(crate) fn walk_worktree<P: WorktreeWalkPolicy>(
     policy: &mut P,
 ) -> Result<P::Output> {
     let root_key = String::new();
-    // The `base` argument is what `validate_symlink_target` uses
-    // as the allowed root for symlink-escape checks. Use `dir`
-    // (the walk root), not `repo.root()`, so symlinks inside a
-    // dedicated worktree like `capture_thread_from_disk`'s
-    // materialised thread path validate against that path.
-    //
-    // Pre-fix, base was always `repo.root()`. For the common
-    // `build_tree(self.root)` case the two are identical so
-    // behaviour is unchanged. For `build_tree(thread_path)` —
-    // used by `capture_thread_from_disk` on a dedicated thread
-    // worktree — `dir` and `repo.root()` diverge and the old
-    // wiring rejected *every* symlink inside the thread tree as
-    // "outside the repo", breaking `thread switch` auto-capture
-    // for any thread that contained a symlink.
+    // `dir` (the walk root), not `repo.root()`, is the base that relative
+    // paths are keyed against, so a dedicated worktree such as
+    // `capture_thread_from_disk`'s thread checkout walks like a root.
     walk_directory(
         repo,
         dir,
@@ -535,104 +524,4 @@ pub(crate) fn read_blob_with_hash(
     let content = read_file_content(path, size)?;
     let hash = ContentHash::compute_typed("blob", &content);
     Ok((objects::object::Blob::new(content), hash))
-}
-
-pub(crate) fn validate_symlink_target(base: &Path, symlink_dir: &Path, target: &Path) -> bool {
-    let canonical_base = match base.canonicalize() {
-        Ok(base) => base,
-        Err(_) => return false,
-    };
-    let canonical_symlink_dir = match symlink_dir.canonicalize() {
-        Ok(dir) => dir,
-        Err(_) => return false,
-    };
-    if !canonical_symlink_dir.starts_with(&canonical_base) {
-        return false;
-    }
-    let target_path = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        canonical_symlink_dir.join(target)
-    };
-    if let Ok(resolved) = target_path.canonicalize() {
-        return resolved.starts_with(&canonical_base);
-    }
-    dangling_path_stays_within_base(&canonical_base, &target_path)
-}
-
-fn dangling_path_stays_within_base(base: &Path, path: &Path) -> bool {
-    let mut existing = path.to_path_buf();
-    let mut missing_components = Vec::new();
-    while !existing.exists() {
-        let Some(name) = existing.file_name() else {
-            return false;
-        };
-        missing_components.push(name.to_os_string());
-        let Some(parent) = existing.parent() else {
-            return false;
-        };
-        existing = parent.to_path_buf();
-    }
-
-    let Ok(mut resolved) = existing.canonicalize() else {
-        return false;
-    };
-    if !resolved.starts_with(base) {
-        return false;
-    }
-    for component in missing_components.iter().rev() {
-        resolved.push(component);
-    }
-    path_stays_within_base_lexically(base, &resolved)
-}
-
-fn path_stays_within_base_lexically(base: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(base) else {
-        return false;
-    };
-    let mut depth = 0_usize;
-    for component in relative.components() {
-        match component {
-            Component::ParentDir if depth == 0 => return false,
-            Component::ParentDir => depth -= 1,
-            Component::CurDir => {}
-            Component::Normal(_) => depth += 1,
-            Component::RootDir | Component::Prefix(_) => return false,
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::validate_symlink_target;
-
-    #[test]
-    #[cfg(unix)]
-    fn validate_symlink_target_rejects_dangling_target_through_escaping_ancestor() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
-
-        assert!(!validate_symlink_target(
-            root.path(),
-            root.path(),
-            Path::new("escape/missing")
-        ));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn validate_symlink_target_allows_dangling_target_under_real_in_repo_dir() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("inside")).unwrap();
-
-        assert!(validate_symlink_target(
-            root.path(),
-            root.path(),
-            Path::new("inside/missing")
-        ));
-    }
 }

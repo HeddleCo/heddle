@@ -28,8 +28,7 @@ use crate::{
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{
-        WalkDirectory, WalkEntry, WorktreeWalkPolicy, cache_key, read_blob_with_hash,
-        validate_symlink_target, walk_worktree,
+        WalkDirectory, WalkEntry, WorktreeWalkPolicy, cache_key, read_blob_with_hash, walk_worktree,
     },
 };
 
@@ -1307,29 +1306,9 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             state.entries.push(tree_entry.clone());
             return Ok(());
         }
+        // Recorded exactly, whatever the target names, as Git records it
+        // (heddle#2017). The walk never descends through a symlink.
         let target = fs::read_link(entry.path)?;
-        // Validate symlink escape against the *walk root*, not
-        // `repo.root()`. When `capture_thread_from_disk` builds a
-        // tree from a dedicated thread worktree, the walk root is
-        // the thread's checkout path (not the main repo) and
-        // symlinks should be allowed to point inside it. Pre-fix
-        // every symlink in such a worktree was rejected the moment
-        // the slow path ran, breaking `thread switch` auto-capture
-        // for any thread containing a symlink. For the common case
-        // where `build_tree(self.root)` runs against the main repo
-        // root, `walk_root == self.repo.root()` and behaviour is
-        // unchanged.
-        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
-        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-            return Err(HeddleError::InvalidSymlinkTarget {
-                path: entry
-                    .path
-                    .strip_prefix(self.walk_root)
-                    .unwrap_or(entry.path)
-                    .to_path_buf(),
-                target,
-            });
-        }
 
         let blob = Blob::new(objects::util::symlink_target_bytes(&target));
         let hash = blob.hash();
@@ -1446,11 +1425,7 @@ impl Repository {
             &mut patterns,
             &self.root.join(".heddle").join("info").join("exclude"),
         )?;
-        let path = self.root.join(".heddleignore");
-
-        if path.exists() {
-            append_ignore_file_patterns(&mut patterns, &path)?;
-        }
+        append_ignore_file_patterns(&mut patterns, &self.root.join(".heddleignore"))?;
 
         Ok(patterns)
     }
@@ -1506,11 +1481,48 @@ impl Repository {
     }
 }
 
-fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
+/// Read an ignore file the repository supplies (`.heddleignore`,
+/// `.gitignore`) or a local exclude file, as Git ≥ 2.32 reads `.gitignore`:
+/// a symlink is not followed, and a FIFO, device or directory is not read.
+/// Either is skipped with a warning. A file over
+/// [`objects::nofollow::MAX_IN_TREE_CONTROL_FILE_BYTES`] is skipped too, so a
+/// hostile repository cannot exhaust memory through it (heddle#2017).
+pub fn read_ignore_file(path: &Path) -> Result<Option<String>> {
+    use objects::nofollow::{
+        InTreeControlFile, MAX_IN_TREE_CONTROL_FILE_BYTES, read_in_tree_control_file,
+    };
+    match read_in_tree_control_file(path, MAX_IN_TREE_CONTROL_FILE_BYTES)? {
+        InTreeControlFile::Absent => Ok(None),
+        InTreeControlFile::Contents(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+            HeddleError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ignore file {} is not valid UTF-8", path.display()),
+            ))
+        }),
+        InTreeControlFile::Symlink => {
+            warn!(path = %path.display(), "ignoring ignore file: it is a symlink, which is never followed");
+            Ok(None)
+        }
+        InTreeControlFile::NotRegular => {
+            warn!(path = %path.display(), "ignoring ignore file: it is not a regular file");
+            Ok(None)
+        }
+        InTreeControlFile::TooLarge(size) => {
+            warn!(
+                path = %path.display(),
+                size,
+                limit = MAX_IN_TREE_CONTROL_FILE_BYTES,
+                "ignoring ignore file: it exceeds the size limit"
+            );
+            Ok(None)
+        }
     }
-    let contents = fs::read_to_string(path)?;
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    let Some(contents) = read_ignore_file(path)? else {
+        return Ok(());
+    };
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {

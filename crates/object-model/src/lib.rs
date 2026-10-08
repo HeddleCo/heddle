@@ -8,4 +8,4 @@ pub mod object;
 pub mod op_record;
 pub mod refs;
 
-pub use error::{HeddleError, RecoveryDetails};
+pub use error::{HeddleError, RecoveryDetails, UntrustedRepositoryReason};

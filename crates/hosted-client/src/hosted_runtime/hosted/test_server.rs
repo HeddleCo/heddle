@@ -78,6 +78,7 @@ pub(crate) struct ContextFixture {
     pub signed_operations: Vec<v2::SignedRecord>,
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
+    pub fail_history: Arc<std::sync::atomic::AtomicBool>,
     /// When true, PutContext returns Dedup Conflict for the create nonce.
     pub put_conflict: bool,
     pub put_requests: Arc<Mutex<usize>>,
@@ -2243,6 +2244,29 @@ async fn serve_observe_collaboration(
         send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
             .await
             .unwrap();
+        return;
+    }
+    if !body.contexts.is_empty()
+        && let Some(context) = &live.context
+        && context
+            .fail_history
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        context
+            .history_requests
+            .lock()
+            .expect("history requests")
+            .extend(body.contexts.iter().map(|reference| reference.id.clone()));
+        let failure = CallFailure {
+            code: CallFailureCode::Unavailable as i32,
+            message: "injected context history failure".into(),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_failure(&failure).expect("history failure"),
+        ))
+        .await
+        .expect("failure response");
         return;
     }
     let payloads = observe_payloads(

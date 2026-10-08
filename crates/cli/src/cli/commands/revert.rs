@@ -7,8 +7,11 @@ use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::RevertOutput;
-use objects::object::{
-    Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree, diff_trees_visit,
+use objects::{
+    nofollow::NoFollowDirectories,
+    object::{
+        Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree, diff_trees_visit,
+    },
 };
 use repo::{DiffKind, Repository};
 use verbs::{
@@ -194,15 +197,27 @@ fn apply_inverse_changes(
     changes: &FileChangeSet,
     files_affected: &mut Vec<String>,
 ) -> Result<()> {
+    // Every write and removal below stays beneath the root without following
+    // a symlink, in a parent or at the leaf (heddle#2017).
+    let root = repo.root();
     for change in changes {
-        let full_path = repo.root().join(&change.path);
+        let full_path = root.join(&change.path);
 
         match change.kind {
             DiffKind::Added => {
-                if full_path.exists() {
-                    if full_path.is_symlink() {
-                        fs::remove_file(&full_path)?;
-                    } else if full_path.is_dir() {
+                let metadata =
+                    if NoFollowDirectories::new(root).parent_is_real_directory(&full_path)? {
+                        match fs::symlink_metadata(&full_path) {
+                            Ok(metadata) => Some(metadata),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(error.into()),
+                        }
+                    } else {
+                        // Beneath a symlink: the path is not in the worktree.
+                        None
+                    };
+                if let Some(metadata) = metadata {
+                    if metadata.is_dir() {
                         if let Some(source_subtree) =
                             repo.resolve_subtree(target_tree, std::path::Path::new(&change.path))?
                         {
@@ -241,13 +256,7 @@ fn apply_inverse_changes(
                     continue;
                 };
                 let blob = repo.require_blob(&hash)?;
-
-                if let Some(parent) = full_path.parent()
-                    && !parent.exists()
-                {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&full_path, blob.content())?;
+                write_reverted_file(root, &full_path, blob.content(), entry.is_executable())?;
                 files_affected.push(format!("+ {}", change.path));
             }
             DiffKind::Modified => {
@@ -264,12 +273,30 @@ fn apply_inverse_changes(
                     continue;
                 };
                 let blob = repo.require_blob(&hash)?;
-                fs::write(&full_path, blob.content())?;
+                write_reverted_file(root, &full_path, blob.content(), entry.is_executable())?;
                 files_affected.push(format!("M {}", change.path));
             }
             DiffKind::Unchanged => {}
         }
     }
 
+    Ok(())
+}
+
+fn write_reverted_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    content: &[u8],
+    executable: bool,
+) -> Result<()> {
+    let file = objects::nofollow::write_file_beneath(root, path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (file, executable);
     Ok(())
 }

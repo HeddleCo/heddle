@@ -212,7 +212,8 @@ pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> R
 
     // Rules already in force via the checkout's tracked `.heddleignore` plus any
     // prior exclude entries — a dep already covered needs no new rule.
-    let tracked = read_opt(&checkout.join(".heddleignore"))?;
+    // The tracked file is read no-follow and size-capped (heddle#2017).
+    let tracked = repo::read_ignore_file(&checkout.join(".heddleignore"))?;
     let exclude_path = hydrate_exclude_path(checkout);
     let existing_exclude = read_opt(&exclude_path)?;
 

@@ -689,6 +689,39 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         &objects::RecoveryDetails::serialization_error(detail),
                     );
                 }
+                HeddleError::UntrustedRepository { root, reason } => {
+                    let config_path = crate::config::UserConfig::default_path().map_or_else(
+                        || "your Heddle user config".to_string(),
+                        |path| path.display().to_string(),
+                    );
+                    let trust = format!(
+                        "add {} to `[safe] repositories` in {config_path}",
+                        shell_quote(&root.display().to_string())
+                    );
+                    let (hint, command) = match reason {
+                        objects::error::UntrustedRepositoryReason::Embedded { enclosing } => {
+                            let enclosing = shell_quote(&enclosing.display().to_string());
+                            (
+                                format!(
+                                    "Run Heddle from the enclosing repository (`heddle -C {enclosing} status`), or, if you trust the nested repository, {trust}."
+                                ),
+                                format!("heddle -C {enclosing} status"),
+                            )
+                        }
+                        objects::error::UntrustedRepositoryReason::ForeignOwner { .. } => (
+                            format!("If you trust this repository, {trust}."),
+                            "heddle status".to_string(),
+                        ),
+                    };
+                    return ErrorClassification::known(
+                        "untrusted_repository",
+                        hint,
+                        format!("{reason}"),
+                        "opening it would let its config, hooks, and store pointer act for this user",
+                        "no repository objects, refs, metadata, or worktree files were changed",
+                        command,
+                    );
+                }
                 HeddleError::RepositoryNotFound(path) => {
                     let command =
                         format!("heddle init {}", shell_quote(&path.display().to_string()));

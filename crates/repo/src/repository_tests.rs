@@ -1824,22 +1824,6 @@ fn test_compare_worktree_cached_detailed_uses_untracked_subtrees_and_flattens_ex
 }
 
 #[test]
-#[cfg(target_os = "linux")]
-fn test_build_tree_rejects_escaping_symlinks() {
-    let (temp_dir, repo) = create_test_repo();
-
-    let symlink_path = temp_dir.path().join("escape");
-    let outside_dir = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(outside_dir.path(), &symlink_path).unwrap();
-
-    let result = repo.build_tree(temp_dir.path());
-    assert!(matches!(
-        result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
-}
-
-#[test]
 #[cfg(unix)]
 fn test_build_tree_allows_valid_symlinks() {
     let (temp_dir, repo) = create_test_repo();
@@ -1933,64 +1917,6 @@ fn test_materialize_tree_creates_symlinks() {
 
 #[test]
 #[cfg(unix)]
-fn test_materialize_tree_rejects_relative_symlink_escape() {
-    let (temp_dir, repo) = create_test_repo();
-    let materialize_root = temp_dir.path().join("materialized");
-    let tree = handcrafted_symlink_tree(&repo, std::path::Path::new("../outside"));
-
-    let result = repo.materialize_tree(&tree, &materialize_root);
-
-    assert!(matches!(
-        result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
-    assert!(
-        fs::symlink_metadata(materialize_root.join("link")).is_err(),
-        "escaping symlink must fail before the link is created"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn test_materialize_tree_rejects_normalized_relative_symlink_escape() {
-    let (temp_dir, repo) = create_test_repo();
-    let materialize_root = temp_dir.path().join("materialized");
-    let tree = handcrafted_symlink_tree(&repo, std::path::Path::new(".heddle/../../outside"));
-
-    let result = repo.materialize_tree(&tree, &materialize_root);
-
-    assert!(matches!(
-        result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
-    assert!(
-        fs::symlink_metadata(materialize_root.join("link")).is_err(),
-        "normalized escaping symlink must fail before the link is created"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn test_materialize_tree_rejects_absolute_symlink_escape() {
-    let (temp_dir, repo) = create_test_repo();
-    let materialize_root = temp_dir.path().join("materialized");
-    let outside_target = temp_dir.path().join("outside-target");
-    let tree = handcrafted_symlink_tree(&repo, &outside_target);
-
-    let result = repo.materialize_tree(&tree, &materialize_root);
-
-    assert!(matches!(
-        result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
-    assert!(
-        fs::symlink_metadata(materialize_root.join("link")).is_err(),
-        "absolute escaping symlink must fail before the link is created"
-    );
-}
-
-#[test]
-#[cfg(unix)]
 fn test_materialize_tree_allows_handcrafted_in_repo_symlink() {
     let (temp_dir, repo) = create_test_repo();
     let materialize_root = temp_dir.path().join("materialized");
@@ -2009,27 +1935,21 @@ fn test_materialize_tree_allows_handcrafted_in_repo_symlink() {
 
 #[test]
 #[cfg(unix)]
-fn test_capture_and_materialize_reject_same_escaping_symlink_target() {
+fn test_capture_and_materialize_round_trip_same_escaping_symlink_target() {
     let (temp_dir, repo) = create_test_repo();
     let target = std::path::Path::new("../outside");
-    std::os::unix::fs::symlink(target, temp_dir.path().join("capture-link")).unwrap();
+    std::os::unix::fs::symlink(target, temp_dir.path().join("link")).unwrap();
 
-    let capture_result = repo.build_tree(temp_dir.path());
-    assert!(matches!(
-        capture_result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
+    let tree = repo
+        .build_tree(temp_dir.path())
+        .expect("capture records an escaping symlink as Git does");
 
     let materialize_root = temp_dir.path().join("materialized");
-    let tree = handcrafted_symlink_tree(&repo, target);
-    let materialize_result = repo.materialize_tree(&tree, &materialize_root);
-    assert!(matches!(
-        materialize_result,
-        Err(HeddleError::InvalidSymlinkTarget { .. })
-    ));
-    assert!(
-        fs::symlink_metadata(materialize_root.join("link")).is_err(),
-        "materialize must reject the same target capture rejects"
+    repo.materialize_tree(&tree, &materialize_root)
+        .expect("materialize checks out what capture recorded");
+    assert_eq!(
+        fs::read_link(materialize_root.join("link")).unwrap(),
+        target
     );
 }
 
@@ -2105,16 +2025,20 @@ fn test_materialize_tree_restores_executable_permissions() {
 
 #[test]
 #[cfg(unix)]
-fn test_build_tree_rejects_dangling_symlink_escaping_repo() {
+fn test_build_tree_records_dangling_symlink_escaping_repo() {
     let (temp_dir, repo) = create_test_repo();
 
     let symlink_path = temp_dir.path().join("escape");
     std::os::unix::fs::symlink("/nonexistent/../../../etc/passwd", &symlink_path).unwrap();
 
-    let result = repo.build_tree(temp_dir.path());
-    assert!(
-        matches!(result, Err(HeddleError::InvalidSymlinkTarget { .. })),
-        "Should reject dangling symlink that escapes repo via .. traversal"
+    let tree = repo.build_tree(temp_dir.path()).unwrap();
+    let hash = tree
+        .get("escape")
+        .and_then(TreeEntry::symlink_hash)
+        .expect("a dangling escaping symlink is recorded as a symlink");
+    assert_eq!(
+        repo.store().get_blob(&hash).unwrap().unwrap().content(),
+        b"/nonexistent/../../../etc/passwd"
     );
 }
 
@@ -3403,7 +3327,9 @@ fn open_solid_checkout_without_git_uses_native_checkout_authority() {
 #[test]
 fn worktree_pointer_authority_controls_checkout_capability() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init(temp_dir.path()).unwrap();
+    // A sibling of the main repository: a hand-written pointer inside its
+    // worktree would be refused as planted content (heddle#2034).
+    let repo = Repository::init(temp_dir.path().join("main")).unwrap();
     let checkout = temp_dir.path().join("git-backed-worktree");
     let checkout_heddle = checkout.join(".heddle");
     fs::create_dir_all(checkout_heddle.join("state")).unwrap();
@@ -3514,4 +3440,356 @@ fn rr_probe_crash_windows() {
             main.view().unwrap().source_heads
         );
     }
+}
+
+// heddle#2017: Git checks out symlinks whatever their target. A tracked
+// absolute or `../` symlink must materialize exactly, and the worktree must
+// never be written THROUGH a symlink when a later path sits beneath it.
+
+#[cfg(unix)]
+fn symlink_entry(repo: &Repository, name: &str, target: &str) -> TreeEntry {
+    let hash = repo
+        .store()
+        .put_blob(&Blob::new(target.as_bytes().to_vec()))
+        .unwrap();
+    TreeEntry::symlink(name, hash).unwrap()
+}
+
+#[cfg(unix)]
+fn file_entry(repo: &Repository, name: &str, content: &str) -> TreeEntry {
+    let hash = repo.store().put_blob(&Blob::from(content)).unwrap();
+    TreeEntry::file(name.to_string(), hash, false).unwrap()
+}
+
+#[cfg(unix)]
+fn dir_entry(repo: &Repository, name: &str, entries: Vec<TreeEntry>) -> TreeEntry {
+    let tree = Tree::from_entries(entries);
+    let hash = repo.store().put_tree(&tree).unwrap();
+    TreeEntry::directory(name.to_string(), hash).unwrap()
+}
+
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_checks_out_absolute_and_escaping_symlinks_exactly() {
+    let (temp_dir, repo) = create_test_repo();
+    let materialize_root = temp_dir.path().join("materialized");
+    let tree = Tree::from_entries(vec![
+        symlink_entry(&repo, "abs-link", "/usr/share/dict/words"),
+        symlink_entry(&repo, "rel-link", "../outside"),
+        symlink_entry(&repo, "deep-link", ".heddle/../../../etc/passwd"),
+        file_entry(&repo, "plain.txt", "plain\n"),
+    ]);
+
+    repo.materialize_tree(&tree, &materialize_root)
+        .expect("Git checks out absolute and escaping symlinks; so must heddle");
+
+    for (name, target) in [
+        ("abs-link", "/usr/share/dict/words"),
+        ("rel-link", "../outside"),
+        ("deep-link", ".heddle/../../../etc/passwd"),
+    ] {
+        let path = materialize_root.join(name);
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{name} must be a real symlink"
+        );
+        assert_eq!(fs::read_link(&path).unwrap(), Path::new(target), "{name}");
+    }
+    assert_eq!(
+        fs::read_to_string(materialize_root.join("plain.txt")).unwrap(),
+        "plain\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_capture_records_absolute_and_escaping_symlinks_without_following_them() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.txt"), "outside\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), temp_dir.path().join("abs-link")).unwrap();
+    std::os::unix::fs::symlink("../outside", temp_dir.path().join("rel-link")).unwrap();
+
+    let tree = repo.build_tree(temp_dir.path()).unwrap();
+
+    let abs = tree.get("abs-link").expect("absolute symlink captured");
+    assert_eq!(
+        repo.store()
+            .get_blob(&abs.symlink_hash().expect("captured as a symlink"))
+            .unwrap()
+            .unwrap()
+            .content(),
+        symlink_target_bytes(outside.path()).as_slice()
+    );
+    let rel = tree.get("rel-link").expect("relative symlink captured");
+    assert_eq!(
+        repo.store()
+            .get_blob(&rel.symlink_hash().expect("captured as a symlink"))
+            .unwrap()
+            .unwrap()
+            .content(),
+        b"../outside"
+    );
+    assert!(
+        tree.entries()
+            .iter()
+            .all(|entry| entry.name() != "secret.txt"),
+        "capture must not descend through a symlink"
+    );
+}
+
+/// The real safety rule: a tracked `link/file` must never be written through
+/// a `link` symlink that points outside the checkout. Git replaces the
+/// symlink with a real directory; so does heddle.
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_never_writes_through_symlinked_parent() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("checkout");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    // Left over from an earlier state (or planted untracked/ignored).
+    std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("nested/inner")).unwrap();
+    let tree = Tree::from_entries(vec![
+        dir_entry(
+            &repo,
+            "link",
+            vec![
+                file_entry(&repo, "file", "pwned\n"),
+                dir_entry(&repo, "sub", vec![file_entry(&repo, "deep", "deep\n")]),
+            ],
+        ),
+        dir_entry(
+            &repo,
+            "nested",
+            vec![dir_entry(
+                &repo,
+                "inner",
+                vec![symlink_entry(&repo, "planted", "/etc/passwd")],
+            )],
+        ),
+    ]);
+
+    repo.materialize_tree(&tree, &root).unwrap();
+
+    assert_eq!(
+        fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "nothing may be written outside the checkout"
+    );
+    for dir in ["link", "nested/inner"] {
+        assert!(
+            fs::symlink_metadata(root.join(dir)).unwrap().is_dir(),
+            "{dir} must now be a real directory"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("link/file")).unwrap(),
+        "pwned\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("link/sub/deep")).unwrap(),
+        "deep\n"
+    );
+    assert_eq!(
+        fs::read_link(root.join("nested/inner/planted")).unwrap(),
+        Path::new("/etc/passwd")
+    );
+}
+
+/// A leaf that is already a symlink is replaced, never written through.
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_replaces_leaf_symlink_instead_of_following_it() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    fs::write(&victim, "untouched\n").unwrap();
+    let root = temp_dir.path().join("checkout");
+    fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(&victim, root.join("file")).unwrap();
+    let tree = Tree::from_entries(vec![file_entry(&repo, "file", "tracked\n")]);
+
+    repo.materialize_tree(&tree, &root).unwrap();
+
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched\n");
+    let meta = fs::symlink_metadata(root.join("file")).unwrap();
+    assert!(meta.is_file(), "the leaf must be a regular file now");
+    assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "tracked\n");
+}
+
+/// Commit 1 introduces `link -> <outside>`; commit 2 replaces it with a real
+/// `link/` directory holding `link/file`. Moving between the two (both ways,
+/// incremental and full) must never write outside the repository.
+#[test]
+#[cfg(unix)]
+fn test_goto_symlink_to_directory_transition_never_writes_outside() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    fs::write(root.join("base.txt"), "base\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+    std::os::unix::fs::symlink("/usr/share/dict/words", root.join("abs-link")).unwrap();
+    let with_link = repo.snapshot(Some("link".into()), None).unwrap();
+
+    fs::remove_file(root.join("link")).unwrap();
+    fs::create_dir(root.join("link")).unwrap();
+    fs::write(root.join("link/file"), "inside\n").unwrap();
+    let with_dir = repo.snapshot(Some("dir".into()), None).unwrap();
+
+    repo.goto(&with_link.id()).unwrap();
+    assert_eq!(fs::read_link(root.join("link")).unwrap(), outside.path());
+    assert_eq!(
+        fs::read_link(root.join("abs-link")).unwrap(),
+        Path::new("/usr/share/dict/words")
+    );
+
+    repo.goto(&with_dir.id()).unwrap();
+    assert!(fs::symlink_metadata(root.join("link")).unwrap().is_dir());
+    assert_eq!(
+        fs::read_to_string(root.join("link/file")).unwrap(),
+        "inside\n"
+    );
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+
+    // Full rematerialize over a worktree whose `link` is still a symlink
+    // (e.g. one the user re-created): must not write through it either.
+    repo.goto(&with_link.id()).unwrap();
+    repo.goto_discard_local(&with_dir.id()).unwrap();
+    assert!(fs::symlink_metadata(root.join("link")).unwrap().is_dir());
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+/// An ignored symlink sits where the target state tracks a directory, so the
+/// worktree is clean and goto takes the incremental path. Git replaces the
+/// ignored symlink with a real directory; heddle must too, and must never
+/// write `link/file` through it.
+#[test]
+#[cfg(unix)]
+fn test_incremental_goto_replaces_ignored_symlink_instead_of_writing_through_it() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let root = temp_dir.path();
+    fs::write(root.join("base.txt"), "base\n").unwrap();
+    fs::create_dir(root.join("link")).unwrap();
+    fs::write(root.join("link/file"), "inside\n").unwrap();
+    let with_dir = repo.snapshot(Some("dir".into()), None).unwrap();
+
+    fs::remove_dir_all(root.join("link")).unwrap();
+    fs::write(root.join(".heddleignore"), "link\n").unwrap();
+    repo.snapshot(Some("ignored".into()), None).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+
+    repo.goto(&with_dir.id()).unwrap();
+
+    assert_eq!(
+        fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "goto must never write through an ignored symlink"
+    );
+    assert!(fs::symlink_metadata(root.join("link")).unwrap().is_dir());
+    assert_eq!(
+        fs::read_to_string(root.join("link/file")).unwrap(),
+        "inside\n"
+    );
+}
+
+/// heddle#2017 review: deleting through a symlink. A state tracks
+/// `link/secret`; the worktree then holds `link` as an ignored symlink to an
+/// outside directory that has a `secret` of its own. Moving to a state without
+/// `link/secret` (incremental and full rematerialize) must never delete the
+/// outside file.
+#[test]
+#[cfg(unix)]
+fn test_goto_never_deletes_through_an_ignored_symlink() {
+    for discard in [false, true] {
+        let (temp_dir, repo) = create_test_repo();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "outside\n").unwrap();
+        let root = temp_dir.path();
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        let base = repo.snapshot(Some("base".into()), None).unwrap();
+        fs::create_dir(root.join("link")).unwrap();
+        fs::write(root.join("link/secret"), "tracked\n").unwrap();
+        repo.snapshot(Some("tracked".into()), None).unwrap();
+        fs::remove_dir_all(root.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+        fs::create_dir_all(root.join(".heddle/info")).unwrap();
+        fs::write(root.join(".heddle/info/exclude"), "/link\n").unwrap();
+
+        let result = if discard {
+            repo.goto_discard_local(&base.id())
+        } else {
+            repo.goto_verified_clean(&base.id())
+        };
+
+        result.unwrap();
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "outside\n",
+            "goto (discard={discard}) deleted a file through the `link` symlink"
+        );
+    }
+}
+
+/// heddle#2017 review P2-a: like Git ≥ 2.32, an in-tree `.heddleignore` or
+/// `.gitignore` that is a symlink is not followed; its target's lines are
+/// not ignore rules.
+#[test]
+#[cfg(unix)]
+fn test_symlinked_ignore_files_are_not_followed() {
+    let (temp_dir, repo) = create_test_repo();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("rules"), "from-outside-rule\n").unwrap();
+    for name in [".heddleignore", ".gitignore"] {
+        std::os::unix::fs::symlink(outside.path().join("rules"), temp_dir.path().join(name))
+            .unwrap();
+    }
+
+    let patterns = repo.ignore_patterns().unwrap();
+
+    assert!(
+        !patterns
+            .iter()
+            .any(|pattern| pattern == "from-outside-rule"),
+        "a symlinked ignore file was followed: {patterns:?}"
+    );
+}
+
+/// A FIFO or device in place of `.heddleignore` must not hang or exhaust
+/// memory: only a regular file is read, and only up to a bounded size.
+#[test]
+#[cfg(unix)]
+fn test_ignore_file_must_be_a_bounded_regular_file() {
+    let (temp_dir, repo) = create_test_repo();
+    let fifo = temp_dir.path().join(".heddleignore");
+    let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o644) }, 0);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let root = temp_dir.path().to_path_buf();
+    std::thread::spawn(move || {
+        let repo = Repository::open(&root).unwrap();
+        let _ = tx.send(repo.ignore_patterns().map(|patterns| patterns.len()));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(10));
+    assert!(
+        matches!(outcome, Ok(Ok(_))),
+        "reading a FIFO .heddleignore must neither hang nor fail: {outcome:?}"
+    );
+
+    fs::remove_file(&fifo).unwrap();
+    let mut oversized = "big-rule\n".repeat((2 << 20) / 9);
+    oversized.push_str("tail-rule\n");
+    fs::write(&fifo, oversized).unwrap();
+    let patterns = repo.ignore_patterns().unwrap();
+    assert!(
+        !patterns.iter().any(|pattern| pattern == "tail-rule"),
+        "an ignore file over the size cap must not be loaded"
+    );
 }

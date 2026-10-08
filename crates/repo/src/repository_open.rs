@@ -3,12 +3,7 @@
 //! the object store, replaying snapshot artifacts, and reconstructing any
 //! configured lazy hydrator.
 
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use objects::{
     error::{HeddleError, Result},
@@ -25,7 +20,8 @@ use super::{
     RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority,
     discovery::{
         RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
-        has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+        ensure_repository_trusted, has_git_repository_at_root, is_heddle_repository_root,
+        parse_objectstore_pointer, record_nested_repository_trust, refuse_metadataless_mount,
     },
     overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude},
 };
@@ -318,15 +314,7 @@ impl Repository {
         // Solid/materialized checkouts have their own `.heddle` pointer and
         // are handled by the worktree branch below, so this only fires for a
         // virtualized (or torn-down) mount root.
-        if let Some(mount_root) = metadataless_managed_thread_root(&start_path) {
-            return Err(HeddleError::Config(format!(
-                "'{}' is a Heddle-managed virtualized thread mount with no checkout \
-                 metadata of its own; refusing to operate on the parent repository from \
-                 inside it. Run heddle from the repository root, or use a solid/materialized \
-                 thread checkout.",
-                mount_root.display()
-            )));
-        }
+        refuse_metadataless_mount(&start_path)?;
         let mut discovered_git_root = None;
 
         for dir in bounded_ancestor_paths(&start_path) {
@@ -341,6 +329,9 @@ impl Repository {
             }
 
             if is_heddle_repository_root(dir) {
+                // Trust admission precedes reading anything the candidate's
+                // metadata controls: config, store pointer, hooks (heddle#2034).
+                ensure_repository_trusted(dir)?;
                 // Format admission is read-only and precedes locks, database
                 // recovery, Git exclude edits, and nested overlay bootstrap.
                 if heddle_path.join("objectstore").is_file() {
@@ -581,34 +572,6 @@ impl Repository {
             .as_bytes(),
         )?;
         fs::create_dir_all(heddle_dir.join("state"))?;
-        Ok(())
+        record_nested_repository_trust(path)
     }
-}
-
-struct WorktreePointer {
-    objectstore: PathBuf,
-    source_authority: RepositorySourceAuthority,
-}
-
-fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
-    let mut objectstore = None;
-    let mut source_authority = None;
-    for line in content.lines() {
-        if let Some(path) = line.strip_prefix("objectstore:") {
-            let path = path.trim();
-            if !path.is_empty() {
-                objectstore = Some(PathBuf::from(path));
-            }
-        } else if let Some(authority) = line.strip_prefix("source-authority:") {
-            source_authority = match authority.trim() {
-                "native" => Some(RepositorySourceAuthority::Native),
-                "git-overlay" => Some(RepositorySourceAuthority::GitOverlay),
-                _ => return None,
-            };
-        }
-    }
-    Some(WorktreePointer {
-        objectstore: objectstore?,
-        source_authority: source_authority?,
-    })
 }

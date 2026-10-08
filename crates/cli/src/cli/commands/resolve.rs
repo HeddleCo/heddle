@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Resolve command implementation.
 
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -701,38 +701,65 @@ fn resolve_file_with_version(
         return Ok(());
     }
 
-    let full_path = repo.root().join(path);
-
-    if ours {
-        let our_state = repo
-            .store()
-            .get_state(&merge_state.ours)?
-            .ok_or_else(|| anyhow!("Our state not found"))?;
-        let our_tree = repo.require_tree(&our_state.tree)?;
-
-        if let Some(entry) = our_tree.get(path) {
-            let Some(hash) = entry.leaf_content_hash() else {
-                return Ok(());
-            };
-            let blob = repo.require_blob(&hash)?;
-            fs::write(&full_path, blob.content())?;
-        }
-    } else if theirs {
-        let their_state = repo
-            .store()
-            .get_state(&merge_state.theirs)?
-            .ok_or_else(|| anyhow!("Their state not found"))?;
-        let their_tree = repo.require_tree(&their_state.tree)?;
-
-        if let Some(entry) = their_tree.get(path) {
-            let Some(hash) = entry.leaf_content_hash() else {
-                return Ok(());
-            };
-            let blob = repo.require_blob(&hash)?;
-            fs::write(&full_path, blob.content())?;
-        }
+    let side = if ours {
+        &merge_state.ours
+    } else {
+        &merge_state.theirs
+    };
+    let state = repo
+        .store()
+        .get_state(side)?
+        .ok_or_else(|| anyhow!("{} state not found", if ours { "Our" } else { "Their" }))?;
+    let tree = repo.require_tree(&state.tree)?;
+    let selected_path = Path::new(path);
+    if let Some(parent) = selected_path.parent()
+        && let Some(tree) = repo.resolve_subtree(&tree, parent)?
+        && let Some(name) = selected_path.file_name().and_then(|name| name.to_str())
+        && let Some(entry) = tree.get(name)
+    {
+        write_resolved_entry(repo, path, entry)?;
     }
 
+    Ok(())
+}
+
+/// Write the chosen side's entry at `path` without following a symlink in
+/// any parent or at the leaf (heddle#2017). A symlink entry is written as a
+/// symlink and an executable keeps its mode, as checkout writes them.
+fn write_resolved_entry(
+    repo: &Repository,
+    path: &str,
+    entry: &objects::object::TreeEntry,
+) -> Result<()> {
+    let Some(hash) = entry.leaf_content_hash() else {
+        return Ok(());
+    };
+    let blob = repo.require_blob(&hash)?;
+    let root = repo.root();
+    let full_path = root.join(path);
+    if entry.entry_type() == objects::object::EntryType::Symlink {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            objects::nofollow::write_symlink_beneath(
+                root,
+                &full_path,
+                std::ffi::OsStr::from_bytes(blob.content()),
+            )
+            .with_context(|| format!("write resolved symlink {}", full_path.display()))?;
+        }
+        return Ok(());
+    }
+    let file = objects::nofollow::write_file_beneath(root, &full_path, blob.content())
+        .with_context(|| format!("write resolved file {}", full_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if entry.is_executable() { 0o755 } else { 0o644 };
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    drop(file);
     Ok(())
 }
 

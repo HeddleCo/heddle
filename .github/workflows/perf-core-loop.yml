@@ -35,10 +35,14 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     # 10k/100k fixtures and release compiles write through TMPDIR.
-    # runner.temp is on the job disk and already exists before rustup runs.
-    env:
-      TMPDIR: ${{ runner.temp }}
+    # `runner` is not a legal context in job env; using it there makes
+    # GitHub reject the workflow file before any job starts. RUNNER_TEMP
+    # already exists on the job disk, so the first step publishes it
+    # before rustup runs.
     steps:
+      - name: Point TMPDIR at runner temp
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
