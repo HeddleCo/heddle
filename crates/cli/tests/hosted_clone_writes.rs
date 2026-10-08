@@ -3399,9 +3399,8 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
         capture.calls.clear();
         capture.fail_clone_stage = Some(stage.into());
     }
-    let started = std::time::Instant::now();
     let output = if recovery {
-        fixture.output_at(&fixture.clone, &["status"])
+        fixture.output_at(&fixture.clone, &["--output", "json", "status"])
     } else {
         fixture.output_at(
             fixture._temp.path(),
@@ -3419,8 +3418,6 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
     );
     let capture = fixture.captured.lock().expect("capture").clone();
     let calls = &capture.calls;
-    fixture.client.close().await;
-    fixture.server.abort();
     assert!(
         !output.status.success(),
         "clone must stop at {stage} failure: {error}"
@@ -3442,8 +3439,14 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
             "cause lost: {error}"
         );
     }
+    // Measure error handling after the peer fails, excluding source install
+    // and verification that precede the failing RPC.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
+        capture
+            .failed_clone_at
+            .expect("failure timestamp")
+            .elapsed()
+            < std::time::Duration::from_secs(10),
         "failure must be immediate"
     );
     assert!(
@@ -3452,11 +3455,23 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
     );
     let failed = capture.failed_clone_call.expect("failure was injected");
     assert!(
-        !calls[failed + 1..].iter().any(
-            |call| call.ends_with("/ObserveCollaboration") || call.ends_with("/ObserveThreads")
-        ),
+        !calls[failed + 1..]
+            .iter()
+            .any(|call| call.ends_with("/ObserveCollaboration")
+                || call.ends_with("/ObserveThreads")
+                || call.ends_with("/ResolveResources")),
         "no sync or metadata after failed stage: {calls:?}"
     );
+    {
+        let mut capture = fixture.captured.lock().expect("restore peer");
+        capture.fail_clone_stage = None;
+    }
+    fixture.run_at(&fixture.clone, &["status"]);
+    assert!(
+        !repo::clone_intent::CloneIntent::path(&fixture.clone).exists(),
+        "successful recovery clears the retained intent"
+    );
+    fixture.close().await;
 }
 
 #[test]

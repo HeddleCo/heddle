@@ -75,6 +75,7 @@ pub struct PublicationCapture {
     pub fail_clone_stage: Option<String>,
     pub clone_observations: Vec<bool>,
     pub failed_clone_call: Option<usize>,
+    pub failed_clone_at: Option<std::time::Instant>,
     /// Apply the next discussion command, then lose its receipt, so the
     /// client must redeliver an operation the server already holds.
     pub lose_next_discussion_receipt: bool,
@@ -444,6 +445,7 @@ async fn serve_call(
         {
             let mut capture = fixture.captured.lock().expect("failed call");
             capture.failed_clone_call = Some(capture.calls.len() - 1);
+            capture.failed_clone_at = Some(std::time::Instant::now());
         }
         if failed_stage.as_deref() == Some("disconnect") {
             connection.close(0u32.into(), b"injected disconnect");
