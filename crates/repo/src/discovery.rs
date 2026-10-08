@@ -178,7 +178,9 @@ pub fn ensure_repository_trusted(root: &Path) -> Result<()> {
         .get()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    ensure_repository_trusted_with(root, safe, current_users())
+    ensure_repository_trusted_with(root, safe, current_users(), &|_, metadata| {
+        owner_of(metadata)
+    })
 }
 
 /// The owners whose repositories this process trusts by ownership.
@@ -222,12 +224,17 @@ fn owner_of(_metadata: &fs::Metadata) -> u32 {
     0
 }
 
+/// Owner uid of a path, given its metadata. A parameter so tests can model
+/// files another user owns without running as root.
+pub(super) type OwnerOf<'a> = &'a dyn Fn(&Path, &fs::Metadata) -> u32;
+
 /// [`ensure_repository_trusted`] with the trust inputs supplied explicitly.
 /// `owners` is `None` where the platform has no uid ownership model.
 pub(super) fn ensure_repository_trusted_with(
     root: &Path,
     safe_repositories: &[PathBuf],
     owners: Option<TrustedOwners>,
+    owner_of: OwnerOf<'_>,
 ) -> Result<()> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     if safe_repositories.contains(&root) {
@@ -235,7 +242,7 @@ pub(super) fn ensure_repository_trusted_with(
     }
     let heddle_dir = root.join(".heddle");
     if let Some(owners) = owners {
-        ensure_owned(&root, &heddle_dir, owners)?;
+        ensure_owned(&root, &heddle_dir, owners, owner_of)?;
     }
     for enclosing in enclosing_repository_roots(&root) {
         if !nested_record_vouches(&enclosing, &root) {
@@ -248,9 +255,14 @@ pub(super) fn ensure_repository_trusted_with(
     Ok(())
 }
 
-fn ensure_owned(root: &Path, heddle_dir: &Path, owners: TrustedOwners) -> Result<()> {
+fn ensure_owned(
+    root: &Path,
+    heddle_dir: &Path,
+    owners: TrustedOwners,
+    owner_of: OwnerOf<'_>,
+) -> Result<()> {
     let foreign = |path: &Path, metadata: &fs::Metadata| {
-        let owner = owner_of(metadata);
+        let owner = owner_of(path, metadata);
         (!owners.accepts(owner)).then(|| {
             untrusted(
                 root,
@@ -347,7 +359,11 @@ fn nested_record_vouches(enclosing: &Path, root: &Path) -> bool {
 /// `.heddle` metadata; a standalone repository has nothing to record.
 pub(super) fn record_nested_repository_trust(root: &Path) -> Result<()> {
     let root = root.canonicalize().map_err(|error| {
-        HeddleError::Io(enrich_fs_error(root, "resolving new repository root", error))
+        HeddleError::Io(enrich_fs_error(
+            root,
+            "resolving new repository root",
+            error,
+        ))
     })?;
     let Some(body) = nested_record_body(&root) else {
         return Ok(());

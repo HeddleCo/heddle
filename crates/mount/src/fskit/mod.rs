@@ -217,6 +217,7 @@ fn fskit_log(msg: &str) {
 
 pub(super) fn open_thread(repo_path: &str, thread_id: &str) -> c_abi::HeddleFSKitSessionHandle {
     fskit_log(&format!("open_thread: repo={repo_path} thread={thread_id}"));
+    config::UserConfig::register_default_safe_repositories();
     let repo = match repo::Repository::open(repo_path) {
         Ok(r) => {
             fskit_log("Repository::open succeeded");

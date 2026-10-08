@@ -97,7 +97,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
     // `with_local_head`), and the manifests live in the *main*
     // repo's `threads/`. Pre-fix this misread always returned an
     // empty inventory inside a worktree.
-    let heddle_dir = resolve_heddle_dir(cli).unwrap_or_else(|_| repo_root.join(".heddle"));
+    let heddle_dir = resolve_heddle_dir(cli)?;
     let upload_health = repo::device_runs::RunStore::open_existing(&heddle_dir)?
         .map(|store| store.upload_health())
         .transpose()?
@@ -367,11 +367,15 @@ fn daemon_response_refusal(
     )
 }
 
+/// The repository the daemon serves. `-C` goes through the same admission
+/// as any other command (heddle#2034): an untrusted path is refused, never
+/// used as a raw root.
 fn resolve_repo_root(cli: &Cli) -> Result<std::path::PathBuf> {
-    if let Some(root) = cli.repo.as_ref() {
-        return Ok(root.clone());
-    }
-    let repo = repo::Repository::open(&std::env::current_dir()?)?;
+    let start = match cli.repo.as_ref() {
+        Some(root) => root.clone(),
+        None => std::env::current_dir()?,
+    };
+    let repo = repo::Repository::open(&start)?;
     Ok(repo.root().to_path_buf())
 }
 

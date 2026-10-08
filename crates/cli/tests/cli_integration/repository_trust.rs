@@ -160,3 +160,64 @@ fn relative_safe_repository_entry_is_rejected() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("safe.repositories"), "{stderr}");
 }
+
+/// P3: `daemon status -C <planted>` used the planted path as a raw root and,
+/// after an open failure, read `<planted>/.heddle` directly.
+#[test]
+fn daemon_status_refuses_planted_repository_named_with_dash_c() {
+    let (temp, _outer, planted) = enclosing_with_planted_repo();
+    let planted_arg = planted.display().to_string();
+    let output = heddle_output(
+        &["--output", "json", "-C", &planted_arg, "daemon", "status"],
+        Some(temp.path()),
+    )
+    .expect("spawn heddle");
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "daemon status must refuse the planted repository; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = error_envelope(&output, "daemon status");
+    assert_eq!(envelope["kind"], "untrusted_repository", "{envelope}");
+}
+
+/// P3: the `status --short` fast path parsed the planted repository's config
+/// before anything refused it.
+#[test]
+fn status_short_fast_path_refuses_before_parsing_planted_config() {
+    let (_temp, _outer, planted) = enclosing_with_planted_repo();
+    let config_path = planted.join(".heddle/config.toml");
+    let config = fs::read_to_string(&config_path).expect("read planted config");
+    fs::write(
+        &config_path,
+        format!("{config}\n[output]\nformat = \"bogus\"\n"),
+    )
+    .expect("write planted config");
+
+    let output = heddle_output(&["--output", "json", "status", "--short"], Some(&planted))
+        .expect("spawn heddle");
+    let envelope = error_envelope(&output, "status --short");
+    assert_eq!(envelope["kind"], "untrusted_repository", "{envelope}");
+}
+
+/// P2-c: a repository `heddle init` creates inside another repository's
+/// worktree is vouched for by its creation record; no `[safe]` entry needed.
+#[test]
+fn heddle_init_inside_a_worktree_is_trusted_without_safe_entry() {
+    let temp = TempDir::new().expect("tempdir");
+    let outer = temp.path().join("outer");
+    fs::create_dir_all(&outer).expect("create outer");
+    heddle(&["init"], Some(&outer)).expect("init outer");
+    heddle(&["init", "libs/inner"], Some(&outer)).expect("init nested");
+    let nested = outer.join("libs/inner");
+    let output = heddle_output(&["--output", "json", "status"], Some(&nested)).expect("spawn");
+    assert!(
+        output.status.success(),
+        "a Heddle-created nested repository must open; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(report["output_kind"], "status", "{report}");
+}

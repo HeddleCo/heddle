@@ -476,24 +476,7 @@ fn test_cli_discovery_does_not_skip_a_genuinely_malformed_repository() {
     let nested = broken.join("src/nested");
     std::fs::create_dir_all(&nested).unwrap();
 
-    // A nested repository needs explicit trust to be discovered at all
-    // (heddle#2034); trust it so its malformed config is what surfaces.
-    let user_config = temp.path().join("user-config.toml");
-    std::fs::write(
-        &user_config,
-        format!(
-            "[safe]\nrepositories = [\"{}\"]\n",
-            broken.canonicalize().unwrap().display()
-        ),
-    )
-    .unwrap();
-    let user_config = user_config.display().to_string();
-    let output = heddle_output_with_env(
-        &["status"],
-        Some(&nested),
-        &[("HEDDLE_CONFIG", user_config.as_str())],
-    )
-    .expect("invoke status in broken repo");
+    let output = heddle_output(&["status"], Some(&nested)).expect("invoke status in broken repo");
     assert!(
         !output.status.success(),
         "discovery must not skip the broken inner repository and open the valid outer repository"
