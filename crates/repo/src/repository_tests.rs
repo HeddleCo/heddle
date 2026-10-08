@@ -3403,7 +3403,9 @@ fn open_solid_checkout_without_git_uses_native_checkout_authority() {
 #[test]
 fn worktree_pointer_authority_controls_checkout_capability() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init(temp_dir.path()).unwrap();
+    // A sibling of the main repository: a hand-written pointer inside its
+    // worktree would be refused as planted content (heddle#2034).
+    let repo = Repository::init(temp_dir.path().join("main")).unwrap();
     let checkout = temp_dir.path().join("git-backed-worktree");
     let checkout_heddle = checkout.join(".heddle");
     fs::create_dir_all(checkout_heddle.join("state")).unwrap();
