@@ -98,7 +98,11 @@ fn main() -> Result<()> {
 }
 
 fn command_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
+    // Source install, verification, pack construction, and checkout do
+    // synchronous work in the foreground. Keep iroh's reactor polling during
+    // those phases without creating a CPU-count-sized pool for each command.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
 }
