@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{OnceLock, RwLock},
 };
 
 use objects::{
     Progress,
-    error::{HeddleError, Result},
+    error::{HeddleError, Result, UntrustedRepositoryReason},
     fs_atomic::enrich_fs_error,
     object::ThreadName,
     store::{FsStore, ObjectStore, ShallowInfo},
@@ -116,6 +116,179 @@ pub fn discover_heddle_root(start: &Path) -> Option<PathBuf> {
     bounded_ancestor_paths(&start)
         .into_iter()
         .find(|path| is_heddle_repository_root(path))
+}
+
+/// Repository roots the user explicitly trusts (`[safe] repositories` in the
+/// Heddle user config), canonicalized. The CLI registers them once at startup;
+/// a library caller that never registers any gets the strict default.
+static SAFE_REPOSITORIES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Register the user's explicitly trusted repository roots, the analogue of
+/// Git's `safe.directory`. A listed root is opened even when it lies inside
+/// another repository's worktree or another user owns it. The first
+/// registration wins; later calls are ignored.
+pub fn set_safe_repositories(roots: impl IntoIterator<Item = PathBuf>) {
+    let roots = roots
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect();
+    let _ = SAFE_REPOSITORIES.set(roots);
+}
+
+/// Refuse repository metadata the user never vouched for (heddle#2034).
+///
+/// A `.heddle` directory is ordinary content below a worktree root, so a
+/// checkout can plant `sub/.heddle/{HEAD,config.toml,hooks,objectstore}`.
+/// Opening that repository from inside `sub/` would hand its config (TLS CA,
+/// upstream URL, remotes), its hooks, and its store pointer control over this
+/// user's commands. Mirroring Git's `safe.bareRepository=explicit` and
+/// `safe.directory`, `root` is refused unless it is listed in
+/// [`set_safe_repositories`], or both of these hold:
+///
+/// - the current user owns its `.heddle` (and the store a checkout pointer
+///   names);
+/// - it is not embedded in an enclosing Heddle worktree. Three nested shapes
+///   are not embedded, because checkout cannot forge them: metadata inside
+///   the enclosing `.heddle` (managed thread checkouts), a linked checkout
+///   whose pointer names the enclosing repository's own store, and the
+///   sidecar of a nested Git repository (checkout never writes `.git`).
+///
+/// Refusing the whole repository rather than filtering individual config keys
+/// fails closed: hooks, remotes, the hydrator config and the store pointer are
+/// as dangerous as the TLS CA, and a key added later would be honoured by
+/// default.
+pub fn ensure_repository_trusted(root: &Path) -> Result<()> {
+    let safe = SAFE_REPOSITORIES
+        .get()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    ensure_repository_trusted_with(root, safe, current_user())
+}
+
+#[cfg(unix)]
+fn current_user() -> Option<u32> {
+    Some(crate::daemon::peer::current_euid())
+}
+
+#[cfg(not(unix))]
+fn current_user() -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn owner_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::metadata(path).ok().map(|metadata| metadata.uid())
+}
+
+#[cfg(not(unix))]
+fn owner_of(_path: &Path) -> Option<u32> {
+    None
+}
+
+/// [`ensure_repository_trusted`] with the trust inputs supplied explicitly.
+/// `current_user` is `None` where the platform has no uid ownership model.
+pub(super) fn ensure_repository_trusted_with(
+    root: &Path,
+    safe_repositories: &[PathBuf],
+    current_user: Option<u32>,
+) -> Result<()> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if safe_repositories.contains(&root) {
+        return Ok(());
+    }
+    let heddle_dir = root.join(".heddle");
+    let pointed_store = pointed_store(&heddle_dir);
+    if let Some(current) = current_user {
+        for metadata in std::iter::once(&heddle_dir).chain(pointed_store.as_ref()) {
+            if let Some(owner) = owner_of(metadata)
+                && owner != current
+            {
+                return Err(untrusted(
+                    &root,
+                    UntrustedRepositoryReason::ForeignOwner {
+                        path: metadata.clone(),
+                        owner,
+                        current,
+                    },
+                ));
+            }
+        }
+    }
+    let mut nested_git_root = None;
+    for enclosing in bounded_ancestor_paths(&root).into_iter().skip(1) {
+        if !is_heddle_repository_root(&enclosing) || root.starts_with(enclosing.join(".heddle")) {
+            continue;
+        }
+        if *nested_git_root.get_or_insert_with(|| has_git_repository_at_root(&root)) {
+            return Ok(());
+        }
+        if pointed_store.is_some() && pointed_store == repository_store(&enclosing) {
+            continue;
+        }
+        return Err(untrusted(
+            &root,
+            UntrustedRepositoryReason::Embedded { enclosing },
+        ));
+    }
+    Ok(())
+}
+
+fn untrusted(root: &Path, reason: UntrustedRepositoryReason) -> HeddleError {
+    HeddleError::UntrustedRepository {
+        root: root.to_path_buf(),
+        reason,
+    }
+}
+
+/// The canonical store a checkout's `.heddle/objectstore` pointer names, when
+/// it is a readable absolute pointer. Malformed pointers are reported by
+/// [`super::Repository::open`]; trust only needs the store they would select.
+fn pointed_store(heddle_dir: &Path) -> Option<PathBuf> {
+    let pointer = fs::read_to_string(heddle_dir.join("objectstore")).ok()?;
+    let store = parse_objectstore_pointer(&pointer)?.objectstore;
+    store
+        .is_absolute()
+        .then(|| store.canonicalize().ok())
+        .flatten()
+}
+
+/// The canonical store the repository rooted at `root` writes to.
+fn repository_store(root: &Path) -> Option<PathBuf> {
+    let heddle_dir = root.join(".heddle");
+    if heddle_dir.join("objects").is_dir() {
+        return heddle_dir.canonicalize().ok();
+    }
+    pointed_store(&heddle_dir)
+}
+
+pub(super) struct WorktreePointer {
+    pub(super) objectstore: PathBuf,
+    pub(super) source_authority: RepositorySourceAuthority,
+}
+
+pub(super) fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
+    let mut objectstore = None;
+    let mut source_authority = None;
+    for line in content.lines() {
+        if let Some(path) = line.strip_prefix("objectstore:") {
+            let path = path.trim();
+            if !path.is_empty() {
+                objectstore = Some(PathBuf::from(path));
+            }
+        } else if let Some(authority) = line.strip_prefix("source-authority:") {
+            source_authority = match authority.trim() {
+                "native" => Some(RepositorySourceAuthority::Native),
+                "git-overlay" => Some(RepositorySourceAuthority::GitOverlay),
+                _ => return None,
+            };
+        }
+    }
+    Some(WorktreePointer {
+        objectstore: objectstore?,
+        source_authority: source_authority?,
+    })
 }
 
 /// Open only the Git repository rooted at `root`; never inherit an ancestor.

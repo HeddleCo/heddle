@@ -200,6 +200,9 @@ impl HeddleExitCode {
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
+                    // Refusing an untrusted repository is a missing precondition
+                    // (explicit trust or the enclosing root), like a missing one.
+                    objects::error::HeddleError::UntrustedRepository { .. } => return Self::Config,
                     objects::error::HeddleError::RepositoryFormatTooNew { .. }
                     | objects::error::HeddleError::RepositoryFormatTooOld { .. }
                     | objects::error::HeddleError::StorageFormatTooNew { .. }

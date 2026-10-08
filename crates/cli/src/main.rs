@@ -322,6 +322,9 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     };
+    // Explicit repository trust must be registered before anything below
+    // discovers or opens a repository (heddle#2034).
+    user_config.register_safe_repositories();
     let repo_start = cli.repo.clone().or_else(|| std::env::current_dir().ok());
     if let Some(path) = repo_start.as_ref() {
         UserConfig::set_remote_tls_repo_start(path.clone());
@@ -431,8 +434,17 @@ async fn async_main() -> Result<()> {
     if let Some(start) = incomplete_land_recovery_start(&cli, &command_contract)?
         && recovery_target_has_existing_metadata(&cli.command, &start)
     {
-        let repo = repo::Repository::open(&start)?;
-        recover_incomplete_land_if_present(&repo)?;
+        // Route open refusals (untrusted or too-old repositories) through the
+        // typed envelope like the command body's own errors.
+        let recovered = repo::Repository::open(&start)
+            .map_err(anyhow::Error::from)
+            .and_then(|repo| recover_incomplete_land_if_present(&repo));
+        if let Err(err) = recovered {
+            let code = HeddleExitCode::from_error(&err);
+            print_error_with_hint(&cli, &err);
+            shutdown_command_telemetry(command_trace, command_span_guard, telemetry, code.into());
+            return Err(RenderedExit(code.into()).into());
+        }
     }
 
     let command_start = Instant::now();

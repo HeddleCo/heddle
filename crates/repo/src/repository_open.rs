@@ -3,12 +3,7 @@
 //! the object store, replaying snapshot artifacts, and reconstructing any
 //! configured lazy hydrator.
 
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use objects::{
     error::{HeddleError, Result},
@@ -25,7 +20,8 @@ use super::{
     RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority,
     discovery::{
         RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
-        has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+        ensure_repository_trusted, has_git_repository_at_root, is_heddle_repository_root,
+        metadataless_managed_thread_root, parse_objectstore_pointer,
     },
     overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude},
 };
@@ -341,6 +337,9 @@ impl Repository {
             }
 
             if is_heddle_repository_root(dir) {
+                // Trust admission precedes reading anything the candidate's
+                // metadata controls: config, store pointer, hooks (heddle#2034).
+                ensure_repository_trusted(dir)?;
                 // Format admission is read-only and precedes locks, database
                 // recovery, Git exclude edits, and nested overlay bootstrap.
                 if heddle_path.join("objectstore").is_file() {
@@ -583,32 +582,4 @@ impl Repository {
         fs::create_dir_all(heddle_dir.join("state"))?;
         Ok(())
     }
-}
-
-struct WorktreePointer {
-    objectstore: PathBuf,
-    source_authority: RepositorySourceAuthority,
-}
-
-fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
-    let mut objectstore = None;
-    let mut source_authority = None;
-    for line in content.lines() {
-        if let Some(path) = line.strip_prefix("objectstore:") {
-            let path = path.trim();
-            if !path.is_empty() {
-                objectstore = Some(PathBuf::from(path));
-            }
-        } else if let Some(authority) = line.strip_prefix("source-authority:") {
-            source_authority = match authority.trim() {
-                "native" => Some(RepositorySourceAuthority::Native),
-                "git-overlay" => Some(RepositorySourceAuthority::GitOverlay),
-                _ => return None,
-            };
-        }
-    }
-    Some(WorktreePointer {
-        objectstore: objectstore?,
-        source_authority: source_authority?,
-    })
 }
