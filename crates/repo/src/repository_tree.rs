@@ -1430,11 +1430,7 @@ impl Repository {
             &mut patterns,
             &self.root.join(".heddle").join("info").join("exclude"),
         )?;
-        let path = self.root.join(".heddleignore");
-
-        if path.exists() {
-            append_ignore_file_patterns(&mut patterns, &path)?;
-        }
+        append_ignore_file_patterns(&mut patterns, &self.root.join(".heddleignore"))?;
 
         Ok(patterns)
     }
@@ -1490,11 +1486,48 @@ impl Repository {
     }
 }
 
-fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
+/// Read an ignore file the repository supplies (`.heddleignore`,
+/// `.gitignore`) or a local exclude file, as Git ≥ 2.32 reads `.gitignore`:
+/// a symlink is not followed, and a FIFO, device or directory is not read.
+/// Either is skipped with a warning. A file over
+/// [`objects::nofollow::MAX_IN_TREE_CONTROL_FILE_BYTES`] is skipped too, so a
+/// hostile repository cannot exhaust memory through it (heddle#2017).
+pub fn read_ignore_file(path: &Path) -> Result<Option<String>> {
+    use objects::nofollow::{
+        InTreeControlFile, MAX_IN_TREE_CONTROL_FILE_BYTES, read_in_tree_control_file,
+    };
+    match read_in_tree_control_file(path, MAX_IN_TREE_CONTROL_FILE_BYTES)? {
+        InTreeControlFile::Absent => Ok(None),
+        InTreeControlFile::Contents(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+            HeddleError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ignore file {} is not valid UTF-8", path.display()),
+            ))
+        }),
+        InTreeControlFile::Symlink => {
+            warn!(path = %path.display(), "ignoring ignore file: it is a symlink, which is never followed");
+            Ok(None)
+        }
+        InTreeControlFile::NotRegular => {
+            warn!(path = %path.display(), "ignoring ignore file: it is not a regular file");
+            Ok(None)
+        }
+        InTreeControlFile::TooLarge(size) => {
+            warn!(
+                path = %path.display(),
+                size,
+                limit = MAX_IN_TREE_CONTROL_FILE_BYTES,
+                "ignoring ignore file: it exceeds the size limit"
+            );
+            Ok(None)
+        }
     }
-    let contents = fs::read_to_string(path)?;
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    let Some(contents) = read_ignore_file(path)? else {
+        return Ok(());
+    };
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {

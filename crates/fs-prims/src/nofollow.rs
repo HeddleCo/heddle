@@ -322,6 +322,126 @@ pub fn remove_path_beneath(root: &Path, path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Upper bound on an in-tree control file such as `.heddleignore` or
+/// `.gitignore`. Real ignore files are a few KiB; anything larger is refused
+/// rather than read into memory.
+pub const MAX_IN_TREE_CONTROL_FILE_BYTES: u64 = 1 << 20;
+
+/// What reading an in-tree control file found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InTreeControlFile {
+    Absent,
+    Contents(Vec<u8>),
+    /// A symlink, which is never followed. Git ≥ 2.32 refuses to follow
+    /// in-tree `.gitignore` symlinks for the same reason: the target may be
+    /// any file on the machine, or a device such as `/dev/zero`.
+    Symlink,
+    /// A FIFO, device, socket or directory. Reading one could block forever
+    /// or never end.
+    NotRegular,
+    TooLarge(u64),
+}
+
+/// Read a control file the repository itself supplies (`.heddleignore`,
+/// `.gitignore`): only a regular file, opened without following a symlink,
+/// and only up to `max_bytes`.
+pub fn read_in_tree_control_file(path: &Path, max_bytes: u64) -> io::Result<InTreeControlFile> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(InTreeControlFile::Absent);
+        }
+        Err(error) => return Err(enrich_fs_error(path, "inspecting", error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(InTreeControlFile::Symlink);
+    }
+    if !metadata.is_file() {
+        return Ok(InTreeControlFile::NotRegular);
+    }
+    if metadata.len() > max_bytes {
+        return Ok(InTreeControlFile::TooLarge(metadata.len()));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK: if the name was swapped for a FIFO since the lstat, the
+        // open must not block waiting for a writer.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(InTreeControlFile::Absent);
+        }
+        Err(error) => return Err(enrich_fs_error(path, "reading", error)),
+    };
+    if !file.metadata()?.is_file() {
+        return Ok(InTreeControlFile::NotRegular);
+    }
+    let mut contents = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(file, max_bytes + 1), &mut contents)
+        .map_err(|error| enrich_fs_error(path, "reading", error))?;
+    if contents.len() as u64 > max_bytes {
+        return Ok(InTreeControlFile::TooLarge(contents.len() as u64));
+    }
+    Ok(InTreeControlFile::Contents(contents))
+}
+
+/// Prepare `path` beneath `root` for an ordinary read-modify-write that must
+/// not touch a user's symlinks: missing parent directories are created, but an
+/// existing symlinked parent, or a symlink or non-regular file at the leaf, is
+/// refused rather than followed or replaced. Used where the path is a
+/// convention inside the repository (`.claude/settings.json`) that a tracked
+/// symlink may legitimately redirect elsewhere.
+pub fn prepare_regular_file_beneath(root: &Path, path: &Path) -> io::Result<()> {
+    let names = components_beneath(root, path)?;
+    let Some((_, parents)) = names.split_last() else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for name in parents {
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::other(format!(
+                    "refusing to write {} through symlink {}",
+                    path.strip_prefix(root).unwrap_or(path).display(),
+                    current.strip_prefix(root).unwrap_or(&current).display(),
+                )));
+            }
+            Ok(_) => {
+                return Err(enrich_fs_error(
+                    &current,
+                    "creating",
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "a file occupies a path that must be a directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => create_directory(&current)?,
+            Err(error) => return Err(enrich_fs_error(&current, "inspecting", error)),
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::other(format!(
+            "refusing to write {}: it is a symlink",
+            path.strip_prefix(root).unwrap_or(path).display(),
+        ))),
+        Ok(_) => Err(io::Error::other(format!(
+            "refusing to write {}: it is not a regular file",
+            path.strip_prefix(root).unwrap_or(path).display(),
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(enrich_fs_error(path, "inspecting", error)),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::{fs, os::unix::fs::symlink};
