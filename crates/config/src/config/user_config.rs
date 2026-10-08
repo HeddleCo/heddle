@@ -7,8 +7,10 @@ use std::{
     sync::OnceLock,
 };
 
-use objects::config_types::{FsMonitorMode, OutputFormat};
-use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
+use objects::{
+    config_types::{FsMonitorMode, OutputFormat},
+    fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret},
+};
 #[cfg(feature = "local-repository")]
 use repo::WorktreeStatusOptions;
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,25 @@ pub struct UserConfig {
     pub harness: UserHarnessConfig,
     #[serde(default)]
     pub land: UserLandConfig,
+    #[serde(default, skip_serializing_if = "UserSafeConfig::is_empty")]
+    pub safe: UserSafeConfig,
+}
+
+/// `[safe]`: repositories the user explicitly trusts, the analogue of Git's
+/// `safe.directory` (heddle#2034). Discovery refuses a repository whose
+/// `.heddle` lies inside another Heddle worktree (it may be checked-out
+/// content) or that another user owns, unless its root is listed here.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct UserSafeConfig {
+    /// Absolute repository roots (the directory that contains `.heddle`).
+    #[serde(default)]
+    pub repositories: Vec<PathBuf>,
+}
+
+impl UserSafeConfig {
+    fn is_empty(&self) -> bool {
+        self.repositories.is_empty()
+    }
 }
 
 pub struct StagedUserConfig {
@@ -368,13 +389,49 @@ impl UserConfig {
         // (Codex R3 cid 3313132711 on #271). The path is canonicalized
         // so the rendered hint is copy/paste-safe even when the caller
         // passed a relative or env-derived path.
-        toml::from_str::<Self>(&contents).map_err(|err| {
+        let config = toml::from_str::<Self>(&contents).map_err(|err| {
             objects::error::HeddleError::ConfigParse {
-                path: resolved,
+                path: resolved.clone(),
                 source: err,
             }
-            .into()
-        })
+        })?;
+        if let Some(relative) = config
+            .safe
+            .repositories
+            .iter()
+            .find(|root| !root.is_absolute())
+        {
+            return Err(objects::error::HeddleError::ConfigInvalidValue {
+                path: resolved,
+                key: "safe.repositories".to_string(),
+                value: relative.display().to_string(),
+                valid_values: vec!["an absolute repository root path".to_string()],
+            }
+            .into());
+        }
+        Ok(config)
+    }
+
+    /// Register `[safe] repositories` with repository discovery. Called once
+    /// at CLI startup, before any repository is opened.
+    #[cfg(feature = "local-repository")]
+    pub fn register_safe_repositories(&self) {
+        repo::set_safe_repositories(self.safe.repositories.iter().cloned());
+    }
+
+    /// Register `[safe] repositories` from the default user config, for
+    /// processes that open repositories without the CLI's startup (the mount
+    /// workers). An unreadable user config registers nothing, which keeps the
+    /// strict default.
+    #[cfg(feature = "local-repository")]
+    pub fn register_default_safe_repositories() {
+        match Self::load_default() {
+            Ok(config) => config.register_safe_repositories(),
+            Err(error) => {
+                tracing::warn!("ignoring `[safe] repositories`: user config unreadable: {error:#}");
+                repo::set_safe_repositories([]);
+            }
+        }
     }
 
     pub fn load_default() -> anyhow::Result<Self> {
@@ -747,10 +804,19 @@ fn discovered_repo_tls_ca_certificate_path(
     let Some(start) = start else {
         return Ok(None);
     };
-    let Some(root) = repo::discover_heddle_root(start) else {
-        return Ok(None);
+    // Same admission as `Repository::open` (heddle#2034): an untrusted
+    // repository's config, or the parent's from inside a virtualized thread
+    // mount, must not choose this process's trust anchors. Opening is refused
+    // separately; commands that never open a repository (clone, auth) proceed
+    // with the remaining roots. A checkout's config is its store's.
+    let config_path = match repo::discover_repository_config(start) {
+        Ok(Some(config_path)) => config_path,
+        Ok(None) => return Ok(None),
+        Err(refusal) => {
+            tracing::warn!("ignoring repository `remote.tls_ca_certificate_path`: {refusal}");
+            return Ok(None);
+        }
     };
-    let config_path = root.join(".heddle/config.toml");
     let contents = match fs::read_to_string(&config_path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -774,11 +840,21 @@ fn discovered_repo_tls_ca_certificate_path(
     else {
         return Ok(None);
     };
-    Ok(Some(if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }))
+    if path.is_absolute() {
+        return Ok(Some(path));
+    }
+    // Relative paths resolve against the repository that owns this config:
+    // `<root>/.heddle/config.toml`.
+    let root = config_path.parent().and_then(Path::parent).ok_or_else(|| {
+        security_config_error(
+            "remote.tls_ca_certificate_path",
+            format!(
+                "repository config {} has no repository root",
+                config_path.display()
+            ),
+        )
+    })?;
+    Ok(Some(root.join(path)))
 }
 
 #[cfg(feature = "local-repository")]
@@ -1210,7 +1286,9 @@ mod tests {
 
     #[cfg(feature = "local-repository")]
     fn write_discoverable_repo(root: &std::path::Path, remote_toml: &str) {
-        fs::create_dir_all(root.join(".heddle")).expect("create .heddle");
+        // A main-repository shape (`objects/`), the layout whose own
+        // `config.toml` `Repository::open` loads.
+        fs::create_dir_all(root.join(".heddle/objects")).expect("create .heddle");
         fs::write(root.join(".heddle/HEAD"), "ref: refs/heddle/heads/main\n").expect("write HEAD");
         fs::write(
             root.join(".heddle/config.toml"),
@@ -1311,6 +1389,88 @@ mod tests {
         assert_eq!(selected.as_deref(), Some("selected ca pem"));
         assert_eq!(other.as_deref(), Some("cwd ca pem"));
         fs::remove_dir_all(parent).expect("remove temp dir");
+    }
+
+    /// A repository whose config sets a CA relative to its root.
+    #[cfg(feature = "local-repository")]
+    fn repo_with_relative_ca(root: &std::path::Path) -> repo::Repository {
+        let repository = repo::Repository::init_default(root).expect("init repo");
+        fs::write(root.join("ca.pem"), "store ca pem").expect("write repo CA");
+        let mut config = repository.config().clone();
+        config.remote.tls_ca_certificate_path = Some(PathBuf::from("ca.pem"));
+        config
+            .save(&repository.heddle_dir().join("config.toml"))
+            .expect("save repo config");
+        repository
+    }
+
+    /// heddle#2034 P2-b: a checkout has no `config.toml` of its own; `open`
+    /// loads its store's, so the CA comes from there, relative to the store's
+    /// repository root.
+    #[cfg(feature = "local-repository")]
+    #[test]
+    fn remote_tls_ca_from_checkout_reads_store_config() {
+        let _env = RemoteEnvGuard::clean();
+        let parent = unique_temp_path("heddle-repo-tls-ca-checkout");
+        let repository = repo_with_relative_ca(&parent.join("main"));
+        let checkout = parent.join("checkout");
+        repo::Repository::init_worktree(&checkout, repository.heddle_dir())
+            .expect("create checkout");
+
+        let pem = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&checkout))
+            .expect("store CA should load");
+        assert_eq!(pem.as_deref(), Some("store ca pem"));
+        fs::remove_dir_all(parent).expect("remove temp dir");
+    }
+
+    /// heddle#2034 P2-b: inside a metadata-less virtualized thread mount,
+    /// `open` refuses rather than climbing to the parent; the CA lookup must
+    /// not climb either.
+    #[cfg(feature = "local-repository")]
+    #[test]
+    fn remote_tls_ca_ignored_inside_virtualized_thread_mount() {
+        let _env = RemoteEnvGuard::clean();
+        let parent = unique_temp_path("heddle-repo-tls-ca-mount");
+        let repository = repo_with_relative_ca(&parent.join("main"));
+        let mount_root = repository.managed_checkout_path("virt");
+        fs::create_dir_all(&mount_root).expect("create mount root");
+
+        let pem = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&mount_root))
+            .expect("a refused mount's parent CA is ignored, not fatal");
+        assert_eq!(pem, None);
+        fs::remove_dir_all(parent).expect("remove temp dir");
+    }
+
+    /// heddle#2034: a `.heddle` planted inside another repository's worktree
+    /// is checked-out content, so its CA must not become a trust anchor —
+    /// whether the command starts inside it or names it with `-C`.
+    #[cfg(feature = "local-repository")]
+    #[test]
+    fn remote_tls_ca_ignores_repo_embedded_in_another_worktree() {
+        let _env = RemoteEnvGuard::clean();
+        let outer = unique_temp_path("heddle-repo-tls-ca-embedded");
+        let planted = outer.join("fixtures/sub");
+        fs::create_dir_all(planted.join("src")).expect("create planted repo");
+        let planted_ca = planted.join("attacker-ca.pem");
+        fs::write(&planted_ca, "attacker ca pem").expect("write planted CA");
+        write_discoverable_repo(&outer, "");
+        write_discoverable_repo(
+            &planted,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                planted_ca.display()
+            ),
+        );
+
+        for start in [planted.clone(), planted.join("src")] {
+            let pem = UserConfig::default()
+                .remote_tls_ca_certificate_pem(Some(&start))
+                .expect("an embedded repo's CA is ignored, not fatal");
+            assert_eq!(pem, None, "embedded repo CA honoured from {start:?}");
+        }
+        fs::remove_dir_all(outer).expect("remove temp dir");
     }
 
     #[cfg(feature = "local-repository")]

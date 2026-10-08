@@ -154,8 +154,12 @@ fn pending_incomplete_land_marker_exists(start: &Path) -> bool {
 }
 
 fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
-    if let Some(heddle_root) = discover_heddle_root(start) {
-        let config_path = heddle_root.join(".heddle/config.toml");
+    if discover_heddle_root(start).is_some() {
+        // Same admission as `Repository::open` before parsing any repository
+        // config (heddle#2034); a refusal surfaces as its typed envelope.
+        let Some(config_path) = repo::discover_repository_config(start)? else {
+            return Ok(None);
+        };
         return if config_path.is_file() {
             Ok(Some(RepoConfig::load_for_repository(&config_path)?))
         } else {

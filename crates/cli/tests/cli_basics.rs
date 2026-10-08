@@ -40,6 +40,8 @@ mod perf_trace;
 mod placeholder_identity;
 #[path = "cli_integration/refs_and_history.rs"]
 mod refs_and_history;
+#[path = "cli_integration/repository_trust.rs"]
+mod repository_trust;
 #[path = "cli_integration/state_id_acceptance.rs"]
 mod state_id_acceptance;
 #[path = "cli_integration/submodule_status.rs"]

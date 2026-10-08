@@ -2603,6 +2603,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fuser",
+ "heddle-config",
  "heddle-format",
  "heddle-objects",
  "heddle-oplog",
