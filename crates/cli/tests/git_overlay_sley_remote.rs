@@ -198,11 +198,7 @@ fn overlay_pull_refuses_hostile_git_metadata_without_changing_checkout() {
         let hostile = git_checkout::write_commit(&source, Some(first), files);
         publish_branch(&source, "main", Some(first), hostile);
 
-        let output = run(
-            &temp,
-            &checkout,
-            &["--output", "json", "pull", "origin", "main"],
-        );
+        let output = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
         before.assert_unchanged(&checkout);
         assert_eq!(
             std::fs::read(checkout.join("tracked.txt")).expect("tracked file"),
@@ -218,7 +214,7 @@ fn overlay_pull_refuses_hostile_git_metadata_without_changing_checkout() {
             "{error}"
         );
         assert_eq!(
-            SleyRepository::open(&checkout)
+            SleyRepository::discover(&checkout)
                 .expect("open checkout")
                 .references()
                 .read_ref("refs/heads/main")

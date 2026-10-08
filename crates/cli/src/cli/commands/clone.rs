@@ -2712,7 +2712,8 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
     Repository::ensure_git_overlay_local_excludes(repo.root())?;
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
     let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
-    let checkout = sley_worktree::checkout_branch_filtered(
+    let path_policy = sley_worktree::WorktreePathPolicy::new().reserve_root_name(".heddle");
+    let checkout = sley_worktree::checkout_branch_filtered_with_path_policy(
         Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
@@ -2720,18 +2721,20 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
         branch,
         hosted_clone_reflog_committer(),
         &config,
+        &path_policy,
     )
     .map_err(anyhow::Error::msg)?;
     if checkout.oid.is_null() {
         let branch_ref = format!("refs/heads/{branch}");
         anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
     }
-    sley_worktree::reset_index_and_worktree_to_commit(
+    sley_worktree::reset_index_and_worktree_to_commit_with_path_policy(
         Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),
         &checkout.oid,
+        &path_policy,
     )
     .map_err(anyhow::Error::msg)?;
     Ok(())

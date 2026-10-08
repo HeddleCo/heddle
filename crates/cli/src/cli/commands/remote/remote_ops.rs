@@ -815,7 +815,7 @@ fn publish_git_pull_branch(
     materialized: bool,
 ) -> Result<()> {
     if materialized {
-        sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered_with_path_policy(
             Some(repo.root()),
             repo.root(),
             git.git_dir(),
@@ -824,6 +824,7 @@ fn publish_git_pull_branch(
             b"Heddle <heddle@localhost> 0 +0000".to_vec(),
             b"heddle pull: prepare fast-forward".to_vec(),
             config,
+            &sley_worktree::WorktreePathPolicy::new().reserve_root_name(".heddle"),
         )
         .map_err(|error| git_pull_checkout_advice(local_ref, &error))?;
     }
@@ -889,7 +890,7 @@ fn rollback_git_pull_branch(
     }
     if materialized {
         let config = git.config_snapshot()?;
-        sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered_with_path_policy(
             Some(repo.root()),
             repo.root(),
             git.git_dir(),
@@ -898,6 +899,7 @@ fn rollback_git_pull_branch(
             b"Heddle <heddle@localhost> 0 +0000".to_vec(),
             b"heddle pull: roll back failed fast-forward".to_vec(),
             &config,
+            &sley_worktree::WorktreePathPolicy::new().reserve_root_name(".heddle"),
         )?;
         git.set_head_symref(
             local_ref,
