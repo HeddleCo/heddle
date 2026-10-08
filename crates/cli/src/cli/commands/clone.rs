@@ -2939,6 +2939,72 @@ mod tests {
 
     #[cfg(feature = "client")]
     #[test]
+    fn hosted_git_overlay_branch_checkout_reserves_root_metadata() {
+        assert_hosted_checkout_reserves_root_metadata(false);
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_git_overlay_reset_reserves_root_metadata() {
+        assert_hosted_checkout_reserves_root_metadata(true);
+    }
+
+    #[cfg(feature = "client")]
+    fn assert_hosted_checkout_reserves_root_metadata(already_attached: bool) {
+        use crate::git_checkout_test_support::{MetadataSnapshot, write_commit};
+
+        for path in [
+            ".heddle/config.toml",
+            ".HEDDLE/config.toml",
+            ".GIT/hooks/post-checkout",
+        ] {
+            let temp = tempfile::TempDir::new().expect("fixture directory");
+            let git = SleyRepository::init(temp.path()).expect("initialize Git checkout");
+            let repo =
+                Repository::init_git_overlay_sidecar(temp.path()).expect("initialize sidecar");
+            let commit = write_commit(&git, None, &[(path, b"pwned = true\n")]);
+            heddle_git_projection::git_core::set_reference(
+                &git,
+                "refs/heads/main",
+                commit,
+                sley::RefPrecondition::MustNotExist,
+                "fixture branch",
+            )
+            .expect("publish fixture branch");
+            let head = if already_attached {
+                "ref: refs/heads/main\n".to_string()
+            } else {
+                let clean = write_commit(&git, None, &[]);
+                format!("{clean}\n")
+            };
+            std::fs::write(git.git_dir().join("HEAD"), head).expect("set fixture HEAD");
+            git.write_index(
+                &sley::Index {
+                    version: 2,
+                    entries: Vec::new(),
+                    extensions: Vec::new(),
+                    checksum: None,
+                },
+                sley::IndexWriteOptions::default(),
+            )
+            .expect("initialize clean fixture index");
+            let before = MetadataSnapshot::record(temp.path());
+
+            let result = finish_hosted_git_overlay_checkout(&repo, "main");
+            before.assert_unchanged(temp.path());
+            assert!(!temp.path().join(".HEDDLE").exists());
+            let error = result
+                .expect_err("hostile checkout must be refused")
+                .to_string();
+            assert!(
+                error.contains("invalid path") && error.contains(path),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
     fn hosted_clone_thread_selection_prefers_main() {
         let selected = select_hosted_clone_thread(None, ["master", "main"], None, "owner/repo")
             .expect("thread selected");

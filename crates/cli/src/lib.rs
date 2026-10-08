@@ -79,3 +79,7 @@ pub fn register_hosted_factory() {
 
 #[cfg(test)]
 mod object_graph_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/git_checkout.rs"]
+pub(crate) mod git_checkout_test_support;

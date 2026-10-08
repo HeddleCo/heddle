@@ -2067,6 +2067,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn git_overlay_pull_checkout_reserves_root_metadata() {
+        assert_git_pull_checkout_reserves_root_metadata(false);
+    }
+
+    #[test]
+    fn git_overlay_pull_rollback_reserves_root_metadata() {
+        assert_git_pull_checkout_reserves_root_metadata(true);
+    }
+
+    fn assert_git_pull_checkout_reserves_root_metadata(rollback: bool) {
+        use crate::git_checkout_test_support::{MetadataSnapshot, write_commit};
+
+        for path in [
+            ".heddle/config.toml",
+            ".HEDDLE/config.toml",
+            ".GIT/hooks/post-checkout",
+        ] {
+            let temp = tempfile::TempDir::new().expect("fixture directory");
+            let git = SleyRepository::init(temp.path()).expect("initialize Git checkout");
+            let repo =
+                Repository::init_git_overlay_sidecar(temp.path()).expect("initialize sidecar");
+            let hostile = write_commit(&git, None, &[(path, b"pwned = true\n")]);
+            let clean = write_commit(&git, Some(hostile), &[]);
+            let branch_tip = if rollback { hostile } else { clean };
+            set_reference(
+                &git,
+                "refs/heads/main",
+                branch_tip,
+                RefPrecondition::MustNotExist,
+                "fixture branch",
+            )
+            .expect("publish fixture branch");
+            // Rollback starts from the clean detached checkout prepared by pull.
+            std::fs::write(git.git_dir().join("HEAD"), format!("{clean}\n"))
+                .expect("set fixture HEAD");
+            git.write_index(
+                &sley::Index {
+                    version: 2,
+                    entries: Vec::new(),
+                    extensions: Vec::new(),
+                    checksum: None,
+                },
+                sley::IndexWriteOptions::default(),
+            )
+            .expect("initialize clean fixture index");
+            let before = MetadataSnapshot::record(temp.path());
+
+            let result = if rollback {
+                rollback_git_pull_branch(
+                    &repo,
+                    &git,
+                    "refs/heads/main",
+                    Some(hostile),
+                    clean,
+                    true,
+                    false,
+                )
+            } else {
+                let config = git.config_snapshot().expect("Git config");
+                publish_git_pull_branch(
+                    &repo,
+                    &git,
+                    &config,
+                    "refs/heads/main",
+                    Some(clean),
+                    hostile,
+                    true,
+                )
+            };
+            before.assert_unchanged(temp.path());
+            assert!(!temp.path().join(".HEDDLE").exists());
+            let error = result
+                .expect_err("hostile checkout must be refused")
+                .to_string();
+            assert!(
+                error.contains("invalid path") && error.contains(path),
+                "{error}"
+            );
+            assert_eq!(
+                git.references()
+                    .read_ref("refs/heads/main")
+                    .expect("branch"),
+                Some(ReferenceTarget::Direct(branch_tip))
+            );
+        }
+    }
+
+    #[test]
     fn successful_pull_with_failed_staging_cleanup_warns_and_succeeds() {
         let mut warning = String::new();
         let outcome = finish_git_pull_after_cleanup(
