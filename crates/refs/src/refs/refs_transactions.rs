@@ -530,6 +530,19 @@ impl RefManager {
         let mut temp_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
+                match &plan.summary_delta {
+                    Some(SummaryDelta::SetThread { name, .. }) => {
+                        objects::name_encoding::write_name_entry(&self.threads_dir(), name)?;
+                    }
+                    Some(SummaryDelta::SetMarker { name, .. }) => {
+                        objects::name_encoding::write_name_entry(&self.markers_dir(), name)?;
+                    }
+                    Some(SummaryDelta::SetRemoteThread { remote, name, .. }) => {
+                        objects::name_encoding::write_name_entry(&self.remotes_dir(), remote)?;
+                        objects::name_encoding::write_name_entry(&self.remote_dir(remote)?, name)?;
+                    }
+                    _ => {}
+                }
                 let parent = plan.path.parent().ok_or_else(|| {
                     HeddleError::Config(format!("invalid ref path {}", plan.path.display()))
                 })?;
@@ -840,7 +853,7 @@ mod tests {
         let lock = refs.lock_refs().unwrap();
         let result = refs.validate_commit_publish(&updates, &lock, || {
             generation.store(1, Ordering::Release);
-            std::fs::create_dir(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
+            std::fs::create_dir_all(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
             Ok(true)
         });
         drop(lock);

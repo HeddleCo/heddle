@@ -648,8 +648,14 @@ fn finish_git_overlay_clone(
         ))
     })?;
     checkout_clone_thread(&repo, &track_name, &state_id)?;
-    write_git_head_branch(&local_path.join(".git"), &track_name)?;
-    configure_git_overlay_origin_tracking(local_path, &track_name)?;
+    write_git_head_branch(
+        &local_path.join(".git"),
+        &objects::name_encoding::git_name(&track_name),
+    )?;
+    configure_git_overlay_origin_tracking(
+        local_path,
+        &objects::name_encoding::git_name(&track_name),
+    )?;
     verify_git_overlay_clone(&repo, local_path, &track_name, &state_id)?;
 
     let trust = build_repository_verification_state(&repo);
@@ -835,7 +841,7 @@ fn verify_git_overlay_clone(
             canonical_git_import_ref_command(track_name),
         ))
     })?;
-    if git_head != track_name {
+    if git_head != objects::name_encoding::git_name(track_name) {
         return Err(anyhow!(clone_verification_failed_advice(
             format!(
                 "clone verification failed: .git/HEAD points at '{git_head}', but Heddle attached '{track_name}'"
@@ -857,7 +863,10 @@ fn verify_git_overlay_clone(
                     "Heddle active thread '{current}' does not match imported Git branch '{track_name}'"
                 ),
                 "continuing would report the clone as verified while Heddle is attached to the wrong thread",
-                format!("heddle thread switch {track_name} --force"),
+                format!(
+                    "heddle thread switch {} --force",
+                    repo::shell_quote(track_name)
+                ),
             )));
         }
         None => {
@@ -865,7 +874,10 @@ fn verify_git_overlay_clone(
                 "clone verification failed: Heddle HEAD is detached after clone",
                 "Heddle HEAD is detached after clone verification",
                 "continuing would report the clone as verified without an attached Heddle thread",
-                format!("heddle thread switch {track_name} --force"),
+                format!(
+                    "heddle thread switch {} --force",
+                    repo::shell_quote(track_name)
+                ),
             )));
         }
     }
@@ -986,8 +998,14 @@ fn clone_git_overlay_import_failed_advice(
         .map(|name| format!(" for requested ref '{name}'"))
         .unwrap_or_default();
     let primary_command = requested_ref
-        .map(|name| format!("heddle clone {remote_label} <path> --thread {name}"))
-        .unwrap_or_else(|| format!("heddle clone {remote_label} <path>"));
+        .map(|name| {
+            format!(
+                "heddle clone {} <path> {}",
+                repo::shell_quote(remote_label),
+                repo::thread_flag(name)
+            )
+        })
+        .unwrap_or_else(|| format!("heddle clone {} <path>", repo::shell_quote(remote_label)));
     RecoveryAdvice::safety_refusal(
         "git_overlay_clone_import_failed",
         format!("Git-overlay clone import failed{requested}: {cause}"),
@@ -1004,7 +1022,11 @@ fn clone_git_overlay_branch_not_imported_advice(
     track_name: &str,
     remote_label: &str,
 ) -> RecoveryAdvice {
-    let primary_command = format!("heddle clone {remote_label} <path> --thread {track_name}");
+    let primary_command = format!(
+        "heddle clone {} <path> {}",
+        repo::shell_quote(remote_label),
+        repo::thread_flag(track_name)
+    );
     RecoveryAdvice::safety_refusal(
         "git_overlay_clone_branch_not_imported",
         format!("Git clone did not import branch '{track_name}'"),
@@ -1020,7 +1042,7 @@ fn clone_git_overlay_branch_not_imported_advice(
 }
 
 fn clone_git_overlay_no_branch_refs_advice(remote_label: &str) -> RecoveryAdvice {
-    let primary_command = format!("heddle clone {remote_label} <path>");
+    let primary_command = format!("heddle clone {} <path>", repo::shell_quote(remote_label));
     RecoveryAdvice::safety_refusal(
         "git_overlay_clone_no_branch_refs",
         "Git clone did not import any branch refs",
@@ -1134,9 +1156,11 @@ fn select_clone_thread(
     remote_label: &str,
 ) -> Result<String> {
     let threads = repo.refs().list_threads()?;
+    let requested = requested.map(objects::name_encoding::native_git_name);
+    let advertised_head = advertised_head.map(objects::name_encoding::native_git_name);
     select_clone_checkout_thread(
-        requested,
-        advertised_head,
+        requested.as_deref(),
+        advertised_head.as_deref(),
         threads.iter().map(ThreadName::as_str),
     )
     .map_err(|err| match err {
@@ -1885,7 +1909,10 @@ async fn clone_network_connected(
         } else if git_overlay_clone {
             finish_hosted_git_overlay_checkout(&local_repo, &track_name)
                 .context("failed to finish hosted Git-overlay checkout")?;
-            configure_git_overlay_origin_tracking(local_path, &track_name)?;
+            configure_git_overlay_origin_tracking(
+                local_path,
+                &objects::name_encoding::git_name(&track_name),
+            )?;
             publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         } else {
             checkout_clone_thread(&local_repo, &track_name, &final_state)

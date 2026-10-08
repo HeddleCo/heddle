@@ -137,12 +137,15 @@ pub fn open_git_repository_at_root(root: &Path) -> Result<Option<SleyRepository>
     if !(metadata.is_dir() || metadata.is_file()) {
         return Ok(None);
     }
-    let repo = SleyRepository::open(&dot_git).map_err(|error| {
-        HeddleError::Config(format!(
-            "failed to open Git metadata at '{}': {error}",
-            dot_git.display()
-        ))
-    })?;
+    // Heddle binds original Git OIDs. Replacement refs neither define source
+    // identity nor need enumeration during metadata discovery.
+    let repo = SleyRepository::open_with(&dot_git, sley::OpenOptions::new().replace_objects(false))
+        .map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to open Git metadata at '{}': {error}",
+                dot_git.display()
+            ))
+        })?;
     if let Some(workdir) = repo.workdir() {
         let resolved_root = root.canonicalize().map_err(|error| {
             HeddleError::Io(enrich_fs_error(root, "resolving Git worktree root", error))
@@ -179,16 +182,24 @@ pub(super) fn has_git_repository_at_root(root: &Path) -> bool {
 /// resolves them as a worktree before it climbs to the parent. A
 /// *virtualized* thread mounts a content-addressed projection there and
 /// writes no such pointer, so a bare upward walk would sail past the
-/// metadata-less mount and open the PARENT repo. The flat
-/// `thread_manifest::thread_dir` encoding guarantees `<encoded>` is exactly
-/// one path component, so any direct checkout leaf below it has the
-/// unambiguous `<leaf> → <encoded> → threads → .heddle` shape (heddle#572 r2).
+/// metadata-less mount and open the PARENT repo. The v6 encoding ends in
+/// `entry`; recognize only a canonical encoded name above that terminal.
 pub(super) fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
     for dir in bounded_ancestor_paths(start_path) {
         let dir = dir.as_path();
         if let Some(thread_dir) = dir.parent()
-            && let Some(threads) = thread_dir.parent()
-            && threads.file_name().and_then(|n| n.to_str()) == Some("threads")
+            && thread_dir.file_name().and_then(|name| name.to_str()) == Some("entry")
+            && let Some(threads) = thread_dir.ancestors().find(|ancestor| {
+                ancestor.file_name().and_then(|name| name.to_str()) == Some("threads")
+                    && ancestor
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        == Some(".heddle")
+            })
+            && let Ok(encoded) = thread_dir.strip_prefix(threads)
+            && (objects::name_encoding::decode_name_path(encoded).is_some()
+                || objects::name_encoding::is_digest_name_path(encoded))
             && let Some(heddle) = threads.parent()
             && heddle.file_name().and_then(|n| n.to_str()) == Some(".heddle")
             && heddle.join("objects").is_dir()
@@ -278,6 +289,15 @@ impl Repository {
             )));
         }
 
+        let config_path = heddle_dir.join("config.toml");
+        let mut config = match RepoConfig::load_for_repository(&config_path) {
+            Ok(config) => config,
+            Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                RepoConfig::default()
+            }
+            Err(error) => return Err(error),
+        };
+
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
         objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
         // Establish recovery serialization during initialization, so later
@@ -292,14 +312,6 @@ impl Repository {
         let oplog = OpLog::new_unattributed(&heddle_dir);
         oplog.init()?;
 
-        let config_path = heddle_dir.join("config.toml");
-        let mut config = match RepoConfig::load_for_repository(&config_path) {
-            Ok(config) => config,
-            Err(HeddleError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                RepoConfig::default()
-            }
-            Err(error) => return Err(error),
-        };
         config.repository.source_authority = source_authority;
         config.save(&config_path)?;
         let store = Self::build_store(&config, &root, &heddle_dir, None)?;

@@ -14,7 +14,6 @@ use objects::{
     store::ObjectStore as _,
 };
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
-use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
 use super::{
@@ -153,7 +152,7 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
             .skipped_refs
             .iter()
             .map(|reference| SkippedRefOutput {
-                name: String::from_utf8_lossy(&reference.raw_name).into_owned(),
+                name: reference.display_name(),
                 reason: reference.reason.description().to_string(),
             })
             .collect(),
@@ -275,8 +274,14 @@ fn action_value(trust: &RepositoryVerificationState) -> Option<String> {
 }
 
 fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<()> {
+    let heads = ingest::GitSource::open(git_root)?.collect_refs()?;
     if refs.is_empty() {
-        if git_repo_has_any_commit_ref(git_root)? {
+        if heads.iter().any(|head| {
+            matches!(
+                head.namespace,
+                ingest::RefNamespace::Branch | ingest::RefNamespace::Tag
+            )
+        }) {
             return Ok(());
         }
         return Err(anyhow!(no_git_commits_to_adopt_advice(
@@ -287,7 +292,11 @@ fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<
 
     let missing = refs
         .iter()
-        .filter(|name| !git_ref_points_to_commit(git_root, name).unwrap_or(false))
+        .filter(|name| {
+            !heads
+                .iter()
+                .any(|head| head.full_name == name.trim() || head.short_name == name.trim())
+        })
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
@@ -295,31 +304,6 @@ fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<
     }
 
     Err(anyhow!(no_git_commits_to_adopt_advice(git_root, missing)))
-}
-
-fn git_repo_has_any_commit_ref(git_root: &Path) -> Result<bool> {
-    let git = SleyRepository::discover(git_root)
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    for reference in git
-        .references()
-        .list_refs()
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?
-    {
-        let name = reference.name.as_str();
-        if (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
-            && git_ref_points_to_commit(git_root, name)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn git_ref_points_to_commit(git_root: &Path, name: &str) -> Result<bool> {
-    let spec = format!("{name}^{{commit}}");
-    let git = SleyRepository::discover(git_root)
-        .map_err(|error| anyhow!("failed to inspect Git ref '{name}': {error}"))?;
-    Ok(git.rev_parse(&spec).is_ok())
 }
 
 fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) -> RecoveryAdvice {
@@ -348,7 +332,7 @@ fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) ->
 }
 
 fn git_worktree_root(start: &Path) -> Result<PathBuf> {
-    let git = SleyRepository::discover(start).map_err(|error| {
+    let git = repo::open_git_import_source(start).map_err(|error| {
         anyhow!(RecoveryAdvice::adopt_requires_git_worktree(Some(format!(
             "Git inspection failed: {error}"
         ))))

@@ -341,6 +341,21 @@ impl Repository {
             }
 
             if is_heddle_repository_root(dir) {
+                // Format admission is read-only and precedes locks, database
+                // recovery, Git exclude edits, and nested overlay bootstrap.
+                if heddle_path.join("objectstore").is_file() {
+                    let content = fs::read_to_string(heddle_path.join("objectstore"))?;
+                    if let Some(pointer) = parse_objectstore_pointer(&content)
+                        && pointer.objectstore.is_absolute()
+                        && pointer.objectstore.join("config.toml").try_exists()?
+                    {
+                        super::repo_config::check_repository_format(
+                            &pointer.objectstore.join("config.toml"),
+                        )?;
+                    }
+                } else {
+                    super::repo_config::check_repository_format(&heddle_path.join("config.toml"))?;
+                }
                 // HYBRID installs already have local metadata. Recover before
                 // interpreting mutable config or selecting the object store.
                 let _installation = if heddle_path

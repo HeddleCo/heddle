@@ -21,7 +21,7 @@ use objects::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{thread_manifest::encode_thread_segment, timeline_pack::TimelinePackSet};
+use crate::timeline_pack::TimelinePackSet;
 
 pub const TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION: u16 = 1;
 pub const TIMELINE_OPERATION_INDEX_SCHEMA_VERSION: u16 = 1;
@@ -378,6 +378,7 @@ impl TimelineStore {
         let bytes = rmp_serde::to_vec_named(record)
             .map_err(|err| HeddleError::Serialization(err.to_string()))?;
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        objects::name_encoding::write_name_entry(&self.root.join(RECOVERY_DIR), &record.thread)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -389,6 +390,7 @@ impl TimelineStore {
         &self,
         thread: &str,
     ) -> Result<Option<TimelineMaterializationRecoveryRecord>> {
+        objects::name_encoding::verify_name_entry(&self.root.join(RECOVERY_DIR), thread)?;
         let path = self.materialization_recovery_path(thread);
         let _guard = self.lock.read().map_err(timeline_lock_error)?;
         let bytes = match fs::read(&path) {
@@ -414,6 +416,7 @@ impl TimelineStore {
     }
 
     pub fn clear_materialization_recovery(&self, thread: &str) -> Result<()> {
+        objects::name_encoding::verify_name_entry(&self.root.join(RECOVERY_DIR), thread)?;
         let path = self.materialization_recovery_path(thread);
         let _guard = self.lock.write().map_err(timeline_lock_error)?;
         match fs::remove_file(path) {
@@ -424,26 +427,28 @@ impl TimelineStore {
     }
 
     pub fn materialization_recovery_path(&self, thread: &str) -> PathBuf {
-        self.root.join(RECOVERY_DIR).join(format!(
-            "{}.{MATERIALIZATION_RECOVERY_EXT}",
-            encode_thread_segment(thread)
-        ))
+        self.root
+            .join(RECOVERY_DIR)
+            .join(objects::name_encoding::name_path(thread))
+            .join(format!("record.{MATERIALIZATION_RECOVERY_EXT}"))
     }
 
     pub fn lock_materialization(&self, thread: &str) -> Result<WriteLockGuard> {
+        objects::name_encoding::write_name_entry(&self.root.join(LOCKS_DIR), thread)?;
         RepoLock::at(self.materialization_lock_path(thread))
             .write()
             .map_err(timeline_lock_error)
     }
 
     pub fn materialization_lock_path(&self, thread: &str) -> PathBuf {
-        self.root.join(LOCKS_DIR).join(format!(
-            "{}.materialization.lock",
-            encode_thread_segment(thread)
-        ))
+        self.root
+            .join(LOCKS_DIR)
+            .join(objects::name_encoding::name_path(thread))
+            .join("materialization.lock")
     }
 
     pub fn lock_recording(&self, thread: &str) -> Result<WriteLockGuard> {
+        objects::name_encoding::write_name_entry(&self.root.join(LOCKS_DIR), thread)?;
         RepoLock::at(self.recording_lock_path(thread))
             .write()
             .map_err(timeline_lock_error)
@@ -452,7 +457,8 @@ impl TimelineStore {
     pub fn recording_lock_path(&self, thread: &str) -> PathBuf {
         self.root
             .join(LOCKS_DIR)
-            .join(format!("{}.recording.lock", encode_thread_segment(thread)))
+            .join(objects::name_encoding::name_path(thread))
+            .join("recording.lock")
     }
 
     fn ops_dir(&self) -> PathBuf {

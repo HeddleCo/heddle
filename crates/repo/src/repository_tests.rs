@@ -386,6 +386,41 @@ fn test_custom_store_fixture_threads_a_custom_object_store() {
 }
 
 #[test]
+fn v5_open_and_init_leave_all_files_byte_identical() {
+    let temp = TempDir::new().expect("v5 fixture");
+    let heddle = temp.path().join(".heddle");
+    fs::create_dir_all(heddle.join("objects")).expect("objects");
+    fs::write(heddle.join("config.toml"), "[repository]\nversion = 5\n").expect("v5 config");
+    fs::write(
+        heddle.join(crate::local_metadata::DATABASE_NAME),
+        b"v5 database bytes",
+    )
+    .expect("database");
+    let before = snapshot_directory(temp.path());
+    assert!(Repository::open(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::open_for_oplog_recovery(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::init(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    assert!(Repository::init_default(temp.path()).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+    let intent = crate::clone_intent::CloneIntent {
+        origin: "test".into(),
+        endpoint: "test".into(),
+        repository: "test".into(),
+        thread: None,
+        advertised_head: None,
+        depth: None,
+        lazy: false,
+    };
+    intent.create(temp.path()).expect("clone recovery fixture");
+    let before = snapshot_directory(temp.path());
+    assert!(Repository::init_clone(temp.path(), RepositorySourceAuthority::Native).is_err());
+    assert_eq!(snapshot_directory(temp.path()), before);
+}
+
+#[test]
 fn open_refuses_newer_repository_format_with_recovery_advice() {
     let temp_dir = TempDir::new().unwrap();
     crate::init_test_repository(temp_dir.path()).unwrap();
@@ -1170,9 +1205,15 @@ fn native_admission_before_ref_publish_survives_a_crash_between_them() {
     // would materialize the reconstructible snapshot, which is the publish step
     // this crash window is supposed to have skipped.
     assert_eq!(
-        fs::read_to_string(temp_dir.path().join(".heddle/refs/threads/main"))
-            .unwrap()
-            .trim(),
+        fs::read_to_string(
+            temp_dir
+                .path()
+                .join(".heddle/refs/threads")
+                .join(objects::name_encoding::name_path("main"))
+                .join("value")
+        )
+        .unwrap()
+        .trim(),
         baseline.id().to_string_full(),
         "the ref must not have moved before the crash"
     );
@@ -1409,7 +1450,11 @@ fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
 
     drop(repo);
     fs::write(
-        temp_dir.path().join(".heddle/refs/threads/main"),
+        temp_dir
+            .path()
+            .join(".heddle/refs/threads")
+            .join(objects::name_encoding::name_path("main"))
+            .join("value"),
         format!("{}\n", baseline.to_string_full()),
     )
     .unwrap();
@@ -3292,7 +3337,7 @@ fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
         opened.managed_checkout_path("child"),
         shared_heddle
             .join("threads")
-            .join("child")
+            .join(objects::name_encoding::name_path("child"))
             .join("source-repo"),
         "managed child threads should keep the original repo directory name, not the current checkout leaf"
     );

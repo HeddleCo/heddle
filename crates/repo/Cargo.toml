@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+sley-refs.workspace = true
 anyhow.workspace = true
 biscuit-auth.workspace = true
 heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.12" }

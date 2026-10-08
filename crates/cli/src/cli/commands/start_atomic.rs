@@ -789,8 +789,12 @@ impl StartThread {
         let rewind_abs = self.abs_path.clone();
         let plan_created = self.target_dir_created;
         let fwd_claim = Rc::clone(&target_claim);
+        let name = self.name.clone();
         tx.step(
             move || {
+                // Solid and virtualized checkouts have no manifest writer to
+                // install the digest identity. Persist it before the checkout.
+                objects::name_encoding::write_name_entry(&threads_root, &name)?;
                 let established = create_target_dir(&abs, plan_created)?;
                 fwd_claim.set(Some(established));
                 Ok(())

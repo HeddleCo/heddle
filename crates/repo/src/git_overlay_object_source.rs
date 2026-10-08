@@ -87,7 +87,7 @@ impl GitOverlayObjectSource {
         if let Some(repo) = git.as_ref() {
             return Ok(repo.clone());
         }
-        let repo = SleyRepository::discover(&self.root).map_err(|error| {
+        let repo = crate::open_git_import_source(&self.root).map_err(|error| {
             HeddleError::Config(format!(
                 "open authoritative Git object database at {}: {error}",
                 self.root.display()
@@ -98,7 +98,7 @@ impl GitOverlayObjectSource {
     }
 
     fn refresh_git(&self) -> Result<SleyRepository> {
-        let repo = SleyRepository::discover(&self.root).map_err(|error| {
+        let repo = crate::open_git_import_source(&self.root).map_err(|error| {
             HeddleError::Config(format!(
                 "refresh authoritative Git object database at {}: {error}",
                 self.root.display()

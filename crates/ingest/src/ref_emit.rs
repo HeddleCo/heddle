@@ -115,13 +115,13 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                     // slash separation prevents collisions between a
                     // local `main` and `origin/main`; refs stores
                     // slashed names as nested paths under `refs/threads/`.
-                    repo::validate_thread_id(&head.short_name).map_err(|error| {
-                        IngestError::Other(format!(
-                            "Git branch '{}' cannot be imported as a Heddle thread: {error}",
-                            head.short_name
-                        ))
-                    })?;
-                    let thread_name = ThreadName::from(head.short_name.as_str());
+                    let thread_name =
+                        ThreadName::from_git_branch(&head.short_name).map_err(|error| {
+                            IngestError::Other(format!(
+                                "Git branch '{}' cannot be imported: {error}",
+                                head.short_name
+                            ))
+                        })?;
                     // The divergence check MUST run before the batch publish:
                     // a thread import that would move a thread across divergent
                     // history fails closed here, before any ref is written.
@@ -144,7 +144,8 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                     threads.push((thread_name, cid, existing));
                 }
                 RefNamespace::Tag => {
-                    let marker_name = MarkerName::from(head.short_name.as_str());
+                    let marker_name = MarkerName::from_git_tag(&head.short_name)
+                        .map_err(|error| IngestError::Other(error.to_string()))?;
                     // `create_marker` rejects existing names (markers are
                     // write-once by design), so an idempotent importer has to
                     // use `RefExpectation::Any`. We still short-circuit when

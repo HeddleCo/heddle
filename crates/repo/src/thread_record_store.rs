@@ -39,9 +39,11 @@ impl FilesystemThreadRecordStore {
         if thread_id.is_empty() {
             return Err(HeddleError::Config("thread id cannot be empty".to_string()));
         }
+        objects::name_encoding::verify_name_entry(&self.root, thread_id)?;
         Ok(self
             .root
-            .join(format!("{}.toml", encode_thread_id(thread_id))))
+            .join(objects::name_encoding::name_path(thread_id))
+            .join("record.toml"))
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -57,6 +59,7 @@ impl FilesystemThreadRecordStore {
     pub fn save_value<T: Serialize>(&self, thread_id: &str, value: &T) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.record_path(thread_id)?;
+        objects::name_encoding::write_name_entry(&self.root, thread_id)?;
         let content =
             toml::to_string_pretty(value).map_err(|e| HeddleError::Config(e.to_string()))?;
         Ok(write_file_atomic(&path, content.as_bytes())?)
@@ -78,12 +81,13 @@ impl FilesystemThreadRecordStore {
         }
 
         let mut values = Vec::new();
-        for dir_entry in std::fs::read_dir(&self.root)? {
-            let dir_entry = dir_entry?;
-            let path = dir_entry.path();
-            if path.extension().map(|ext| ext == "toml").unwrap_or(false) {
+        let mut entries = Vec::new();
+        crate::thread_manifest::name_directories(&self.root, Path::new(""), &mut entries)?;
+        for (_, dir) in entries {
+            let path = dir.join("record.toml");
+            if path.exists() {
                 let content = std::fs::read_to_string(path)?;
-                let value: T =
+                let value =
                     toml::from_str(&content).map_err(|e| HeddleError::Config(e.to_string()))?;
                 values.push(value);
             }
@@ -132,15 +136,6 @@ impl FilesystemThreadRecordStore {
         });
         Ok(records.pop())
     }
-}
-
-fn encode_thread_id(thread_id: &str) -> String {
-    let mut out = String::with_capacity(thread_id.len() * 2);
-    for byte in thread_id.as_bytes() {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{:02x}", byte);
-    }
-    out
 }
 
 #[cfg(test)]

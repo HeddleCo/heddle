@@ -133,11 +133,6 @@ fn validate_worktree_target(
         // inside foo's own checkout, starting it dirty and able to capture the
         // sidecar as user content. Require the leaf so the sidecar stays
         // OUTSIDE the checkout (heddle#572 r3).
-        if path.parent() == Some(threads_root.as_path()) {
-            return Err(anyhow::anyhow!(worktree_target_managed_needs_leaf_advice(
-                path
-            )));
-        }
         // Under `.heddle/threads` is allowed for managed checkouts, but the
         // target must be a fresh per-thread slot — never nested inside an
         // EXISTING thread's reserved subtree (its canonical
@@ -151,6 +146,21 @@ fn validate_worktree_target(
         // reuse another's reserved checkout (heddle#572 r2/r3).
         if is_inside_existing_thread(repo, &threads_root, path, self_thread)? {
             return Err(anyhow::anyhow!(worktree_target_nested_thread_advice(path)));
+        }
+        let relative = path.strip_prefix(&threads_root)?;
+        let encoded_namespace = relative
+            .components()
+            .next()
+            .and_then(|part| part.as_os_str().to_str())
+            .is_some_and(|part| part.starts_with("n-") || part.starts_with("h-") || part == "git");
+        let checkout_leaf = relative.parent().is_some_and(|encoded| {
+            objects::name_encoding::decode_name_path(encoded).is_some()
+                || objects::name_encoding::is_digest_name_path(encoded)
+        });
+        if path.parent() == Some(threads_root.as_path()) || (encoded_namespace && !checkout_leaf) {
+            return Err(anyhow::anyhow!(worktree_target_managed_needs_leaf_advice(
+                path
+            )));
         }
     } else if path == repo.heddle_dir() || path.starts_with(repo.heddle_dir()) {
         return Err(anyhow::anyhow!(worktree_target_storage_advice(path)));
@@ -619,7 +629,9 @@ mod gate_tests {
         register_thread(&repo, "foo", repo::ThreadMode::Materialized);
         register_thread(&repo, "virt", repo::ThreadMode::Virtualized);
         for name in ["foo", "virt"] {
-            let nested = threads_root.join(name).join(&checkout_leaf).join("nested");
+            let nested = repo::thread_manifest::thread_dir(repo.heddle_dir(), name)
+                .join(&checkout_leaf)
+                .join("nested");
             let err = validate_worktree_target(&repo, &nested, None).unwrap_err();
             assert!(
                 err.to_string().contains("nested inside an existing thread"),

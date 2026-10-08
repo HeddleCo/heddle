@@ -299,20 +299,24 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// `async` because ref emission awaits the backend's `async` marker
     /// read; for the local `RefManager` the future is immediately ready.
     pub async fn run(&mut self) -> crate::Result<ImportStats> {
-        let (mut heads, refs_seen) = self.git.collect_refs_detailed()?;
+        let frozen_refs = self.git.collect_frozen_import_refs()?;
+        let (mut heads, refs_seen) = self.git.collect_refs_from_frozen(&frozen_refs)?;
         let emitted_remote_names: HashSet<String> = heads
             .iter()
             .filter(|head| head.namespace == RefNamespace::RemoteBranch)
             .map(|head| head.full_name.clone())
             .collect();
-        let frozen_refs = self.git.collect_frozen_import_refs()?;
         let mut supported = HashSet::new();
         let mut skipped_refs = Vec::new();
-        for reference in frozen_refs {
-            if reference.raw_name == b"HEAD" {
+        for reference in &frozen_refs {
+            if reference.raw_name == b"HEAD"
+                || (std::str::from_utf8(&reference.raw_name).is_err()
+                    && !reference.raw_name.starts_with(b"refs/heads/")
+                    && !reference.raw_name.starts_with(b"refs/tags/"))
+            {
                 continue;
             }
-            let disposition = classify_git_import_ref(&reference).map_err(|error| {
+            let disposition = classify_git_import_ref(reference).map_err(|error| {
                 IngestError::Git(format!(
                     "classify Git ref {}: {error:?}",
                     String::from_utf8_lossy(&reference.raw_name)
@@ -320,14 +324,14 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             })?;
             match disposition {
                 ImportRefDisposition::Branch | ImportRefDisposition::CommitTag => {
-                    supported.insert(reference.raw_name);
+                    supported.insert(reference.raw_name.clone());
                 }
                 ImportRefDisposition::Unsupported {
                     reason: ImportSkipReason::RemoteTracking,
                 } if std::str::from_utf8(&reference.raw_name)
                     .is_ok_and(|name| emitted_remote_names.contains(name)) =>
                 {
-                    supported.insert(reference.raw_name);
+                    supported.insert(reference.raw_name.clone());
                 }
                 ImportRefDisposition::DefaultHead
                 | ImportRefDisposition::RequiredNotes
@@ -336,7 +340,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 } => {}
                 ImportRefDisposition::Unsupported { reason } => {
                     skipped_refs.push(SkippedImportRef {
-                        raw_name: reference.raw_name,
+                        raw_name: reference.raw_name.clone(),
                         reason,
                     })
                 }
@@ -358,7 +362,10 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // Reflog SHAs are filtered to those still in the odb, so this
         // can't steer us into dangling territory.
         let reflog_entries = if self.scope.is_all() {
-            self.git.collect_reflog()?
+            let mut entries = Vec::new();
+            self.git
+                .collect_reflog_from_frozen(&frozen_refs, &mut entries)?;
+            entries
         } else {
             self.git.collect_reflog_for_refs(&heads)?
         };
@@ -1668,6 +1675,165 @@ mod tests {
         seed_raw_tree_repo(path, &[("140000", "unknown")]);
     }
 
+    fn refname_round_trip(name: &str) {
+        refname_round_trip_input(name, name.len() > 240);
+    }
+
+    fn refname_round_trip_input(name: &str, packed: bool) {
+        let source = TempDir::new().expect("source");
+        let destination = TempDir::new().expect("destination");
+        let oid = seed_multibranch_repo(source.path());
+        let full = format!("refs/heads/{name}");
+        // Packed input also permits a Git-valid single component longer than
+        // the host filesystem's limit; Git itself writes this representation.
+        if packed {
+            std::fs::write(
+                source.path().join(".git/packed-refs"),
+                format!("{oid} {full}\n"),
+            )
+            .expect("packed Git ref");
+        } else {
+            git_output(source.path(), &["update-ref", &full, &oid], None);
+        }
+        let git = GitSource::open(source.path()).expect("open Git");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(destination.path());
+        refs.init().expect("init refs");
+        let mut map = ShaMap::new();
+        pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).expect("import");
+        let native = ThreadName::from_git_branch(name).expect("Git branch mapping");
+        let state = refs
+            .get_thread(&native)
+            .expect("read storage")
+            .expect("imported branch");
+        let head = refs::refs::Head::Attached {
+            thread: native.clone(),
+        };
+        refs.write_head(&head).expect("HEAD write");
+        assert_eq!(refs.read_head().expect("HEAD read"), head);
+        refs.pack_refs().expect("native packed refs");
+        let reopened = RefManager::new(destination.path());
+        assert!(reopened.list_threads().expect("listing").contains(&native));
+        assert_eq!(
+            reopened.get_thread(&native).expect("fetch ref"),
+            Some(state)
+        );
+        assert!(store.get_state(&state).expect("fetch state").is_some());
+    }
+
+    #[test]
+    #[ignore = "sley 0.11.0 trims Unicode packed-ref suffixes; HeddleCo/sley#243"]
+    fn refname_packed_git_nbsp_blocked_on_sley_243() {
+        refname_round_trip_input("trailing\u{a0}", true);
+    }
+
+    #[test]
+    fn refname_round_trip_equals() {
+        refname_round_trip("feat/mcp=timeout");
+    }
+    #[test]
+    fn refname_round_trip_comma() {
+        refname_round_trip("a,b");
+    }
+    #[test]
+    fn refname_round_trip_unicode() {
+        refname_round_trip("ünicode/ブランチ");
+    }
+    #[test]
+    fn refname_round_trip_at() {
+        refname_round_trip("@");
+    }
+    #[test]
+    fn refname_round_trip_plus() {
+        refname_round_trip("x+y");
+    }
+    #[test]
+    fn refname_round_trip_nbsp() {
+        refname_round_trip("trailing\u{a0}");
+    }
+    #[test]
+    fn refname_round_trip_replacement() {
+        refname_round_trip("literal\u{fffd}");
+    }
+    #[test]
+    fn refname_round_trip_long() {
+        refname_round_trip(&"界".repeat(337));
+    }
+    #[test]
+    fn refname_round_trip_reserved() {
+        refname_round_trip("heddle/foo");
+    }
+
+    #[cfg(unix)]
+    fn import_non_utf8_ref(namespace: &str, packed: bool) {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let source = TempDir::new().expect("Git source");
+        let destination = TempDir::new().expect("native destination");
+        let oid = seed_multibranch_repo(source.path());
+        let raw_name = format!("refs/{namespace}/bad-").into_bytes();
+        let raw_name = [raw_name.as_slice(), b"\xff"].concat();
+        if packed {
+            let bytes = [oid.as_bytes(), b" ", &raw_name, b"\n"].concat();
+            std::fs::write(source.path().join(".git/packed-refs"), bytes).expect("packed ref");
+        } else {
+            let path = source
+                .path()
+                .join(".git")
+                .join(OsString::from_vec(raw_name.clone()));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("namespace");
+            std::fs::write(path, format!("{oid}\n")).expect("loose ref");
+        }
+        let git = GitSource::open(source.path()).expect("open Git");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(destination.path());
+        refs.init().expect("native refs");
+        let mut map = ShaMap::new();
+        let stats = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run())
+            .expect("other refs still import");
+        assert!(
+            refs.get_thread(&ThreadName::new("main"))
+                .expect("main")
+                .is_some()
+        );
+        assert!(
+            !refs
+                .list_threads()
+                .expect("threads")
+                .iter()
+                .any(|name| name.contains("bad-"))
+        );
+        if namespace == "heads" || namespace == "tags" {
+            assert!(
+                stats
+                    .skipped_refs
+                    .iter()
+                    .any(|excluded| excluded.raw_name == raw_name
+                        && excluded.reason == ImportSkipReason::NonUtf8RefName),
+                "excluded ref must retain its exact bytes: {:?}",
+                stats.skipped_refs
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_ignored_namespace_does_not_abort_import() {
+        for namespace in ["remotes/origin", "notes", "pull"] {
+            for packed in [false, true] {
+                import_non_utf8_ref(namespace, packed);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_imported_ref_is_reported_and_other_refs_import() {
+        for namespace in ["heads", "tags"] {
+            for packed in [false, true] {
+                import_non_utf8_ref(namespace, packed);
+            }
+        }
+    }
     #[test]
     fn imports_commits_refs_and_tag_end_to_end() {
         let gitdir = TempDir::new().unwrap();
@@ -1777,11 +1943,16 @@ mod tests {
             "{stats:?}"
         );
         assert!(
-            stats
+            !stats
                 .skipped_refs
                 .iter()
-                .any(|reference| { reference.raw_name == b"refs/heads/heddle/reserved" }),
-            "{stats:?}"
+                .any(|reference| reference.raw_name == b"refs/heads/heddle/reserved")
+        );
+        let reserved = ThreadName::from_git_branch("heddle/reserved").expect("mapped name");
+        assert!(
+            refs.get_thread(&reserved)
+                .expect("reserved branch storage")
+                .is_some()
         );
     }
 

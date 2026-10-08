@@ -9,7 +9,7 @@ use sley::ObjectId;
 use super::{
     git_core::{
         GitProjection, GitProjectionError, GitProjectionResult, RefNamespace,
-        collect_import_source_ref_updates, open_repo,
+        collect_import_source_ref_updates,
     },
     git_export::commit_requires_residual,
     git_residual::ResidualStore,
@@ -38,7 +38,7 @@ pub fn import_git_history(
         progress,
     )
     .map_err(map_ingest_error)?;
-    bridge.build_existing_mapping(Some(source))?;
+    bridge.restore_ingest_mapping_cache()?;
     bridge.seed_ingest_identity_mappings_from_store()?;
     capture_import_residuals(bridge, source, refs, &stats)?;
     bridge.save_mapping_to_disk()?;
@@ -51,7 +51,7 @@ fn capture_import_residuals(
     refs: &[String],
     stats: &ingest::ImportStats,
 ) -> GitProjectionResult<()> {
-    let source_repo = open_repo(source)?;
+    let source_repo = repo::open_git_import_source(source)?;
     let updates = collect_import_source_ref_updates(&source_repo, refs)?;
     let residuals = ResidualStore::open(bridge.heddle_repo.heddle_dir());
 
@@ -108,7 +108,7 @@ fn map_ingest_error(error: ingest::IngestError) -> GitProjectionError {
 }
 
 fn reject_shallow_source(source: &Path, refs: &[String]) -> GitProjectionResult<()> {
-    let repo = open_repo(source)?;
+    let repo = repo::open_git_import_source(source)?;
     if repo.git_dir().join("shallow").is_file() {
         let wanted = (!refs.is_empty()).then(|| refs.iter().cloned().collect::<HashSet<_>>());
         return Err(GitProjectionError::ShallowClone {

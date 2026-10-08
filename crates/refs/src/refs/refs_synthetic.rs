@@ -11,10 +11,7 @@ use objects::{
     object::{StateId, SyntheticFrontierName},
 };
 
-use super::{
-    RefManager, format_state_id_text, parse_state_id_text,
-    refs_storage::{decode_flat_thread_name, encode_flat_thread_name},
-};
+use super::{RefManager, format_state_id_text, parse_state_id_text};
 use crate::fs_atomic::create_dir_all_durable;
 
 impl RefManager {
@@ -24,7 +21,10 @@ impl RefManager {
 
     fn synthetic_frontier_path(&self, name: &SyntheticFrontierName) -> std::path::PathBuf {
         self.synthetic_dir()
-            .join(encode_flat_thread_name(&name.as_name()))
+            .join(objects::name_encoding::name_path(&synthetic_storage_name(
+                name,
+            )))
+            .join("value")
     }
 
     /// Persist a synthetic frontier root. Does not construct a [`ThreadName`].
@@ -34,6 +34,10 @@ impl RefManager {
         state: &StateId,
     ) -> Result<()> {
         self.write_chokepoint(|_lock| {
+            objects::name_encoding::write_name_entry(
+                &self.synthetic_dir(),
+                &synthetic_storage_name(name),
+            )?;
             let path = self.synthetic_frontier_path(name);
             let parent = path.parent().ok_or_else(|| {
                 HeddleError::Config("invalid synthetic frontier path".to_string())
@@ -46,6 +50,10 @@ impl RefManager {
 
     /// Fetch a synthetic frontier root by its type-distinct name.
     pub fn get_synthetic_frontier(&self, name: &SyntheticFrontierName) -> Result<Option<StateId>> {
+        objects::name_encoding::verify_name_entry(
+            &self.synthetic_dir(),
+            &synthetic_storage_name(name),
+        )?;
         let path = self.synthetic_frontier_path(name);
         match self.read_optional_string(&path)? {
             Some(contents) => parse_state_id_text(contents.trim())
@@ -62,16 +70,19 @@ impl RefManager {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let file_name = match entry.file_name().to_str() {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-            let Some(decoded) = decode_flat_thread_name(&file_name) else {
+        for decoded in self.list_refs_recursive(&dir, "")? {
+            let Some((thread, change)) = decoded
+                .strip_prefix("heddle/frontier/")
+                .and_then(|suffix| suffix.rsplit_once('/'))
+            else {
                 continue;
             };
-            let Ok(name) = SyntheticFrontierName::parse(&decoded) else {
+            let mapped = format!(
+                "heddle/frontier/{}/{}",
+                objects::name_encoding::native_git_name(thread),
+                change
+            );
+            let Ok(name) = SyntheticFrontierName::parse(&mapped) else {
                 continue;
             };
             let Some(state) = self.get_synthetic_frontier(&name)? else {
@@ -82,6 +93,14 @@ impl RefManager {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+}
+
+fn synthetic_storage_name(name: &SyntheticFrontierName) -> String {
+    format!(
+        "heddle/frontier/{}/{}",
+        objects::name_encoding::git_name(name.thread()),
+        name.change_id().to_string_full()
+    )
 }
 
 #[cfg(test)]
@@ -124,6 +143,25 @@ mod tests {
             Some(right_state)
         );
         assert_eq!(refs.list_synthetic_frontiers().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn long_reserved_import_name_has_bounded_exact_synthetic_storage() {
+        let temp = TempDir::new().expect("refs");
+        let refs = RefManager::new(temp.path());
+        let git = format!("heddle/{}", "界".repeat(333));
+        let thread = ThreadName::from_git_branch(&git).expect("Git branch");
+        let name = SyntheticFrontierName::new(&thread, cid(9)).expect("synthetic");
+        let state = fresh_state_id();
+        refs.set_thread(&thread, &state)
+            .expect("long imported thread");
+        refs.set_synthetic_frontier(&name, &state)
+            .expect("long synthetic");
+        assert_eq!(refs.list_threads().expect("threads"), vec![thread]);
+        assert_eq!(
+            refs.list_synthetic_frontiers().expect("synthetics"),
+            vec![(name, state)]
+        );
     }
 
     #[test]

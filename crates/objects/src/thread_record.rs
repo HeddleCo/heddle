@@ -5,19 +5,12 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A validated thread id. Construction from user- or externally-supplied
-/// input goes through [`ThreadId::new`], which rejects anything that is not a
-/// safe single shell token (see [`validate_thread_id`]). That invariant is what
-/// lets recommended-command breadcrumbs interpolate a thread id *bare* — there
-/// is no whitespace or shell metacharacter to quote, by construction.
+/// A Git-valid thread identity. Command breadcrumbs must quote its exact UTF-8.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ThreadId(String);
 
 impl ThreadId {
-    /// Construct a thread id from user/external input, validating it against
-    /// the safe slug rule. Returns a [`ThreadIdError`] carrying an actionable
-    /// rename hint when the input is empty or contains a space, a shell
-    /// metacharacter, a `..` path segment, or a leading `/`.
+    /// Validate Git branch syntax, the 1024-byte full-ref limit and native reservation.
     pub fn new(value: impl Into<String>) -> Result<Self, ThreadIdError> {
         let value = value.into();
         validate_thread_id(&value)?;
@@ -25,9 +18,8 @@ impl ThreadId {
     }
 
     /// Wrap a value WITHOUT validation. Reserved for inputs that are
-    /// safe-by-construction: deserialization of thread records already on disk
-    /// (validate at creation, trust thereafter) and internally-generated slug
-    /// ids. Never call this on user/external input — use [`ThreadId::new`].
+    /// safe-by-construction: fields read through validated thread records
+    /// and internally-generated ids. Never call this on user/external input — use [`ThreadId::new`].
     pub(crate) fn new_unchecked(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -48,11 +40,8 @@ impl<'de> Deserialize<'de> for ThreadId {
     where
         D: serde::Deserializer<'de>,
     {
-        // Persisted thread ids were validated when the thread was created; a
-        // record on disk is trusted, so deserialize through `new_unchecked`
-        // rather than re-running validation (and rejecting historical data).
         let value = String::deserialize(deserializer)?;
-        Ok(Self::new_unchecked(value))
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -78,8 +67,7 @@ impl std::fmt::Display for ThreadIdError {
         } else {
             write!(
                 f,
-                "thread name '{}' is invalid: use only letters, digits, and _ - . / @ : + = \
-                 (no spaces, shell metacharacters, '..' path segments, or a leading '/' or '-') — try '{}'",
+                "thread name '{}' is invalid: use a Git branch name other than HEAD or the reserved heddle/ namespace or a noncanonical git% prefix (full ref at most 1024 UTF-8 bytes) — try '{}'",
                 self.input, self.suggestion
             )
         }
@@ -88,37 +76,36 @@ impl std::fmt::Display for ThreadIdError {
 
 impl std::error::Error for ThreadIdError {}
 
-/// The single rule for thread-id validity. A valid id is non-empty, made up
-/// only of the safe slug set (ASCII alphanumerics plus `_ - . / @ : + =`), has
-/// no `..` segment, and does not begin with `/`. This is deliberately the same
-/// safe set the shell quoting rule treats as needing no quoting, so a valid
-/// thread id is always a single shell token: `feature/x`, `v1.2`, `my-thread`,
-/// and `team@scope` are accepted; spaces, quotes, `;`, `|`, `$`, `&`, `*`,
-/// backticks, and newlines are rejected. Thread ids flow into worktree paths,
-/// so `..` and a leading `/` are rejected to keep them in-tree. A leading `-`
-/// is also rejected: it is in the safe set (for `my-thread`) but a breadcrumb
-/// like `heddle land --thread -foo` parses `-foo` as a flag, not the value.
+/// Git branch syntax is owned by Sley, including the valid short name `@`.
 pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
-    let safe_charset = value.bytes().all(|b| {
-        b.is_ascii_alphanumeric()
-            || matches!(b, b'_' | b'-' | b'.' | b'/' | b'@' | b':' | b'+' | b'=')
-    });
-    let ok = !value.is_empty()
-        && safe_charset
-        && !value.contains("..")
-        && !value.starts_with('/')
-        // A leading '-' is in the safe set (for `my-thread`) but makes the id
-        // look like a CLI flag: `heddle land --thread -foo` parses `-foo` as an
-        // option, and argv-template construction panics. Reject it at the source.
-        && !value.starts_with('-')
-        && !crate::object::is_reserved_heddle_namespace(value);
-    if ok {
+    let git_name = crate::name_encoding::git_name(value);
+    if git_name != "HEAD"
+        && git_name.len() + "refs/heads/".len() <= 1024
+        && sley_refs::BranchRefNameBuf::from_branch_name(&git_name).is_ok()
+        && !crate::object::is_reserved_heddle_namespace(value)
+        && (!value.starts_with("git%") || crate::name_encoding::native_git_name(&git_name) == value)
+    {
         Ok(())
     } else {
         Err(ThreadIdError {
             input: value.to_string(),
             suggestion: suggest_thread_id(value),
         })
+    }
+}
+
+#[cfg(test)]
+mod refname_tests {
+    use super::validate_thread_id;
+
+    #[test]
+    fn native_git_prefix_requires_canonical_mapping() {
+        assert!(validate_thread_id("git%foo").is_err());
+        for git in ["git%foo", "heddle/foo", "git%n-heddle%2Ffoo"] {
+            let native = crate::name_encoding::native_git_name(git);
+            assert!(validate_thread_id(&native).is_ok());
+            assert_eq!(crate::name_encoding::git_name(&native), git);
+        }
     }
 }
 
@@ -149,7 +136,13 @@ fn suggest_thread_id(value: &str) -> String {
     if trimmed.is_empty() {
         "thread".to_string()
     } else {
-        trimmed.to_string()
+        let mut suggestion = trimmed[..trimmed.len().min(1000)]
+            .trim_end_matches('.')
+            .to_string();
+        if suggestion == "HEAD" || suggestion.ends_with(".lock") {
+            suggestion.push_str("-thread");
+        }
+        suggestion
     }
 }
 
