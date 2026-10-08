@@ -13,13 +13,13 @@ categories.workspace = true
 sley-refs.workspace = true
 anyhow.workspace = true
 biscuit-auth.workspace = true
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.12" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.28.13" }
 base32.workspace = true
 api = { workspace = true }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.12" }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.13" }
 ignore.workspace = true
 heddle-perf-contract.workspace = true
 libc.workspace = true
