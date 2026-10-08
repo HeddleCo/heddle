@@ -141,8 +141,8 @@ use discovery::bounded_ancestor_paths_with_device;
 #[cfg(test)]
 use discovery::metadataless_managed_thread_root;
 pub use discovery::{
-    discover_heddle_root, ensure_repository_trusted, is_heddle_repository_root,
-    open_git_repository_at_root, set_safe_repositories,
+    discover_heddle_root, discover_repository_config, ensure_repository_trusted,
+    is_heddle_repository_root, open_git_repository_at_root, set_safe_repositories,
 };
 pub use overlay::{
     GitCheckpointIntent, GitCheckpointIntentPhase, GitCheckpointRecord, GitImportGuidance,

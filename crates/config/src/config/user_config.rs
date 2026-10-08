@@ -789,17 +789,19 @@ fn discovered_repo_tls_ca_certificate_path(
     let Some(start) = start else {
         return Ok(None);
     };
-    let Some(root) = repo::discover_heddle_root(start) else {
-        return Ok(None);
+    // Same admission as `Repository::open` (heddle#2034): an untrusted
+    // repository's config, or the parent's from inside a virtualized thread
+    // mount, must not choose this process's trust anchors. Opening is refused
+    // separately; commands that never open a repository (clone, auth) proceed
+    // with the remaining roots. A checkout's config is its store's.
+    let config_path = match repo::discover_repository_config(start) {
+        Ok(Some(config_path)) => config_path,
+        Ok(None) => return Ok(None),
+        Err(refusal) => {
+            tracing::warn!("ignoring repository `remote.tls_ca_certificate_path`: {refusal}");
+            return Ok(None);
+        }
     };
-    // An untrusted repository's config must not choose this process's trust
-    // anchors (heddle#2034). Opening it is refused separately; commands that
-    // never open a repository (clone, auth) proceed with the remaining roots.
-    if let Err(refusal) = repo::ensure_repository_trusted(&root) {
-        tracing::warn!("ignoring repository `remote.tls_ca_certificate_path`: {refusal}");
-        return Ok(None);
-    }
-    let config_path = root.join(".heddle/config.toml");
     let contents = match fs::read_to_string(&config_path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -823,11 +825,24 @@ fn discovered_repo_tls_ca_certificate_path(
     else {
         return Ok(None);
     };
-    Ok(Some(if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }))
+    if path.is_absolute() {
+        return Ok(Some(path));
+    }
+    // Relative paths resolve against the repository that owns this config:
+    // `<root>/.heddle/config.toml`.
+    let root = config_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            security_config_error(
+                "remote.tls_ca_certificate_path",
+                format!(
+                    "repository config {} has no repository root",
+                    config_path.display()
+                ),
+            )
+        })?;
+    Ok(Some(root.join(path)))
 }
 
 #[cfg(feature = "local-repository")]

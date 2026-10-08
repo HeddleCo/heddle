@@ -21,7 +21,7 @@ use super::{
     discovery::{
         RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
         ensure_repository_trusted, has_git_repository_at_root, is_heddle_repository_root,
-        metadataless_managed_thread_root, parse_objectstore_pointer,
+        parse_objectstore_pointer, record_nested_repository_trust, refuse_metadataless_mount,
     },
     overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude},
 };
@@ -314,15 +314,7 @@ impl Repository {
         // Solid/materialized checkouts have their own `.heddle` pointer and
         // are handled by the worktree branch below, so this only fires for a
         // virtualized (or torn-down) mount root.
-        if let Some(mount_root) = metadataless_managed_thread_root(&start_path) {
-            return Err(HeddleError::Config(format!(
-                "'{}' is a Heddle-managed virtualized thread mount with no checkout \
-                 metadata of its own; refusing to operate on the parent repository from \
-                 inside it. Run heddle from the repository root, or use a solid/materialized \
-                 thread checkout.",
-                mount_root.display()
-            )));
-        }
+        refuse_metadataless_mount(&start_path)?;
         let mut discovered_git_root = None;
 
         for dir in bounded_ancestor_paths(&start_path) {
@@ -580,6 +572,6 @@ impl Repository {
             .as_bytes(),
         )?;
         fs::create_dir_all(heddle_dir.join("state"))?;
-        Ok(())
+        record_nested_repository_trust(path)
     }
 }

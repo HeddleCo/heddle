@@ -245,7 +245,8 @@ pub use repository::{
     SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
     WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
-    compute_rewrite_pct, discover_heddle_root, ensure_repository_trusted, find_merge_base,
+    compute_rewrite_pct, discover_heddle_root, discover_repository_config,
+    ensure_repository_trusted, find_merge_base,
     is_heddle_repository_root, is_major_rewrite, is_synthetic_root, merge_context_blobs,
     open_git_repository_at_root, query_history_from_source, set_safe_repositories,
 };
