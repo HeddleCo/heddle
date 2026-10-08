@@ -9,7 +9,6 @@ use super::{
 };
 use crate::object::{
     ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeEntryTarget,
-    TreeScheme,
 };
 
 const TREE_MAGIC: &[u8; 4] = b"HCT1";
@@ -47,14 +46,13 @@ pub fn encode_tree_frame(trees: &[Tree]) -> Result<Vec<u8>> {
             "tree entry count {count} exceeds maximum {MAX_COMPACT_COUNT}"
         )));
     }
-    if trees
-        .iter()
-        .any(|tree| tree.scheme() == TreeScheme::V4Salted)
-    {
-        // HCT1 columns carry no salt; a V4 salted tree must never be written
-        // through this salt-less frame (it would silently re-hash as V3).
+    if trees.iter().any(Tree::requires_canonical_body) {
+        // HCT1 columns carry no salt and no Git layout; a V4 salted tree or a
+        // tree with a Git source layout must never be written through this
+        // frame (it would silently re-hash as a different tree).
         return Err(invalid(
-            "cannot encode a v4 salted tree in an HCT1 compact frame".to_string(),
+            "cannot encode a v4 salted tree or a git source layout in an HCT1 compact frame"
+                .to_string(),
         ));
     }
     let mut output = Writer::new(TREE_MAGIC);

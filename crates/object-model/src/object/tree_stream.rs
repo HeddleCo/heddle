@@ -8,11 +8,11 @@ use super::{
     ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
     tree::git_format_from_tag,
     tree_canonical::{
-        TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_INDEX_LEN, TREE_BLOCK_PREAMBLE_LEN,
-        TREE_ENCODING_VERSION, TREE_HEADER_LEN, TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC,
-        TREE_REDACTED_MAGIC, TREE_SALTED_MAGIC, TreeBlockHeader, TreeBlockIndex, TreeHeader,
-        decode_block_header, decode_block_index, decode_block_payload, decode_entry_frame,
-        decode_header,
+        SourcePositions, TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_INDEX_LEN,
+        TREE_BLOCK_PREAMBLE_LEN, TREE_ENCODING_VERSION, TREE_HEADER_LEN,
+        TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TREE_REDACTED_MAGIC, TREE_SALTED_MAGIC,
+        TreeBlockHeader, TreeBlockIndex, TreeHeader, decode_block_header, decode_block_index,
+        decode_block_payload, decode_entry_frame, decode_header,
     },
     tree_source::{TreeBodyIntegrity, TreeByteSource},
 };
@@ -169,9 +169,13 @@ pub struct TreeEntryReader<S: TreeByteSource> {
     lean_hash_entries: Option<Vec<TreeEntry>>,
     decoded_logical_len: u64,
     started_at_zero: bool,
-    pending: Option<(TreeEntry, usize)>,
+    pending: Option<DecodedStreamEntry>,
     finished: bool,
 }
+
+/// An entry as read from the body: the entry, its Git source position when
+/// the tree records one, and the encoded bytes it occupied.
+type DecodedStreamEntry = (TreeEntry, Option<u32>, usize);
 
 impl<S: TreeByteSource> TreeEntryReader<S> {
     pub fn open(
@@ -305,7 +309,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         let mut decoded_bytes = 0usize;
         while entries.len() < limits.max_entries() && self.cursor.ordinal < self.header.entry_count
         {
-            let (entry, consumed) = self.take_next_entry()?;
+            let (entry, position, consumed) = self.take_next_entry()?;
             let size = entry.decoded_size();
             if size > limits.max_decoded_bytes() {
                 return Err(TreeStreamError::OversizedEntry {
@@ -316,10 +320,10 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             if !entries.is_empty()
                 && decoded_bytes.saturating_add(size) > limits.max_decoded_bytes()
             {
-                self.pending = Some((entry, consumed));
+                self.pending = Some((entry, position, consumed));
                 break;
             }
-            self.commit_entry(&entry, consumed)?;
+            self.commit_entry(&entry, position, consumed)?;
             decoded_bytes += size;
             entries.push(entry);
         }
@@ -331,12 +335,19 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
 
     /// Yield one decoded entry. Used by full-object collect without a page ceiling.
     pub fn next_entry(&mut self) -> Result<Option<TreeEntry>, TreeStreamError> {
+        Ok(self.next_entry_with_position()?.map(|(entry, _)| entry))
+    }
+
+    /// [`Self::next_entry`] plus the entry's Git source position, if recorded.
+    fn next_entry_with_position(
+        &mut self,
+    ) -> Result<Option<(TreeEntry, Option<u32>)>, TreeStreamError> {
         if self.cursor.ordinal == self.header.entry_count {
             return Ok(None);
         }
-        let (entry, consumed) = self.take_next_entry()?;
-        self.commit_entry(&entry, consumed)?;
-        Ok(Some(entry))
+        let (entry, position, consumed) = self.take_next_entry()?;
+        self.commit_entry(&entry, position, consumed)?;
+        Ok(Some((entry, position)))
     }
 
     pub fn finish_and_verify(&mut self) -> Result<(), TreeStreamError> {
@@ -382,14 +393,14 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         Ok(())
     }
 
-    fn take_next_entry(&mut self) -> Result<(TreeEntry, usize), TreeStreamError> {
+    fn take_next_entry(&mut self) -> Result<DecodedStreamEntry, TreeStreamError> {
         if let Some(pending) = self.pending.take() {
             return Ok(pending);
         }
         self.read_entry_at(self.cursor.byte_offset)
     }
 
-    fn read_entry_at(&mut self, offset: u64) -> Result<(TreeEntry, usize), TreeStreamError> {
+    fn read_entry_at(&mut self, offset: u64) -> Result<DecodedStreamEntry, TreeStreamError> {
         if matches!(self.layout, TreeReaderLayout::Lean { .. }) {
             return self.read_lean_entry(offset);
         }
@@ -413,8 +424,8 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             usize::try_from(frame_len).map_err(|_| TreeStreamError::TruncatedFrame { offset })?;
         let mut frame = vec![0u8; frame_len];
         self.source.read_exact_at(frame_start, &mut frame)?;
-        let entry = decode_entry_frame(&frame)?;
-        Ok((entry, 4 + frame_len))
+        let (entry, position) = decode_entry_frame(&frame)?;
+        Ok((entry, position, 4 + frame_len))
     }
 
     fn logical_payload_end(&self) -> u64 {
@@ -427,7 +438,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         }
     }
 
-    fn read_lean_entry(&mut self, offset: u64) -> Result<(TreeEntry, usize), TreeStreamError> {
+    fn read_lean_entry(&mut self, offset: u64) -> Result<DecodedStreamEntry, TreeStreamError> {
         let mut cursor = offset;
         let tag = read_source_byte(&mut self.source, &mut cursor)?;
         let mode = FileMode::from_byte(tag >> 3).ok_or_else(|| {
@@ -517,10 +528,11 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         }
         let consumed = usize::try_from(cursor - offset)
             .map_err(|_| TreeStreamError::Malformed("compact entry length exceeds usize".into()))?;
-        Ok((entry, consumed))
+        // HLR1 never carries a Git layout (see `Tree::encode_lean`).
+        Ok((entry, None, consumed))
     }
 
-    fn read_blocked_entry(&mut self) -> Result<(TreeEntry, usize), TreeStreamError> {
+    fn read_blocked_entry(&mut self) -> Result<DecodedStreamEntry, TreeStreamError> {
         let block_header = match &self.layout {
             TreeReaderLayout::Blocked { header, .. } => *header,
             TreeReaderLayout::Raw | TreeReaderLayout::Lean { .. } => {
@@ -603,7 +615,8 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
                 "cursor byte offset is not an entry boundary".into(),
             ));
         }
-        Ok((decode_entry_frame(frame)?, consumed))
+        let (entry, position) = decode_entry_frame(frame)?;
+        Ok((entry, position, consumed))
     }
 
     fn read_block_index(
@@ -626,7 +639,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
     fn read_block_anchor(
         &mut self,
         index: TreeBlockIndex,
-    ) -> Result<(TreeEntry, usize), TreeStreamError> {
+    ) -> Result<DecodedStreamEntry, TreeStreamError> {
         let mut len_bytes = [0u8; 4];
         self.source
             .read_exact_at(index.stored_offset, &mut len_bytes)?;
@@ -644,7 +657,8 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         let mut frame = vec![0u8; frame_len];
         self.source
             .read_exact_at(index.stored_offset + 4, &mut frame)?;
-        Ok((decode_entry_frame(&frame)?, consumed))
+        let (entry, position) = decode_entry_frame(&frame)?;
+        Ok((entry, position, consumed))
     }
 
     fn load_block(
@@ -721,7 +735,12 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         Ok(())
     }
 
-    fn commit_entry(&mut self, entry: &TreeEntry, consumed: usize) -> Result<(), TreeStreamError> {
+    fn commit_entry(
+        &mut self,
+        entry: &TreeEntry,
+        source_position: Option<u32>,
+        consumed: usize,
+    ) -> Result<(), TreeStreamError> {
         if let Some(previous) = self.cursor.prev_name.as_deref()
             && previous >= entry.name()
         {
@@ -731,14 +750,14 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             .into());
         }
         if let Some(hasher) = &mut self.hasher {
-            entry.update_hasher(hasher);
+            entry.update_hasher(hasher, source_position);
         }
         if let Some(entries) = &mut self.lean_hash_entries {
             entries.push(entry.clone());
         }
         self.decoded_logical_len = self
             .decoded_logical_len
-            .checked_add(entry.encoded_len() as u64)
+            .checked_add(entry.encoded_len(source_position) as u64)
             .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
         self.cursor.ordinal += 1;
         self.cursor.byte_offset += consumed as u64;
@@ -750,7 +769,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         if self.cursor.ordinal == 0 || self.cursor.ordinal == self.header.entry_count {
             return Ok(());
         }
-        let (entry, consumed) = self.read_entry_at(self.cursor.byte_offset)?;
+        let (entry, position, consumed) = self.read_entry_at(self.cursor.byte_offset)?;
         if let Some(previous) = self.cursor.prev_name.as_deref()
             && previous >= entry.name()
         {
@@ -758,7 +777,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
                 "cursor previous name is not a valid predecessor".into(),
             ));
         }
-        self.pending = Some((entry, consumed));
+        self.pending = Some((entry, position, consumed));
         Ok(())
     }
 }
@@ -918,11 +937,14 @@ impl Tree {
             None,
         )?;
         let mut entries = Vec::new();
-        while let Some(entry) = reader.next_entry()? {
+        let mut positions = SourcePositions::default();
+        while let Some((entry, position)) = reader.next_entry_with_position()? {
+            positions.push(entries.len(), position)?;
             entries.push(entry);
         }
         reader.finish_and_verify()?;
-        let tree = Tree::try_from_decoded_entries(entries).map_err(TreeStreamError::from)?;
+        let tree = Tree::try_from_decoded_layout(entries, positions.finish())
+            .map_err(TreeStreamError::from)?;
         let found = tree.hash();
         if found != header.tree_id {
             return Err(TreeStreamError::HashMismatch {

@@ -7,7 +7,7 @@ use objects::{
     error::HeddleError,
     object::{
         AnnotatedTag, AudienceTier, ContentHash, FacetKind, MarkerName, State, StateId, ThreadName,
-        TreeEntryTarget, visible,
+        TreeEntry, TreeEntryTarget, visible,
     },
     store::ObjectStore,
 };
@@ -225,6 +225,11 @@ fn write_state_object(
 }
 
 /// Export a Heddle tree to Git.
+///
+/// A tree imported from a non-canonical Git tree (odd or zero-padded modes, or
+/// entries out of Git's order) records that layout, and is written back as
+/// the exact source bytes so its id, and every id above it, is unchanged.
+/// Every other tree goes through Git's canonical tree writer, as before.
 pub fn export_tree(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
@@ -235,71 +240,98 @@ pub fn export_tree(
         .get_tree(tree_hash)?
         .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
 
-    let empty_tree = ObjectId::empty_tree(repo.object_format());
-    let mut editor = repo.edit_tree(&empty_tree).map_err(git_err)?;
-
-    for entry in tree.entries() {
-        let write_blob_entry = |hash: &ContentHash| -> GitProjectionResult<ObjectId> {
-            // Redaction safety: if the blob carries an active redaction
-            // record, export the stub instead of the bytes. This is the
-            // single chokepoint between Heddle-side redactions and any
-            // downstream Git remote (GitHub, internal mirrors, ...).
-            // Bytes that escape via Git projection are bytes that escape,
-            // full stop — we cannot retroactively scrub them from
-            // outside repos. The check sits *here*, not in
-            // `materialize_blob`, because export reads `blob.content()`
-            // directly (we never touch the materialize path) and writes
-            // the raw bytes through `repo.write_blob`.
-            let stub = heddle_repo
-                .redaction_stub_for_blob(hash)
-                .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?;
-
-            if let Some(stub_text) = stub {
-                // Stubs are text-only and ASCII safe across newline/BOM quirks.
-                return repo.write_blob(stub_text.as_bytes()).map_err(git_err);
-            }
-
-            let blob = heddle_repo
-                .store()
-                .get_blob(hash)?
-                .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
-            repo.write_blob(blob.content()).map_err(git_err)
-        };
-        let (kind, id) = match entry.target() {
-            TreeEntryTarget::Tree { hash } => {
-                (EntryKind::Tree, export_tree(heddle_repo, repo, hash)?)
-            }
-            TreeEntryTarget::Blob { hash, executable } => {
-                let kind = if *executable {
-                    EntryKind::BlobExecutable
-                } else {
-                    EntryKind::Blob
-                };
-                (kind, write_blob_entry(hash)?)
-            }
-            TreeEntryTarget::Symlink { hash } => (EntryKind::Symlink, write_blob_entry(hash)?),
-            TreeEntryTarget::Gitlink { target } => (EntryKind::Commit, *target),
-            // A native child-spool edge points at a spool-id + state-id, NOT a
-            // git commit OID, so it has no valid git submodule (mode 160000)
-            // representation. Emitting a `Commit` entry here would fabricate a
-            // bogus submodule pointer, so we deliberately SKIP the entry on
-            // git-export. (Git-import never produces spoollinks — only native
-            // spool operations do — so nothing round-trips back through here.)
-            TreeEntryTarget::Spoollink { spool_id, state_id } => {
-                debug!(
-                    name = entry.name(),
-                    %spool_id,
-                    %state_id,
-                    "skipping SPOOLLINK entry on git-export: no valid git submodule representation"
-                );
+    if tree.has_git_layout() {
+        let mut body = Vec::new();
+        for entry in tree.git_ordered_entries() {
+            let Some((_, id)) = export_entry(heddle_repo, repo, entry)? else {
                 continue;
-            }
-        };
-
-        editor.upsert(entry.name(), kind, id);
+            };
+            let Some(mode) = entry.git_mode() else {
+                continue;
+            };
+            mode.write_digits(&mut body);
+            body.push(b' ');
+            body.extend_from_slice(entry.name().as_bytes());
+            body.push(0);
+            body.extend_from_slice(id.as_bytes());
+        }
+        return repo
+            .write_raw_object(GitObjectType::Tree, body)
+            .map_err(git_err);
     }
 
+    let empty_tree = ObjectId::empty_tree(repo.object_format());
+    let mut editor = repo.edit_tree(&empty_tree).map_err(git_err)?;
+    for entry in tree.entries() {
+        if let Some((kind, id)) = export_entry(heddle_repo, repo, entry)? {
+            editor.upsert(entry.name(), kind, id);
+        }
+    }
     repo.write_tree(editor).map_err(git_err)
+}
+
+/// Write one entry's object to Git and return its canonical kind and id, or
+/// `None` for an entry Git cannot represent.
+fn export_entry(
+    heddle_repo: &HeddleRepository,
+    repo: &SleyRepository,
+    entry: &TreeEntry,
+) -> GitProjectionResult<Option<(EntryKind, ObjectId)>> {
+    let write_blob_entry = |hash: &ContentHash| -> GitProjectionResult<ObjectId> {
+        // Redaction safety: if the blob carries an active redaction
+        // record, export the stub instead of the bytes. This is the
+        // single chokepoint between Heddle-side redactions and any
+        // downstream Git remote (GitHub, internal mirrors, ...).
+        // Bytes that escape via Git projection are bytes that escape,
+        // full stop — we cannot retroactively scrub them from
+        // outside repos. The check sits *here*, not in
+        // `materialize_blob`, because export reads `blob.content()`
+        // directly (we never touch the materialize path) and writes
+        // the raw bytes through `repo.write_blob`.
+        let stub = heddle_repo
+            .redaction_stub_for_blob(hash)
+            .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?;
+
+        if let Some(stub_text) = stub {
+            // Stubs are text-only and ASCII safe across newline/BOM quirks.
+            return repo.write_blob(stub_text.as_bytes()).map_err(git_err);
+        }
+
+        let blob = heddle_repo
+            .store()
+            .get_blob(hash)?
+            .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
+        repo.write_blob(blob.content()).map_err(git_err)
+    };
+    let exported = match entry.target() {
+        TreeEntryTarget::Tree { hash } => (EntryKind::Tree, export_tree(heddle_repo, repo, hash)?),
+        TreeEntryTarget::Blob { hash, executable } => {
+            let kind = if *executable {
+                EntryKind::BlobExecutable
+            } else {
+                EntryKind::Blob
+            };
+            (kind, write_blob_entry(hash)?)
+        }
+        TreeEntryTarget::Symlink { hash } => (EntryKind::Symlink, write_blob_entry(hash)?),
+        TreeEntryTarget::Gitlink { target } => (EntryKind::Commit, *target),
+        // A native child-spool edge points at a spool-id + state-id, NOT a
+        // git commit OID, so it has no valid git submodule (mode 160000)
+        // representation. Emitting a `Commit` entry here would fabricate a
+        // bogus submodule pointer, so we deliberately SKIP the entry on
+        // git-export. (Git-import never produces spoollinks — only native
+        // spool operations do — so nothing round-trips back through here.)
+        TreeEntryTarget::Spoollink { spool_id, state_id } => {
+            debug!(
+                name = entry.name(),
+                %spool_id,
+                %state_id,
+                "skipping SPOOLLINK entry on git-export: no valid git submodule representation"
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(exported))
 }
 
 /// Export all Heddle states to Git commits.

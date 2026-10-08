@@ -55,6 +55,7 @@ mod timeline;
 mod tree;
 mod tree_canonical;
 mod tree_diff;
+mod tree_git_layout;
 mod tree_path;
 mod tree_source;
 mod tree_stream;
@@ -183,6 +184,7 @@ pub use tree_canonical::{
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
 pub use tree_diff::{diff_trees, diff_trees_visit};
+pub use tree_git_layout::{GitTreeEntryRef, RawGitMode, parse_git_tree};
 #[cfg(feature = "async-source")]
 pub use tree_path::resolve_tree_path_async;
 pub use tree_path::{

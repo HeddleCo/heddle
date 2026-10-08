@@ -12,6 +12,7 @@ use super::{
     ContentHash, EntryType, FileMode, PartialTree, PartialTreeLeaf, SpoolId, StateId, Tree,
     TreeEntry, TreeError, TreeScheme,
     tree::{git_format_from_tag, git_format_to_tag},
+    tree_git_layout::{apply_layout_trailer, layout_trailer_len, split_layout_flags},
     tree_stream::TreeStreamError,
 };
 
@@ -136,11 +137,12 @@ impl Tree {
         let tree_id = self.hash();
         let mut payload = Vec::new();
         let mut logical_len = 0u64;
-        for entry in self.entries() {
+        for (index, entry) in self.entries().iter().enumerate() {
+            let source_position = self.source_position_at(index);
             logical_len = logical_len
-                .checked_add(entry.encoded_len() as u64)
+                .checked_add(entry.encoded_len(source_position) as u64)
                 .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
-            let frame = encode_entry_frame(entry)?;
+            let frame = encode_entry_frame(entry, source_position)?;
             let frame_len = u32::try_from(frame.len()).map_err(|_| {
                 TreeStreamError::Malformed(format!("entry '{}' frame exceeds u32", entry.name()))
             })?;
@@ -186,10 +188,12 @@ impl Tree {
             });
         }
         let mut entries = Vec::new();
+        let mut positions = SourcePositions::default();
         let mut offset = TREE_HEADER_LEN;
         let payload_end = data.len();
         for _ in 0..header.entry_count {
-            let (entry, consumed) = decode_entry_at(data, offset, payload_end)?;
+            let (entry, position, consumed) = decode_entry_at(data, offset, payload_end)?;
+            positions.push(entries.len(), position)?;
             entries.push(entry);
             offset += consumed;
         }
@@ -198,7 +202,7 @@ impl Tree {
                 extra: (payload_end - offset) as u64,
             });
         }
-        let tree = Tree::try_from_decoded_entries(entries)?;
+        let tree = Tree::try_from_decoded_layout(entries, positions.finish())?;
         let found = tree.hash();
         if found != header.tree_id {
             return Err(TreeStreamError::HashMismatch {
@@ -209,7 +213,8 @@ impl Tree {
         if tree
             .entries()
             .iter()
-            .map(|entry| entry.encoded_len() as u64)
+            .enumerate()
+            .map(|(index, entry)| entry.encoded_len(tree.source_position_at(index)) as u64)
             .sum::<u64>()
             != header.logical_len
         {
@@ -694,6 +699,12 @@ impl Tree {
                 "cannot encode a v4 salted tree as HLR1 lean; use HSR1".into(),
             ));
         }
+        if self.has_git_layout() {
+            // HLR1 carries no Git layout; such a tree is stored as HTR4.
+            return Err(TreeStreamError::Malformed(
+                "cannot encode a tree with a git source layout as HLR1 lean; use HTR4".into(),
+            ));
+        }
         self.validate()?;
         encode_lean_entries(self.entries())
     }
@@ -809,6 +820,12 @@ pub fn encode_lean_entry(
     previous_name: &str,
     out: &mut Vec<u8>,
 ) -> Result<(), TreeStreamError> {
+    if entry.raw_git_mode().is_some() {
+        return Err(TreeStreamError::Malformed(format!(
+            "compact entry '{}' cannot carry a raw git mode",
+            entry.name()
+        )));
+    }
     out.push((entry.mode().to_byte() << 3) | entry.entry_type().to_byte());
     let prefix = shared_prefix(previous_name, entry.name());
     put_varint(prefix, out);
@@ -1102,6 +1119,12 @@ pub fn encode_tree_delta(
             "cannot encode a v4 salted tree as an HDC1 delta; use HSR1".into(),
         ));
     }
+    if anchor.has_git_layout() || current.has_git_layout() {
+        // A tree with a Git source layout is stored as a full HTR4 body.
+        return Err(TreeStreamError::Malformed(
+            "cannot encode a tree with a git source layout as an HDC1 delta; use HTR4".into(),
+        ));
+    }
     anchor.validate()?;
     current.validate()?;
     if anchor.hash() != anchor_id {
@@ -1372,25 +1395,62 @@ fn read_u32_at(data: &[u8], offset: usize) -> Result<u32, TreeStreamError> {
     ))
 }
 
-pub(crate) fn encode_entry_frame(entry: &TreeEntry) -> Result<Vec<u8>, TreeStreamError> {
+/// Encode one entry frame: `mode|flags ‖ kind ‖ name_len ‖ name ‖ target ‖
+/// layout trailer`. Without a Git layout the flags are zero and the trailer is
+/// empty, which is the historical frame.
+pub(crate) fn encode_entry_frame(
+    entry: &TreeEntry,
+    source_position: Option<u32>,
+) -> Result<Vec<u8>, TreeStreamError> {
     let name = entry.name().as_bytes();
     let name_len = u16::try_from(name.len()).map_err(|_| {
         TreeStreamError::Malformed(format!("entry name '{}' exceeds u16", entry.name()))
     })?;
     let mut frame = Vec::new();
-    frame.push(entry.mode().to_byte());
+    frame.push(entry.mode().to_byte() | entry.layout_flags(source_position));
     frame.push(entry.entry_type().to_byte());
     frame.extend_from_slice(&name_len.to_le_bytes());
     frame.extend_from_slice(name);
     encode_target(&mut frame, entry)?;
+    entry.write_layout_trailer(source_position, |bytes| frame.extend_from_slice(bytes));
     Ok(frame)
+}
+
+/// Collects the per-entry source positions of a decoded body: every entry
+/// carries one, or none does.
+#[derive(Default)]
+pub(crate) struct SourcePositions {
+    positions: Vec<u32>,
+}
+
+impl SourcePositions {
+    pub(crate) fn push(
+        &mut self,
+        index: usize,
+        position: Option<u32>,
+    ) -> Result<(), TreeStreamError> {
+        match position {
+            Some(position) if self.positions.len() == index => {
+                self.positions.push(position);
+                Ok(())
+            }
+            None if self.positions.is_empty() => Ok(()),
+            _ => Err(TreeStreamError::Malformed(
+                "source positions must be recorded on every entry or none".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn finish(self) -> Vec<u32> {
+        self.positions
+    }
 }
 
 pub(crate) fn decode_entry_at(
     data: &[u8],
     offset: usize,
     payload_end: usize,
-) -> Result<(TreeEntry, usize), TreeStreamError> {
+) -> Result<(TreeEntry, Option<u32>, usize), TreeStreamError> {
     if offset + 4 > payload_end {
         return Err(TreeStreamError::TruncatedFrame {
             offset: offset as u64,
@@ -1412,15 +1472,19 @@ pub(crate) fn decode_entry_at(
             offset: offset as u64,
         });
     }
-    let entry = decode_entry_frame(&data[frame_start..frame_end])?;
-    Ok((entry, 4 + frame_len))
+    let (entry, position) = decode_entry_frame(&data[frame_start..frame_end])?;
+    Ok((entry, position, 4 + frame_len))
 }
 
-pub(crate) fn decode_entry_frame(frame: &[u8]) -> Result<TreeEntry, TreeStreamError> {
+/// Decode one entry frame and its source position, if it records one.
+pub(crate) fn decode_entry_frame(
+    frame: &[u8],
+) -> Result<(TreeEntry, Option<u32>), TreeStreamError> {
     if frame.len() < 4 {
         return Err(TreeStreamError::TruncatedFrame { offset: 0 });
     }
-    let mode = FileMode::from_byte(frame[0]).ok_or_else(|| {
+    let (flags, mode_byte) = split_layout_flags(frame[0]);
+    let mode = FileMode::from_byte(mode_byte).ok_or_else(|| {
         TreeStreamError::Malformed(format!("malformed tree entry mode {}", frame[0]))
     })?;
     let kind = EntryType::from_byte(frame[1]).ok_or_else(|| {
@@ -1434,14 +1498,19 @@ pub(crate) fn decode_entry_frame(frame: &[u8]) -> Result<TreeEntry, TreeStreamEr
     let name = std::str::from_utf8(&frame[4..name_end])
         .map_err(|_| TreeStreamError::Malformed("tree entry name is not UTF-8".into()))?
         .to_string();
-    let entry = decode_target(name, kind, mode, &frame[name_end..])?;
+    let target_end = frame
+        .len()
+        .checked_sub(layout_trailer_len(flags))
+        .filter(|end| *end >= name_end)
+        .ok_or(TreeStreamError::TruncatedFrame { offset: 0 })?;
+    let entry = decode_target(name, kind, mode, &frame[name_end..target_end])?;
     if entry.mode() != mode {
         return Err(TreeStreamError::Malformed(format!(
             "tree kind/mode mismatch for {}: {kind:?}/{mode:?}",
             entry.name()
         )));
     }
-    Ok(entry)
+    Ok(apply_layout_trailer(entry, flags, &frame[target_end..])?)
 }
 
 fn encode_target(frame: &mut Vec<u8>, entry: &TreeEntry) -> Result<(), TreeStreamError> {
@@ -1555,7 +1624,7 @@ fn encode_salted_entry_frame(
     entry: &TreeEntry,
     salt: &[u8; 32],
 ) -> Result<Vec<u8>, TreeStreamError> {
-    let inner = encode_entry_frame(entry)?;
+    let inner = encode_entry_frame(entry, None)?;
     let mut frame = Vec::with_capacity(32 + inner.len());
     frame.extend_from_slice(salt);
     frame.extend_from_slice(&inner);
@@ -1571,7 +1640,12 @@ pub(crate) fn decode_salted_entry_frame(
     let salt: [u8; 32] = frame[..32]
         .try_into()
         .map_err(|_| TreeStreamError::Malformed("salted frame salt is not 32 bytes".into()))?;
-    let entry = decode_entry_frame(&frame[32..])?;
+    let (entry, position) = decode_entry_frame(&frame[32..])?;
+    if position.is_some() {
+        return Err(TreeStreamError::Malformed(
+            "salted v4 entries do not record a git source position".into(),
+        ));
+    }
     Ok((salt, entry))
 }
 
@@ -1589,7 +1663,7 @@ impl Tree {
         let mut logical_len = 0u64;
         for (entry, salt) in self.entries().iter().zip(self.salts().iter()) {
             logical_len = logical_len
-                .checked_add(entry.encoded_len() as u64)
+                .checked_add(entry.encoded_len(None) as u64)
                 .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
             let frame = encode_salted_entry_frame(entry, salt)?;
             let frame_len = u32::try_from(frame.len()).map_err(|_| {
@@ -1700,7 +1774,7 @@ pub fn decode_salted_v4(data: &[u8]) -> Result<Tree, TreeStreamError> {
     if tree
         .entries()
         .iter()
-        .map(|entry| entry.encoded_len() as u64)
+        .map(|entry| entry.encoded_len(None) as u64)
         .sum::<u64>()
         != logical_len
     {

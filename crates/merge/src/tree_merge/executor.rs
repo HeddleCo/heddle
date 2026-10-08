@@ -865,7 +865,9 @@ fn merge_delete_changed_entry(
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<()> {
-    if kept_entry == base_entry {
+    // Entries compare by meaning: a recorded source Git mode (heddle#2018)
+    // is not a modification.
+    if kept_entry.same_meaning(base_entry) {
         return Ok(());
     }
 
@@ -894,7 +896,7 @@ fn merge_added_entries(
     labels: ConflictLabels<'_>,
     semantic_merge: Option<SemanticMergeFn>,
 ) -> Result<()> {
-    if our_entry == their_entry {
+    if our_entry.same_meaning(their_entry) {
         merged_entries.push((**our_entry).clone());
     } else if our_entry.is_tree() && their_entry.is_tree() {
         let (entry, sub_conflicts) = merge_subtrees(
@@ -940,11 +942,11 @@ fn merge_changed_entries(
     labels: ConflictLabels<'_>,
     semantic_merge: Option<SemanticMergeFn>,
 ) -> Result<()> {
-    if our_entry == their_entry {
+    if our_entry.same_meaning(their_entry) {
         merged_entries.push((**our_entry).clone());
-    } else if our_entry == base_entry {
+    } else if our_entry.same_meaning(base_entry) {
         merged_entries.push((**their_entry).clone());
-    } else if their_entry == base_entry {
+    } else if their_entry.same_meaning(base_entry) {
         merged_entries.push((**our_entry).clone());
     } else if let Some(entry) =
         merge_mode_content_orthogonal_change(base_entry, our_entry, their_entry)
