@@ -809,7 +809,7 @@ impl Candidate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use std::{
         collections::VecDeque,

@@ -25,6 +25,7 @@ const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 /// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
     // Close proof files before removing their owning staging directory.
+    #[cfg(feature = "native")]
     pub(super) partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
@@ -33,6 +34,7 @@ pub struct StagedSource {
     pub(super) state: State,
     #[cfg(feature = "native")]
     pub(super) prefix_original: Option<SignedRecord>,
+    #[cfg(feature = "native")]
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
     /// Verified converted Git ancestors staged in `ancestry.pack`, keyed by
@@ -284,6 +286,7 @@ impl StagedSource {
             .filter(|floor| floor.coverage == import_ancestry_page::Coverage::Floor)
             .map(|floor| (floor.tip, &floor.members))
     }
+    #[cfg(feature = "native")]
     pub(super) fn ancestry_paths(&self) -> Option<[std::path::PathBuf; 2]> {
         let pack = self.directory.path().join("ancestry.pack");
         pack.exists()
@@ -428,7 +431,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         .map_err(|error| Error::Preparation(error.to_string()))?
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 fn validate(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -450,7 +453,7 @@ struct DisclosureInput {
     require_import_ancestry: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 pub(crate) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -528,7 +531,9 @@ pub(super) fn validate_with_receipts_and_carriers(
         operations: value.operations,
         dependencies: value.dependencies,
         state: value.state,
+        #[cfg(feature = "native")]
         partial_trees: value.partial_trees,
+        #[cfg(feature = "native")]
         authority_admissions: value.authority_admissions,
         ancestry: value.ancestry,
     })
@@ -538,6 +543,7 @@ pub(super) fn validate_with_receipts_and_carriers(
 pub struct ValidatedSourceArtifacts {
     pub(crate) native_authority: Option<NativePublicProofBundleV1>,
     pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
+    #[cfg(feature = "native")]
     partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
@@ -596,7 +602,9 @@ impl ValidatedSourceArtifacts {
             operations: self.operations,
             dependencies: self.dependencies,
             state: self.state,
+            #[cfg(feature = "native")]
             partial_trees: self.partial_trees,
+            #[cfg(feature = "native")]
             authority_admissions: self.authority_admissions,
             ancestry: self.ancestry,
         })
@@ -773,6 +781,7 @@ fn validate_disclosure_artifacts(
             genesis: original.clone(),
             dependencies: Vec::new(),
             state,
+            #[cfg(feature = "native")]
             partial_trees: None,
             authority_admissions: BTreeMap::new(),
             ancestry: Vec::new(),
@@ -1165,7 +1174,7 @@ fn validate_disclosure_artifacts(
     } else {
         (references, capture.visibility.as_ref())
     };
-    let partial_trees = if allow_partial {
+    let _partial_trees = if allow_partial {
         Some(
             pack.validate_visible_source_closure(&state, SOURCE_BYTES)
                 .map_err(preparation)?,
@@ -1228,7 +1237,8 @@ fn validate_disclosure_artifacts(
         authority_admissions,
         dependencies,
         state,
-        partial_trees,
+        #[cfg(feature = "native")]
+        partial_trees: _partial_trees,
         ancestry: verified_ancestry.floors,
     })
 }
@@ -1358,6 +1368,6 @@ fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[path = "staging_tests.rs"]
 mod tests;

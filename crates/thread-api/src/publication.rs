@@ -1084,7 +1084,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "source-transfer")]
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn thread_publication_prepares_only_selected_source_and_binds_its_revision() {
         use objects::{
