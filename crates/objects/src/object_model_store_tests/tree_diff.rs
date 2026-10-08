@@ -462,3 +462,67 @@ fn test_deep_tree_diff_uses_constant_native_stack_async() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn missing_historical_tree_is_not_empty() {
+    let store = InMemoryStore::new();
+    let missing = ContentHash::compute(b"unfetched historical tree");
+    let present = create_tree(
+        &store,
+        vec![("a.txt", create_blob(&store, "content"), EntryType::Blob)],
+    );
+    for (from, to) in [(missing, present), (present, missing), (missing, missing)] {
+        let error = diff_trees(&store, &from, &to)
+            .expect_err("missing tree must never produce additions or deletions");
+        assert!(
+            matches!(error.downcast_ref::<crate::HeddleError>(), Some(crate::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &missing.to_hex()),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn missing_historical_subtree_is_not_empty() {
+    let store = InMemoryStore::new();
+    let missing = ContentHash::compute(b"unfetched historical subtree");
+    let root = create_tree(&store, vec![("dir", missing, EntryType::Tree)]);
+    let empty = create_tree(&store, vec![]);
+    for (from, to) in [(root, empty), (empty, root)] {
+        let error =
+            diff_trees(&store, &from, &to).expect_err("missing subtree must not be skipped");
+        assert!(
+            matches!(error.downcast_ref::<crate::HeddleError>(), Some(crate::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &missing.to_hex()),
+            "{error:?}"
+        );
+    }
+}
+
+#[cfg(feature = "async-source")]
+#[test]
+fn missing_historical_trees_fail_closed_async() {
+    let store = InMemoryStore::new();
+    let missing = ContentHash::compute(b"unfetched historical tree");
+    let present = create_tree(
+        &store,
+        vec![("a.txt", create_blob(&store, "content"), EntryType::Blob)],
+    );
+    let nested = create_tree(&store, vec![("dir", missing, EntryType::Tree)]);
+    let empty = create_tree(&store, vec![]);
+    let source = AsyncInMemorySource(store);
+    for (from, to) in [
+        (missing, present),
+        (present, missing),
+        (missing, missing),
+        (nested, empty),
+        (empty, nested),
+    ] {
+        let error = block_on_current_thread(diff_trees_visit_async(&source, &from, &to, |_| {
+            ControlFlow::<()>::Continue(())
+        }))
+        .expect_err("async diff must not fabricate content");
+        assert!(
+            matches!(error.downcast_ref::<crate::HeddleError>(), Some(crate::HeddleError::MissingObject { object_type, id }) if object_type == "tree" && id == &missing.to_hex()),
+            "{error:?}"
+        );
+    }
+}
