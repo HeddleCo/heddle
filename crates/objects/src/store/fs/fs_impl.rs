@@ -217,10 +217,51 @@ fn append_unique_states(
 }
 
 impl FsStore {
-    /// Publish the authoritative loose copies of packed states behind one
-    /// parent-directory durability barrier. A later pack may refresh mutable
-    /// tail fields under the same StateId, so the loose bodies cannot be
-    /// dropped even though the pack already contains each state.
+    /// Whether this store already holds `id` loose, packed or in its recent
+    /// cache. Unlike [`ObjectStore::has_state`] this never consults the
+    /// external source: a packed copy already shadows that source.
+    fn holds_state(&self, id: &StateId) -> Result<bool> {
+        if self.try_has_state_once(id)? {
+            return Ok(true);
+        }
+        Ok(self.reload_packs_if_stale()? && self.try_has_state_once(id)?)
+    }
+
+    /// The incoming pack's States that need a loose copy: those the store
+    /// already holds. Call this before the pack itself is installed.
+    ///
+    /// Two copies under one StateId can differ in fields outside the hash
+    /// (`git_lossy`, sub-second `created_at`), and readers take a loose copy
+    /// before any pack. The loose copy keeps the later install's bytes in
+    /// front of the copy the store held. A State the store does not hold yet
+    /// has no other copy to shadow, so it is served from its pack, exactly as
+    /// after [`prune_loose_objects`](Self::prune_loose_objects). This keeps
+    /// the install's file and fsync count independent of how many States a
+    /// pack carries (HeddleCo/heddle#2023).
+    fn states_needing_loose_copies(
+        &self,
+        reader: &crate::store::pack::PackReader,
+        ids: &[PackObjectId],
+    ) -> Result<Vec<(StateId, Vec<u8>)>> {
+        let mut held = HashSet::new();
+        for id in ids {
+            if let PackObjectId::StateId(state) = id
+                && self.holds_state(state)?
+            {
+                held.insert(*state);
+            }
+        }
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut states = state_entries_from_pack(reader, ids)?;
+        states.retain(|(id, _)| held.contains(id));
+        Ok(states)
+    }
+
+    /// Publish loose copies of packed States the store already held behind
+    /// one parent-directory durability barrier (see
+    /// [`states_needing_loose_copies`](Self::states_needing_loose_copies)).
     fn write_packed_state_mirrors_batch(&self, states: Vec<(StateId, Vec<u8>)>) -> Result<()> {
         if states.is_empty() {
             return Ok(());
@@ -2134,7 +2175,7 @@ impl ObjectStore for FsStore {
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = validate_and_list_pack(self, &reader)?;
-        let state_entries = state_entries_from_pack(&reader, &ids)?;
+        let state_entries = self.states_needing_loose_copies(&reader, &ids)?;
         let attachment_entries = attachment_entries_from_pack(&reader, &ids)?;
         self.install_pack_files(pack_data, index_data)?;
         self.write_packed_state_mirrors_batch(state_entries)?;
@@ -2203,7 +2244,7 @@ impl ObjectStore for FsStore {
         };
         let state_entries = {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            state_entries_from_pack(&reader, &ids)?
+            self.states_needing_loose_copies(&reader, &ids)?
         };
         let attachment_entries = {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;

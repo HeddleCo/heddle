@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 use super::{
     FsStore, LooseObjectWriteMode,
-    fs_paths::{blobs_dir, hash_path, packs_dir, state_path, trees_dir},
+    fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
     fs_atomic::temp_path,
@@ -449,21 +449,25 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
     assert_eq!(loaded.content(), blob.content());
 }
 
-#[test]
-fn install_pack_batches_authoritative_loose_state_writes() {
-    let (_temp, store) = create_test_store();
-    let attribution = Attribution::human(Principal::new("Batch", "batch@example.com"));
-    let first = State::new(
-        ContentHash::compute(b"first tree"),
-        vec![],
-        attribution.clone(),
-    );
-    let second = State::new(
-        ContentHash::compute(b"second tree"),
-        vec![first.id()],
-        attribution,
-    );
-    let states = [&first, &second];
+/// A linear chain of `count` States, root first.
+fn state_chain(count: usize, label: &str) -> Vec<State> {
+    let attribution = Attribution::human(Principal::new("Chain", "chain@example.com"));
+    let mut chain: Vec<State> = Vec::with_capacity(count);
+    for index in 0..count {
+        let parents = chain.last().map(|s| vec![s.id()]).unwrap_or_default();
+        chain.push(
+            State::new(
+                ContentHash::compute(format!("{label} tree {index}").as_bytes()),
+                parents,
+                attribution.clone(),
+            )
+            .with_intent(format!("{label} commit {index}")),
+        );
+    }
+    chain
+}
+
+fn state_pack<'a>(states: impl IntoIterator<Item = &'a State>) -> (Vec<u8>, Vec<u8>) {
     let mut builder = PackBuilder::new(CompressionConfig::disabled());
     for state in states {
         builder.add_id(
@@ -473,21 +477,132 @@ fn install_pack_batches_authoritative_loose_state_writes() {
         );
     }
     let (pack_data, index_data, _) = builder.build().unwrap();
+    (pack_data, index_data)
+}
+
+fn loose_state_count(store: &FsStore) -> usize {
+    std::fs::read_dir(super::fs_paths::states_dir(store.root()))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+fn file_count(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(Result::unwrap)
+        .map(|entry| {
+            if entry.file_type().unwrap().is_dir() {
+                file_count(&entry.path())
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+/// Installs `count` new States from one streaming pack; returns the store and
+/// the number of files the install added under the store root.
+fn install_streaming_chain(count: usize) -> (TempDir, FsStore, Vec<State>, usize) {
+    let (temp, store) = create_test_store();
+    let chain = state_chain(count, "streamed");
+    let (pack_data, index_data) = state_pack(&chain);
+    let stage = TempDir::new().unwrap();
+    let staged_pack = stage.path().join("staged.pack");
+    let staged_index = stage.path().join("staged.idx");
+    std::fs::write(&staged_pack, &pack_data).unwrap();
+    std::fs::write(&staged_index, &index_data).unwrap();
+    let before = file_count(store.root());
+    store
+        .install_pack_streaming(&staged_pack, &staged_index)
+        .unwrap();
+    let added = file_count(store.root()) - before;
+    (temp, store, chain, added)
+}
+
+#[test]
+fn install_pack_serves_new_states_from_the_pack_without_loose_copies() {
+    let (_temp, store) = create_test_store();
+    let chain = state_chain(2, "fresh");
+    let (pack_data, index_data) = state_pack(&chain);
 
     store.install_pack(&pack_data, &index_data).unwrap();
 
     assert_eq!(
         store.snapshot_batch_flush_count(),
-        1,
-        "one pack must publish every loose state behind one directory-sync flush"
+        0,
+        "States the store did not hold need no loose copy and no flush"
     );
     assert_eq!(store.pending_directory_sync_count(), 0);
-    for state in states {
-        assert!(
-            state_path(store.root(), &state.id()).is_file(),
-            "packed state must retain its authoritative loose copy"
-        );
+    assert_eq!(loose_state_count(&store), 0);
+    for state in &chain {
         assert_eq!(store.get_state(&state.id()).unwrap().as_ref(), Some(state));
+    }
+}
+
+/// HeddleCo/heddle#2023: installing a long converted history wrote and
+/// fsynced one loose file per State. The install's file count must be a
+/// constant of the pack, not of its State count.
+#[test]
+fn install_pack_streaming_file_count_does_not_scale_with_state_count() {
+    let (_short_temp, _short, _, short_added) = install_streaming_chain(64);
+    let (_long_temp, long, chain, long_added) = install_streaming_chain(2_048);
+
+    assert_eq!(
+        long_added, short_added,
+        "a 2,048-State install must add exactly as many files as a 64-State one"
+    );
+    assert_eq!(loose_state_count(&long), 0, "no per-State loose files");
+    assert_eq!(
+        long.snapshot_batch_flush_count(),
+        0,
+        "no loose-State flush barrier"
+    );
+    assert_eq!(long.list_states().unwrap().len(), chain.len());
+    for state in [&chain[0], &chain[1_023], &chain[1_024], &chain[2_047]] {
+        assert_eq!(long.get_state(&state.id()).unwrap().as_ref(), Some(state));
+    }
+}
+
+/// A State's non-hashed fields (here `git_lossy`) can differ between two
+/// copies under one StateId. A later pack's copy must keep shadowing the copy
+/// the store already held, whether that copy was loose or packed.
+#[test]
+fn install_pack_refreshes_a_state_the_store_already_holds() {
+    for held_loose in [true, false] {
+        let (_temp, store) = create_test_store();
+        let original = state_chain(1, "held").remove(0);
+        let refreshed = original.clone().with_git_lossy(true);
+        assert_eq!(refreshed.id(), original.id(), "git_lossy is not hashed");
+        if held_loose {
+            store.put_state(&original).unwrap();
+        } else {
+            let (pack_data, index_data) = state_pack([&original]);
+            store.install_pack(&pack_data, &index_data).unwrap();
+            assert_eq!(loose_state_count(&store), 0);
+        }
+        let (pack_data, index_data) = state_pack([&refreshed]);
+
+        store.install_pack(&pack_data, &index_data).unwrap();
+
+        assert_eq!(
+            store.snapshot_batch_flush_count(),
+            1,
+            "the held State's loose copy is published behind one flush"
+        );
+        assert_eq!(loose_state_count(&store), 1);
+        let reopened = FsStore::new(store.root());
+        for reader in [&store, &reopened] {
+            assert!(
+                reader
+                    .get_state(&original.id())
+                    .unwrap()
+                    .expect("state")
+                    .git_lossy,
+                "the later copy shadows the held one (held loose: {held_loose})"
+            );
+        }
     }
 }
 
