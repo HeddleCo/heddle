@@ -71,6 +71,11 @@ pub struct PublicationCapture {
     pub delivered_command_ids: Vec<String>,
     /// Inject a publication failure to verify push's partial-result contract.
     pub reject_discussions: bool,
+    /// Fail a clone's observation or metadata RPC, after source installation.
+    pub fail_clone_stage: Option<String>,
+    pub clone_observations: Vec<bool>,
+    pub failed_clone_call: Option<usize>,
+    pub failed_clone_at: Option<std::time::Instant>,
     /// Apply the next discussion command, then lose its receipt, so the
     /// client must redeliver an operation the server already holds.
     pub lose_next_discussion_receipt: bool,
@@ -314,7 +319,13 @@ async fn start_inner(
             let server_key = server_key.clone();
             let connection_task = async move {
                 while let Ok((send, recv)) = connection.accept_bi().await {
-                    tokio::spawn(serve_call(send, recv, fixture.clone(), server_key.clone()));
+                    tokio::spawn(serve_call(
+                        send,
+                        recv,
+                        fixture.clone(),
+                        server_key.clone(),
+                        connection.clone(),
+                    ));
                 }
             };
             if routed {
@@ -368,6 +379,7 @@ async fn serve_call(
     mut recv: iroh::endpoint::RecvStream,
     fixture: Fixture,
     server_key: Vec<u8>,
+    connection: iroh::endpoint::Connection,
 ) {
     let mut request = Vec::new();
     let (method, context, prelude_len) = loop {
@@ -389,6 +401,71 @@ async fn serve_call(
         .expect("capture calls")
         .calls
         .push(method.clone());
+    let failed_stage = fixture
+        .captured
+        .lock()
+        .expect("failure injection")
+        .fail_clone_stage
+        .clone();
+    let annotation = if failed_stage.is_some() && method.ends_with("/ObserveCollaboration") {
+        read_request_body(&mut recv, &mut request).await;
+        let body = v2::ObserveCollaborationRequest::decode(
+            decode_request_frame(&request).expect("observation").body,
+        )
+        .expect("request");
+        let annotation = body.annotations.is_some();
+        fixture
+            .captured
+            .lock()
+            .expect("observations")
+            .clone_observations
+            .push(annotation);
+        Some(annotation)
+    } else {
+        None
+    };
+    let fail = match failed_stage.as_deref() {
+        Some("discussion") | Some("disconnect") => annotation == Some(false),
+        Some("context") => annotation == Some(true),
+        Some("metadata") => {
+            method.ends_with("/ResolveResources")
+                && fixture
+                    .captured
+                    .lock()
+                    .expect("observations")
+                    .clone_observations
+                    .iter()
+                    .filter(|annotation| **annotation)
+                    .count()
+                    >= 2
+        }
+        _ => false,
+    };
+    if fail {
+        {
+            let mut capture = fixture.captured.lock().expect("failed call");
+            capture.failed_clone_call = Some(capture.calls.len() - 1);
+            capture.failed_clone_at = Some(std::time::Instant::now());
+        }
+        if failed_stage.as_deref() == Some("disconnect") {
+            connection.close(0u32.into(), b"injected disconnect");
+            return;
+        }
+        let failure = api::heddle::api::common::CallFailure {
+            code: api::heddle::api::common::CallFailureCode::Unavailable as i32,
+            message: "injected clone sync failure".into(),
+            error: None,
+        };
+        send.write_all(&if method.ends_with("/ResolveResources") {
+            api::framing::encode_failure_response(&failure).expect("failure frame")
+        } else {
+            api::framing::encode_stream_failure(&failure).expect("failure frame")
+        })
+        .await
+        .expect("failure response");
+        send.finish().expect("failure FIN");
+        return;
+    }
     let streaming = method_descriptor(&method)
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))

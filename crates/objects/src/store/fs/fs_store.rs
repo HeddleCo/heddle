@@ -309,7 +309,8 @@ impl FsStore {
     /// The path should be the `.heddle` directory.
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        crate::store::pack::sweep_scratch(&root.join("tmp"));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root), root.join("tmp"));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,
@@ -340,7 +341,8 @@ impl FsStore {
     /// Create a new filesystem store with custom compression settings.
     pub fn with_compression(root: impl AsRef<Path>, compression: CompressionConfig) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        crate::store::pack::sweep_scratch(&root.join("tmp"));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root), root.join("tmp"));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,
@@ -449,6 +451,7 @@ impl FsStore {
     /// and index publish are finished or aborted before packs are loaded.
     /// Uses the default intent TTL so abandoned staging is swept.
     pub fn reload_packs(&self) -> Result<()> {
+        crate::store::pack::sweep_scratch(&self.root.join("tmp"));
         let packs = packs_dir(&self.root);
         let _ = super::pack_install_journal::recover_pack_install_intents_with_ttl(
             &packs,

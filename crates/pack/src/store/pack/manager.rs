@@ -25,6 +25,7 @@ use crate::{
 pub struct PackManager {
     packs_dir: PathBuf,
     packs: Vec<CachedPack>,
+    scratch_root: PathBuf,
     object_locations: RwLock<ObjectLocationIndex>,
     eager_object_locations: bool,
 }
@@ -45,65 +46,84 @@ struct CachedPack {
     pack_path: PathBuf,
     index_path: PathBuf,
     reader: OnceLock<Option<PackReader<'static>>>,
+    scratch_root: PathBuf,
 }
 
 impl CachedPack {
-    fn discovered(pack_path: PathBuf, index_path: PathBuf) -> Self {
+    fn discovered(pack_path: PathBuf, index_path: PathBuf, scratch_root: PathBuf) -> Self {
         Self {
             pack_path,
             index_path,
             reader: OnceLock::new(),
+            scratch_root,
         }
     }
 
-    fn validated(pack_path: PathBuf, index_path: PathBuf, reader: PackReader<'static>) -> Self {
+    fn validated(
+        pack_path: PathBuf,
+        index_path: PathBuf,
+        reader: PackReader<'static>,
+        scratch_root: PathBuf,
+    ) -> Self {
         Self {
             pack_path,
             index_path,
             reader: OnceLock::from(Some(reader)),
+            scratch_root,
         }
     }
 
     fn reader(&self) -> Option<&PackReader<'static>> {
         self.reader
-            .get_or_init(
-                || match PackReader::open_lazy(&self.pack_path, &self.index_path) {
+            .get_or_init(|| {
+                match PackReader::open_lazy(&self.pack_path, &self.index_path, &self.scratch_root) {
                     Ok(reader) => Some(reader),
                     Err(error) => {
                         debug!(pack = ?self.pack_path, %error, "Failed to open pack");
                         None
                     }
-                },
-            )
+                }
+            })
             .as_ref()
     }
 
     fn verified_reader(&self) -> Option<&PackReader<'static>> {
         self.reader
-            .get_or_init(
-                || match PackReader::open(&self.pack_path, &self.index_path) {
+            .get_or_init(|| {
+                match PackReader::open(&self.pack_path, &self.index_path, &self.scratch_root) {
                     Ok(reader) => Some(reader),
                     Err(error) => {
                         debug!(pack = ?self.pack_path, %error, "Failed to open pack");
                         None
                     }
-                },
-            )
+                }
+            })
             .as_ref()
     }
 }
 
 impl PackManager {
-    pub fn new(packs_dir: PathBuf) -> Self {
-        Self::new_with_index_mode(packs_dir, force_eager_pack_index())
+    pub fn new(packs_dir: PathBuf, scratch_root: PathBuf) -> Self {
+        Self::new_with_scratch(packs_dir, scratch_root, force_eager_pack_index())
     }
 
+    #[cfg(test)]
     fn new_with_index_mode(packs_dir: PathBuf, eager_object_locations: bool) -> Self {
-        let packs = Self::load_packs(&packs_dir).unwrap_or_default();
+        let scratch_root = packs_dir.join("tmp");
+        Self::new_with_scratch(packs_dir, scratch_root, eager_object_locations)
+    }
+
+    fn new_with_scratch(
+        packs_dir: PathBuf,
+        scratch_root: PathBuf,
+        eager_object_locations: bool,
+    ) -> Self {
+        let packs = Self::load_packs(&packs_dir, &scratch_root).unwrap_or_default();
         let object_locations = Self::initial_object_locations(&packs, eager_object_locations);
         Self {
             packs_dir,
             packs,
+            scratch_root,
             object_locations: RwLock::new(object_locations),
             eager_object_locations,
         }
@@ -143,15 +163,17 @@ impl PackManager {
         Ok(packs)
     }
 
-    fn load_packs(packs_dir: &Path) -> Result<Vec<CachedPack>> {
+    fn load_packs(packs_dir: &Path, scratch_root: &Path) -> Result<Vec<CachedPack>> {
         Ok(Self::discover_pack_paths(packs_dir)?
             .into_iter()
-            .map(|(pack_path, index_path)| CachedPack::discovered(pack_path, index_path))
+            .map(|(pack_path, index_path)| {
+                CachedPack::discovered(pack_path, index_path, scratch_root.to_path_buf())
+            })
             .collect())
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        self.packs = Self::load_packs(&self.packs_dir)?;
+        self.packs = Self::load_packs(&self.packs_dir, &self.scratch_root)?;
         self.reset_object_locations();
         Ok(())
     }
@@ -252,16 +274,22 @@ impl PackManager {
         if self.packs.iter().any(|pack| pack.pack_path == pack_path) {
             return Ok(());
         }
-        let reader = PackReader::open(&pack_path, &index_path)?;
-        let objects = reader.indexed_read_tiers()?;
+        let reader = PackReader::open(&pack_path, &index_path, &self.scratch_root)?;
         let pack_index = self.packs.len();
-        let cached = CachedPack::validated(pack_path, index_path, reader);
+        let cached =
+            CachedPack::validated(pack_path, index_path, reader, self.scratch_root.clone());
         self.packs.push(cached);
         let mut index = self
             .object_locations
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if index.complete {
+            let objects = self.packs[pack_index]
+                .reader()
+                .ok_or_else(|| {
+                    crate::store::StoreError::InvalidObject("new pack reader unavailable".into())
+                })?
+                .indexed_read_tiers()?;
             for (id, tier) in objects {
                 remember_location(&mut index.locations, id, pack_index, tier);
             }
@@ -416,7 +444,7 @@ impl PackManager {
     }
 
     pub fn has_object_id(&self, id: &PackObjectId) -> bool {
-        self.object_location(id)
+        self.point_object_location(id)
             .is_ok_and(|location| location.is_some())
     }
 

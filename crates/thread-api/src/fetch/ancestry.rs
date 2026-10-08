@@ -9,9 +9,9 @@ use heddle_object_model::object::{State, StateId};
 use heddle_pack::store::pack::{ObjectType, PackObjectId, PackReader, StreamingPackBuilder};
 
 use super::Error;
-use crate::contract::{
-    ImportAncestryPage, ImportFloorTierSummary, ThreadRef, import_ancestry_page::Coverage,
-};
+#[cfg(feature = "native")]
+use crate::contract::ImportFloorTierSummary;
+use crate::contract::{ImportAncestryPage, ThreadRef, import_ancestry_page::Coverage};
 
 pub(super) struct ImportFloorInput {
     pub digest: Vec<u8>,
@@ -22,6 +22,7 @@ pub(super) struct VerifiedFloor {
     pub tip: StateId,
     pub coverage: Coverage,
     pub members: BTreeSet<StateId>,
+    #[cfg(feature = "native")]
     pub tiers: ImportFloorTierSummary,
 }
 #[derive(Default)]
@@ -214,6 +215,7 @@ impl AncestryInput {
         let reader = PackReader::open(
             &directory.join("ancestry.pack"),
             &directory.join("ancestry.idx"),
+            directory,
         )
         .map_err(preparation)?;
         let bytes = reader
@@ -222,7 +224,7 @@ impl AncestryInput {
             .ok_or(Error::Invalid("selected import ancestor absent"))?;
         Ok(Some((*tip, bytes.1)))
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     pub fn retained_allocations(&self) -> usize {
         self.sets
             .values()
@@ -333,15 +335,17 @@ pub(super) fn verify(
                 "import ancestry path does not reach the selected revision",
             ));
         }
+        let _tiers = set
+            .header
+            .floor_tiers
+            .clone()
+            .ok_or(Error::Invalid("import floor tier summary absent"))?;
         verified.floors.push(VerifiedFloor {
             tip,
             coverage,
             members: reached,
-            tiers: set
-                .header
-                .floor_tiers
-                .clone()
-                .ok_or(Error::Invalid("import floor tier summary absent"))?,
+            #[cfg(feature = "native")]
+            tiers: _tiers,
         });
     }
     if used.len() != input.sets.len() {

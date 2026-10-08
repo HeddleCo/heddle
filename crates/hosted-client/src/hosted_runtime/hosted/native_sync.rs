@@ -54,7 +54,7 @@ use super::{
 
 const PUBLISH: &str = "heddle.api.v1alpha2.SyncService/PublishContent";
 const START: &str = "heddle.api.v1alpha2.ThreadService/StartThread";
-const SOURCE_OBJECTS: usize = 100_000;
+const LOCAL_ANCESTRY_STATES: usize = 100_000;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const ANCESTRY_RECORDS: usize = 10_000;
 const ANCESTRY_BYTES: usize = 16 * 1024 * 1024;
@@ -1060,17 +1060,17 @@ impl HostedClient {
                 proofs.push(proof);
             }
         }
-        let scratch = tempfile::Builder::new()
-            .prefix("heddle-source-transfer-")
-            .tempdir()
-            .map_err(native_error)?;
+        let scratch_root = repo.store().root().join("tmp");
+        objects::fs_atomic::create_private_dir_all(&scratch_root).map_err(native_error)?;
+        let scratch =
+            objects::store::pack::ScratchDir::new(&scratch_root, "heddle-source-transfer-")
+                .map_err(native_error)?;
         let pack = SourcePack::prepare_with_references(
             repo.store(),
             &state,
             &proofs,
             scratch.path(),
             SourceBudget {
-                max_objects: SOURCE_OBJECTS,
                 max_decoded_bytes: SOURCE_BYTES,
             },
         )
@@ -1645,10 +1645,11 @@ impl HostedClient {
             },
             Vec::new(),
         );
-        let scratch = tempfile::Builder::new()
-            .prefix("heddle-source-transfer-")
-            .tempdir()
-            .map_err(native_error)?;
+        let scratch_root = repo.store().root().join("tmp");
+        objects::fs_atomic::create_private_dir_all(&scratch_root).map_err(native_error)?;
+        let scratch =
+            objects::store::pack::ScratchDir::new(&scratch_root, "heddle-source-transfer-")
+                .map_err(native_error)?;
         let staged = self
             .fetch_native_source(
                 repo,
@@ -1735,9 +1736,11 @@ impl HostedClient {
                 protocol: Some(thread_api::hybrid::protocol()),
                 ..Default::default()
             };
+            let scratch_root = repo.store().root().join("tmp");
+            objects::fs_atomic::create_private_dir_all(&scratch_root).map_err(native_error)?;
             let scratch = tempfile::Builder::new()
                 .prefix("heddle-foreign-prefix-")
-                .tempdir()
+                .tempdir_in(&scratch_root)
                 .map_err(native_error)?;
             let mut prefix = self
                 .fetch_native_source(
@@ -2339,7 +2342,7 @@ fn admit_hosted_source_ancestry(
     let mut stack = vec![local_state];
     let mut on_path = std::collections::BTreeSet::new();
     let mut expanded = std::collections::BTreeSet::new();
-    let mut remaining = SOURCE_OBJECTS;
+    let mut remaining = LOCAL_ANCESTRY_STATES;
     while let Some(state_id) = stack.last().copied() {
         if state_id == base
             || !replica
@@ -3532,7 +3535,20 @@ mod tests {
             assert!(publication.thread_genesis.is_none());
             assert!(publication.operations.is_empty());
             assert!(publication.pack_data.is_empty());
-            assert!(!repo.heddle_dir().join("source-transfers").exists());
+            let scratch_root = repo.store().root().join("tmp");
+            if scratch_root.exists() {
+                assert!(
+                    std::fs::read_dir(scratch_root)
+                        .expect("scratch")
+                        .all(|entry| {
+                            !entry
+                                .expect("scratch entry")
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with("heddle-source-transfer-")
+                        })
+                );
+            }
         }
         assert_eq!(
             (LINEAGE_STATES, ANCESTRY_RECORDS, ANCESTRY_BYTES),

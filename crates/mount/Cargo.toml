@@ -23,6 +23,9 @@ oplog.workspace = true
 pollster.workspace = true
 refs.workspace = true
 repo = { workspace = true, features = ["default"] }
+# `[safe] repositories` from the user config (heddle#2034): the workers open
+# repositories in their own process, outside the CLI's startup.
+config.workspace = true
 # `serde`/`serde_json` carry the framed control-plane messages between
 # the `heddle-fuse-worker` subprocess and its supervisor (CLI or
 # daemon). The framing lives in `src/worker.rs`; both ends of the

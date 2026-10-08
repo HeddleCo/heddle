@@ -84,6 +84,7 @@ impl SnapshotCommitArtifact {
 #[doc(hidden)]
 pub struct SnapshotPackManager {
     format: PackManager,
+    scratch_root: PathBuf,
     snapshot_commit_index: OnceLock<std::result::Result<SnapshotCommitIndex, String>>,
 }
 
@@ -95,16 +96,20 @@ struct SnapshotCommitIndex {
 impl SnapshotPackManager {
     /// Open the format manager. The objects-owned snapshot index is built on
     /// its first query so ordinary repository opens do not decode every pack.
-    pub fn new(packs_dir: PathBuf) -> Self {
+    pub fn new(packs_dir: PathBuf, scratch_root: PathBuf) -> Self {
         Self {
-            format: PackManager::new(packs_dir),
+            format: PackManager::new(packs_dir, scratch_root.clone()),
+            scratch_root,
             snapshot_commit_index: OnceLock::new(),
         }
     }
 
     /// Reload pack-format state and the objects-owned snapshot index.
     pub fn reload(&mut self) -> Result<()> {
-        let mut format = PackManager::new(self.format.packs_dir().to_path_buf());
+        let mut format = PackManager::new(
+            self.format.packs_dir().to_path_buf(),
+            self.scratch_root.clone(),
+        );
         format.reload()?;
         self.format = format;
         self.snapshot_commit_index = OnceLock::new();
@@ -413,8 +418,8 @@ mod tests {
         fs::write(&pack_path, &pack_data).unwrap();
         fs::write(&index_path, &index_data).unwrap();
 
-        let format_manager = PackManager::new(packs_dir.clone());
-        let mut snapshot_manager = SnapshotPackManager::new(packs_dir);
+        let format_manager = PackManager::new(packs_dir.clone(), temp.path().join("tmp"));
+        let mut snapshot_manager = SnapshotPackManager::new(packs_dir, temp.path().join("tmp"));
         assert_eq!(
             snapshot_manager.get_hashed_object(&hash).unwrap(),
             format_manager.get_hashed_object(&hash).unwrap()
@@ -435,14 +440,15 @@ mod tests {
         fs::write(temp.path().join("ordinary.pack"), b"not opened").unwrap();
         fs::write(temp.path().join("ordinary.idx"), b"not opened").unwrap();
 
-        let manager = SnapshotPackManager::new(temp.path().to_path_buf());
+        let manager = SnapshotPackManager::new(temp.path().to_path_buf(), temp.path().join("tmp"));
         assert!(manager.snapshot_commit_descriptors().unwrap().is_empty());
     }
 
     #[test]
     fn repeated_state_descriptor_lookup_stays_on_lazy_index_after_many_snapshots() {
         let temp = TempDir::new().unwrap();
-        let mut manager = SnapshotPackManager::new(temp.path().to_path_buf());
+        let mut manager =
+            SnapshotPackManager::new(temp.path().to_path_buf(), temp.path().join("tmp"));
         let mut states = Vec::new();
         for ordinal in 0..128 {
             let (pack_path, index_path, state) = write_snapshot_pack(temp.path(), ordinal);

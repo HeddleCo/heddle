@@ -132,6 +132,9 @@ mod discovery;
 mod overlay;
 #[path = "repository_open.rs"]
 mod repository_open;
+#[cfg(test)]
+#[path = "repository_trust_tests.rs"]
+mod repository_trust_tests;
 use repository_open::has_git_metadata;
 #[path = "repository_operation_status.rs"]
 mod repository_operation_status;
@@ -142,7 +145,10 @@ mod repository_identity;
 use discovery::bounded_ancestor_paths_with_device;
 #[cfg(test)]
 use discovery::metadataless_managed_thread_root;
-pub use discovery::{discover_heddle_root, is_heddle_repository_root, open_git_repository_at_root};
+pub use discovery::{
+    discover_heddle_root, discover_repository_config, ensure_repository_trusted,
+    is_heddle_repository_root, open_git_repository_at_root, set_safe_repositories,
+};
 pub use overlay::{
     GitCheckpointIntent, GitCheckpointIntentPhase, GitCheckpointRecord, GitImportGuidance,
     GitRemoteTrackingStatus,

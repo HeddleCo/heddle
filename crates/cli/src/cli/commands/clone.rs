@@ -1847,42 +1847,24 @@ async fn clone_network_connected(
         }
         configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
 
-        // Read path for hosted discussions (heddle discuss): materialize the
-        // hosted CollaborationService discussions for the cloned head into the
-        // local op-log so `discuss list` / `discuss show` see them. Best-effort:
-        // a fetch hiccup warns rather than failing an otherwise-good clone.
-        match hosted_client::client::discussion_sync::pull_discussions(
+        // Both hosted views must be installed before publishing the checkout
+        // or clearing its recovery intent. A failed stage stops later RPCs.
+        hosted_client::client::discussion_sync::pull_discussions(
             &local_repo,
             client,
             repo_path,
             Some(final_state),
         )
         .await
-        {
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(
-                    "{} discussion sync skipped: {error:#}",
-                    style::warn_marker()
-                );
-            }
-        }
-        // Read path for hosted context annotations (heddle context): materialize
-        // the hosted head's annotations into the local Context attachment so
-        // `context list` sees them. Best-effort, mirroring discussions.
-        match hosted_client::client::context_sync::pull_context(
+        .context("post-install discussion sync failed; source installed; clone intent retained")?;
+        hosted_client::client::context_sync::pull_context(
             &local_repo,
             client,
             repo_path,
             Some(final_state),
         )
         .await
-        {
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
-            }
-        }
+        .context("post-install context sync failed; source installed; clone intent retained")?;
 
         // Ordering invariant: the reachable object closure is hash-complete;
         // one whole-filesystem barrier commits all direct clone data; only
@@ -1926,7 +1908,8 @@ async fn clone_network_connected(
             &track_name,
             &final_state,
         )
-        .await?;
+        .await
+        .context("post-install metadata sync failed; source installed; clone intent retained")?;
         CloneIntent::clear(local_path)?;
         // A Thread with several hosted heads cloned every head; one is checked
         // out (or advertised) by the documented default and the rest stay
@@ -2102,32 +2085,22 @@ async fn recover_interrupted_clone_connected(
         .save(repo.heddle_dir())?;
     }
     configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
-    if let Err(error) = hosted_client::client::discussion_sync::pull_discussions(
+    hosted_client::client::discussion_sync::pull_discussions(
         &repo,
         client,
         &intent.repository,
         Some(final_state),
     )
     .await
-    {
-        eprintln!(
-            "{} discussion sync skipped during clone recovery: {error:#}",
-            style::warn_marker()
-        );
-    }
-    if let Err(error) = hosted_client::client::context_sync::pull_context(
+    .context("clone recovery discussion sync failed; source installed; clone intent retained")?;
+    hosted_client::client::context_sync::pull_context(
         &repo,
         client,
         &intent.repository,
         Some(final_state),
     )
     .await
-    {
-        eprintln!(
-            "{} context sync skipped during clone recovery: {error:#}",
-            style::warn_marker()
-        );
-    }
+    .context("clone recovery context sync failed; source installed; clone intent retained")?;
     durability.commit()?;
     if durability.barrier_count() != 1 {
         return Err(HeddleError::InvalidObject(
@@ -2154,7 +2127,8 @@ async fn recover_interrupted_clone_connected(
         &track_name,
         &final_state,
     )
-    .await?;
+    .await
+    .context("clone recovery metadata sync failed; source installed; clone intent retained")?;
     CloneIntent::clear(root)?;
     Ok(())
 }

@@ -62,10 +62,11 @@ fn probed_source_authority() -> repo::RepositorySourceAuthority {
     let Ok(cwd) = std::env::current_dir() else {
         return repo::RepositorySourceAuthority::Native;
     };
-    let Some(root) = repo::discover_heddle_root(&cwd) else {
+    // Untrusted repository config is never parsed (heddle#2034).
+    let Ok(Some(config_path)) = repo::discover_repository_config(&cwd) else {
         return repo::RepositorySourceAuthority::Native;
     };
-    match repo::RepoConfig::load_for_repository(&root.join(".heddle").join("config.toml")) {
+    match repo::RepoConfig::load_for_repository(&config_path) {
         Ok(config) => config.repository.source_authority,
         Err(_) => repo::RepositorySourceAuthority::Native,
     }

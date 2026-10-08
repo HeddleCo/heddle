@@ -94,6 +94,36 @@ impl SourceTargetMap {
         result.sort_unstable_by_key(|entry| entry.0);
         Ok(result)
     }
+    /// Visit canonical entries with a bounded trie frontier (52 levels, at
+    /// most 32 children each). The visitor can read resolution records through
+    /// the same store without retaining the complete map.
+    pub fn visit_entries<S: SourceTargetMapStore>(
+        store: &mut S,
+        root: Option<ContentHash>,
+        budget: &mut MapBudget,
+        mut visitor: impl FnMut(&mut S, ContentHash, ContentHash) -> Result<(), S::Error>,
+    ) -> Result<(), MapError<S::Error>> {
+        let mut pending = root
+            .map(|root| vec![(root, None, Vec::new())])
+            .unwrap_or_default();
+        while let Some((hash, count, prefix)) = pending.pop() {
+            match load(store, hash, count, &prefix, budget)? {
+                Node::Leaf(entries) => {
+                    for (key, value) in entries {
+                        visitor(store, key, value).map_err(MapError::Storage)?;
+                    }
+                }
+                Node::Branch { children, .. } => {
+                    for child in children.into_iter().rev() {
+                        let mut next = prefix.clone();
+                        next.push(child.slot);
+                        pending.push((child.link.hash, Some(child.link.count), next));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn get<S: SourceTargetMapStore>(
         store: &mut S,
         root: Option<ContentHash>,
@@ -807,6 +837,21 @@ mod tests {
         for key in &keys {
             assert_eq!(get(&mut store, forward, *key), Some(*key));
         }
+        let mut visited = Vec::new();
+        SourceTargetMap::visit_entries(
+            &mut store,
+            forward,
+            &mut MapBudget::new(usize::MAX, 100_000, 0, 0),
+            |_, key, value| {
+                visited.push((key, value));
+                Ok(())
+            },
+        )
+        .expect("stream a deep canonical route");
+        assert_eq!(
+            visited,
+            keys.iter().map(|key| (*key, *key)).collect::<Vec<_>>()
+        );
         let mut remaining = forward;
         for key in &keys[..9] {
             remaining = put(&mut store, remaining, *key, None);

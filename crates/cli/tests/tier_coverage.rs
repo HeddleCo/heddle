@@ -49,9 +49,8 @@ fn every_commands_variant_has_explicit_root_contract() {
         // `feature_gated(...)`, so `command_contract_root_commands()`
         // omits them in builds without the feature even though the enum
         // source (read as text) still lists the variant.
-        let gated_off = (cfg!(not(feature = "client"))
-            && matches!(variant.as_str(), "Auth" | "Whoami"))
-            || (cfg!(not(feature = "ci")) && variant == "Ci");
+        let gated_off = matches!(variant.as_str(), "Auth" | "Whoami" if cfg!(not(feature = "client")))
+            || matches!(variant.as_str(), "Ci" if cfg!(not(feature = "ci")));
         if gated_off {
             continue;
         }

@@ -582,7 +582,6 @@ async fn publication_prepare_sign_send_uses_one_exchange_without_identity_refres
         &state,
         scratch.path(),
         super::super::SourceBudget {
-            max_objects: 16,
             max_decoded_bytes: 1024 * 1024,
         },
     )

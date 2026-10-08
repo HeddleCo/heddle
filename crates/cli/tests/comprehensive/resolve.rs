@@ -33,22 +33,32 @@ fn test_resolve_no_merge_in_progress() {
 
 #[test]
 fn test_resolve_multiple_conflicting_files() {
+    resolve_two_conflicting_files("a.txt", "b.txt");
+}
+
+#[test]
+fn resolve_nested_paths_selects_ours_and_theirs() {
+    resolve_two_conflicting_files("a/b/c.txt", "a/b/d.txt");
+}
+
+fn resolve_two_conflicting_files(ours_path: &str, theirs_path: &str) {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    fs::write(temp.path().join("a.txt"), "base a").unwrap();
-    fs::write(temp.path().join("b.txt"), "base b").unwrap();
+    fs::create_dir_all(temp.path().join("a/b")).unwrap();
+    fs::write(temp.path().join(ours_path), "base a").unwrap();
+    fs::write(temp.path().join(theirs_path), "base b").unwrap();
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
     heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("a.txt"), "feature a").unwrap();
-    fs::write(temp.path().join("b.txt"), "feature b").unwrap();
+    fs::write(temp.path().join(ours_path), "feature a").unwrap();
+    fs::write(temp.path().join(theirs_path), "feature b").unwrap();
     heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
 
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    fs::write(temp.path().join("a.txt"), "main a").unwrap();
-    fs::write(temp.path().join("b.txt"), "main b").unwrap();
+    fs::write(temp.path().join(ours_path), "main a").unwrap();
+    fs::write(temp.path().join(theirs_path), "main b").unwrap();
     heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
@@ -63,7 +73,7 @@ fn test_resolve_multiple_conflicting_files() {
         "refresh should create a durable conflict state: {refresh:?}"
     );
 
-    let result = heddle(&["resolve", "a.txt", "--ours"], Some(temp.path()));
+    let result = heddle(&["resolve", ours_path, "--ours"], Some(temp.path()));
     assert!(
         result.is_ok(),
         "resolve first file failed: {:?}",
@@ -72,15 +82,15 @@ fn test_resolve_multiple_conflicting_files() {
 
     let list_result = heddle(&["resolve", "--list"], Some(temp.path()));
     assert!(
-        list_result.unwrap().contains("b.txt"),
+        list_result.unwrap().contains(theirs_path),
         "should show remaining conflict"
     );
 
     let result = heddle(&["resolve", "--all", "--theirs"], Some(temp.path()));
     assert!(result.is_ok(), "resolve all failed: {:?}", result.err());
 
-    let a_content = fs::read_to_string(temp.path().join("a.txt")).unwrap();
-    let b_content = fs::read_to_string(temp.path().join("b.txt")).unwrap();
+    let a_content = fs::read_to_string(temp.path().join(ours_path)).unwrap();
+    let b_content = fs::read_to_string(temp.path().join(theirs_path)).unwrap();
     assert_eq!(a_content, "feature a", "a.txt should be ours");
     assert_eq!(b_content, "main b", "b.txt should be theirs");
 }

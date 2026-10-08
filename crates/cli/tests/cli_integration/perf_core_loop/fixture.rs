@@ -15,6 +15,9 @@ use refs::PackedRefsModel;
 use repo::{FsMonitorMode, FsMonitorSettings, Repository, WorktreeStatusOptions};
 use tempfile::TempDir;
 
+const PERF_PRINCIPAL_NAME: &str = "Performance Contract";
+const PERF_PRINCIPAL_EMAIL: &str = "perf-contract@heddle.test";
+
 pub(super) struct PerfFixture {
     _temp: TempDir,
     root: PathBuf,
@@ -43,6 +46,10 @@ impl PerfFixture {
         let repo = Repository::open(&root).expect("open perf fixture");
         let mut config = repo.config().clone();
         config.worktree.fsmonitor.mode = FsMonitorMode::Native;
+        // Child commands receive HEDDLE_PRINCIPAL_* via base_command. In-process
+        // history setup reads the repository, so the fixture must record the
+        // same principal on the repo itself.
+        config.set_principal(PERF_PRINCIPAL_NAME, PERF_PRINCIPAL_EMAIL);
         config
             .save(&repo.heddle_dir().join("config.toml"))
             .expect("enable native monitor");
@@ -219,8 +226,8 @@ pub(super) fn base_command(binary: &Path, cwd: &Path) -> Command {
         .current_dir(cwd)
         .env_clear()
         .env("HEDDLE_CONFIG", cwd.join(".heddle-user/config.toml"))
-        .env("HEDDLE_PRINCIPAL_NAME", "Performance Contract")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "perf-contract@heddle.test")
+        .env("HEDDLE_PRINCIPAL_NAME", PERF_PRINCIPAL_NAME)
+        .env("HEDDLE_PRINCIPAL_EMAIL", PERF_PRINCIPAL_EMAIL)
         .env("HEDDLE_AGENT_PROVIDER", "release-harness")
         .env("HEDDLE_AGENT_MODEL", "core-loop-v1")
         .env("NO_COLOR", "1");
@@ -228,4 +235,51 @@ pub(super) fn base_command(binary: &Path, cwd: &Path) -> Command {
         command.env("TMPDIR", tmpdir);
     }
     command
+}
+
+/// Clears one process environment variable and restores it when dropped.
+///
+/// The perf fixture used to export `HEDDLE_PRINCIPAL_*` only on child
+/// commands. In-process repository calls read the test process, so this
+/// guard makes that miss deterministic even when the outer shell has the
+/// variables set.
+struct ClearedEnv {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ClearedEnv {
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: this integration test runs on one thread and restores the
+        // variable before returning. No other thread in this test reads it.
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for ClearedEnv {
+    fn drop(&mut self) {
+        // SAFETY: same single-threaded test scope as `remove`.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[test]
+fn core_loop_fixture_resolves_principal_in_process() {
+    let _name = ClearedEnv::remove("HEDDLE_PRINCIPAL_NAME");
+    let _email = ClearedEnv::remove("HEDDLE_PRINCIPAL_EMAIL");
+    let binary = Path::new(env!("CARGO_BIN_EXE_heddle"));
+    let fixture = PerfFixture::new(binary, 1);
+    let repo = Repository::open(fixture.root()).expect("open perf fixture");
+    let attribution = repo
+        .get_attribution()
+        .expect("in-process principal configured on the perf fixture");
+    assert_eq!(attribution.principal.name_lossy(), PERF_PRINCIPAL_NAME);
+    assert_eq!(attribution.principal.email_lossy(), PERF_PRINCIPAL_EMAIL);
 }

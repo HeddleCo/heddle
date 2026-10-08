@@ -148,14 +148,20 @@ impl ProviderPackSpool {
         objects::fs_atomic::sync_file(&self.file, &self.pack_path)?;
         write_provider_index(&self.index_path, &self.manifest)?;
 
-        let reader = PackReader::open(&self.pack_path, &self.index_path)?;
+        let reader = PackReader::open(
+            &self.pack_path,
+            &self.index_path,
+            self.dir.as_ref().ok_or_else(|| {
+                ProtocolError::InvalidState("provider spool directory is missing".into())
+            })?,
+        )?;
         let expected_objects = self
             .manifest
             .extents
             .iter()
             .map(|extent| extent.objects.len())
             .sum::<usize>();
-        if reader.list_ids()?.len() != expected_objects {
+        if reader.object_count() != expected_objects {
             return Err(ProtocolError::InvalidState(
                 "provider pack index does not match its manifest".to_string(),
             ));
@@ -261,7 +267,10 @@ impl CompletedProviderPack {
     }
 
     /// Atomically install a fully validated provider pack into the object store.
-    pub fn install_into(&mut self, store: &impl ObjectStore) -> Result<Vec<PackObjectId>> {
+    pub fn install_into(
+        &mut self,
+        store: &impl ObjectStore,
+    ) -> Result<objects::store::pack::PackInventory> {
         store
             .install_pack_streaming(&self.pack_path, &self.index_path)
             .map_err(ProtocolError::from)

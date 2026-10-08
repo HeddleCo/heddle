@@ -575,7 +575,8 @@ fn test_fs_pack_build_and_read_benchmark() {
     std::fs::write(&index_path, &index_data).unwrap();
 
     let read_start = Instant::now();
-    let reader = objects::store::PackReader::open(&pack_path, &index_path).unwrap();
+    let reader =
+        objects::store::PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
     for (hash, _, expected) in &objects {
         let (_, data) = reader.get_hashed_object(hash).unwrap().unwrap();
         assert_eq!(&data, expected);
@@ -645,7 +646,9 @@ fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
-    let reader = objects::store::PackReader::from_slice(pack_data, index_data).unwrap();
+    let reader =
+        objects::store::PackReader::from_slice(pack_data, index_data, &std::env::temp_dir())
+            .unwrap();
     reader
         .list_ids()
         .unwrap()

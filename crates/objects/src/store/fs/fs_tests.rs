@@ -435,7 +435,10 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
     let ids = store
         .install_pack_streaming(&staged_pack, &staged_index)
         .expect("streaming install");
-    assert!(ids.contains(&PackObjectId::Hash(blob_hash)));
+    assert!(
+        ids.contains(&PackObjectId::Hash(blob_hash))
+            .expect("inventory membership")
+    );
     assert!(
         !staged_pack.exists(),
         "durable publish must consume pack stage"
@@ -443,6 +446,18 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
     assert!(
         !staged_index.exists(),
         "durable publish must consume index stage"
+    );
+
+    drop(stage);
+    assert!(
+        ids.contains(&PackObjectId::Hash(blob_hash))
+            .expect("inventory survives removal of staging")
+    );
+    assert_eq!(
+        ids.ids()
+            .collect::<StoreResult<Vec<_>>>()
+            .expect("inventory"),
+        vec![PackObjectId::Hash(blob_hash)]
     );
 
     let loaded = store.get_blob(&blob_hash).unwrap().expect("packed blob");
@@ -1951,4 +1966,133 @@ fn fs_open_tree_on_a_v4_salted_tree_errors_not_none() {
         Ok(None) => panic!("open_tree on a v4 tree must not silently return None"),
         Ok(Some(_)) => panic!("open_tree must not stream a v4 salted tree"),
     }
+}
+
+fn expire_scratch_entry(path: &std::path::Path) {
+    use std::{
+        fs::{FileTimes, OpenOptions},
+        time::{Duration, SystemTime},
+    };
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS opens directories; FILE_WRITE_ATTRIBUTES
+        // is required to set their timestamps without opening a data writer.
+        options.custom_flags(0x02000000).access_mode(0x180);
+    }
+    options
+        .open(path)
+        .expect("scratch entry")
+        .set_times(
+            FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(2 * 86400)),
+        )
+        .expect("expired timestamp");
+}
+
+#[test]
+fn store_open_sweeps_stale_scratch_and_preserves_fresh_entries() {
+    let (_temp, store) = create_test_store();
+    let scratch = store.root().join("tmp");
+    std::fs::create_dir_all(scratch.join("stale-download")).expect("scratch directory");
+    std::fs::write(scratch.join("stale-download/pack"), b"abandoned download").expect("download");
+    std::fs::write(scratch.join("stale-index"), b"abandoned sort").expect("index");
+    std::fs::write(scratch.join("fresh"), b"current transfer").expect("fresh file");
+    for name in ["stale-download", "stale-index"] {
+        expire_scratch_entry(&scratch.join(name));
+    }
+    let reopened = FsStore::new(store.root());
+    reopened.reload_packs().expect("store open");
+    assert!(
+        !scratch.join("stale-download").exists(),
+        "crashed downloads must be swept"
+    );
+    assert!(
+        !scratch.join("stale-index").exists(),
+        "crashed sort files must be swept"
+    );
+    assert!(scratch.join("fresh").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_store_blob_read_and_clone_repair_preserve_packs() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, store) = create_test_store();
+    let blob = Blob::from("read without scratch writes");
+    store
+        .put_blobs_packed(vec![(blob.hash(), blob.content().to_vec())])
+        .expect("packed blob");
+    let scratch = store.root().join("tmp");
+    std::fs::create_dir_all(&scratch).expect("scratch root");
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o555))
+        .expect("readonly scratch");
+    std::fs::set_permissions(store.root(), std::fs::Permissions::from_mode(0o555))
+        .expect("readonly store");
+    let reopened = FsStore::new(store.root());
+    let read = reopened.get_blob(&blob.hash());
+    let repair = reopened.discard_corrupt_clone_packs();
+    let packs = count_packs(&store);
+    std::fs::set_permissions(store.root(), std::fs::Permissions::from_mode(0o755))
+        .expect("restore store");
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o755))
+        .expect("restore scratch");
+    assert_eq!(packs, 1, "scratch failure must never delete a valid pack");
+    assert_eq!(repair.expect("small-pack repair needs no scratch"), 0);
+    assert_eq!(read.expect("small-pack read needs no scratch"), Some(blob));
+}
+
+#[test]
+fn clone_repair_propagates_index_io_errors_without_deleting_pack() {
+    let (_temp, store) = create_test_store();
+    let blob = Blob::from("valid pack with an unreadable index");
+    store
+        .put_blobs_packed(vec![(blob.hash(), blob.content().to_vec())])
+        .expect("pack");
+    let pack = std::fs::read_dir(packs_dir(store.root()))
+        .expect("packs")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("pack path");
+    let index = pack.with_extension("idx");
+    let bytes = std::fs::read(&index).expect("index");
+    std::fs::remove_file(&index).expect("remove index");
+    std::fs::create_dir(&index).expect("index cannot be read as a file");
+    let result = store.discard_corrupt_clone_packs();
+    assert!(pack.exists(), "I/O failure is not pack corruption");
+    assert!(matches!(result, Err(HeddleError::Io(_))), "{result:?}");
+    std::fs::remove_dir(&index).expect("restore index path");
+    std::fs::write(index, bytes).expect("restore index");
+}
+
+#[test]
+fn store_open_keeps_expired_scratch_while_an_owner_is_alive() {
+    let (_temp, store) = create_test_store();
+    let scratch = store.root().join("tmp");
+    let live = scratch.join("live-download");
+    std::fs::create_dir_all(&live).expect("scratch");
+    std::fs::write(live.join("source.pack"), b"live bytes").expect("download");
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(live.join(".lease"))
+        .expect("live owner");
+    lease.lock_shared().expect("live owner lock");
+    expire_scratch_entry(&live);
+    let reopened = FsStore::new(store.root());
+    reopened
+        .reload_packs()
+        .expect("open beside a long-running transfer");
+    assert!(
+        live.join("source.pack").exists(),
+        "TTL never overrides a live lease"
+    );
+    drop(lease);
+    reopened.reload_packs().expect("open after owner exit");
+    assert!(
+        !live.exists(),
+        "expired scratch is reclaimed after the owner exits"
+    );
 }
