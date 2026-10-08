@@ -27,7 +27,7 @@ pub use repo::{
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
 use sley::{
-    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
+    BString as GitByteString, DeleteRef, DeleteRefName, GitObjectType, GitTime, HeadUpdateOptions,
     IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
     remote::{
@@ -2121,7 +2121,11 @@ fn delete_reference(
         Some(ReferenceTarget::Direct(oid)) => {
             authorize_ref_change(repo, name, Some(oid), None, authorization)?;
             repo.delete_ref(DeleteRef {
-                name: FullName::new(name).map_err(git_err)?,
+                // The ref was read leniently, so its on-disk name may be one
+                // Git refuses to create (`refs/heads/broken...ref`). Deletion
+                // uses Git's delete-time `refname_is_safe` rule, as
+                // `git update-ref -d` does.
+                name: DeleteRefName::new(name).map_err(git_err)?,
                 expected_old: Some(expected_old.unwrap_or(oid)),
                 expected: None,
                 reflog: None,
@@ -2132,10 +2136,10 @@ fn delete_reference(
         Some(ReferenceTarget::Symbolic(_)) => {
             authorize_ref_change(repo, name, None, None, authorization)?;
             if let Some(expected_old) = expected_old {
-                let current = repo
-                    .find_reference(name)
-                    .map_err(git_err)?
-                    .and_then(|reference| reference.peeled_oid(repo).ok().flatten());
+                // `find_reference` rejects names `FullName` refuses; resolve
+                // through the lenient ref store so a malformed name can still
+                // be compared and deleted.
+                let current = sley_refs::resolve_ref_peeled(&refs, name).map_err(git_err)?;
                 if current != Some(expected_old) {
                     return Err(GitProjectionError::Git(format!(
                         "failed to delete Git reference '{name}': expected {expected_old}, found {}",
@@ -4777,6 +4781,54 @@ mod tests {
                 .expect("read main")
                 .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
             Some(tip),
+        );
+    }
+
+    /// sley 0.12 (heddle#2022): a ref Git refuses to create can still be
+    /// removed, as `git update-ref -d` allows, whether direct or symbolic.
+    #[test]
+    fn deletes_planted_refs_whose_names_git_refuses_to_create() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let tip = test_commit(&repo, "tip", &[]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            tip,
+            RefPrecondition::MustNotExist,
+            "test: seed",
+        )
+        .expect("seed branch");
+        let broken = "refs/heads/broken...ref";
+        let broken_symbolic = "refs/heads/sym..link";
+        assert!(
+            sley::FullName::new(broken).is_err(),
+            "Git refuses to create it"
+        );
+        std::fs::write(tmp.path().join(broken), format!("{tip}\n")).expect("plant direct ref");
+        std::fs::write(tmp.path().join(broken_symbolic), "ref: refs/heads/main\n")
+            .expect("plant symbolic ref");
+
+        for name in [broken, broken_symbolic] {
+            delete_reference_authorized(
+                &repo,
+                name,
+                Some(tip),
+                false,
+                RefRewriteAuthorization::ManagedProjectionWithdrawal,
+            )
+            .unwrap_or_else(|error| panic!("delete {name}: {error}"));
+            assert!(
+                !tmp.path().join(name).exists(),
+                "{name} is removed from disk"
+            );
+        }
+        assert_eq!(
+            repo.find_reference("refs/heads/main")
+                .expect("read main")
+                .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
+            Some(tip),
+            "deleting a symbolic ref leaves its target",
         );
     }
 

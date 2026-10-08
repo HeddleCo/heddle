@@ -807,9 +807,7 @@ fn resolve_git_tracking_remote(
             }));
         }
     }
-    if !looks_like_remote_location(requested)
-        && FullName::try_from(format!("refs/remotes/{requested}/HEAD").as_str()).is_ok()
-    {
+    if !looks_like_remote_location(requested) && is_git_remote_name(requested) {
         return Ok(Some(GitTrackingRemoteResolution {
             name: requested.to_string(),
             configured_remote: None,
@@ -826,6 +824,14 @@ fn resolve_git_tracking_remote(
         }));
     }
     Ok(None)
+}
+
+/// Git's `valid_remote_name`: the name must form a valid tracking ref. sley
+/// 0.12's `FullName` applies `git check-ref-format`, so names Git refuses
+/// (`a..b`, `x~1`, `bad:name`, `fork.lock`) are not treated as remotes.
+/// The cases match `git check-ref-format refs/remotes/<name>/HEAD`.
+fn is_git_remote_name(name: &str) -> bool {
+    FullName::try_from(format!("refs/remotes/{name}/HEAD").as_str()).is_ok()
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
@@ -2438,6 +2444,30 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn remote_name_probe_matches_git_check_ref_format() {
+        for name in ["origin", "my-fork", "team/upstream", "fork.v2", "dot.", "@"] {
+            assert!(
+                is_git_remote_name(name),
+                "{name} is a valid Git remote name"
+            );
+        }
+        for name in [
+            "",
+            "a..b",
+            "x~1",
+            "bad:name",
+            "fork.lock",
+            "a@{b",
+            ".hidden",
+        ] {
+            assert!(
+                !is_git_remote_name(name),
+                "{name:?} is not a Git remote name"
+            );
+        }
+    }
 
     #[cfg(feature = "client")]
     #[test]

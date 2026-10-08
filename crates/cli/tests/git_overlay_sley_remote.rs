@@ -64,7 +64,7 @@ fn publish_ref(repo: &SleyRepository, name: &str, old: Option<ObjectId>, new: Ob
 
 fn delete_ref(repo: &SleyRepository, name: &str, expected_old: ObjectId) {
     repo.delete_ref(DeleteRef {
-        name: sley::FullName::new(name).expect("valid ref name"),
+        name: sley::DeleteRefName::new(name).expect("deletable ref name"),
         expected_old: Some(expected_old),
         expected: None,
         reflog: None,
