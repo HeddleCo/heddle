@@ -152,6 +152,12 @@ impl Repository {
         current_worktree_verified_clean: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
     ) -> Result<WorktreeApplyPlan> {
+        // Refuse a root metadata alias (heddle#2028) before a full
+        // rematerialize clears anything. Deeper `.git` aliases cannot
+        // decode, and planning refuses them again entry by entry.
+        for entry in to_tree.entries() {
+            objects::worktree::check_worktree_write_path(Path::new(entry.name()))?;
+        }
         let plan_start = Instant::now();
         let plan = match from_tree {
             None => {
@@ -406,6 +412,7 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        objects::worktree::check_worktree_write_path(rel_path)?;
         match entry.entry_type() {
             EntryType::Blob => {
                 plan.stats.changed_count += 1;
@@ -455,6 +462,7 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        objects::worktree::check_worktree_write_path(rel_path)?;
         match entry.entry_type() {
             EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 plan.stats.changed_count += 1;
@@ -484,6 +492,9 @@ impl Repository {
         to_entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
+        // Neither side may write or remove through a metadata directory
+        // (heddle#2028).
+        objects::worktree::check_worktree_write_path(rel_path)?;
         if from_entry.entry_type() == EntryType::Tree && to_entry.entry_type() == EntryType::Tree {
             let from_hash = from_entry.require_content_hash();
             let to_hash = to_entry.require_content_hash();

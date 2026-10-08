@@ -64,6 +64,11 @@ pub fn cmd_revert(
 
     ensure_worktree_clean(&repo, "revert")?;
 
+    // Refuse before any file is touched (heddle#2028).
+    for change in &changes {
+        objects::worktree::check_worktree_write_path(std::path::Path::new(&change.path))?;
+    }
+
     let mut files_affected: Vec<String> = Vec::new();
 
     apply_inverse_changes(

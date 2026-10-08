@@ -156,6 +156,7 @@ fn cmd_resolve_all(
     let mut resolutions = Vec::new();
 
     for path in &unresolved {
+        objects::worktree::check_worktree_write_path(std::path::Path::new(path))?;
         resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
         ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
         merge_manager.resolve(path)?;
@@ -215,6 +216,7 @@ fn cmd_resolve_file(
     let mode = manual_resolution_mode(ours, theirs);
     let conflict_paths = vec![path.to_string()];
     let conflicts = structured_conflicts_for_paths(repo, &merge_state, &conflict_paths)?;
+    objects::worktree::check_worktree_write_path(std::path::Path::new(path))?;
     resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
     ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
     merge_manager.resolve(path)?;

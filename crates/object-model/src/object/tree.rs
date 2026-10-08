@@ -304,6 +304,12 @@ pub fn validate_name(name: &str) -> Result<(), TreeError> {
             "entry name exceeds the HTR4 u16 length bound".into(),
         ));
     }
+    // `.git` aliases are reserved at every depth (heddle#2028). A tree does
+    // not know its depth, so a root `.heddle` is refused where the root is
+    // known: Git import and checkout.
+    if let Some(reason) = super::reserved_tree_entry_name(name.as_bytes(), false) {
+        return Err(TreeError::InvalidName(format!("'{name}' {reason}")));
+    }
     Ok(())
 }
 

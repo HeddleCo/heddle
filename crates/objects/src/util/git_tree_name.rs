@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git tree-entry name classification shared by import engines.
 
-use crate::object::validate_tree_entry_name;
+use crate::object::{ReservedMetadataName, reserved_tree_entry_name, validate_tree_entry_name};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitTreeNameClassification {
     Representable(String),
     NeedsLossy(GitTreeNameLossy),
+    /// The name aliases a metadata directory (heddle#2028). Import must fail:
+    /// not even `--lossy` may drop it, because the tree is malicious rather
+    /// than unrepresentable.
+    Reserved(ReservedMetadataName),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,7 +26,15 @@ pub enum GitTreeNameLossyAction {
     Converted,
 }
 
-pub fn classify_git_tree_name(raw_name: &[u8]) -> GitTreeNameClassification {
+/// Classify one Git tree entry name. `at_root` says the entry is a direct
+/// child of a commit's root tree, where `.heddle` is reserved too (see
+/// [`reserved_tree_entry_name`]).
+pub fn classify_git_tree_name(raw_name: &[u8], at_root: bool) -> GitTreeNameClassification {
+    // Checked on the raw bytes, before any lossy conversion could hide or
+    // create an alias.
+    if let Some(reason) = reserved_tree_entry_name(raw_name, at_root) {
+        return GitTreeNameClassification::Reserved(reason);
+    }
     let (name, utf8_lossy) = match std::str::from_utf8(raw_name) {
         Ok(name) => (name.to_string(), false),
         Err(_) => (String::from_utf8_lossy(raw_name).into_owned(), true),
@@ -70,10 +82,14 @@ mod tests {
             "a\\b",
             "ctrl\u{0001}",
             "del\u{7f}",
+            ".git",
+            ".GIT",
+            "GIT~1",
+            ".heddle",
         ];
         for c in cases {
             let classified_representable = matches!(
-                classify_git_tree_name(c.as_bytes()),
+                classify_git_tree_name(c.as_bytes(), false),
                 GitTreeNameClassification::Representable(_)
             );
             let validator_accepts = validate_tree_entry_name(c).is_ok();
@@ -87,14 +103,14 @@ mod tests {
     #[test]
     fn backslash_name_is_not_representable() {
         assert!(matches!(
-            classify_git_tree_name(b"foo\\bar"),
+            classify_git_tree_name(b"foo\\bar", false),
             GitTreeNameClassification::NeedsLossy(_)
         ));
     }
 
     #[test]
     fn invalid_utf8_is_converted_not_dropped() {
-        match classify_git_tree_name(&[b'a', 0xff, b'b']) {
+        match classify_git_tree_name(&[b'a', 0xff, b'b'], false) {
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 assert_eq!(lossy.action, GitTreeNameLossyAction::Converted);
             }
@@ -108,11 +124,39 @@ mod tests {
         // conversion replaces the 0xff but the backslash survives, so the
         // converted name is still rejected by validate_tree_entry_name and
         // must be Dropped — never silently persisted as Converted.
-        match classify_git_tree_name(b"bad\\\xff") {
+        match classify_git_tree_name(b"bad\\\xff", false) {
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 assert_eq!(lossy.action, GitTreeNameLossyAction::Dropped);
             }
             other => panic!("expected NeedsLossy/Dropped, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reserved_names_fail_rather_than_go_lossy() {
+        let cases: [(&[u8], bool); 8] = [
+            (b".git", false),
+            (b".GIT", false),
+            (b".git::$INDEX_ALLOCATION", false),
+            (b"git~1", false),
+            (b".git\\hooks", false),
+            (b".git\xff", false),
+            (b".heddle", true),
+            (b".HEDDLE", true),
+        ];
+        for (raw, at_root) in cases {
+            assert!(
+                matches!(
+                    classify_git_tree_name(raw, at_root),
+                    GitTreeNameClassification::Reserved(_)
+                ),
+                "{raw:?}"
+            );
+        }
+        // A nested `.heddle` is ordinary content.
+        assert_eq!(
+            classify_git_tree_name(b".heddle", false),
+            GitTreeNameClassification::Representable(".heddle".to_string())
+        );
     }
 }

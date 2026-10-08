@@ -696,6 +696,9 @@ fn persist_refresh_conflict_state(
         None
     };
     super::merge::apply_merged_tree_external(thread_repo, &tree)?;
+    for path in &paths {
+        objects::worktree::check_worktree_write_path(std::path::Path::new(path))?;
+    }
     ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &paths)?;
     thread_repo
         .merge_state_manager()

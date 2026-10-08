@@ -618,6 +618,9 @@ impl Repository {
     ) -> Result<()> {
         let path = dir.join(entry.name());
         let rel_path = rel_dir.join(entry.name());
+        // Defence in depth (heddle#2028): never create a `.git` alias at any
+        // depth, nor a root `.heddle` alias, whatever the tree says.
+        objects::worktree::check_worktree_write_path(&rel_path)?;
         match entry.target() {
             TreeEntryTarget::Blob { hash, executable } => {
                 plan.file_count += 1;

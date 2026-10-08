@@ -45,7 +45,8 @@ use std::{
 
 use chrono::{DateTime, TimeZone, Utc};
 use objects::object::{
-    EntryType, RawGitMode, Tree, TreeEntry, parse_git_tree,
+    EntryType, RawGitMode, ReservedMetadataName, Tree, TreeEntry, parse_git_tree,
+    reserved_tree_entry_name,
     thread_replication::git_import_graph::{
         GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity,
     },
@@ -55,7 +56,7 @@ use sley::{
     ReferenceTarget as SleyRefTarget, Repository as SleyRepository, Signature as SleySignature,
 };
 
-use crate::IngestError;
+use crate::{IngestError, import_options::join_tree_path};
 
 /// A reference pointing at a commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +171,33 @@ pub(crate) fn git_tree_from_entries(
     Tree::from_git_entries(entries).map_err(|error| {
         IngestError::Git(format!("git tree {tree_sha} cannot be imported: {error}"))
     })
+}
+
+/// The permanent error for a Git tree entry that aliases a metadata
+/// directory (heddle#2028), naming the tree, the entry's path and why.
+pub(crate) fn reserved_tree_entry_error(
+    tree_sha: &str,
+    path_prefix: &str,
+    child: &TreeChild,
+    reason: ReservedMetadataName,
+) -> IngestError {
+    IngestError::ReservedTreeEntry {
+        tree: tree_sha.to_string(),
+        path: join_tree_path(path_prefix, &child.name),
+        reason,
+    }
+}
+
+/// Refuse Git tree `tree_sha` as a commit's root tree if any direct child
+/// is reserved there (`.git` or `.heddle` aliases). Used when the tree was
+/// already translated, possibly as a subtree, where `.heddle` is allowed.
+pub(crate) fn reject_reserved_root_entries(git: &GitSource, tree_sha: &str) -> crate::Result<()> {
+    for child in git.read_tree(tree_sha)? {
+        if let Some(reason) = reserved_tree_entry_name(&child.raw_name, true) {
+            return Err(reserved_tree_entry_error(tree_sha, "", &child, reason));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

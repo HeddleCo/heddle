@@ -17,7 +17,11 @@ use objects::{
 
 use crate::{
     GitSource, IngestError,
-    git_walk::{CommitEntry, TreeChild, TreeChildKind, git_tree_from_entries},
+    git_walk::{
+        CommitEntry, TreeChild, TreeChildKind, git_tree_from_entries, reject_reserved_root_entries,
+        reserved_tree_entry_error,
+    },
+    import_options::join_tree_path,
     state_writer::descriptor_state_from_commit,
 };
 
@@ -453,10 +457,26 @@ struct GitBlameFrontier {
     commit_to_target: Vec<Option<usize>>,
 }
 
+/// Translate a commit's root tree.
 fn translate_tree(
     git: &GitSource,
     store: &InMemoryStore,
     git_sha: &str,
+    cache: &mut HashMap<String, ContentHash>,
+) -> crate::Result<ContentHash> {
+    if cache.contains_key(git_sha) {
+        // A tree first translated as a subtree may hold a `.heddle`, which
+        // is reserved only once the tree is a commit's root.
+        reject_reserved_root_entries(git, git_sha)?;
+    }
+    translate_tree_at(git, store, git_sha, "", cache)
+}
+
+fn translate_tree_at(
+    git: &GitSource,
+    store: &InMemoryStore,
+    git_sha: &str,
+    path_prefix: &str,
     cache: &mut HashMap<String, ContentHash>,
 ) -> crate::Result<ContentHash> {
     if let Some(hash) = cache.get(git_sha) {
@@ -464,7 +484,14 @@ fn translate_tree(
     }
     let mut entries = Vec::new();
     for child in git.read_tree(git_sha)? {
-        entries.push(translate_child(git, store, &child, cache)?);
+        entries.push(translate_child(
+            git,
+            store,
+            git_sha,
+            path_prefix,
+            &child,
+            cache,
+        )?);
     }
     let hash = store.put_tree(&git_tree_from_entries(git_sha, entries)?)?;
     cache.insert(git_sha.to_string(), hash);
@@ -474,11 +501,21 @@ fn translate_tree(
 fn translate_child(
     git: &GitSource,
     store: &InMemoryStore,
+    git_sha: &str,
+    path_prefix: &str,
     child: &TreeChild,
     cache: &mut HashMap<String, ContentHash>,
 ) -> crate::Result<TreeEntry> {
-    let name = match classify_git_tree_name(&child.raw_name) {
+    let name = match classify_git_tree_name(&child.raw_name, path_prefix.is_empty()) {
         GitTreeNameClassification::Representable(name) => name,
+        GitTreeNameClassification::Reserved(reason) => {
+            return Err(reserved_tree_entry_error(
+                git_sha,
+                path_prefix,
+                child,
+                reason,
+            ));
+        }
         GitTreeNameClassification::NeedsLossy(lossy) => {
             return Err(IngestError::Other(format!(
                 "Git path cannot be represented without a lossy import: {} ({})",
@@ -492,7 +529,11 @@ fn translate_child(
             TreeEntry::file(name, hash, executable)
         }
         TreeChildKind::Tree => {
-            TreeEntry::directory(name, translate_tree(git, store, &child.sha, cache)?)
+            let path = join_tree_path(path_prefix, &name);
+            TreeEntry::directory(
+                name,
+                translate_tree_at(git, store, &child.sha, &path, cache)?,
+            )
         }
         TreeChildKind::Symlink => {
             let hash = store.put_blob(&Blob::from_slice(&git.read_blob(&child.sha)?))?;

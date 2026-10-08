@@ -12,7 +12,10 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{Blob, ContentHash, EntryType, State, StateId, Tree, TreeEntry, parse_git_tree},
+    object::{
+        Blob, ContentHash, EntryType, State, StateId, Tree, TreeEntry, parse_git_tree,
+        reserved_tree_entry_name,
+    },
     store::ExternalObjectSource,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -212,6 +215,15 @@ impl ExternalObjectSource for GitOverlayObjectSource {
             .map_err(|error| HeddleError::InvalidObject(format!("Git tree {git_sha}: {error}")))?;
         let mut entries = Vec::with_capacity(children.len());
         for child in children {
+            // `.git` aliases are refused at every depth (heddle#2028). This
+            // source does not know whether the tree is a root, so a root
+            // `.heddle` is left to checkout, which refuses it.
+            if let Some(reason) = reserved_tree_entry_name(child.name, false) {
+                return Err(HeddleError::InvalidObject(format!(
+                    "Git tree {git_sha} entry '{}' {reason}",
+                    String::from_utf8_lossy(child.name)
+                )));
+            }
             let name = String::from_utf8(child.name.to_vec()).map_err(|_| {
                 HeddleError::Config(format!(
                     "Git tree {git_sha} has a non-UTF-8 entry; run `heddle import local --lossy` to import it explicitly"

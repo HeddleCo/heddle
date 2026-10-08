@@ -42,7 +42,7 @@ use crate::{
     IngestError,
     git_walk::{
         CommitEntry, GitSource, RefDiscoveryStats, RefHead, RefNamespace, TreeChild, TreeChildKind,
-        git_tree_from_entries,
+        git_tree_from_entries, reject_reserved_root_entries, reserved_tree_entry_error,
     },
     import_options::{
         ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
@@ -853,6 +853,11 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             && (!self.repair_mapped_objects
                 || !self.materialized_trees.insert(git_tree_sha.to_string()))
         {
+            if path_prefix.is_empty() {
+                // A tree first translated as a subtree may hold a `.heddle`,
+                // which is reserved only once the tree is a commit's root.
+                reject_reserved_root_entries(self.git, git_tree_sha)?;
+            }
             let entries = self
                 .map
                 .get_tree_lossy_entries(git_tree_sha)
@@ -880,7 +885,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         let children = self.git.read_tree(git_tree_sha)?;
         let mut entries = Vec::with_capacity(children.len());
         for child in children {
-            if let Some(entry) = self.translate_child(&child, path_prefix)? {
+            if let Some(entry) = self.translate_child(git_tree_sha, &child, path_prefix)? {
                 entries.push(entry);
             }
         }
@@ -911,11 +916,20 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
 
     fn translate_child(
         &mut self,
+        git_tree_sha: &str,
         child: &TreeChild,
         path_prefix: &str,
     ) -> crate::Result<Option<TreeEntry>> {
-        let name = match classify_git_tree_name(&child.raw_name) {
+        let name = match classify_git_tree_name(&child.raw_name, path_prefix.is_empty()) {
             GitTreeNameClassification::Representable(name) => name,
+            GitTreeNameClassification::Reserved(reason) => {
+                return Err(reserved_tree_entry_error(
+                    git_tree_sha,
+                    path_prefix,
+                    child,
+                    reason,
+                ));
+            }
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 let path = join_tree_path(path_prefix, &lossy.name);
                 let entry = match lossy.action {
@@ -3143,5 +3157,285 @@ mod tests {
             !dot_heddle.join(".heddle").exists(),
             "must not create a nested `.heddle/.heddle/` when caller passes a `.heddle`-suffixed path"
         );
+    }
+
+    /// Git import refuses trees whose entries alias a metadata directory
+    /// (heddle#2028): `.git` at any depth, `.heddle` at a commit's root.
+    ///
+    /// Git refuses to write these trees itself, so they are built raw with
+    /// `git hash-object --literally`, as a hostile repository would be.
+    mod reserved_tree_entry_tests {
+        use std::{io::Write, path::Path, process::Command};
+
+        use objects::{
+            object::{MetadataDir, ThreadName},
+            store::InMemoryStore,
+        };
+        use refs::refs::RefManager;
+        use tempfile::TempDir;
+
+        use crate::{
+            GitSource, ImportOptions, IngestError, OverlayHistory, importer::Importer,
+            sha_map::ShaMap,
+        };
+
+        fn git(path: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+            let mut command = Command::new("git");
+            command
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().expect("spawn git");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(stdin.unwrap_or_default())
+                .expect("write stdin");
+            let output = child.wait_with_output().expect("git output");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        /// A raw Git tree: `(mode, name, oid)` entries, written as given (Git's
+        /// own order is not enforced, and no name is refused).
+        fn raw_tree(path: &Path, entries: &[(&str, &[u8], &str)]) -> String {
+            let mut body = Vec::new();
+            for (mode, name, oid) in entries {
+                body.extend_from_slice(mode.as_bytes());
+                body.push(b' ');
+                body.extend_from_slice(name);
+                body.push(0);
+                for pair in oid.as_bytes().chunks(2) {
+                    body.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+                }
+            }
+            git(
+                path,
+                &["hash-object", "--literally", "-w", "-t", "tree", "--stdin"],
+                Some(&body),
+            )
+        }
+
+        fn blob(path: &Path, content: &[u8]) -> String {
+            git(path, &["hash-object", "-w", "--stdin"], Some(content))
+        }
+
+        fn commit(path: &Path, tree: &str, parent: Option<&str>) -> String {
+            let mut args = vec!["commit-tree", tree, "-m", "hostile"];
+            if let Some(parent) = parent {
+                args.extend(["-p", parent]);
+            }
+            git(path, &args, None)
+        }
+
+        fn init(path: &Path) {
+            git(path, &["init", "-q", "--initial-branch=main"], None);
+        }
+
+        /// `README.md` plus `<components…>/x`: the alias sits on the path to the
+        /// leaf, e.g. `[".git", "hooks"]` or `["a", ".git", "hooks"]`.
+        fn seed_hostile_repo(path: &Path, components: &[&[u8]]) {
+            init(path);
+            let readme = blob(path, b"readme\n");
+            let hook = blob(path, b"#!/bin/sh\necho pwned\n");
+            let mut child = raw_tree(path, &[("100755", b"x", &hook)]);
+            for name in components.iter().skip(1).rev() {
+                child = raw_tree(path, &[("40000", name, &child)]);
+            }
+            let root = raw_tree(
+                path,
+                &[
+                    ("100644", b"README.md", &readme),
+                    ("40000", components[0], &child),
+                ],
+            );
+            let tip = commit(path, &root, None);
+            git(path, &["update-ref", "refs/heads/main", &tip], None);
+        }
+
+        fn import(path: &Path, lossy: bool) -> crate::Result<()> {
+            let destination = TempDir::new().unwrap();
+            let git = GitSource::open(path).unwrap();
+            let store = InMemoryStore::new();
+            let refs = RefManager::new(destination.path());
+            refs.init().unwrap();
+            let mut map = ShaMap::new();
+            let mut importer =
+                Importer::new(&git, &store, &refs, &mut map).with_options(ImportOptions {
+                    lossy,
+                    ..ImportOptions::default()
+                });
+            pollster::block_on(importer.run()).map(drop)
+        }
+
+        fn expect_reserved(result: crate::Result<()>, path: &str, dir: MetadataDir) {
+            match result {
+                Err(IngestError::ReservedTreeEntry {
+                    tree,
+                    path: actual,
+                    reason,
+                }) => {
+                    assert_eq!(actual, path);
+                    assert_eq!(reason.dir, dir, "{path}");
+                    assert_eq!(tree.len(), 40, "names the Git tree: {tree}");
+                    let message = IngestError::ReservedTreeEntry {
+                        tree: tree.clone(),
+                        path: actual,
+                        reason,
+                    }
+                    .to_string();
+                    assert!(
+                        message.contains(&tree) && message.contains(path),
+                        "{message}"
+                    );
+                }
+                other => panic!("{path}: expected ReservedTreeEntry, got {other:?}"),
+            }
+        }
+
+        const GIT_ALIASES: [&[u8]; 8] = [
+            b".git",
+            b".GIT",
+            b".git.",
+            b".git ",
+            b"GIT~1",
+            b".git::$INDEX_ALLOCATION",
+            ".g\u{200c}it".as_bytes(),
+            b".git\\hooks",
+        ];
+
+        #[test]
+        fn import_refuses_git_aliases_at_the_root_and_nested() {
+            for alias in GIT_ALIASES {
+                let name = String::from_utf8_lossy(alias).into_owned();
+                for (components, path) in [
+                    (vec![alias, b"hooks"], name.clone()),
+                    (vec![b"a".as_slice(), alias, b"hooks"], format!("a/{name}")),
+                ] {
+                    let source = TempDir::new().unwrap();
+                    seed_hostile_repo(source.path(), &components);
+                    for lossy in [false, true] {
+                        expect_reserved(import(source.path(), lossy), &path, MetadataDir::Git);
+                    }
+                    match OverlayHistory::open(source.path(), "main") {
+                        Err(IngestError::ReservedTreeEntry { path: actual, .. }) => {
+                            assert_eq!(actual, path);
+                        }
+                        Err(other) => panic!("{path}: overlay history: {other}"),
+                        Ok(_) => panic!("{path}: overlay history accepted the tree"),
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn import_refuses_heddle_aliases_at_the_root() {
+            for alias in [
+                b".heddle".as_slice(),
+                b".HEDDLE",
+                b".heddle.",
+                b"HEDDLE~1",
+                ".hed\u{200c}dle".as_bytes(),
+            ] {
+                let source = TempDir::new().unwrap();
+                seed_hostile_repo(source.path(), &[alias, b"hooks"]);
+                let path = String::from_utf8_lossy(alias).into_owned();
+                expect_reserved(import(source.path(), true), &path, MetadataDir::Heddle);
+                assert!(OverlayHistory::open(source.path(), "main").is_err());
+            }
+        }
+
+        /// A nested `.heddle` is a tracked fixture (weft keeps
+        /// `examples/calculator/.heddle/`), and ordinary dotfiles are ordinary.
+        #[test]
+        fn import_keeps_nested_heddle_fixtures_and_dotfiles() {
+            let source = TempDir::new().unwrap();
+            init(source.path());
+            let file = blob(source.path(), b"content\n");
+            let fixture = raw_tree(source.path(), &[("100644", b"HEAD", &file)]);
+            let calculator = raw_tree(source.path(), &[("40000", b".heddle", &fixture)]);
+            let examples = raw_tree(source.path(), &[("40000", b"calculator", &calculator)]);
+            let workflows = raw_tree(source.path(), &[("100644", b"ci.yml", &file)]);
+            let root = raw_tree(
+                source.path(),
+                &[
+                    ("40000", b".github", &workflows),
+                    ("100644", b".gitignore", &file),
+                    ("100644", b".heddleignore", &file),
+                    ("40000", b"examples", &examples),
+                ],
+            );
+            let tip = commit(source.path(), &root, None);
+            git(
+                source.path(),
+                &["update-ref", "refs/heads/main", &tip],
+                None,
+            );
+
+            import(source.path(), false).expect("ordinary tree imports");
+            OverlayHistory::open(source.path(), "main").expect("overlay history");
+        }
+
+        /// A tree first translated as a subtree, where `.heddle` is allowed, is
+        /// still refused when a later commit uses it as its root.
+        #[test]
+        fn a_subtree_reused_as_a_root_is_checked_again() {
+            let source = TempDir::new().unwrap();
+            init(source.path());
+            let file = blob(source.path(), b"content\n");
+            let metadata = raw_tree(source.path(), &[("100644", b"config.toml", &file)]);
+            let inner = raw_tree(source.path(), &[("40000", b".heddle", &metadata)]);
+            let first = raw_tree(source.path(), &[("40000", b"sub", &inner)]);
+            let first = commit(source.path(), &first, None);
+            let second = commit(source.path(), &inner, Some(&first));
+            git(
+                source.path(),
+                &["update-ref", "refs/heads/main", &second],
+                None,
+            );
+
+            expect_reserved(import(source.path(), false), ".heddle", MetadataDir::Heddle);
+            assert!(OverlayHistory::open(source.path(), "main").is_err());
+            // The first commit alone is fine: its `.heddle` is nested.
+            git(
+                source.path(),
+                &["update-ref", "refs/heads/first", &first],
+                None,
+            );
+            OverlayHistory::open(source.path(), "first").expect("nested .heddle projects");
+        }
+
+        #[test]
+        fn reserved_threads_are_not_written() {
+            let source = TempDir::new().unwrap();
+            seed_hostile_repo(source.path(), &[b".git", b"hooks"]);
+            let destination = TempDir::new().unwrap();
+            let git = GitSource::open(source.path()).unwrap();
+            let store = InMemoryStore::new();
+            let refs = RefManager::new(destination.path());
+            refs.init().unwrap();
+            let mut map = ShaMap::new();
+            assert!(
+                pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).is_err()
+            );
+            assert_eq!(
+                refs.get_thread(&ThreadName::new("main")).unwrap(),
+                None,
+                "a refused import must not publish the branch"
+            );
+        }
     }
 }

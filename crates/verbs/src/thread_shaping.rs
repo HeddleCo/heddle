@@ -85,6 +85,15 @@ impl fmt::Display for ThreadShapingError {
 
 impl Error for ThreadShapingError {}
 
+/// Refuse a move that would write or remove a path through a metadata
+/// directory (heddle#2028), before either worktree is touched.
+fn check_move_paths(paths: &[String]) -> Result<()> {
+    for path in paths {
+        objects::worktree::check_worktree_write_path(Path::new(path))?;
+    }
+    Ok(())
+}
+
 pub fn capture_split(
     repo: &Repository,
     opts: CaptureSplitOptions,
@@ -105,6 +114,7 @@ pub fn capture_split(
         .into());
     }
 
+    check_move_paths(&moved_paths)?;
     let target_repo = Repository::open(&target.execution_path)?;
     apply_selected_worktree_paths(repo, &target_repo, &moved_paths)?;
     let target_snapshot = snapshot(
@@ -160,6 +170,7 @@ pub fn thread_move(
         .into());
     }
 
+    check_move_paths(&moved_paths)?;
     apply_selected_state_paths(&source_repo, &source_current, &target_repo, &moved_paths)?;
     let target_snapshot = snapshot(
         &target_repo,
