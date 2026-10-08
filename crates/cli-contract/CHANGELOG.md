@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-cli-contract-v0.28.13...heddle-cli-contract-v0.28.14) - 2026-10-08
+
+### Other
+
+- update Cargo.toml dependencies
+
 ### Added
 
 - `promote` command catalog, JSON schema, and recovery advice (heddle#1728).
