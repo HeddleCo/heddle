@@ -340,20 +340,33 @@ fn test_undo_capture_requires_hard_before_rewriting_worktree() {
     );
 }
 
+/// heddle#2017: Git records and checks out symlinks whatever their target, so
+/// a `.venv` interpreter link or a `../` link must capture, and `undo --hard`
+/// must restore both with their exact targets.
 #[test]
 #[cfg(unix)]
-fn test_capture_escaping_symlink_error_names_path_and_target() {
+fn test_escaping_symlinks_capture_and_restore_exactly() {
     let temp = TempDir::new().unwrap();
     drop(Repository::init_default(temp.path()).unwrap());
     std::fs::create_dir(temp.path().join(".git")).unwrap();
     std::fs::create_dir_all(temp.path().join(".venv/bin")).unwrap();
     std::os::unix::fs::symlink("/usr/bin/python3", temp.path().join(".venv/bin/python")).unwrap();
+    std::os::unix::fs::symlink("../outside", temp.path().join("rel-link")).unwrap();
+    heddle_must_succeed(&["capture", "-m", "links"], temp.path());
 
-    let error = heddle(&["capture", "-m", "venv"], Some(temp.path()))
-        .expect_err("escaping symlink must be rejected");
-    assert!(
-        error.contains(".venv/bin/python -> /usr/bin/python3"),
-        "{error}"
+    std::fs::remove_file(temp.path().join(".venv/bin/python")).unwrap();
+    std::fs::remove_file(temp.path().join("rel-link")).unwrap();
+    std::fs::write(temp.path().join("other.txt"), "other\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "drop links"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+
+    assert_eq!(
+        std::fs::read_link(temp.path().join(".venv/bin/python")).unwrap(),
+        std::path::Path::new("/usr/bin/python3")
+    );
+    assert_eq!(
+        std::fs::read_link(temp.path().join("rel-link")).unwrap(),
+        std::path::Path::new("../outside")
     );
 }
 
@@ -2160,6 +2173,105 @@ fn test_undo_list_hides_atomic_commit_marker_batches() {
         assert!(
             !only_markers,
             "undo --list must not surface a record-less commit-marker batch: {list}"
+        );
+    }
+}
+
+/// Every regular file beneath `root` (outside `.heddle`), read without
+/// following symlinks, so a test can assert no worktree file holds `needle`.
+#[cfg(unix)]
+fn worktree_files_containing(root: &std::path::Path, needle: &[u8]) -> Vec<std::path::PathBuf> {
+    let mut hits = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.strip_prefix(root).unwrap() == std::path::Path::new(".heddle") {
+                continue;
+            }
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && std::fs::read(&path)
+                    .unwrap()
+                    .windows(needle.len())
+                    .any(|window| window == needle)
+            {
+                hits.push(path);
+            }
+        }
+    }
+    hits
+}
+
+/// heddle#2017 review P1: `undo --hard` preserves the root `.heddleignore`
+/// across the reset. When `.heddleignore` is a tracked symlink to a secret
+/// outside the repository, undo must never copy the secret's bytes into the
+/// worktree, where the next capture or push would carry them out.
+#[test]
+#[cfg(unix)]
+fn test_undo_hard_never_copies_bytes_behind_a_symlinked_heddleignore() {
+    let temp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let secret = outside.path().join("id_ed25519");
+    std::fs::write(&secret, "PRIVATE-KEY-BYTES-2017\n").unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    std::os::unix::fs::symlink(&secret, temp.path().join(".heddleignore")).unwrap();
+    heddle_must_succeed(&["capture", "-m", "link the ignore file"], temp.path());
+
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+
+    assert_eq!(
+        worktree_files_containing(temp.path(), b"PRIVATE-KEY-BYTES-2017"),
+        Vec::<std::path::PathBuf>::new(),
+        "undo copied the bytes behind a symlinked .heddleignore into the worktree"
+    );
+    assert_eq!(std::fs::read(&secret).unwrap(), b"PRIVATE-KEY-BYTES-2017\n");
+}
+
+/// heddle#2017 review: deleting through a symlink, end to end. A state tracks
+/// `link/secret`; the worktree then holds `link` as an ignored symlink to an
+/// outside directory that also has a `secret`. Reverting that state, and
+/// `undo --hard` back past it, must never reach through `link` to delete the
+/// outside file. (The repository-level goto test drives the same deletion
+/// past the dirty gate.)
+#[test]
+#[cfg(unix)]
+fn test_revert_and_undo_never_delete_through_an_ignored_symlink() {
+    for verb in [&["revert", "HEAD"][..], &["undo", "--hard"][..]] {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        // Same bytes as the tracked file, so a status that read through the
+        // symlink would call the worktree clean and let the verb proceed.
+        std::fs::write(outside.path().join("secret"), "tracked\n").unwrap();
+        heddle_must_succeed(&["init"], temp.path());
+        std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+        heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+        std::fs::create_dir(temp.path().join("link")).unwrap();
+        std::fs::write(temp.path().join("link/secret"), "tracked\n").unwrap();
+        heddle_must_succeed(&["capture", "-m", "track link/secret"], temp.path());
+        std::fs::remove_dir_all(temp.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("link")).unwrap();
+        std::fs::create_dir_all(temp.path().join(".heddle/info")).unwrap();
+        std::fs::write(temp.path().join(".heddle/info/exclude"), "/link\n").unwrap();
+
+        // Both verbs refuse first: a symlink where a tracked directory was is
+        // an unsaved change even when ignored. That gate is part of the
+        // guarantee, so pin it along with the outcome.
+        let error = heddle(verb, Some(temp.path())).expect_err("dirty worktree must be refused");
+        assert!(error.contains("unsaved worktree path(s): link"), "{error}");
+
+        let _ = heddle(verb, Some(temp.path()));
+
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "tracked\n",
+            "`heddle {}` deleted a file through the `link` symlink",
+            verb.join(" ")
         );
     }
 }
