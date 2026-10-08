@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Resolve command implementation.
 
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -699,6 +699,7 @@ fn resolve_file_with_version(
         return Ok(());
     }
 
+    let path = Path::new(path);
     let full_path = repo.root().join(path);
 
     if ours {
@@ -708,7 +709,11 @@ fn resolve_file_with_version(
             .ok_or_else(|| anyhow!("Our state not found"))?;
         let our_tree = repo.require_tree(&our_state.tree)?;
 
-        if let Some(entry) = our_tree.get(path) {
+        if let Some(parent) = path.parent()
+            && let Some(tree) = repo.resolve_subtree(&our_tree, parent)?
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && let Some(entry) = tree.get(name)
+        {
             let Some(hash) = entry.leaf_content_hash() else {
                 return Ok(());
             };
@@ -722,7 +727,11 @@ fn resolve_file_with_version(
             .ok_or_else(|| anyhow!("Their state not found"))?;
         let their_tree = repo.require_tree(&their_state.tree)?;
 
-        if let Some(entry) = their_tree.get(path) {
+        if let Some(parent) = path.parent()
+            && let Some(tree) = repo.resolve_subtree(&their_tree, parent)?
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && let Some(entry) = tree.get(name)
+        {
             let Some(hash) = entry.leaf_content_hash() else {
                 return Ok(());
             };

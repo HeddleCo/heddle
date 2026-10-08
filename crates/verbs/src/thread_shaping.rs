@@ -392,9 +392,13 @@ fn restore_one_path(
     baseline_tree: Option<&objects::object::Tree>,
     path: &str,
 ) -> Result<()> {
+    let path = Path::new(path);
     let target_path = repo.root().join(path);
     if let Some(tree) = baseline_tree
-        && let Some(entry) = tree.get(path)
+        && let Some(parent) = path.parent()
+        && let Some(tree) = repo.resolve_subtree(tree, parent)?
+        && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && let Some(entry) = tree.get(name)
     {
         let Some(hash) = entry.leaf_content_hash() else {
             return Ok(());
