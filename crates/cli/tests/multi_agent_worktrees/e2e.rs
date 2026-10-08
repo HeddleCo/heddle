@@ -3087,7 +3087,22 @@ fn thread_list_shows_current_stacked_and_parallel_threads() {
 
 #[test]
 fn capture_split_moves_selected_dirty_paths_into_target_thread() {
+    capture_split_moves_selected_dirty_paths_into_target_thread_at_path("auth.rs");
+}
+
+#[test]
+fn capture_split_restores_nested_path_in_source() {
+    capture_split_moves_selected_dirty_paths_into_target_thread_at_path("a/b/c.txt");
+}
+
+fn capture_split_moves_selected_dirty_paths_into_target_thread_at_path(path: &str) {
     let main = setup_repo("base.txt", "base");
+    let has_baseline = path.contains('/');
+    if has_baseline {
+        fs::create_dir_all(main.path().join("a/b")).unwrap();
+        fs::write(main.path().join(path), "baseline").unwrap();
+        heddle(&["capture", "-m", "path baseline"], Some(main.path())).unwrap();
+    }
     let source_started: Value = serde_json::from_str(
         &heddle(
             &[
@@ -3121,7 +3136,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     let source_path = std::path::PathBuf::from(source_started["execution_path"].as_str().unwrap());
     let target_path = std::path::PathBuf::from(target_started["execution_path"].as_str().unwrap());
 
-    fs::write(source_path.join("auth.rs"), "auth impl").unwrap();
+    fs::write(source_path.join(path), "auth impl").unwrap();
     fs::write(source_path.join("search.rs"), "search impl").unwrap();
 
     let split: Value = serde_json::from_str(
@@ -3134,7 +3149,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
                 "--into",
                 "feature/target",
                 "--path",
-                "auth.rs",
+                path,
                 "-m",
                 "split auth",
             ],
@@ -3144,14 +3159,40 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     )
     .unwrap();
     assert_eq!(split["to_thread"], "feature/target");
-    assert!(!source_path.join("auth.rs").exists());
+    assert_eq!(split["moved_paths"], serde_json::json!([path]));
+    if has_baseline {
+        assert_eq!(
+            fs::read_to_string(source_path.join(path)).unwrap(),
+            "baseline"
+        );
+    } else {
+        assert!(!source_path.join(path).exists());
+    }
     assert!(source_path.join("search.rs").exists());
-    assert!(target_path.join("auth.rs").exists());
+    assert_eq!(
+        fs::read_to_string(target_path.join(path)).unwrap(),
+        "auth impl"
+    );
 }
 
 #[test]
 fn thread_move_reassigns_selected_captured_paths_between_threads() {
+    thread_move_reassigns_selected_captured_paths_between_threads_at_path("feature.rs");
+}
+
+#[test]
+fn thread_move_transfers_nested_path_and_restores_source() {
+    thread_move_reassigns_selected_captured_paths_between_threads_at_path("a/b/c.txt");
+}
+
+fn thread_move_reassigns_selected_captured_paths_between_threads_at_path(path: &str) {
     let main = setup_repo("base.txt", "base");
+    let has_baseline = path.contains('/');
+    if has_baseline {
+        fs::create_dir_all(main.path().join("a/b")).unwrap();
+        fs::write(main.path().join(path), "baseline").unwrap();
+        heddle(&["capture", "-m", "path baseline"], Some(main.path())).unwrap();
+    }
     let source_started: Value = serde_json::from_str(
         &heddle(
             &[
@@ -3185,8 +3226,10 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     let source_path = std::path::PathBuf::from(source_started["execution_path"].as_str().unwrap());
     let target_path = std::path::PathBuf::from(target_started["execution_path"].as_str().unwrap());
 
-    fs::write(source_path.join("feature.rs"), "moved work").unwrap();
+    fs::write(source_path.join(path), "moved work").unwrap();
     heddle(&["capture", "-m", "source work"], Some(&source_path)).unwrap();
+
+    fs::write(source_path.join(path), "uncaptured work").unwrap();
 
     let moved: Value = serde_json::from_str(
         &heddle(
@@ -3198,7 +3241,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
                 "feature/source",
                 "feature/target",
                 "--path",
-                "feature.rs",
+                path,
             ],
             Some(main.path()),
         )
@@ -3207,8 +3250,19 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     .unwrap();
     assert_eq!(moved["from_thread"], "feature/source");
     assert_eq!(moved["to_thread"], "feature/target");
-    assert!(!source_path.join("feature.rs").exists());
-    assert!(target_path.join("feature.rs").exists());
+    assert_eq!(moved["moved_paths"], serde_json::json!([path]));
+    if has_baseline {
+        assert_eq!(
+            fs::read_to_string(source_path.join(path)).unwrap(),
+            "baseline"
+        );
+    } else {
+        assert!(!source_path.join(path).exists());
+    }
+    assert_eq!(
+        fs::read_to_string(target_path.join(path)).unwrap(),
+        "moved work"
+    );
 }
 
 #[test]
