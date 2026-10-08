@@ -85,7 +85,10 @@ fn request_delegation(
 /// Source admission failures carry exact branch and tag counts.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportSourceRefError {
-    #[error("source has {branches} branches and {tags} tags ({total} refs); maximum is 512")]
+    #[error(
+        "source has {branches} branches and {tags} tags ({total} refs); maximum is {max}",
+        max = MAX_IMPORT_REFS
+    )]
     TooManyRefs {
         branches: usize,
         tags: usize,
@@ -662,20 +665,26 @@ mod tests {
                 matches!(ImportSourceRefs::from_names([ref_name.into()]), Err(ImportSourceRefError::InvalidBranch { ref_name: rejected, .. }) if rejected == ref_name)
             );
         }
+        assert_eq!(MAX_IMPORT_REFS, 4096);
         let names = std::iter::once("refs/heads/main".into())
-            .chain((0..512).map(|index| format!("refs/tags/{index}")));
+            .chain((0..MAX_IMPORT_REFS).map(|index| format!("refs/tags/{index}")));
+        let error = ImportSourceRefs::from_names(names).expect_err("4097 refs");
         assert!(matches!(
-            ImportSourceRefs::from_names(names),
-            Err(ImportSourceRefError::TooManyRefs {
+            error,
+            ImportSourceRefError::TooManyRefs {
                 branches: 1,
-                tags: 512,
-                total: 513
-            })
+                tags: 4096,
+                total: 4097
+            }
         ));
+        assert_eq!(
+            error.to_string(),
+            "source has 1 branches and 4096 tags (4097 refs); maximum is 4096"
+        );
         assert!(
             ImportSourceRefs::from_names(
                 std::iter::once("refs/heads/main".into())
-                    .chain((0..511).map(|index| format!("refs/tags/{index}")))
+                    .chain((0..MAX_IMPORT_REFS - 1).map(|index| format!("refs/tags/{index}")))
             )
             .is_ok()
         );
