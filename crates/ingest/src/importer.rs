@@ -920,16 +920,14 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         child: &TreeChild,
         path_prefix: &str,
     ) -> crate::Result<Option<TreeEntry>> {
-        let name = match classify_git_tree_name(&child.raw_name, path_prefix.is_empty()) {
+        let classification = classify_git_tree_name(
+            &child.raw_name,
+            path_prefix.is_empty(),
+            child.kind == TreeChildKind::Symlink,
+        )
+        .map_err(|reason| reserved_tree_entry_error(git_tree_sha, path_prefix, child, reason))?;
+        let name = match classification {
             GitTreeNameClassification::Representable(name) => name,
-            GitTreeNameClassification::Reserved(reason) => {
-                return Err(reserved_tree_entry_error(
-                    git_tree_sha,
-                    path_prefix,
-                    child,
-                    reason,
-                ));
-            }
             GitTreeNameClassification::NeedsLossy(lossy) => {
                 let path = join_tree_path(path_prefix, &lossy.name);
                 let entry = match lossy.action {
@@ -3168,7 +3166,7 @@ mod tests {
         use std::{io::Write, path::Path, process::Command};
 
         use objects::{
-            object::{MetadataDir, ThreadName},
+            object::{MetadataName, ThreadName},
             store::InMemoryStore,
         };
         use refs::refs::RefManager;
@@ -3281,7 +3279,7 @@ mod tests {
             pollster::block_on(importer.run()).map(drop)
         }
 
-        fn expect_reserved(result: crate::Result<()>, path: &str, dir: MetadataDir) {
+        fn expect_reserved(result: crate::Result<()>, path: &str, name: MetadataName) {
             match result {
                 Err(IngestError::ReservedTreeEntry {
                     tree,
@@ -3289,7 +3287,7 @@ mod tests {
                     reason,
                 }) => {
                     assert_eq!(actual, path);
-                    assert_eq!(reason.dir, dir, "{path}");
+                    assert_eq!(reason.name, name, "{path}");
                     assert_eq!(tree.len(), 40, "names the Git tree: {tree}");
                     let message = IngestError::ReservedTreeEntry {
                         tree: tree.clone(),
@@ -3328,15 +3326,13 @@ mod tests {
                     let source = TempDir::new().unwrap();
                     seed_hostile_repo(source.path(), &components);
                     for lossy in [false, true] {
-                        expect_reserved(import(source.path(), lossy), &path, MetadataDir::Git);
+                        expect_reserved(import(source.path(), lossy), &path, MetadataName::Git);
                     }
-                    match OverlayHistory::open(source.path(), "main") {
-                        Err(IngestError::ReservedTreeEntry { path: actual, .. }) => {
-                            assert_eq!(actual, path);
-                        }
-                        Err(other) => panic!("{path}: overlay history: {other}"),
-                        Ok(_) => panic!("{path}: overlay history accepted the tree"),
-                    }
+                    // Log and blame never write a worktree, so the read-only
+                    // projection keeps working (a `\` name is unrepresentable
+                    // regardless).
+                    let overlay = OverlayHistory::open(source.path(), "main");
+                    assert_eq!(overlay.is_ok(), !alias.contains(&b'\\'), "{path}");
                 }
             }
         }
@@ -3348,14 +3344,68 @@ mod tests {
                 b".HEDDLE",
                 b".heddle.",
                 b"HEDDLE~1",
+                b"heddle~2",
+                b"Heddle~3",
+                b"HEDDLE~4",
                 ".hed\u{200c}dle".as_bytes(),
             ] {
                 let source = TempDir::new().unwrap();
                 seed_hostile_repo(source.path(), &[alias, b"hooks"]);
                 let path = String::from_utf8_lossy(alias).into_owned();
-                expect_reserved(import(source.path(), true), &path, MetadataDir::Heddle);
-                assert!(OverlayHistory::open(source.path(), "main").is_err());
+                expect_reserved(import(source.path(), true), &path, MetadataName::Heddle);
             }
+        }
+
+        /// `.gitmodules` may not be a symlink, in any spelling Git refuses
+        /// (`verify_path`, fsck `gitmodulesSymlink`); a regular file is fine.
+        #[test]
+        fn import_refuses_gitmodules_symlinks() {
+            for (name, nested) in [
+                (b".gitmodules".as_slice(), false),
+                (b".GITMODULES", false),
+                (b"GITMOD~1", false),
+                (b"gi7eba~1", true),
+                (b".gitmodules.", true),
+            ] {
+                let source = TempDir::new().unwrap();
+                init(source.path());
+                let target = blob(source.path(), b"/etc/passwd");
+                let mut tree = raw_tree(source.path(), &[("120000", name, &target)]);
+                if nested {
+                    tree = raw_tree(source.path(), &[("40000", b"sub", &tree)]);
+                }
+                let tip = commit(source.path(), &tree, None);
+                git(
+                    source.path(),
+                    &["update-ref", "refs/heads/main", &tip],
+                    None,
+                );
+                let display = String::from_utf8_lossy(name);
+                let path = if nested {
+                    format!("sub/{display}")
+                } else {
+                    display.into_owned()
+                };
+                for lossy in [false, true] {
+                    expect_reserved(
+                        import(source.path(), lossy),
+                        &path,
+                        MetadataName::GitModules,
+                    );
+                }
+            }
+
+            let source = TempDir::new().unwrap();
+            init(source.path());
+            let file = blob(source.path(), b"[submodule \"x\"]\n");
+            let tree = raw_tree(source.path(), &[("100644", b".gitmodules", &file)]);
+            let tip = commit(source.path(), &tree, None);
+            git(
+                source.path(),
+                &["update-ref", "refs/heads/main", &tip],
+                None,
+            );
+            import(source.path(), false).expect("a regular .gitmodules imports");
         }
 
         /// A nested `.heddle` is a tracked fixture (weft keeps
@@ -3407,15 +3457,11 @@ mod tests {
                 None,
             );
 
-            expect_reserved(import(source.path(), false), ".heddle", MetadataDir::Heddle);
-            assert!(OverlayHistory::open(source.path(), "main").is_err());
-            // The first commit alone is fine: its `.heddle` is nested.
-            git(
-                source.path(),
-                &["update-ref", "refs/heads/first", &first],
-                None,
+            expect_reserved(
+                import(source.path(), false),
+                ".heddle",
+                MetadataName::Heddle,
             );
-            OverlayHistory::open(source.path(), "first").expect("nested .heddle projects");
         }
 
         #[test]

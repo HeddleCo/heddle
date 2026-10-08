@@ -189,11 +189,12 @@ pub(crate) fn reserved_tree_entry_error(
 }
 
 /// Refuse Git tree `tree_sha` as a commit's root tree if any direct child
-/// is reserved there (`.git` or `.heddle` aliases). Used when the tree was
+/// is reserved there (`.git`, `.heddle` or `.gitmodules`-symlink aliases). Used when the tree was
 /// already translated, possibly as a subtree, where `.heddle` is allowed.
 pub(crate) fn reject_reserved_root_entries(git: &GitSource, tree_sha: &str) -> crate::Result<()> {
     for child in git.read_tree(tree_sha)? {
-        if let Some(reason) = reserved_tree_entry_name(&child.raw_name, true) {
+        let symlink = child.kind == TreeChildKind::Symlink;
+        if let Some(reason) = reserved_tree_entry_name(&child.raw_name, true, symlink) {
             return Err(reserved_tree_entry_error(tree_sha, "", &child, reason));
         }
     }

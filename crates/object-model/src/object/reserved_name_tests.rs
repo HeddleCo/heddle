@@ -5,10 +5,13 @@ fn reason(name: &str) -> Option<ReservedMetadataName> {
     reserved_metadata_name(name.as_bytes())
 }
 
-fn expect(name: &str, dir: MetadataDir, alias: MetadataAlias) {
+fn expect(name: &str, target: MetadataName, alias: MetadataAlias) {
     assert_eq!(
         reason(name),
-        Some(ReservedMetadataName { dir, alias }),
+        Some(ReservedMetadataName {
+            name: target,
+            alias
+        }),
         "{name:?}"
     );
 }
@@ -36,7 +39,7 @@ fn every_git_alias_is_reserved() {
         (".GI\u{206f}T\u{200d}", HfsIgnorable),
         (".\u{202a}g\u{202e}it", HfsIgnorable),
     ] {
-        expect(name, MetadataDir::Git, alias);
+        expect(name, MetadataName::Git, alias);
     }
 }
 
@@ -52,10 +55,13 @@ fn every_heddle_alias_is_reserved() {
         (".heddle::$INDEX_ALLOCATION", NtfsStream),
         (".heddle\\hooks", BackslashSeparator),
         ("HEDDLE~1", NtfsShortName),
+        ("heddle~2", NtfsShortName),
+        ("Heddle~3.", NtfsShortName),
+        ("HEDDLE~4", NtfsShortName),
         ("heddle~1:x", NtfsShortName),
         (".hed\u{200c}dle", HfsIgnorable),
     ] {
-        expect(name, MetadataDir::Heddle, alias);
+        expect(name, MetadataName::Heddle, alias);
     }
 }
 
@@ -79,7 +85,9 @@ fn ordinary_dotfiles_are_not_reserved() {
         "heddle",
         "GIT~2",
         "git~10",
-        "HEDDLE~2",
+        "HEDDLE~5",
+        "HEDDLE~10",
+        "HEDDL~1",
         "x.git",
         ".g\u{200b}it", // U+200B is not one HFS+ ignores
         ".gıt",         // dotless i does not fold to ASCII
@@ -95,7 +103,7 @@ fn malformed_utf8_ends_the_name_like_git() {
     assert_eq!(
         reserved_metadata_name(b".git\xff"),
         Some(ReservedMetadataName {
-            dir: MetadataDir::Git,
+            name: MetadataName::Git,
             alias: MetadataAlias::HfsIgnorable,
         })
     );
@@ -104,23 +112,23 @@ fn malformed_utf8_ends_the_name_like_git() {
 
 #[test]
 fn heddle_is_reserved_only_at_the_root() {
-    assert!(reserved_tree_entry_name(b".heddle", true).is_some());
-    assert!(reserved_tree_entry_name(b".HEDDLE", true).is_some());
-    assert_eq!(reserved_tree_entry_name(b".heddle", false), None);
-    assert_eq!(reserved_tree_entry_name(b"HEDDLE~1", false), None);
-    assert!(reserved_tree_entry_name(b".git", false).is_some());
-    assert!(reserved_tree_entry_name(b"GIT~1", false).is_some());
+    assert!(reserved_tree_entry_name_at(b".heddle", true).is_some());
+    assert!(reserved_tree_entry_name_at(b".HEDDLE", true).is_some());
+    assert_eq!(reserved_tree_entry_name_at(b".heddle", false), None);
+    assert_eq!(reserved_tree_entry_name_at(b"HEDDLE~1", false), None);
+    assert!(reserved_tree_entry_name_at(b".git", false).is_some());
+    assert!(reserved_tree_entry_name_at(b"GIT~1", false).is_some());
     assert!(is_reserved_metadata_name(".heddle"));
 }
 
 #[test]
 fn path_components_apply_the_depth_rule() {
-    let found = |path: &str| reserved_path_component(path.as_bytes());
+    let found = |path: &str| reserved_path_component(path.as_bytes(), false);
 
     let nested = found("a/.git/hooks/x").expect("nested .git");
     assert_eq!(nested.index, 1);
     assert_eq!(nested.component, ".git");
-    assert_eq!(nested.reason.dir, MetadataDir::Git);
+    assert_eq!(nested.reason.name, MetadataName::Git);
 
     for path in [
         ".git",
@@ -149,18 +157,22 @@ fn path_components_apply_the_depth_rule() {
 
 #[test]
 fn reasons_name_the_directory_and_the_alias() {
-    let message = reserved_path_component(b"a/GIT~1/x").unwrap().to_string();
+    let message = reserved_path_component(b"a/GIT~1/x", false)
+        .unwrap()
+        .to_string();
     assert_eq!(
         message,
-        "'GIT~1' is the NTFS 8.3 short name of the .git metadata directory"
+        "'GIT~1' is an NTFS 8.3 short name of the .git metadata directory"
     );
 }
 
-/// A peer cannot send a tree holding a `.git` alias: every decoder refuses
-/// it. The bytes are made by encoding a same-length placeholder name and
-/// swapping the alias in, since no constructor will build such a tree.
+/// Decoding stays permissive: repositories captured before heddle#2028 can
+/// hold a nested `.git` (a vendored clone, a submodule's gitfile), and they
+/// must stay readable. Import refuses these names and checkout never writes
+/// them; a stored tree that carries one still constructs, encodes and
+/// decodes.
 #[test]
-fn wire_trees_with_a_git_alias_do_not_decode() {
+fn stored_trees_with_a_git_alias_still_decode() {
     use crate::object::{ContentHash, Tree, TreeEntry};
 
     for alias in [
@@ -172,35 +184,85 @@ fn wire_trees_with_a_git_alias_do_not_decode() {
         ".git::$INDEX_ALLOCATION",
         ".g\u{200c}it",
     ] {
-        assert!(
-            TreeEntry::file(alias, ContentHash::compute(b"x"), false).is_err(),
-            "{alias:?} must not construct"
-        );
-        let placeholder = "Q".repeat(alias.len());
         let tree = Tree::from_entries(vec![
-            TreeEntry::file(placeholder.as_str(), ContentHash::compute(b"hook"), true).unwrap(),
+            TreeEntry::file(alias, ContentHash::compute(b"gitdir: ../x"), false).unwrap(),
         ]);
-        let swap = |mut bytes: Vec<u8>| {
-            let at = bytes
-                .windows(alias.len())
-                .position(|window| window == placeholder.as_bytes())
-                .expect("placeholder name in encoding");
-            bytes[at..at + alias.len()].copy_from_slice(alias.as_bytes());
-            bytes
-        };
-
-        let msgpack = swap(rmp_serde::to_vec_named(&tree).unwrap());
-        let error = rmp_serde::from_slice::<Tree>(&msgpack).unwrap_err();
-        assert!(
-            error.to_string().contains("metadata directory"),
-            "{alias:?}: {error}"
+        let msgpack = rmp_serde::to_vec_named(&tree).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<Tree>(&msgpack).unwrap(),
+            tree,
+            "{alias:?}"
         );
-
-        let canonical = swap(tree.encode_canonical().unwrap());
-        let error = Tree::decode_canonical(&canonical).unwrap_err();
-        assert!(
-            error.to_string().contains("metadata directory"),
-            "{alias:?}: {error}"
+        let canonical = tree.encode_canonical().unwrap();
+        assert_eq!(
+            Tree::decode_canonical(&canonical).unwrap(),
+            tree,
+            "{alias:?}"
         );
     }
+}
+
+#[test]
+fn gitmodules_is_reserved_only_as_a_symlink() {
+    use MetadataAlias::*;
+    for (name, alias) in [
+        (".gitmodules", Exact),
+        (".GITMODULES", Case),
+        (".gitmodules.", TrailingDotsOrSpaces),
+        (".gitmodules::$DATA", NtfsStream),
+        ("GITMOD~1", NtfsShortName),
+        ("gitmod~4", NtfsShortName),
+        ("GI7EBA~1", NtfsShortName),
+        ("gi7eba~9", NtfsShortName),
+        ("gi7eb~12", NtfsShortName),
+        (".git\u{200c}modules", HfsIgnorable),
+    ] {
+        assert_eq!(
+            reserved_tree_entry_name(name.as_bytes(), false, true),
+            Some(ReservedMetadataName {
+                name: MetadataName::GitModules,
+                alias
+            }),
+            "{name:?}"
+        );
+        assert_eq!(
+            reserved_tree_entry_name(name.as_bytes(), true, false),
+            None,
+            "{name:?} as a file"
+        );
+    }
+    for name in [
+        "gitmod~5",
+        "gi7eba~0",
+        "gi7ebc~1",
+        ".gitmodule",
+        ".gitmodulesx",
+    ] {
+        assert_eq!(
+            reserved_tree_entry_name(name.as_bytes(), false, true),
+            None,
+            "{name:?}"
+        );
+    }
+    assert!(reserved_path_component(b"sub/.gitmodules", true).is_some());
+    assert!(reserved_path_component(b".gitmodules/x", true).is_none());
+    assert!(reserved_path_component(b"sub/.gitmodules", false).is_none());
+}
+
+#[test]
+fn only_the_exact_root_metadata_is_the_repositorys_own() {
+    let own = |path: &str| {
+        reserved_path_component(path.as_bytes(), false)
+            .unwrap()
+            .is_own_metadata()
+    };
+    assert!(own(".git/config"));
+    assert!(own(".heddle/config.toml"));
+    assert!(!own("vendor/.git/config"));
+    assert!(!own(".GIT/config"));
+    assert!(!own("GIT~1"));
+}
+
+fn reserved_tree_entry_name_at(name: &[u8], at_root: bool) -> Option<ReservedMetadataName> {
+    reserved_tree_entry_name(name, at_root, false)
 }

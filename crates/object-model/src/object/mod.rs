@@ -105,7 +105,7 @@ pub use redaction::{
     Redaction, RedactionError, RedactionsBlob,
 };
 pub use reserved_name::{
-    MetadataAlias, MetadataDir, ReservedMetadataName, ReservedPathComponent,
+    MetadataAlias, MetadataName, ReservedMetadataName, ReservedPathComponent,
     is_reserved_metadata_name, reserved_metadata_name, reserved_path_component,
     reserved_tree_entry_name,
 };

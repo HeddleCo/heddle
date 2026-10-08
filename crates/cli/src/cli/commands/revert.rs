@@ -64,10 +64,12 @@ pub fn cmd_revert(
 
     ensure_worktree_clean(&repo, "revert")?;
 
-    // Refuse before any file is touched (heddle#2028).
-    for change in &changes {
-        objects::worktree::check_worktree_write_path(std::path::Path::new(&change.path))?;
-    }
+    // Skip, with a warning, paths Heddle never writes (heddle#2028).
+    let mut writable = objects::object::FileChangeSet::new();
+    writable.extend(changes.into_iter().filter(|change| {
+        !repo::skip_reserved_worktree_write(std::path::Path::new(&change.path), false)
+    }));
+    let changes = writable;
 
     let mut files_affected: Vec<String> = Vec::new();
 

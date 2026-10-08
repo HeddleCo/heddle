@@ -19,5 +19,6 @@ pub use worktree_ignore::{
 };
 pub use worktree_reserved::{
     check_worktree_write_path, is_reserved_directory_child, is_reserved_worktree_path,
+    reserved_worktree_write,
 };
 pub use worktree_types::{FileStatus, WorktreeChange, WorktreeStatus};
