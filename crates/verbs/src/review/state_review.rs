@@ -726,23 +726,35 @@ fn compute_state_diff_summary(
     state: &State,
     base_state_id: Option<StateId>,
 ) -> objects::error::Result<DiffSummary> {
-    use objects::object::Tree;
-    let parent_id = base_state_id.as_ref().or_else(|| state.parents.first());
-    let parent_tree_hash = if let Some(parent_id) = parent_id {
-        repo.store()
-            .get_state(parent_id)?
-            .ok_or_else(|| objects::HeddleError::MissingObject {
-                object_type: "state".to_string(),
-                id: parent_id.to_string_full(),
-            })?
-            .tree
-    } else {
-        Tree::new().hash()
-    };
+    use std::ops::ControlFlow;
 
-    let parent_tree_obj = repo.require_tree(&parent_tree_hash)?;
+    use objects::object::{FileChangeSet, diff_trees_visit};
+    let parent_id = base_state_id.as_ref().or_else(|| state.parents.first());
+    let parent_tree_hash = match parent_id {
+        Some(parent_id) => Some(
+            repo.store()
+                .get_state(parent_id)?
+                .ok_or(objects::HeddleError::StateNotFound(*parent_id))?
+                .tree,
+        ),
+        None => None,
+    };
+    let parent_tree_obj = parent_tree_hash
+        .as_ref()
+        .map(|hash| repo.require_tree(hash))
+        .transpose()?;
     let new_tree_obj = repo.require_tree(&state.tree)?;
-    let changes = repo.diff_trees(&parent_tree_hash, &state.tree)?;
+    let mut changes = FileChangeSet::new();
+    let _ = diff_trees_visit(
+        repo.store(),
+        parent_tree_hash.as_ref(),
+        &state.tree,
+        |change| {
+            changes.push(change);
+            ControlFlow::<()>::Continue(())
+        },
+    )
+    .map_err(objects::HeddleError::from)?;
 
     // Compute per-file line deltas. We only count `Modified` here for
     // the symmetric add/remove totals; `Added` files contribute every
@@ -754,7 +766,10 @@ fn compute_state_diff_summary(
     let mut removed_lines: u32 = 0;
     let mut changed_paths: Vec<ChangedPath> = Vec::with_capacity(changes.len());
 
-    let parent_files = collect_files(repo, &parent_tree_obj, "")?;
+    let parent_files = match parent_tree_obj.as_ref() {
+        Some(tree) => collect_files(repo, tree, "")?,
+        None => std::collections::HashMap::new(),
+    };
     let new_files = collect_files(repo, &new_tree_obj, "")?;
 
     let mut added_files: u32 = 0;

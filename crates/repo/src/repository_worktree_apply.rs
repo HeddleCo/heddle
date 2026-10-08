@@ -1177,10 +1177,7 @@ fn remove_tracked_descendants_inner(
                 let Some(tree_hash) = entry.tree_hash() else {
                     continue;
                 };
-                let nested = match repo.store().get_tree(&tree_hash)? {
-                    Some(t) => t,
-                    None => continue,
-                };
+                let nested = repo.require_tree(&tree_hash)?;
                 remove_tracked_descendants_inner(repo, &child, &nested)?;
             }
         }

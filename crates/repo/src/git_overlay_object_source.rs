@@ -181,31 +181,24 @@ impl ExternalObjectSource for GitOverlayObjectSource {
         let oid = ObjectId::from_hex(git.object_format(), &git_sha).map_err(|error| {
             HeddleError::Config(format!("parse mapped Git tree {git_sha}: {error}"))
         })?;
-        let object = if oid == ObjectId::empty_tree(git.object_format()) {
-            None
-        } else {
-            let object = match git.read_object(&oid) {
+        let object = match git.read_object(&oid) {
+            Ok(object) => object,
+            Err(sley::GitError::NotFound(_)) => match self.refresh_git()?.read_object(&oid) {
                 Ok(object) => object,
-                Err(sley::GitError::NotFound(_)) => match self.refresh_git()?.read_object(&oid) {
-                    Ok(object) => object,
-                    Err(sley::GitError::NotFound(_)) => {
-                        return Err(mapped_object_missing("tree", &git_sha));
-                    }
-                    Err(error) => return Err(git_read_error(error)),
-                },
+                Err(sley::GitError::NotFound(_)) => {
+                    return Err(mapped_object_missing("tree", &git_sha));
+                }
                 Err(error) => return Err(git_read_error(error)),
-            };
-            if object.object_type != sley::GitObjectType::Tree {
-                return Err(HeddleError::InvalidObject(format!(
-                    "mapped Git tree {git_sha} is a {}",
-                    object.object_type.as_str()
-                )));
-            }
-            Some(object)
+            },
+            Err(error) => return Err(git_read_error(error)),
         };
-        let body = object
-            .as_ref()
-            .map_or(&[][..], |object| object.body.as_slice());
+        if object.object_type != sley::GitObjectType::Tree {
+            return Err(HeddleError::InvalidObject(format!(
+                "mapped Git tree {git_sha} is a {}",
+                object.object_type.as_str()
+            )));
+        }
+        let body = object.body.as_slice();
         // Read the raw tree so a non-canonical source (odd modes, source
         // order) translates to the same native tree the importer stored.
         let children = parse_git_tree(git.object_format(), body)
@@ -336,9 +329,10 @@ fn missing_mapping(kind: &str, oid: &ObjectId, parent: &str) -> HeddleError {
 }
 
 fn mapped_object_missing(kind: &str, git_sha: &str) -> HeddleError {
-    HeddleError::NotFound(format!(
-        "Git-overlay identity map references missing authoritative Git {kind} {git_sha}"
-    ))
+    HeddleError::MissingObject {
+        object_type: kind.to_string(),
+        id: git_sha.to_string(),
+    }
 }
 
 fn db_error(error: rusqlite::Error) -> HeddleError {
@@ -525,9 +519,10 @@ mod tests {
         ] {
             let error = result.expect_err("mapped Git object absence must be visible");
             assert!(
-                matches!(error, HeddleError::NotFound(ref message) if message.contains(kind) && message.contains("identity map")),
+                matches!(&error, HeddleError::MissingObject { object_type, id } if object_type == kind && id == if kind == "tree" { missing_tree_oid } else { missing_blob_oid }),
                 "{error}"
             );
+            assert!(error.to_string().contains("not available locally"));
         }
     }
 }

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Revert command - create inverse of a state's changes.
 
-use std::fs;
+use std::{fs, ops::ControlFlow};
 
 use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::RevertOutput;
-use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
+use objects::object::{
+    Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree, diff_trees_visit,
+};
 use repo::{DiffKind, Repository};
 use verbs::{
     RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
@@ -49,14 +51,17 @@ pub fn cmd_revert(
     // error. `require_tree` carries the fsck recovery hint.
     let target_tree = repo.require_tree(&target_state.tree)?;
 
-    let empty_tree = Tree::new();
-    let parent_hash = if target_state.first_parent().is_some() {
-        parent_tree.hash()
-    } else {
-        empty_tree.hash()
-    };
-
-    let changes = repo.diff_trees(&parent_hash, &target_state.tree)?;
+    let parent_hash = target_state.first_parent().map(|_| parent_tree.hash());
+    let mut changes = FileChangeSet::new();
+    let _ = diff_trees_visit(
+        repo.store(),
+        parent_hash.as_ref(),
+        &target_state.tree,
+        |change| {
+            changes.push(change);
+            ControlFlow::<()>::Continue(())
+        },
+    )?;
 
     if matches!(plan_revert(changes.len()), RevertPlan::NoChanges) {
         return Err(anyhow!(no_changes_to_revert_advice(&target_short)));

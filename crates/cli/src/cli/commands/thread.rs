@@ -214,7 +214,7 @@ fn collect_thread_captures(
             .as_deref()
             .is_some_and(|intent| !intent.starts_with("Bootstrap "))
         {
-            let summary = capture_diff_summary(repo, &state);
+            let summary = capture_diff_summary(repo, &state)?;
             out.push(thread_capture_output(&state, summary));
         }
         if out.len() >= limit {
@@ -225,20 +225,23 @@ fn collect_thread_captures(
     Ok(out)
 }
 
-/// Summarize the file-count delta between a state and its first
-/// parent. Best-effort: returns `None` when there is no parent (root
-/// capture) or when the parent state isn't materialized in the local
-/// store (e.g. shallow imports).
-fn capture_diff_summary(repo: &Repository, state: &State) -> Option<ThreadCaptureSummary> {
-    let parent_id = state.parents.first().copied()?;
-    let parent = repo.store().get_state(&parent_id).ok().flatten()?;
-    let changes = repo.diff_trees(&parent.tree, &state.tree).ok()?;
-    Some(ThreadCaptureSummary {
+/// Summarize the file-count delta between a state and its first parent.
+/// Root captures have no parent summary; recorded parents and trees must resolve.
+fn capture_diff_summary(repo: &Repository, state: &State) -> Result<Option<ThreadCaptureSummary>> {
+    let Some(parent_id) = state.parents.first() else {
+        return Ok(None);
+    };
+    let parent = repo
+        .store()
+        .get_state(parent_id)?
+        .ok_or(HeddleError::StateNotFound(*parent_id))?;
+    let changes = repo.diff_trees(&parent.tree, &state.tree)?;
+    Ok(Some(ThreadCaptureSummary {
         added: changes.added_count(),
         modified: changes.modified_count(),
         deleted: changes.deleted_count(),
         total: changes.len(),
-    })
+    }))
 }
 
 fn thread_capture_output(

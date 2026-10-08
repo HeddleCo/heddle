@@ -11,7 +11,6 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     object::{ContentHash, Tree, TreeEntry},
-    store::ObjectStore,
     worktree::{is_reserved_directory_child, reserved_worktree_write},
 };
 
@@ -305,7 +304,7 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                         .map(
                             |hash| match policy.cached_tree_for_entry(&child_rel_path, &hash) {
                                 Some(tree) => Ok(Some(tree)),
-                                None => repo.store().get_tree(&hash),
+                                None => repo.require_tree(&hash).map(Some),
                             },
                         )
                         .transpose()?

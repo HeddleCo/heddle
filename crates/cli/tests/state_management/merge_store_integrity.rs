@@ -110,7 +110,7 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
          a clean Ok here means the silent-corruption bug regressed",
     );
     assert!(
-        err.contains("missing from the object store"),
+        err.contains("missing tree object") && err.contains("not available locally"),
         "refresh error must surface the missing-subtree diagnostic so the \
          operator can tell store corruption from a normal merge conflict; \
          got: {err}"

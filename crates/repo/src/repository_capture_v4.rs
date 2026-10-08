@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use objects::{
     error::HeddleError,
     object::{ContentHash, Tree, TreeEntry, TreeEntryTarget, TreeScheme},
-    store::{ObjectStore, TreeWrite},
+    store::TreeWrite,
 };
 
 use crate::{Repository, Result};
@@ -87,7 +87,7 @@ impl Repository {
                         .and_then(TreeEntry::tree_hash)
                     {
                         Some(parent_hash) => {
-                            self.resolve_capture_tree_opt(&parent_hash, pending)?
+                            Some(self.resolve_capture_tree(&parent_hash, pending)?)
                         }
                         None => None,
                     };
@@ -116,31 +116,16 @@ impl Repository {
         Tree::from_entries_salted_v4(entries, salts).map_err(HeddleError::from)
     }
 
-    /// Resolve a subtree by hash: the pending capture set first, then the store.
-    fn resolve_capture_tree_opt(
-        &self,
-        hash: &ContentHash,
-        pending: &HashMap<ContentHash, Tree>,
-    ) -> Result<Option<Tree>> {
-        if let Some(tree) = pending.get(hash) {
-            return Ok(Some(tree.clone()));
-        }
-        self.store.get_tree(hash)
-    }
-
-    /// Resolve a subtree that must exist (a child named by the tree under
-    /// conversion). A missing subtree is a hard error — for the capture path the
-    /// pending set plus the store always contain every referenced subtree.
+    /// Resolve a referenced subtree from the pending capture set or the store.
     fn resolve_capture_tree(
         &self,
         hash: &ContentHash,
         pending: &HashMap<ContentHash, Tree>,
     ) -> Result<Tree> {
-        self.resolve_capture_tree_opt(hash, pending)?
-            .ok_or_else(|| HeddleError::MissingObject {
-                object_type: "tree".to_string(),
-                id: hash.to_string(),
-            })
+        if let Some(tree) = pending.get(hash) {
+            return Ok(tree.clone());
+        }
+        self.require_tree(hash)
     }
 }
 
@@ -199,6 +184,35 @@ mod tests {
         let temp = TempDir::new().expect("repository directory");
         let repo = crate::init_test_repository(temp.path()).expect("native repository");
         (temp, repo)
+    }
+
+    #[test]
+    fn capture_missing_parent_subtree_is_not_absent() {
+        use objects::{
+            HeddleError,
+            object::{Blob, Tree, TreeEntry},
+        };
+        let (_temp, repo) = native_repo();
+        let old_blob = repo.store().put_blob(&Blob::from_slice(b"old\n")).unwrap();
+        let missing_child =
+            Tree::from_entries(vec![TreeEntry::file("file.txt", old_blob, false).unwrap()]);
+        let missing_hash = missing_child.hash();
+        let parent =
+            Tree::from_entries(vec![TreeEntry::directory("nested", missing_hash).unwrap()]);
+        repo.store().put_tree(&parent).unwrap();
+        assert!(repo.store().get_tree(&missing_hash).unwrap().is_none());
+        let new_blob = repo.store().put_blob(&Blob::from_slice(b"new\n")).unwrap();
+        let child = Tree::from_entries(vec![TreeEntry::file("file.txt", new_blob, false).unwrap()]);
+        let child_hash = repo.store().put_tree(&child).unwrap();
+        let root = Tree::from_entries(vec![TreeEntry::directory("nested", child_hash).unwrap()]);
+        let error = repo
+            .v4ify_capture_tree(&root, &[], Some(&parent))
+            .expect_err("a missing recorded parent subtree must not mint a new lineage");
+        assert!(
+            matches!(&error, HeddleError::MissingObject { object_type, id } if object_type == "tree" && id == &missing_hash.to_hex()),
+            "{error}"
+        );
+        assert!(error.to_string().contains("not available locally"));
     }
 
     #[test]

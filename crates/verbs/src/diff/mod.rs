@@ -158,10 +158,12 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
         None
     };
     let status_options = ctx.worktree_status_options();
-    let from_hash = from_state
-        .as_ref()
-        .map(|state| state.tree)
-        .unwrap_or_else(|| Tree::new().hash());
+    let from_hash = match &from_state {
+        Some(state) => state.tree,
+        // An unborn repository has no recorded baseline. Semantic loaders
+        // need an actual tree object for that explicitly empty input.
+        None => repo.store().put_tree(&Tree::new())?,
+    };
 
     let semantic_diff_result = if options.semantic {
         if let Some(ref to_state) = to_state {

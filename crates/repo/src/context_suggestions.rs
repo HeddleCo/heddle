@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context rewrite scoring and low-noise suggestion heuristics.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
+};
 
 pub use objects::object::{
     ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
 };
 use objects::{
-    object::{ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions},
+    object::{
+        ContextTarget, State, SuggestionInputs, SuggestionSignal, diff_trees_visit,
+        score_suggestions,
+    },
     store::ObjectStore,
 };
 
@@ -24,34 +30,38 @@ impl Repository {
         let mut signals: BTreeMap<String, SuggestionSignal> = BTreeMap::new();
 
         for (index, candidate) in history.iter().enumerate() {
-            let parent_tree = candidate
-                .first_parent()
-                .and_then(|parent_id| self.store().get_state(parent_id).ok().flatten())
-                .map(|parent| parent.tree);
-
-            let changes = if let Some(parent_tree) = parent_tree {
-                self.diff_trees(&parent_tree, &candidate.tree)?
-            } else {
-                self.diff_trees(&objects::object::Tree::new().hash(), &candidate.tree)?
+            let parent_tree = match candidate.first_parent() {
+                Some(parent_id) => Some(
+                    self.store()
+                        .get_state(parent_id)?
+                        .ok_or(crate::HeddleError::StateNotFound(*parent_id))?
+                        .tree,
+                ),
+                None => None,
             };
-
-            for change in changes {
-                let signal = signals.entry(change.path).or_default();
-                signal.recent_changes += 1;
-                signal
-                    .distinct_states
-                    .insert(candidate.id().to_string_full());
-                if let Some(agent) = &candidate.attribution.agent {
+            let _ = diff_trees_visit(
+                self.store(),
+                parent_tree.as_ref(),
+                &candidate.tree,
+                |change| {
+                    let signal = signals.entry(change.path).or_default();
+                    signal.recent_changes += 1;
                     signal
-                        .distinct_agents
-                        .insert(format!("{}/{}", agent.provider, agent.model));
-                }
-                signal.latest_seen_index = Some(
-                    signal
-                        .latest_seen_index
-                        .map_or(index, |current| current.min(index)),
-                );
-            }
+                        .distinct_states
+                        .insert(candidate.id().to_string_full());
+                    if let Some(agent) = &candidate.attribution.agent {
+                        signal
+                            .distinct_agents
+                            .insert(format!("{}/{}", agent.provider, agent.model));
+                    }
+                    signal.latest_seen_index = Some(
+                        signal
+                            .latest_seen_index
+                            .map_or(index, |current| current.min(index)),
+                    );
+                    ControlFlow::<()>::Continue(())
+                },
+            )?;
         }
 
         let stale_map = staleness::check_context_staleness(self, state)?;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Snapshot operations for Repository.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use objects::{
     lock::RepositoryLockExt,
@@ -96,6 +96,7 @@ mod contention_retry_tests {
                     mode: crate::FsMonitorMode::Off,
                 },
             ),
+            &[],
         );
         let entry = WalkEntry {
             path: &path,
@@ -166,7 +167,7 @@ struct SnapshotMutation<'a> {
     /// worktree-derived — so it runs entirely in V3 against this tree, never the
     /// committed (possibly V4) tree. For a v3 spool this equals the committed
     /// tree; for a v4 spool it is the flat tree the walker produced.
-    worktree_revalidation_tree: Option<Tree>,
+    worktree_revalidation_tree: Option<(Tree, Vec<TreeWrite>)>,
     worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
     worktree_revalidation_cutoff_ns: Option<i64>,
     worktree_monitor_token: Option<ChangeMonitorToken>,
@@ -417,12 +418,18 @@ impl SnapshotMutation<'_> {
         // Revalidate against the flat V3 tree the walker produced, not the
         // committed (possibly v4) tree. Worktree identity is scheme-independent;
         // salts are lineage-derived and irrelevant to "did the worktree change".
-        let revalidation_tree = self.worktree_revalidation_tree.as_ref().ok_or_else(|| {
-            HeddleError::Config("snapshot preparation omitted its revalidation tree".to_string())
-        })?;
-        let walked =
-            self.repo
-                .snapshot_worktree_fingerprint(revalidation_tree, files, cutoff_ns)?;
+        let (revalidation_tree, pending_trees) =
+            self.worktree_revalidation_tree.as_ref().ok_or_else(|| {
+                HeddleError::Config(
+                    "snapshot preparation omitted its revalidation tree".to_string(),
+                )
+            })?;
+        let walked = self.repo.snapshot_worktree_fingerprint(
+            revalidation_tree,
+            pending_trees,
+            files,
+            cutoff_ns,
+        )?;
         Ok(walked.hash() == revalidation_tree.hash())
     }
 
@@ -456,47 +463,44 @@ impl SnapshotMutation<'_> {
         };
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
 
-        // Keep the walker's flat V3 tree for prepare→commit worktree
-        // revalidation, which is scheme-agnostic and must not chase v4 salts.
-        if matches!(&self.source, SnapshotSource::Worktree) {
-            self.worktree_revalidation_tree = Some(tree.clone());
-        }
-
         // All authored captures use salted commitments. The internal worktree
         // fingerprint remains flat for revalidation; source trees inherit salts
         // only from unchanged entries in the first-parent lineage.
         let parent_root = match self.prev_head {
-            Some(id) => self
-                .repo
-                .store
-                .get_state(&id)?
-                .map(|state| self.repo.store.get_tree(&state.tree))
-                .transpose()?
-                .flatten(),
+            Some(id) => {
+                let state = self
+                    .repo
+                    .store
+                    .get_state(&id)?
+                    .ok_or(HeddleError::StateNotFound(id))?;
+                Some(self.repo.require_tree(&state.tree)?)
+            }
             None => None,
         };
         let pending_trees = supplied_blobs
-            .as_ref()
-            .map(|(_, trees)| trees.as_slice())
-            .unwrap_or(&[]);
+            .as_mut()
+            .map(|(_, trees)| std::mem::take(trees))
+            .unwrap_or_default();
         let (v4_root, v4_subtrees) =
             self.repo
-                .v4ify_capture_tree(&tree, pending_trees, parent_root.as_ref())?;
+                .v4ify_capture_tree(&tree, &pending_trees, parent_root.as_ref())?;
+        // Revalidation needs the whole prepared flat graph. These subtrees have
+        // not been committed; keep them available rather than reading them as
+        // absent from the durable store after the V4 conversion.
+        if matches!(&self.source, SnapshotSource::Worktree) {
+            self.worktree_revalidation_tree = Some((tree.clone(), pending_trees));
+        }
         tree = v4_root;
         supplied_blobs
             .get_or_insert_with(|| (Vec::new(), Vec::new()))
             .1 = v4_subtrees.into_iter().map(TreeWrite::anchor).collect();
 
         if self.require_worktree_change && matches!(&self.source, SnapshotSource::Worktree) {
-            let previous_tree = match self.prev_head {
-                Some(state_id) => self
-                    .repo
-                    .store
-                    .get_state(&state_id)?
-                    .map(|state| state.tree),
-                None => Some(Tree::new().hash()),
-            };
-            if previous_tree == Some(tree.hash()) {
+            let previous_tree = parent_root
+                .as_ref()
+                .map(Tree::hash)
+                .unwrap_or_else(|| Tree::new().hash());
+            if previous_tree == tree.hash() {
                 return Err(HeddleError::NoChanges);
             }
         }
@@ -900,6 +904,7 @@ struct SnapshotFingerprintPolicy<'a> {
     racy_cutoff_ns: i64,
     index: WorktreeIndex,
     monitor: ChangeMonitorSession,
+    pending_trees: HashMap<ContentHash, &'a Tree>,
 }
 
 impl<'a> SnapshotFingerprintPolicy<'a> {
@@ -909,6 +914,7 @@ impl<'a> SnapshotFingerprintPolicy<'a> {
         racy_cutoff_ns: i64,
         index: WorktreeIndex,
         monitor: ChangeMonitorSession,
+        pending_trees: &'a [TreeWrite],
     ) -> Self {
         Self {
             walk_root,
@@ -916,6 +922,10 @@ impl<'a> SnapshotFingerprintPolicy<'a> {
             racy_cutoff_ns,
             index,
             monitor,
+            pending_trees: pending_trees
+                .iter()
+                .map(|write| (write.tree.hash(), &write.tree))
+                .collect(),
         }
     }
 
@@ -969,7 +979,11 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
         tree_hash: &ContentHash,
     ) -> Option<Tree> {
         let key = crate::worktree_walk::cache_key(rel_path);
-        self.index.clean_tree(&key, tree_hash).cloned()
+        self.pending_trees
+            .get(tree_hash)
+            .copied()
+            .or_else(|| self.index.clean_tree(&key, tree_hash))
+            .cloned()
     }
 
     fn skip_directory_before_enumeration(
@@ -1297,6 +1311,7 @@ impl Repository {
     fn snapshot_worktree_fingerprint(
         &self,
         tree: &Tree,
+        pending_trees: &[TreeWrite],
         files: &BTreeMap<String, ManifestFile>,
         racy_cutoff_ns: i64,
     ) -> Result<Tree> {
@@ -1319,8 +1334,14 @@ impl Repository {
         }
         .map(|(index, _)| index)
         .unwrap_or_default();
-        let mut policy =
-            SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns, index, monitor);
+        let mut policy = SnapshotFingerprintPolicy::new(
+            &self.root,
+            files,
+            racy_cutoff_ns,
+            index,
+            monitor,
+            pending_trees,
+        );
         Ok(walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?.tree)
     }
 
@@ -1891,14 +1912,13 @@ impl Repository {
         // marks are NOT supported on a merge (guarded above); this converts the
         // tip tree only.
         let tree = {
-            let first_parent_tree = self
+            let first_parent_state = self
                 .store
                 .get_state(&first_parent)?
-                .map(|state| self.store.get_tree(&state.tree))
-                .transpose()?
-                .flatten();
+                .ok_or(HeddleError::StateNotFound(first_parent))?;
+            let first_parent_tree = self.require_tree(&first_parent_state.tree)?;
             let (v4_root, v4_subtrees) =
-                self.v4ify_capture_tree(&tree, &[], first_parent_tree.as_ref())?;
+                self.v4ify_capture_tree(&tree, &[], Some(&first_parent_tree))?;
             for subtree in &v4_subtrees {
                 self.store.put_tree(subtree)?;
             }
