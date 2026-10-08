@@ -319,10 +319,24 @@ async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
         "{error}"
     );
     assert!(captured.lock().expect("capture").import_requests.is_empty());
-    // 3 branches + 510 tags = 513; the annotated tag's peeled line counts once.
-    for index in 1..510 {
-        git(path, &["tag", &format!("tag-{index}")]);
-    }
+    // 3 branches + 4094 tags = 4097, one past the 4096 bound; the annotated
+    // tag's peeled line counts once. One `update-ref` writes them all.
+    let head = String::from_utf8(git(path, &["rev-parse", "HEAD"])).expect("HEAD oid");
+    let commands = (1..4094)
+        .map(|index| format!("create refs/tags/tag-{index} {}\n", head.trim()))
+        .collect::<String>();
+    let mut update = Command::new("git")
+        .current_dir(path)
+        .args(["update-ref", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn update-ref");
+    std::io::Write::write_all(
+        update.stdin.as_mut().expect("update-ref stdin"),
+        commands.as_bytes(),
+    )
+    .expect("write tags");
+    assert!(update.wait().expect("update-ref").success());
     let calls_before = captured.lock().expect("capture").calls.len();
     let error = ImportSourceRefs::discover(url)
         .await
@@ -331,8 +345,8 @@ async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
         error,
         ImportSourceRefError::TooManyRefs {
             branches: 3,
-            tags: 510,
-            total: 513
+            tags: 4094,
+            total: 4097
         }
     ));
     assert_eq!(
@@ -361,12 +375,12 @@ async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
         serde_json::from_slice(&refused.stderr).expect("typed ref-limit error");
     assert_eq!(envelope["kind"], "import_source_ref_limit");
     assert_eq!(envelope["branches"], 3);
-    assert_eq!(envelope["tags"], 510);
-    assert_eq!(envelope["total_refs"], 513);
-    assert_eq!(envelope["max_refs"], 512);
+    assert_eq!(envelope["tags"], 4094);
+    assert_eq!(envelope["total_refs"], 4097);
+    assert_eq!(envelope["max_refs"], 4096);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("3 branches and 510 tags (513 refs)"),
+        stderr.contains("3 branches and 4094 tags (4097 refs); maximum is 4096"),
         "{stderr}"
     );
     assert_eq!(captured.lock().expect("capture").calls.len(), calls_before);

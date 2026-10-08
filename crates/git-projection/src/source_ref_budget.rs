@@ -5,8 +5,8 @@
 //! contacts the destination, so the advertisement comes from a server the user
 //! does not control. Sley buffers and parses a whole advertisement under
 //! transport-scale ceilings (128 MiB for v0/v1, 2Mi frames / 256 MiB for v2
-//! `ls-refs`), so the import's 512-ref admission bound would otherwise apply
-//! only after every advertised name had been materialized.
+//! `ls-refs`), so the import's [`MAX_IMPORT_REFS`]-ref admission bound would
+//! otherwise apply only after every advertised name had been materialized.
 //!
 //! [`MeteredHttpClient`] wraps the HTTP client handed to Sley and meters every
 //! response body while Sley reads it. It follows the pkt-line framing byte by
@@ -41,10 +41,13 @@ pub const MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES: u64 = 2048;
 
 /// Aggregate response bytes one discovery may read.
 ///
-/// Every admissible advertisement at realistic ref-name lengths is well under
-/// this; it caps what a peer can make the client buffer when it pads records up
-/// to [`MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES`].
-pub const MAX_SOURCE_ADVERTISEMENT_BYTES: u64 = 1024 * 1024;
+/// One maximal record per admissible ref (8 MiB at 4096 refs). Every admissible
+/// advertisement at realistic ref-name lengths is well under this, and so is
+/// one whose every ref name is 1 KiB with every tag annotated; it caps what a
+/// peer can make the client buffer when it pads records up to
+/// [`MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES`].
+pub const MAX_SOURCE_ADVERTISEMENT_BYTES: u64 =
+    MAX_IMPORT_REFS as u64 * MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES;
 
 /// Which advertisement bound a discovery hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,14 +548,16 @@ mod tests {
         }
     }
 
-    /// The largest admissible source — every tag annotated, so a v0
-    /// advertisement carries a peeled line for each — plus review refs the
-    /// import filters out, all with long names, still fits every bound.
+    /// The largest admissible source — [`MAX_IMPORT_REFS`] refs, every tag
+    /// annotated so a v0 advertisement carries a peeled line for each, every
+    /// name just under heddle-api's 1 KiB ref-name bound — plus review refs the
+    /// import filters out, still fits every bound.
     fn largest_admissible_source() -> AdvertisedRefs {
-        let pad = "p".repeat(200);
-        let branches = (0..256).map(move |index| (format!("refs/heads/{pad}-{index}"), false));
-        let pad = "p".repeat(200);
-        let tags = (0..256).map(move |index| (format!("refs/tags/{pad}-{index}"), true));
+        const HALF: usize = MAX_IMPORT_REFS / 2;
+        let pad = "p".repeat(1000);
+        let branches = (0..HALF).map(move |index| (format!("refs/heads/{pad}-{index}"), false));
+        let pad = "p".repeat(1000);
+        let tags = (0..HALF).map(move |index| (format!("refs/tags/{pad}-{index}"), true));
         let reviews = (0..16).map(|index| (format!("refs/pull/{index}/head"), false));
         Box::new(branches.chain(tags).chain(reviews))
     }
@@ -563,6 +568,18 @@ mod tests {
             let server = StubServer::new(protocol_v2, largest_admissible_source);
             let refs = discover_git_source_refs_with_client(URL, Some(&server)).expect("discovery");
             assert_eq!(refs.len(), MAX_IMPORT_REFS, "v2={protocol_v2}");
+            assert!(
+                server.pulled() < MAX_SOURCE_ADVERTISEMENT_BYTES,
+                "v2={protocol_v2}: pulled {} bytes",
+                server.pulled()
+            );
         }
+    }
+
+    #[test]
+    fn budget_scales_with_the_import_ref_bound() {
+        assert_eq!(MAX_IMPORT_REFS, 4096);
+        assert_eq!(MAX_SOURCE_ADVERTISEMENT_RECORDS, 8256);
+        assert_eq!(MAX_SOURCE_ADVERTISEMENT_BYTES, 8 * 1024 * 1024);
     }
 }
