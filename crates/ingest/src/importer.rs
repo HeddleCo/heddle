@@ -1956,6 +1956,84 @@ mod tests {
         );
     }
 
+    /// Seed a repository with exactly `native` branch + commit-tag refs: the
+    /// multibranch seed's `main`, `feature/x` and `v0.1`, then alternating
+    /// lightweight branches and tags at its tip, written in one `update-ref`.
+    fn seed_native_refs(path: &Path, native: usize) {
+        let tip = seed_multibranch_repo(path);
+        let commands = (0..native - 3)
+            .map(|index| {
+                let namespace = if index % 2 == 0 { "heads" } else { "tags" };
+                format!("create refs/{namespace}/bulk-{index:05} {tip}\n")
+            })
+            .collect::<String>();
+        git_output(path, &["update-ref", "--stdin"], Some(commands.as_bytes()));
+    }
+
+    /// Classify a real source's frozen ref snapshot: the conversion gate that
+    /// bounds native refs.
+    fn classify_native_refs(
+        git: &GitSource,
+    ) -> objects::error::Result<
+        objects::object::thread_replication::git_import_graph::ClassifiedImportRefs,
+    > {
+        let frozen = git.collect_frozen_import_refs().expect("frozen refs");
+        objects::object::thread_replication::git_import_graph::classify_frozen_import_refs(&frozen)
+    }
+
+    /// heddle#2019: rails has 644 branches and tags; the old 512 bound
+    /// refused it during conversion. Classify, then import every ref.
+    #[test]
+    fn import_converts_more_than_512_native_refs() {
+        let native = 600;
+        let gitdir = TempDir::new().expect("Git temp dir");
+        let heddledir = TempDir::new().expect("Heddle temp dir");
+        seed_native_refs(gitdir.path(), native);
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let classified = classify_native_refs(&git)
+            .unwrap_or_else(|error| panic!("{native} native refs must convert: {error}"));
+        assert_eq!(classified.native_ref_count as usize, native);
+        assert!(!classified.partial);
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().expect("refs");
+        let mut map = ShaMap::new();
+        let stats =
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).expect("import");
+        assert_eq!(
+            stats.refs.threads_written + stats.refs.markers_written,
+            native,
+            "{stats:?}"
+        );
+        assert_eq!(stats.refs.skipped_unmapped, 0);
+        assert!(stats.skipped_refs.is_empty(), "{stats:?}");
+    }
+
+    /// heddle#2019: the bound matches heddle-api's `MAX_IMPORT_SOURCE_REFS`
+    /// (4096); one more native ref is refused. Writing 4096 local refs costs
+    /// about five fsyncs each, so this checks the gate, not ref emission.
+    #[test]
+    fn conversion_admits_the_maximum_native_refs_and_refuses_one_more() {
+        let max = objects::object::thread_replication::git_import_graph::MAX_IMPORT_REFS;
+        assert_eq!(max, 4096);
+        let gitdir = TempDir::new().expect("Git temp dir");
+        seed_native_refs(gitdir.path(), max);
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let classified = classify_native_refs(&git)
+            .unwrap_or_else(|error| panic!("{max} native refs must convert: {error}"));
+        assert_eq!(classified.native_ref_count as usize, max);
+        assert!(!classified.partial);
+        git_output(gitdir.path(), &["tag", "one-past-the-bound", "main"], None);
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let error = classify_native_refs(&git).expect_err("one ref past the bound");
+        assert!(
+            error
+                .to_string()
+                .contains("Git import has more than 4096 native refs"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn distinct_git_commits_cannot_claim_the_same_change_id() {
         let gitdir = TempDir::new().expect("Git temp dir");

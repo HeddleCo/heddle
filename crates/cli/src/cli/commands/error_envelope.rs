@@ -561,6 +561,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             cause.downcast_ref::<hosted_client::hosted_runtime::hosted::ImportSourceRefError>()
         {
             use hosted_client::hosted_runtime::hosted::ImportSourceRefError;
+            use objects::object::thread_replication::git_import_graph::MAX_IMPORT_REFS;
             let (kind, extra) = match source_error {
                 ImportSourceRefError::TooManyRefs {
                     branches,
@@ -568,7 +569,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     total,
                 } => (
                     "import_source_ref_limit",
-                    serde_json::json!({ "branches": branches, "tags": tags, "total_refs": total, "max_refs": 512 }),
+                    serde_json::json!({ "branches": branches, "tags": tags, "total_refs": total, "max_refs": MAX_IMPORT_REFS }),
                 ),
                 ImportSourceRefError::NoBranches => {
                     ("import_source_no_branches", serde_json::json!({}))
@@ -594,24 +595,24 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     ("import_source_discovery_failed", serde_json::json!({}))
                 }
             };
-            let hint = match source_error {
+            let hint: String = match source_error {
                 ImportSourceRefError::TooManyRefs { .. } => {
-                    "Choose a source with at most 512 branches and tags."
+                    format!("Choose a source with at most {MAX_IMPORT_REFS} branches and tags.")
                 }
                 ImportSourceRefError::NoBranches => {
-                    "Choose a source with at least one refs/heads/* branch."
+                    "Choose a source with at least one refs/heads/* branch.".into()
                 }
                 ImportSourceRefError::InvalidBranch { .. } => {
-                    "Choose source branch names that are valid Thread names."
+                    "Choose source branch names that are valid Thread names.".into()
                 }
                 ImportSourceRefError::ConflictingBranch { .. } => {
-                    "Retry after the source advertises one object ID per branch."
+                    "Retry after the source advertises one object ID per branch.".into()
                 }
-                ImportSourceRefError::AdvertisementOverBudget(_) => {
-                    "Choose a source that advertises at most 512 branches and tags."
-                }
+                ImportSourceRefError::AdvertisementOverBudget(_) => format!(
+                    "Choose a source that advertises at most {MAX_IMPORT_REFS} branches and tags."
+                ),
                 ImportSourceRefError::Discovery(_) => {
-                    "Check the public source URL and network access."
+                    "Check the public source URL and network access.".into()
                 }
             };
             let mut classification = ErrorClassification::known(

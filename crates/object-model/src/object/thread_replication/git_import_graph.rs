@@ -9,7 +9,14 @@ use crate::{
     object::{MarkerName, ThreadName},
 };
 
-pub const MAX_IMPORT_REFS: usize = 512;
+/// Native refs (branches plus commit tags) one Git import may carry.
+///
+/// Must equal `heddle_api::import_authority::MAX_IMPORT_SOURCE_REFS` (4096,
+/// HeddleCo/api#389), which is also weft discovery's retained-ref cap. The
+/// pinned heddle-api (0.31.0-alpha.44) predates that constant; when the
+/// workspace adopts alpha.45, define this as that constant and assert the
+/// equality in a test (heddle#2019).
+pub const MAX_IMPORT_REFS: usize = 4096;
 
 /// Git object identity retains the hash algorithm; SHA-256 never truncates
 /// into a SHA-1 address. This names commits and raw annotated tag objects.
@@ -279,7 +286,9 @@ pub fn classify_frozen_import_refs(refs: &[ImportRefIdentity]) -> Result<Classif
         ) {
             native_ref_count += 1;
             if native_ref_count > MAX_IMPORT_REFS {
-                return Err(invalid("Git import has more than 512 native refs"));
+                return Err(invalid(format!(
+                    "Git import has more than {MAX_IMPORT_REFS} native refs"
+                )));
             }
         }
         // Provider pull refs are outside the imported branch/tag surface.
@@ -486,6 +495,54 @@ mod tests {
         let mut moved = refs;
         moved[0].raw_target = GitRefTarget::Symbolic(b"refs/heads/absent".to_vec());
         assert!(classify_frozen_import_refs(&moved).is_err());
+    }
+
+    /// HEAD plus `native` refs alternating branch / lightweight commit tag.
+    fn frozen_refs_with_native(native: usize) -> Vec<ImportRefIdentity> {
+        let commit = GitObjectId::Sha1([5; 20]);
+        let direct = |raw_name: String| ImportRefIdentity {
+            raw_name: raw_name.into_bytes(),
+            raw_target: GitRefTarget::Direct {
+                oid: commit.clone(),
+                object_type: GitRefObjectType::Commit,
+            },
+            peeled_commit: Some(commit.clone()),
+        };
+        let mut refs = vec![ImportRefIdentity {
+            raw_name: b"HEAD".to_vec(),
+            raw_target: GitRefTarget::Symbolic(b"refs/heads/b-00000".to_vec()),
+            peeled_commit: None,
+        }];
+        refs.extend(
+            (0..native)
+                .step_by(2)
+                .map(|i| direct(format!("refs/heads/b-{i:05}"))),
+        );
+        refs.extend(
+            (1..native)
+                .step_by(2)
+                .map(|i| direct(format!("refs/tags/t-{i:05}"))),
+        );
+        refs
+    }
+
+    #[test]
+    fn native_ref_bound_admits_4096_and_refuses_4097() {
+        assert_eq!(MAX_IMPORT_REFS, 4096);
+        for native in [600, MAX_IMPORT_REFS] {
+            let classified = classify_frozen_import_refs(&frozen_refs_with_native(native))
+                .unwrap_or_else(|error| panic!("{native} native refs: {error}"));
+            assert_eq!(classified.native_ref_count as usize, native);
+            assert!(!classified.partial);
+        }
+        let error = classify_frozen_import_refs(&frozen_refs_with_native(MAX_IMPORT_REFS + 1))
+            .expect_err("one native ref past the bound");
+        assert!(
+            error
+                .to_string()
+                .contains("Git import has more than 4096 native refs"),
+            "{error}"
+        );
     }
 
     #[test]
