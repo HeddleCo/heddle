@@ -213,6 +213,24 @@ fn write_optional_f32(hasher: &mut blake3::Hasher, value: Option<f32>) {
 
 // ── State ───────────────────────────────────────────────────────────
 
+/// Sentinel stored in [`State::authored_tz_offset`] / [`State::committer_tz_offset`]
+/// for Git's `-0000` timezone token ("local zone unknown"). A seconds-east
+/// offset cannot distinguish `-0000` from `+0000`, yet the sign is part of the
+/// commit bytes and therefore its object id. `i32::MIN` is far outside any real
+/// offset (Git's `±HHMM` spans at most ±99h59m), so it never collides with one.
+pub const TZ_OFFSET_NEGATIVE_UTC: i32 = i32::MIN;
+
+/// Convert a parsed Git timezone (minutes east of UTC plus whether the token was
+/// `-0000`) to the seconds-east value stored on a [`State`], keeping the `-0000`
+/// sign as [`TZ_OFFSET_NEGATIVE_UTC`].
+pub fn git_tz_offset_seconds(minutes_east: i16, negative_utc: bool) -> i32 {
+    if negative_utc {
+        TZ_OFFSET_NEGATIVE_UTC
+    } else {
+        i32::from(minutes_east) * 60
+    }
+}
+
 /// Immutable source-history state. `state_id` is recomputed from every encoded
 /// field; mutable repository metadata lives in `StateAttachment` objects.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

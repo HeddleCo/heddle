@@ -45,10 +45,11 @@ use std::{
 
 use chrono::{DateTime, TimeZone, Utc};
 use objects::object::{
-    EntryType, RawGitMode, ReservedMetadataName, Tree, TreeEntry, parse_git_tree,
-    reserved_tree_entry_name,
-    thread_replication::git_import_graph::{
-        GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity,
+    EntryType, RawGitMode, ReservedMetadataName, Tree, TreeEntry, git_tz_offset_seconds,
+    parse_git_tree, reserved_tree_entry_name,
+    thread_replication::{
+        git_import_converter::parse_git_signature,
+        git_import_graph::{GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity},
     },
 };
 use sley::{
@@ -1128,19 +1129,24 @@ fn parse_oid(format: ObjectFormat, sha: &str) -> crate::Result<SleyObjectId> {
 }
 
 fn signature_from_bytes(raw: &[u8], sha: &str, field: &str) -> crate::Result<GitSignature> {
-    signature_from_raw(raw)
-        .ok_or_else(|| IngestError::Git(format!("{field} {sha}: invalid signature")))
+    let value = parse_git_signature(raw, sha, field)
+        .map_err(|error| IngestError::Git(error.to_string()))?;
+    Ok(GitSignature {
+        name: value.name,
+        email: value.email,
+        time: value.time,
+        tz_offset: value.tz_offset,
+    })
 }
 
 fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
     let sig = SleySignature::from_ident_line(raw)?;
     let time = sig.time;
-    let tz_offset = i32::from(time.timezone_offset_minutes) * 60;
     Some(GitSignature {
         name: sig.name.as_bytes().to_vec(),
         email: sig.email.as_bytes().to_vec(),
         time: Utc.timestamp_opt(time.seconds, 0).single()?,
-        tz_offset,
+        tz_offset: git_tz_offset_seconds(time.timezone_offset_minutes, time.negative_utc),
     })
 }
 
