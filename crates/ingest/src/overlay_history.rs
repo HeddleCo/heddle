@@ -7,7 +7,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
+    object::{Blob, ContentHash, State, StateId, TreeEntry},
     store::{InMemoryStore, ObjectStore},
     util::{
         GitTreeNameClassification, LineDiffLimits, classify_git_tree_name,
@@ -17,7 +17,7 @@ use objects::{
 
 use crate::{
     GitSource, IngestError,
-    git_walk::{CommitEntry, TreeChild, TreeChildKind},
+    git_walk::{CommitEntry, TreeChild, TreeChildKind, git_tree_from_entries},
     state_writer::descriptor_state_from_commit,
 };
 
@@ -466,7 +466,7 @@ fn translate_tree(
     for child in git.read_tree(git_sha)? {
         entries.push(translate_child(git, store, &child, cache)?);
     }
-    let hash = store.put_tree(&Tree::from_entries(entries))?;
+    let hash = store.put_tree(&git_tree_from_entries(git_sha, entries)?)?;
     cache.insert(git_sha.to_string(), hash);
     Ok(hash)
 }
@@ -506,6 +506,7 @@ fn translate_child(
             TreeEntry::gitlink(name, target)
         }
     }
+    .and_then(|entry| entry.with_raw_git_mode(child.mode))
     .map_err(|error| IngestError::Heddle(error.into()))
 }
 

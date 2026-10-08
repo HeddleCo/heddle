@@ -447,7 +447,7 @@ fn mismatched_logical_len_fails_eager_and_streamed() {
     bytes[53..61].copy_from_slice(&forged_logical.to_le_bytes());
     let forged_id = ContentHash::compute_typed_with_len("tree", forged_logical, |hasher| {
         for entry in tree.entries() {
-            entry.update_hasher(hasher);
+            entry.update_hasher(hasher, None);
         }
     });
     bytes[5..37].copy_from_slice(forged_id.as_bytes());

@@ -11,7 +11,7 @@ use super::{
 use crate::{
     object::{
         ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeDeltaOp, TreeEntry,
-        TreeScheme, apply_tree_delta,
+        apply_tree_delta,
     },
     store::Result,
 };
@@ -509,8 +509,10 @@ fn finish_record(tag: u8, prefix: &[usize], raw_blocks: Vec<(u32, Vec<u8>)>) -> 
 /// salt-carrying NPK1 v4 dictionary is a deferred hot-path decision (design
 /// §6.3); until then, refuse.
 fn reject_salted_tree(tree: &Tree) -> Result<()> {
-    if tree.scheme() == TreeScheme::V4Salted {
-        return Err(invalid("cannot pack a v4 salted tree into an NPK1 record"));
+    if tree.requires_canonical_body() {
+        return Err(invalid(
+            "cannot pack a v4 salted tree or a git source layout into an NPK1 record",
+        ));
     }
     Ok(())
 }

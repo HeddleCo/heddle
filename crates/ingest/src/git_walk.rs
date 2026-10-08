@@ -44,8 +44,11 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
-use objects::object::thread_replication::git_import_graph::{
-    GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity,
+use objects::object::{
+    EntryType, RawGitMode, Tree, TreeEntry, parse_git_tree,
+    thread_replication::git_import_graph::{
+        GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity,
+    },
 };
 use sley::{
     GitObjectType, ObjectFormat, ObjectId as SleyObjectId, RefStore as SleyRefStore,
@@ -130,13 +133,15 @@ pub struct GitSignature {
     pub tz_offset: i32,
 }
 
-/// One tree entry (direct child of a git tree).
+/// One tree entry (direct child of a git tree), in the tree's source order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeChild {
     pub name: String,
     pub raw_name: Vec<u8>,
     pub sha: String,
     pub kind: TreeChildKind,
+    /// The mode exactly as the source tree writes it (heddle#2018).
+    pub mode: RawGitMode,
 }
 
 /// One reflog event — a ref moving from `previous_sha` to `new_sha`. Either
@@ -152,6 +157,19 @@ pub struct ReflogEntry {
     /// Raw message as stored in `.git/logs/...` — e.g.
     /// `"commit: foo"`, `"reset: moving to HEAD~1"`, `"pull: Fast-forward"`.
     pub message: String,
+}
+
+/// Build the native tree for Git tree `tree_sha` from its translated entries,
+/// in the Git tree's own order. Records the source order when it is not Git's
+/// canonical order. Duplicate names cannot be represented and fail, naming the
+/// tree and the entry.
+pub(crate) fn git_tree_from_entries(
+    tree_sha: &str,
+    entries: Vec<TreeEntry>,
+) -> crate::Result<Tree> {
+    Tree::from_git_entries(entries).map_err(|error| {
+        IngestError::Git(format!("git tree {tree_sha} cannot be imported: {error}"))
+    })
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -715,41 +733,50 @@ impl GitSource {
         self.read_blob(&blob.to_string()).map(Some)
     }
 
-    /// Read the direct children of a git tree (non-recursive).
+    /// Read the direct children of a git tree (non-recursive), in the
+    /// tree's own order and with each mode exactly as written.
     pub fn read_tree(&self, tree_sha: &str) -> crate::Result<Vec<TreeChild>> {
-        let oid = parse_oid(self.repo.object_format(), tree_sha)?;
-        let entries = if oid == sley::ObjectId::empty_tree(self.repo.object_format()) {
-            Vec::new()
-        } else {
-            self.repo
-                .read_tree(&oid)
-                .map_err(|e| IngestError::Git(format!("find_tree {tree_sha}: {e}")))?
-                .entries
-        };
+        let format = self.repo.object_format();
+        let oid = parse_oid(format, tree_sha)?;
+        if oid == sley::ObjectId::empty_tree(format) {
+            return Ok(Vec::new());
+        }
+        let object = self
+            .repo
+            .read_object(&oid)
+            .map_err(|e| IngestError::Git(format!("find_tree {tree_sha}: {e}")))?;
+        if object.object_type != GitObjectType::Tree {
+            return Err(IngestError::Git(format!(
+                "object {tree_sha} is {}, not a tree",
+                object.object_type.as_str()
+            )));
+        }
+        let entries = parse_git_tree(format, &object.body)
+            .map_err(|e| IngestError::Git(format!("parse tree {tree_sha}: {e}")))?;
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
-            let kind = match entry.mode {
-                0o040000 => TreeChildKind::Tree,
-                0o120000 => TreeChildKind::Symlink,
-                0o160000 => TreeChildKind::Gitlink,
-                mode if mode & 0o170000 == 0o100000 => TreeChildKind::Blob {
-                    executable: mode & 0o111 != 0,
+            let kind = match entry.mode.entry_type() {
+                Some(EntryType::Tree) => TreeChildKind::Tree,
+                Some(EntryType::Symlink) => TreeChildKind::Symlink,
+                Some(EntryType::Gitlink) => TreeChildKind::Gitlink,
+                Some(EntryType::Blob) => TreeChildKind::Blob {
+                    executable: entry.mode.is_executable(),
                 },
-                mode => {
+                Some(EntryType::Spoollink) | None => {
                     return Err(IngestError::Git(format!(
                         "tree entry {} has unsupported mode {:o}",
-                        String::from_utf8_lossy(entry.name.as_bytes()),
-                        mode
+                        String::from_utf8_lossy(entry.name),
+                        entry.mode.value()
                     )));
                 }
             };
-            let raw_name = entry.name.as_bytes().to_vec();
             out.push(TreeChild {
-                name: String::from_utf8_lossy(&raw_name).into_owned(),
-                raw_name,
+                name: String::from_utf8_lossy(entry.name).into_owned(),
+                raw_name: entry.name.to_vec(),
                 sha: entry.oid.to_string(),
                 kind,
+                mode: entry.mode,
             });
         }
         Ok(out)
