@@ -53,7 +53,7 @@ categories = ["development-tools"]
 [workspace.dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
-api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "0428aae9b47fa49357b6c57bebc96146d329169a", version = "=0.31.0-alpha.44" }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "a1a4b6e34fc0737bc0cad3d388cc4a2e3fe28dae", version = "=0.31.0-alpha.45" }
 async-trait = "0.1"
 base32 = "0.5"
 base64 = "0.22"
@@ -68,15 +68,15 @@ fs2 = "0.4.3"
 fastembed = { version = "=5.17.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-sley = { version = "0.11.0", default-features = false, features = ["mmap", "fast-sha1"] }
-sley-config = "0.11.0"
-sley-core = "0.11.0"
-sley-object = "0.11.0"
-sley-odb = "0.11.0"
-sley-pack = "0.11.0"
-sley-refs = "0.11.0"
-sley-transport = "0.11.0"
-sley-worktree = "0.11.0"
+sley = { version = "0.12.0", default-features = false, features = ["mmap", "fast-sha1"] }
+sley-config = "0.12.0"
+sley-core = "0.12.0"
+sley-object = "0.12.0"
+sley-odb = "0.12.0"
+sley-pack = "0.12.0"
+sley-refs = "0.12.0"
+sley-transport = "0.12.0"
+sley-worktree = "0.12.0"
 hex = "0.4"
 hkdf = "0.13"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
@@ -221,7 +221,7 @@ strip = true
 
 [patch.crates-io]
 heddleco-capability-verifier = { path = "crates/capability-verifier" }
-heddle-api = { git = "https://github.com/HeddleCo/api", rev = "0428aae9b47fa49357b6c57bebc96146d329169a", version = "=0.31.0-alpha.44" }
+heddle-api = { git = "https://github.com/HeddleCo/api", rev = "a1a4b6e34fc0737bc0cad3d388cc4a2e3fe28dae", version = "=0.31.0-alpha.45" }
 # heddle#1805 / weft#2077: same patched noq 1.3.0 weft uses. Stock noq writes
 # ACK_FREQUENCY into a nearly-full packet and panics; this rev gates that write
 # on AckFrequency::SIZE_BOUND and recovers poisoned locks from Drop. heddleco-iroh

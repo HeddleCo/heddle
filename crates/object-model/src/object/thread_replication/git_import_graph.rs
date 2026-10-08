@@ -11,12 +11,10 @@ use crate::{
 
 /// Native refs (branches plus commit tags) one Git import may carry.
 ///
-/// Must equal `heddle_api::import_authority::MAX_IMPORT_SOURCE_REFS` (4096,
-/// HeddleCo/api#389), which is also weft discovery's retained-ref cap. The
-/// pinned heddle-api (0.31.0-alpha.44) predates that constant; when the
-/// workspace adopts alpha.45, define this as that constant and assert the
-/// equality in a test (heddle#2019).
-pub const MAX_IMPORT_REFS: usize = 4096;
+/// This is `heddle_api::import_authority::MAX_IMPORT_SOURCE_REFS` (4096,
+/// HeddleCo/api#389), the bound on a host's complete discovery and weft's
+/// retained-ref cap, so the converter and the import authority cannot drift.
+pub const MAX_IMPORT_REFS: usize = api::import_authority::MAX_IMPORT_SOURCE_REFS;
 
 /// Git object identity retains the hash algorithm; SHA-256 never truncates
 /// into a SHA-1 address. This names commits and raw annotated tag objects.
@@ -528,6 +526,11 @@ mod tests {
 
     #[test]
     fn native_ref_bound_admits_4096_and_refuses_4097() {
+        // The converter and the import authority share one bound (heddle#2022).
+        assert_eq!(
+            MAX_IMPORT_REFS,
+            api::import_authority::MAX_IMPORT_SOURCE_REFS
+        );
         assert_eq!(MAX_IMPORT_REFS, 4096);
         for native in [600, MAX_IMPORT_REFS] {
             let classified = classify_frozen_import_refs(&frozen_refs_with_native(native))

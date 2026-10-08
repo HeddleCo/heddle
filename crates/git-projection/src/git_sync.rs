@@ -377,11 +377,10 @@ fn peeled_oid(
 ) -> GitProjectionResult<Option<SleyObjectId>> {
     let Some(oid) = (match target {
         ReferenceTarget::Direct(oid) => Ok(Some(*oid)),
+        // Callers pass names read leniently by `list_refs`, which
+        // `find_reference` rejects when Git would refuse to create them.
         ReferenceTarget::Symbolic(_) => {
-            let Some(reference) = repo.find_reference(name).map_err(git_err)? else {
-                return Ok(None);
-            };
-            reference.peeled_oid(repo).map_err(git_err)
+            sley_refs::resolve_ref_peeled(&repo.references(), name).map_err(git_err)
         }
     })?
     else {
