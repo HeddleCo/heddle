@@ -1968,24 +1968,39 @@ fn fs_open_tree_on_a_v4_salted_tree_errors_not_none() {
     }
 }
 
-#[test]
-fn store_open_sweeps_stale_scratch_and_preserves_fresh_entries() {
+fn expire_scratch_entry(path: &std::path::Path) {
     use std::{
-        fs::{File, FileTimes},
+        fs::{FileTimes, OpenOptions},
         time::{Duration, SystemTime},
     };
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS opens directories; FILE_WRITE_ATTRIBUTES
+        // is required to set their timestamps without opening a data writer.
+        options.custom_flags(0x02000000).access_mode(0x180);
+    }
+    options
+        .open(path)
+        .expect("scratch entry")
+        .set_times(
+            FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(2 * 86400)),
+        )
+        .expect("expired timestamp");
+}
+
+#[test]
+fn store_open_sweeps_stale_scratch_and_preserves_fresh_entries() {
     let (_temp, store) = create_test_store();
     let scratch = store.root().join("tmp");
     std::fs::create_dir_all(scratch.join("stale-download")).expect("scratch directory");
     std::fs::write(scratch.join("stale-download/pack"), b"abandoned download").expect("download");
     std::fs::write(scratch.join("stale-index"), b"abandoned sort").expect("index");
     std::fs::write(scratch.join("fresh"), b"current transfer").expect("fresh file");
-    let old = SystemTime::now() - Duration::from_secs(2 * 86400);
     for name in ["stale-download", "stale-index"] {
-        File::open(scratch.join(name))
-            .expect("entry")
-            .set_times(FileTimes::new().set_modified(old))
-            .expect("old entry");
+        expire_scratch_entry(&scratch.join(name));
     }
     let reopened = FsStore::new(store.root());
     reopened.reload_packs().expect("store open");
@@ -2053,10 +2068,6 @@ fn clone_repair_propagates_index_io_errors_without_deleting_pack() {
 
 #[test]
 fn store_open_keeps_expired_scratch_while_an_owner_is_alive() {
-    use std::{
-        fs::{File, FileTimes},
-        time::{Duration, SystemTime},
-    };
     let (_temp, store) = create_test_store();
     let scratch = store.root().join("tmp");
     let live = scratch.join("live-download");
@@ -2069,12 +2080,7 @@ fn store_open_keeps_expired_scratch_while_an_owner_is_alive() {
         .open(live.join(".lease"))
         .expect("live owner");
     lease.lock_shared().expect("live owner lock");
-    File::open(&live)
-        .expect("directory")
-        .set_times(
-            FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(2 * 86400)),
-        )
-        .expect("expired timestamp");
+    expire_scratch_entry(&live);
     let reopened = FsStore::new(store.root());
     reopened
         .reload_packs()
