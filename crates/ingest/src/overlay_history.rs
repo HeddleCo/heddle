@@ -10,7 +10,7 @@ use objects::{
     object::{Blob, ContentHash, State, StateId, TreeEntry},
     store::{InMemoryStore, ObjectStore},
     util::{
-        GitTreeNameClassification, LineDiffLimits, classify_git_tree_name,
+        GitTreeNameClassification, LineDiffLimits, classify_git_tree_name_representable,
         scratch_bytes_for_line_counts, split_text_lines, visit_lcs_equal_runs,
     },
 };
@@ -477,7 +477,10 @@ fn translate_child(
     child: &TreeChild,
     cache: &mut HashMap<String, ContentHash>,
 ) -> crate::Result<TreeEntry> {
-    let name = match classify_git_tree_name(&child.raw_name) {
+    // A read-only projection for log and blame: it never writes a worktree,
+    // so reserved names (heddle#2028) stay visible here. Import refuses them
+    // and checkout never writes them.
+    let name = match classify_git_tree_name_representable(&child.raw_name) {
         GitTreeNameClassification::Representable(name) => name,
         GitTreeNameClassification::NeedsLossy(lossy) => {
             return Err(IngestError::Other(format!(

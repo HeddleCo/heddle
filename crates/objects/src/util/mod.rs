@@ -10,6 +10,7 @@ pub mod symlink;
 pub use budget::{BudgetExceeded, ResourceBudget, ResourceKind, ResourceUsage};
 pub use git_tree_name::{
     GitTreeNameClassification, GitTreeNameLossy, GitTreeNameLossyAction, classify_git_tree_name,
+    classify_git_tree_name_representable,
 };
 pub use gitlink::gitlink_placeholder_bytes;
 pub use line_diff::{

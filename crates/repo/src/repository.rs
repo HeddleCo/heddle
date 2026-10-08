@@ -107,6 +107,9 @@ mod repository_entry_visibility;
 mod repository_snapshot;
 pub use repository_entry_visibility::{EntryVisibilityBinding, EntryVisibilityMark};
 #[cfg(test)]
+#[path = "repository_reserved_path_tests.rs"]
+mod repository_reserved_path_tests;
+#[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
 #[path = "repository_thread_materialize.rs"]

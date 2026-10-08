@@ -85,6 +85,15 @@ impl fmt::Display for ThreadShapingError {
 
 impl Error for ThreadShapingError {}
 
+/// Drop, with a warning, paths a move must never write or remove: those
+/// through a metadata directory (heddle#2028).
+fn writable_move_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| !repo::skip_reserved_worktree_write(Path::new(path), false))
+        .collect()
+}
+
 pub fn capture_split(
     repo: &Repository,
     opts: CaptureSplitOptions,
@@ -92,8 +101,11 @@ pub fn capture_split(
 ) -> Result<ThreadMoveOutput> {
     let current = current_thread(repo)?.ok_or(ThreadShapingError::NoCurrentThread)?;
     let target = load_thread(repo, &opts.into, "load thread")?;
-    let moved_paths =
-        collect_worktree_split_paths(repo, &opts.prefixes, &opts.worktree_status_options)?;
+    let moved_paths = writable_move_paths(collect_worktree_split_paths(
+        repo,
+        &opts.prefixes,
+        &opts.worktree_status_options,
+    )?);
     if moved_paths.is_empty() {
         return Err(ThreadShapingError::NoPathsMatched(no_paths_matched_details(
             "capture split",
@@ -147,8 +159,12 @@ pub fn thread_move(
         Some(&source.base_state),
         "source thread has no base state",
     )?;
-    let moved_paths =
-        collect_state_move_paths(&source_repo, &source_base, &source_current, &opts.prefixes)?;
+    let moved_paths = writable_move_paths(collect_state_move_paths(
+        &source_repo,
+        &source_base,
+        &source_current,
+        &opts.prefixes,
+    )?);
     if moved_paths.is_empty() {
         return Err(ThreadShapingError::NoPathsMatched(no_paths_matched_details(
             "thread move",
