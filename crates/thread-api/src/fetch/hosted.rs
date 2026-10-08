@@ -418,9 +418,29 @@ fn publish_directory(
                 continue;
             }
             artifacts.install_file(&entry.path(), &destination.join(entry.file_name()))?;
+            #[cfg(test)]
+            crash_point();
         }
     }
     Ok(())
+}
+#[cfg(test)]
+thread_local! {
+    /// Test-only: abort the process, as a crash would, once this many staged
+    /// files have been published. No destructor, rollback or unlock runs.
+    static CRASH_AFTER_PUBLISHED: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+fn crash_point() {
+    CRASH_AFTER_PUBLISHED.with(|remaining| match remaining.get() {
+        Some(1) => {
+            eprintln!("hosted publish crash point reached");
+            std::process::abort();
+        }
+        Some(n) => remaining.set(Some(n - 1)),
+        None => {}
+    });
 }
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())

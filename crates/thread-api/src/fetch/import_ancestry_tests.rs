@@ -1331,3 +1331,245 @@ fn ancestry_staging_peak_memory_is_bounded() {
     );
     println!("{stdout}");
 }
+
+/// Every file under the receiver's published source storage, relative to its
+/// heddle directory, with its bytes.
+fn published_files(repository: &Repository) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).expect("relative").to_path_buf(),
+                    std::fs::read(&path).expect("file"),
+                );
+            }
+        }
+    }
+    let root = repository.heddle_dir();
+    let mut files = BTreeMap::new();
+    for name in ["packs", "objects"] {
+        walk(root, &root.join(name), &mut files);
+    }
+    files
+}
+
+/// Fresh clone of `history` into a new receiver. Returns the receiver, the
+/// install result and how many files the install published.
+fn fresh_clone(
+    history: &ImportedHistory,
+    scratch: &Path,
+    receiver_dir: &Path,
+) -> (Repository, Result<StateId, Error>, usize) {
+    let repository = receiver(history, receiver_dir);
+    let before = published_files(&repository).len();
+    let staged = stage(
+        history,
+        transfer(history, scratch, history.tip()),
+        page_set(
+            history,
+            history.ancestors(),
+            import_ancestry_page::Coverage::Floor,
+            1_000,
+        ),
+        BTreeSet::new(),
+    )
+    .expect("floor verifies against the signed tip");
+    let started = std::time::Instant::now();
+    let installed = try_install(history, &repository, staged);
+    println!(
+        "fresh clone install of {} converted commits: {:?}",
+        history.ancestors().len(),
+        started.elapsed()
+    );
+    let published = published_files(&repository).len() - before;
+    (repository, installed, published)
+}
+
+fn assert_history_installed(repository: &Repository, history: &ImportedHistory) {
+    use objects::store::ObjectStore;
+    let store = Repository::open(repository.root()).expect("reopen");
+    for state in history.ancestors().iter().chain([history.tip()]) {
+        assert_eq!(
+            store
+                .store()
+                .get_state(&state.id())
+                .expect("read")
+                .as_ref()
+                .map(State::id),
+            Some(state.id()),
+            "every converted commit is installed"
+        );
+    }
+}
+
+/// HeddleCo/heddle#2023: a fresh clone of more than ~1,020 converted commits
+/// failed with `installation entry budget exceeded`, because every State was
+/// staged as its own loose file and journaled through the bounded undo log.
+#[test]
+fn fresh_clone_of_a_long_converted_history_installs_under_default_limits() {
+    const LONG: usize = 2_100;
+    const SHORT: usize = 64;
+    let scratch = tempfile::tempdir().expect("scratch");
+
+    let short = imported_history(SHORT, 2);
+    let short_dir = tempfile::tempdir().expect("receiver");
+    let (_, installed, short_published) = fresh_clone(&short, scratch.path(), short_dir.path());
+    assert_eq!(installed.expect("short history installs"), short.tip().id());
+
+    let long = imported_history(LONG, 2);
+    let long_dir = tempfile::tempdir().expect("receiver");
+    let (repository, installed, long_published) =
+        fresh_clone(&long, scratch.path(), long_dir.path());
+    assert_eq!(
+        installed.expect("a 2,100-commit history installs under default limits"),
+        long.tip().id()
+    );
+    assert_history_installed(&repository, &long);
+    // Each published file costs a fixed number of journal entries and fsyncs.
+    assert_eq!(
+        long_published, short_published,
+        "published files (and so undo entries and fsyncs) must not scale with commit count"
+    );
+    assert!(
+        !repository
+            .heddle_dir()
+            .join("objects/states")
+            .read_dir()
+            .is_ok_and(|mut entries| entries.next().is_some()),
+        "converted commits are served from their pack, not per-commit loose files"
+    );
+
+    // A lazy fetch of the oldest converted commit proves membership with a
+    // parent chain of more than 2,000 States the client already holds.
+    let older = long.chain[2].clone();
+    let path = long.chain[2..LONG]
+        .iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
+    let staged = stage(
+        &long,
+        transfer(&long, scratch.path(), &older),
+        page_set(&long, &path, import_ancestry_page::Coverage::Path, 1_000),
+        BTreeSet::from([long.tip().id()]),
+    )
+    .expect("a deep commit stages through its parent chain proof");
+    let before = published_files(&repository).len();
+    assert_eq!(install(&long, &repository, staged), older.id());
+    assert!(
+        published_files(&repository).len() - before <= short_published,
+        "a deep lazy fetch publishes no per-commit files"
+    );
+    let checkout = tempfile::tempdir().expect("older checkout");
+    assert_eq!(
+        checkout_files(&repository, &older, checkout.path()),
+        ["OLD.txt"]
+    );
+}
+
+const CRASH_CHILD: &str = "HEDDLE_TEST_HOSTED_INSTALL_CRASH_RECEIVER";
+
+/// An install interrupted mid-publication (the process dies with the undo log
+/// open) leaves the repository exactly as it was once recovery runs, and the
+/// same clone then succeeds.
+#[test]
+fn crash_mid_long_history_install_recovers_an_intact_store() {
+    const LONG: usize = 2_100;
+    let history = imported_history(LONG, 2);
+    let scratch = tempfile::tempdir().expect("scratch");
+    if let Some(receiver_dir) = std::env::var_os(CRASH_CHILD) {
+        // Child: publish two staged files, then die without unwinding.
+        let repository = Repository::open(&receiver_dir).expect("receiver");
+        let staged = stage(
+            &history,
+            transfer(&history, scratch.path(), history.tip()),
+            page_set(
+                &history,
+                history.ancestors(),
+                import_ancestry_page::Coverage::Floor,
+                1_000,
+            ),
+            BTreeSet::new(),
+        )
+        .expect("stage");
+        super::CRASH_AFTER_PUBLISHED.with(|after| after.set(Some(2)));
+        let result = try_install(&history, &repository, staged);
+        panic!("the crash point must abort before install returns: {result:?}");
+    }
+
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let repository = receiver(&history, receiver_dir.path());
+    let before = published_files(&repository);
+    let states_before = {
+        use objects::store::ObjectStore;
+        repository.store().list_states().expect("states")
+    };
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "crash_mid_long_history_install_recovers_an_intact_store",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_CHILD, receiver_dir.path())
+        .output()
+        .expect("crash child");
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        !child.status.success() && stderr.contains("hosted publish crash point reached"),
+        "child must die at the crash point: {:?}\n{stderr}",
+        child.status
+    );
+    let intent = repository.heddle_dir().join("hosted-install.intent");
+    let crashed = published_files(&repository);
+    assert!(
+        intent.is_file() && crashed.len() > before.len(),
+        "the crash must leave a partly published install behind"
+    );
+
+    // Opening the hosted trust runs installation recovery, as any reader or
+    // writer of the repository does.
+    drop(
+        HostedTrust::open(
+            repository.heddle_dir(),
+            &history.root.authority,
+            ReceiverClock,
+        )
+        .expect("recovery"),
+    );
+    assert!(!intent.exists(), "recovery retires the undo log");
+    assert_eq!(
+        published_files(&repository),
+        before,
+        "recovery restores source storage byte-for-byte"
+    );
+    {
+        use objects::store::ObjectStore;
+        let reopened = Repository::open(receiver_dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.store().list_states().expect("states"),
+            states_before,
+            "no converted commit survives a rolled-back install"
+        );
+    }
+
+    let staged = stage(
+        &history,
+        transfer(&history, scratch.path(), history.tip()),
+        page_set(
+            &history,
+            history.ancestors(),
+            import_ancestry_page::Coverage::Floor,
+            1_000,
+        ),
+        BTreeSet::new(),
+    )
+    .expect("stage");
+    assert_eq!(install(&history, &repository, staged), history.tip().id());
+    assert_history_installed(&repository, &history);
+}
