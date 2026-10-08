@@ -243,15 +243,6 @@ pub enum HeddleError {
     InvalidRefName(String),
     #[error("file too large: {0} bytes")]
     InvalidFileSize(u64),
-    #[error(
-        "symlink target escapes repository: {} -> {}",
-        path.display(),
-        target.display()
-    )]
-    InvalidSymlinkTarget {
-        path: std::path::PathBuf,
-        target: std::path::PathBuf,
-    },
     #[error("object corruption: expected {expected}, found {found}")]
     Corruption {
         expected: ContentHash,
