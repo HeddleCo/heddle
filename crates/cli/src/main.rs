@@ -71,20 +71,12 @@ impl fmt::Display for RenderedExit {
 
 impl std::error::Error for RenderedExit {}
 
-// `current_thread` flavor avoids spinning up a CPU-count-sized worker
-// pool on every CLI invocation. The foreground `heddle` binary is a
-// one-shot command — `heddle status`, `heddle capture`, etc. don't
-// fan out across cores. The mount daemon owns its own runtime setup
-// when it needs real concurrency. Saves ~10-30ms of startup that the
-// multi-thread flavor pays for thread-pool creation + teardown.
 fn main() -> Result<()> {
     install_broken_pipe_panic_hook();
     if let Some(code) = cli::identity_stamp::maybe_run_fast_path() {
         std::process::exit(code);
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let runtime = command_runtime()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(feature = "client")]
         let command = hosted_client::hosted_runtime::hosted::with_command_shutdown(async_main());
@@ -103,6 +95,12 @@ fn main() -> Result<()> {
         Err(payload) if is_broken_pipe_panic(payload.as_ref()) => Ok(()),
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+fn command_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
 }
 
 async fn async_main() -> Result<()> {
@@ -1306,6 +1304,178 @@ fn invocation_is_observe_only(command: &Commands) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn sync_rpc_completes_over_iroh_during_synchronous_install() {
+        use std::{net::Ipv4Addr, sync::mpsc, time::Duration};
+
+        use api::heddle::api::v1alpha2 as v2;
+        use iroh::{Endpoint, RelayMode, endpoint::presets};
+        use prost::Message;
+
+        // An independent server cannot conceal starvation of the CLI reactor.
+        let (address_tx, address_rx) = mpsc::channel();
+        let (install_tx, install_rx) = tokio::sync::oneshot::channel();
+        let (in_flight_tx, in_flight_rx) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("server runtime")
+                .block_on(async {
+                    let endpoint = Endpoint::builder(presets::Minimal)
+                        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+                        .relay_mode(RelayMode::Disabled)
+                        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                        .expect("bind")
+                        .bind()
+                        .await
+                        .expect("server");
+                    address_tx.send(endpoint.addr()).expect("address");
+                    let conn = endpoint
+                        .accept()
+                        .await
+                        .expect("accept")
+                        .await
+                        .expect("connection");
+                    let (mut send, mut recv) = conn.accept_bi().await.expect("discovery");
+                    recv.read_to_end(65536).await.expect("discovery request");
+                    let description = v2::DescribeEndpointResponse {
+                        endpoint: Some(v2::EndpointRef {
+                            kind: v2::EndpointKind::Weft as i32,
+                            public_key: endpoint.id().as_bytes().to_vec(),
+                        }),
+                        supported_packages: vec!["heddle.api.v1alpha2".into()],
+                        implemented_methods: vec![
+                            "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration".into(),
+                        ],
+                        default_read_budget: Some(v2::ReadBudget {
+                            max_items: 64,
+                            max_frame_bytes: 65536,
+                            max_snapshot_bytes: 1048576,
+                        }),
+                        max_pending_batch_bytes: 1048576,
+                        ..Default::default()
+                    };
+                    send.write_all(
+                        &api::framing::encode_success_response(&description.encode_to_vec())
+                            .expect("discovery frame"),
+                    )
+                    .await
+                    .expect("description");
+                    send.finish().expect("FIN");
+                    let (mut send, mut recv) = conn.accept_bi().await.expect("RPC");
+                    let request = recv.read_to_end(65536).await.expect("request");
+                    assert_eq!(
+                        api::framing::decode_request_frame(&request)
+                            .expect("frame")
+                            .method,
+                        "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration"
+                    );
+                    in_flight_tx.send(()).expect("sync in flight");
+                    install_rx.await.expect("install started");
+                    let bodies = [
+                        v2::stream_frame::Body::Open(v2::StreamOpen {
+                            source: description.endpoint,
+                            binding_digest: vec![9; 32],
+                            accepted_budget: Some(v2::ReadBudget {
+                                max_items: 64,
+                                max_frame_bytes: 65536,
+                                max_snapshot_bytes: 1048576,
+                            }),
+                            ..Default::default()
+                        }),
+                        v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                            cursor: vec![1],
+                            snapshot_complete: true,
+                            page: Some(v2::PageInfo {
+                                exhausted: true,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        v2::stream_frame::Body::Complete(v2::StreamComplete { cursor: vec![1] }),
+                    ];
+                    for (index, body) in bodies.into_iter().enumerate() {
+                        let event = v2::CollaborationEvent {
+                            frame: Some(v2::StreamFrame {
+                                sequence: index as u64 + 1,
+                                body: Some(body),
+                            }),
+                            ..Default::default()
+                        };
+                        send.write_all(
+                            &api::framing::encode_stream_message(&event.encode_to_vec())
+                                .expect("response frame"),
+                        )
+                        .await
+                        .expect("response");
+                    }
+                    send.finish().expect("FIN");
+                    conn.closed().await;
+                    endpoint.close().await;
+                });
+        });
+        let addr = address_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server address");
+        let completed = command_runtime().expect("CLI runtime").block_on(async {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                .expect("bind")
+                .bind()
+                .await
+                .expect("client");
+            let client =
+                hosted_client::hosted_runtime::hosted::HostedClient::connect_addr_with_context(
+                    endpoint,
+                    addr,
+                    Default::default(),
+                )
+                .await
+                .expect("hosted client");
+            let remote = client.native().await.expect("discovery");
+            let (done_tx, done_rx) = mpsc::channel();
+            let reader = tokio::spawn(async move {
+                let mut observation = remote
+                    .observe::<thread_api::rpc::CollaborationServiceObserveCollaboration>(
+                        v2::ObserveCollaborationRequest {
+                            observe: Some(v2::ObserveOptions {
+                                mode: v2::ObservationMode::Once as i32,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        None,
+                    )
+                    .await
+                    .expect("sync observation");
+                let batch = observation
+                    .next_commit()
+                    .await
+                    .expect("checkpoint")
+                    .expect("batch");
+                assert!(batch.page.expect("page").exhausted);
+                assert!(observation.next_commit().await.expect("Complete").is_none());
+                let _ = done_tx.send(());
+            });
+            in_flight_rx.await.expect("sync RPC in flight");
+            install_tx.send(()).expect("start install");
+            // A synthetic blocking installer waits for the in-flight sync. The
+            // runtime must deliver it while this foreground future cannot poll.
+            let completed = done_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            reader.await.expect("reader");
+            client.close().await;
+            completed
+        });
+        server.join().expect("server stopped");
+        assert!(
+            completed,
+            "iroh was starved throughout the synchronous install"
+        );
+    }
 
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|arg| (*arg).to_string()).collect()

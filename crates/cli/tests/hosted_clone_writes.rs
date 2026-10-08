@@ -3374,3 +3374,121 @@ async fn partial_context_push_retry_keeps_published_discussions_once_case() {
     );
     fixture.close().await;
 }
+
+async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
+    let fixture = if recovery {
+        Fixture::new().await
+    } else {
+        Fixture::uninstalled().await
+    };
+    if recovery {
+        repo::clone_intent::CloneIntent {
+            origin: fixture.remote(),
+            endpoint: fixture.https.authority.clone(),
+            repository: "spool/acme".into(),
+            thread: Some("main".into()),
+            advertised_head: Some("main".into()),
+            depth: None,
+            lazy: false,
+        }
+        .create(&fixture.clone)
+        .expect("recovery intent");
+    }
+    {
+        let mut capture = fixture.captured.lock().expect("capture");
+        capture.calls.clear();
+        capture.fail_clone_stage = Some(stage.into());
+    }
+    let started = std::time::Instant::now();
+    let output = if recovery {
+        fixture.output_at(&fixture.clone, &["status"])
+    } else {
+        fixture.output_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        )
+    };
+    let error = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let capture = fixture.captured.lock().expect("capture").clone();
+    let calls = &capture.calls;
+    fixture.client.close().await;
+    fixture.server.abort();
+    assert!(
+        !output.status.success(),
+        "clone must stop at {stage} failure: {error}"
+    );
+    let labelled_stage = if stage == "disconnect" {
+        "discussion"
+    } else {
+        stage
+    };
+    let label = if recovery {
+        format!("clone recovery {labelled_stage} sync failed")
+    } else {
+        format!("post-install {labelled_stage} sync failed")
+    };
+    assert!(error.contains(&label), "expected {label}: {error}");
+    if stage != "disconnect" {
+        assert!(
+            error.contains("injected clone sync failure"),
+            "cause lost: {error}"
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "failure must be immediate"
+    );
+    assert!(
+        repo::clone_intent::CloneIntent::path(&fixture.clone).exists(),
+        "retain recovery intent"
+    );
+    let failed = capture.failed_clone_call.expect("failure was injected");
+    assert!(
+        !calls[failed + 1..].iter().any(
+            |call| call.ends_with("/ObserveCollaboration") || call.ends_with("/ObserveThreads")
+        ),
+        "no sync or metadata after failed stage: {calls:?}"
+    );
+}
+
+#[test]
+fn fresh_clone_labels_discussion_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("discussion", false));
+}
+#[test]
+fn fresh_clone_labels_context_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("context", false));
+}
+#[test]
+fn fresh_clone_labels_metadata_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("metadata", false));
+}
+#[test]
+fn clone_recovery_labels_discussion_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("discussion", true));
+}
+#[test]
+fn clone_recovery_labels_context_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("context", true));
+}
+#[test]
+fn clone_recovery_labels_metadata_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_stage_failure("metadata", true));
+}
+
+#[test]
+fn fresh_clone_labels_disconnected_peer_and_stops_sync() {
+    on_large_stack(|| assert_clone_stage_failure("disconnect", false));
+}
+#[test]
+fn clone_recovery_labels_disconnected_peer_and_stops_sync() {
+    on_large_stack(|| assert_clone_stage_failure("disconnect", true));
+}

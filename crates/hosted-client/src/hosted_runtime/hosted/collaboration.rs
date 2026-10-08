@@ -1007,7 +1007,16 @@ impl HostedClient {
 
     pub(crate) async fn observe_collaboration_events(
         &self,
+        request: ObserveCollaborationRequest,
+    ) -> Result<Vec<collaboration_event::Payload>, ProtocolError> {
+        self.observe_collaboration_events_with_timeout(request, std::time::Duration::from_secs(30))
+            .await
+    }
+
+    pub(super) async fn observe_collaboration_events_with_timeout(
+        &self,
         mut request: ObserveCollaborationRequest,
+        _progress_timeout: std::time::Duration,
     ) -> Result<Vec<collaboration_event::Payload>, ProtocolError> {
         ensure_observe_page(&mut request);
         let remote = self.native().await.map_err(native_error)?;
