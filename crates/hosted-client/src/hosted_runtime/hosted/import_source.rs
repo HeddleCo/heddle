@@ -46,7 +46,9 @@ pub(super) fn require_request_authority(method: &str, encoded: &[u8]) -> super::
             if provider != scope.provider || source.clone_url != scope.source_url {
                 return Err(Reject::SourceSelection.into());
             }
-            api::import_authority::validate_repository_hash_algorithm(source, true)?;
+            // `source` is the host's complete current discovery, bounded by
+            // `MAX_IMPORT_SOURCE_REFS`, not one 512-ref discovery page.
+            api::import_authority::validate_discovered_repository(source)?;
         }
         "heddle.api.v1alpha2.IntegrationService/SynchronizeRemote" => {
             let request = contract::SynchronizeRemoteRequest::decode(encoded)?;
@@ -713,6 +715,70 @@ mod tests {
         assert_eq!(source.provider_repository_id, source.clone_url);
         assert!(!source.private);
         assert!(source.installation_id.is_empty());
+    }
+
+    /// Commit carries the host's complete discovery, so a mature repository
+    /// with more refs than one 512-ref discovery page must reach the host
+    /// (heddle#2022). The bound is `MAX_IMPORT_SOURCE_REFS`, not the page size.
+    #[test]
+    fn commit_transport_admits_a_complete_discovery_larger_than_one_page() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        const COMMIT: &str = "/heddle.api.v1alpha2.IntegrationService/CommitImportJob";
+        let f: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../thread-api/tests/fixtures/hybrid-alpha33.json"
+        )))
+        .expect("vectors");
+        let bytes = hex::decode(
+            f["wire_vectors"]["commit_request"]["wire_hex"]
+                .as_str()
+                .expect("wire"),
+        )
+        .expect("hex");
+        let control = contract::CommitImportJobRequest::decode(bytes.as_slice()).expect("commit");
+        require_request_authority(COMMIT, &control.encode_to_vec()).expect("fixed commit request");
+
+        let with_refs = |count: usize| {
+            let mut request = control.clone();
+            let source = request.source.as_mut().expect("source");
+            let oid_len = match source.hash_algorithm {
+                1 => 40,
+                2 => 64,
+                other => panic!("fixture hash algorithm {other}"),
+            };
+            let algorithm = source.hash_algorithm;
+            let mut names = (0..count)
+                .map(|i| format!("refs/tags/r{i:05}"))
+                .collect::<Vec<_>>();
+            names.sort();
+            source.refs = names
+                .into_iter()
+                .map(|name| contract::ProviderRef {
+                    name,
+                    head_oid: "a".repeat(oid_len),
+                    hash_algorithm: algorithm,
+                    ..Default::default()
+                })
+                .collect();
+            request.encode_to_vec()
+        };
+        for count in [
+            api::import_authority::MAX_IMPORT_SOURCE_REF_PAGE + 1,
+            600,
+            api::import_authority::MAX_IMPORT_SOURCE_REFS,
+        ] {
+            require_request_authority(COMMIT, &with_refs(count))
+                .unwrap_or_else(|error| panic!("{count} discovered refs: {error}"));
+        }
+        assert!(matches!(
+            require_request_authority(
+                COMMIT,
+                &with_refs(api::import_authority::MAX_IMPORT_SOURCE_REFS + 1)
+            ),
+            Err(super::super::HostedError::Hybrid(
+                api::hybrid_codec::Reject::Bounds
+            ))
+        ));
     }
 
     #[test]

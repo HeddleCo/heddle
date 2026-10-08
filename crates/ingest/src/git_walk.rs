@@ -471,13 +471,14 @@ impl GitSource {
     fn resolve_ref_commit(&self, name: &str, target: &SleyRefTarget) -> RefResolution {
         let oid = match target {
             SleyRefTarget::Direct(oid) => *oid,
-            SleyRefTarget::Symbolic(_) => match self.repo.find_reference(name) {
-                Ok(Some(reference)) => match reference.peeled_oid(&self.repo) {
+            // Enumerated names are read leniently; `find_reference` rejects
+            // one Git refuses to create, so resolve through the ref store.
+            SleyRefTarget::Symbolic(_) => {
+                match sley_refs::resolve_ref_peeled(&self.repo.references(), name) {
                     Ok(Some(oid)) => oid,
                     Ok(None) | Err(_) => return RefResolution::PeelFailed,
-                },
-                Ok(None) | Err(_) => return RefResolution::PeelFailed,
-            },
+                }
+            }
         };
 
         match self.repo.peel_to_commit_oid(oid) {

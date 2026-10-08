@@ -270,11 +270,12 @@ fn collect_commit_oids(repo: &SleyRepository) -> GitProjectionResult<Vec<SleyObj
         }
         let oid = match reference.target {
             ReferenceTarget::Direct(oid) => oid,
+            // `list_refs` reads names leniently; `find_reference` would reject
+            // one Git refuses to create, so resolve through the ref store.
             ReferenceTarget::Symbolic(_) => {
-                let Some(reference) = repo.find_reference(&reference.name).map_err(git_err)? else {
-                    continue;
-                };
-                let Some(oid) = reference.peeled_oid(repo).map_err(git_err)? else {
+                let Some(oid) = sley_refs::resolve_ref_peeled(&repo.references(), &reference.name)
+                    .map_err(git_err)?
+                else {
                     continue;
                 };
                 oid
