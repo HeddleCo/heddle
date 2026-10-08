@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.13](https://github.com/HeddleCo/heddle/compare/heddle-ingest-v0.28.12...heddle-ingest-v0.28.13) - 2026-10-08
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-ingest-v0.15.0...heddle-ingest-v0.15.1) - 2026-08-27
 
 ### Fixed

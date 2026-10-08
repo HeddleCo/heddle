@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.13](https://github.com/HeddleCo/heddle/compare/heddle-agent-relay-v0.28.12...heddle-agent-relay-v0.28.13) - 2026-10-08
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.28.12](https://github.com/HeddleCo/heddle/compare/heddle-agent-relay-v0.28.11...heddle-agent-relay-v0.28.12) - 2026-10-07
 
 ### Other
