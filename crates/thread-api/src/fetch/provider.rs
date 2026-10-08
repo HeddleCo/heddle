@@ -344,6 +344,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
         let directory = tempfile::Builder::new()
             .prefix("provider-download-")
             .tempdir_in(scratch)?;
+        let _scratch_lease = heddle_pack::store::pack::ScratchLease::acquire(directory.path())?;
         if !self.ancestry.is_empty() {
             for name in ["ancestry.pack", "ancestry.idx"] {
                 std::fs::copy(
@@ -809,7 +810,7 @@ impl Candidate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use std::{
         collections::VecDeque,

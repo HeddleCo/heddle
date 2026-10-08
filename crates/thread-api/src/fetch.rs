@@ -17,7 +17,7 @@ mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
 pub(crate) use staging::validate_artifacts;
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 pub(crate) use staging::validate_with_receipts;
 pub use staging::{StagedSource, ValidatedSourceArtifacts};
 
@@ -654,7 +654,7 @@ impl Validation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[path = "fetch_tests.rs"]
 mod tests;
 

@@ -82,7 +82,7 @@ pub(super) fn cutover(
         }
     }
     sync_directory(&packs_dir(store.root()))?;
-    *manager = SnapshotPackManager::new(packs_dir(store.root()));
+    *manager = SnapshotPackManager::new(packs_dir(store.root()), store.root().join("tmp"));
     *npk1_manager = Npk1Manager::new(packs_dir(store.root()));
     drop(manager);
     drop(npk1_manager);

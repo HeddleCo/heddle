@@ -31,7 +31,7 @@ source-transfer = [
     "dep:heddle-pack",
     "dep:tempfile",
     "dep:wire",
-    "heddle-pack/fs",
+    "heddle-pack/source-transfer",
 ]
 # An Iroh adapter for the transport-neutral client and replication driver.
 iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]

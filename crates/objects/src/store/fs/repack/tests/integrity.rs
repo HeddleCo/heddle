@@ -98,7 +98,7 @@ fn repack_preserves_every_typed_identity_byte_identically() {
     let pack_bytes = fs::read(&pack_path).unwrap();
     assert_eq!(u64::from_be_bytes(pack_bytes[8..16].try_into().unwrap()), 3);
     assert_eq!(
-        PackReader::open(&pack_path, &index_path)
+        PackReader::open(&pack_path, &index_path, &std::env::temp_dir())
             .unwrap()
             .list_ids()
             .unwrap()

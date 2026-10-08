@@ -416,7 +416,8 @@ impl StagedSource {
         )
         .map_err(preparation)?;
         let reader =
-            heddle_pack::store::pack::PackReader::open(&pack, &index).map_err(preparation)?;
+            heddle_pack::store::pack::PackReader::open(&pack, &index, self.directory.path())
+                .map_err(preparation)?;
         reader
             .visit_objects(|id, kind, bytes| {
                 if kind != heddle_pack::store::pack::ObjectType::Tree
@@ -429,12 +430,15 @@ impl StagedSource {
             .map_err(preparation)?;
         let (output, _) = builder.finalize().map_err(preparation)?;
         drop(output);
-        for partial in &self.partial_trees {
-            let bytes =
-                objects::object::encode_redacted_projection(partial).map_err(preparation)?;
-            repository
-                .store()
-                .put_partial_tree(&partial.declared_root(), &bytes)
+        if let Some(closure) = &self.partial_trees {
+            closure
+                .visit_partial_trees(|partial| {
+                    let bytes = objects::object::encode_redacted_projection(partial)?;
+                    repository
+                        .store()
+                        .put_partial_tree(&partial.declared_root(), &bytes)
+                        .map(|_| ())
+                })
                 .map_err(preparation)?;
         }
         repository

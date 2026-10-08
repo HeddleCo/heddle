@@ -350,7 +350,8 @@ impl FsStore {
         let descriptor = if let Some(artifact) = commit_artifact {
             let pack_path = packs.join(format!("{installed_pack_name}.pack"));
             let index_path = packs.join(format!("{installed_pack_name}.idx"));
-            let object_ids = PackReader::open(&pack_path, &index_path)?.list_ids()?;
+            let object_ids =
+                PackReader::open(&pack_path, &index_path, &self.root.join("tmp"))?.list_ids()?;
             Some(SnapshotCommitDescriptor {
                 artifact,
                 pack_name: installed_pack_name,

@@ -18,6 +18,7 @@ use objects::{
 
 pub(crate) struct TimelinePackSet {
     packs_dir: PathBuf,
+    scratch_root: PathBuf,
     packs: Vec<TimelinePack>,
     operation_locations: HashMap<TimelineOperationId, usize>,
 }
@@ -29,9 +30,10 @@ struct TimelinePack {
 }
 
 impl TimelinePackSet {
-    pub(crate) fn open(packs_dir: PathBuf) -> Result<Self> {
+    pub(crate) fn open(packs_dir: PathBuf, scratch_root: PathBuf) -> Result<Self> {
         let mut set = Self {
             packs_dir,
+            scratch_root,
             packs: Vec::new(),
             operation_locations: HashMap::new(),
         };
@@ -56,7 +58,7 @@ impl TimelinePackSet {
         let mut packs = Vec::new();
         let mut operation_locations = HashMap::new();
         for (pack_path, index_path) in paired_pack_paths(&self.packs_dir)? {
-            let reader = PackReader::open(&pack_path, &index_path)?;
+            let reader = PackReader::open(&pack_path, &index_path, &self.scratch_root)?;
             let pack_index = packs.len();
             for id in reader.list_ids()? {
                 let operation_id = timeline_id_from_pack_id(id)?;
@@ -150,7 +152,12 @@ impl TimelinePackSet {
             );
         }
         let (pack_data, index_data, stats) = builder.build()?;
-        verify_candidate_pack(&pack_data, &index_data, &canonical_operations)?;
+        verify_candidate_pack(
+            &pack_data,
+            &index_data,
+            &canonical_operations,
+            &self.scratch_root,
+        )?;
         let new_pack_name = install_pack_bytes_journaled(&self.packs_dir, &pack_data, &index_data)?;
         self.reload()?;
         verify_canonical_operations(self, &canonical_operations)?;
@@ -178,8 +185,9 @@ fn verify_candidate_pack(
     pack_data: &[u8],
     index_data: &[u8],
     expected: &BTreeMap<TimelineOperationId, Vec<u8>>,
+    scratch_root: &Path,
 ) -> Result<()> {
-    let reader = PackReader::from_slice(pack_data, index_data)?;
+    let reader = PackReader::from_slice(pack_data, index_data, scratch_root)?;
     if reader.list_ids()?.len() != expected.len() {
         return Err(HeddleError::InvalidObject(
             "new timeline pack entry count differs from canonical operations".to_string(),

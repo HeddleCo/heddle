@@ -131,7 +131,11 @@ fn object_locator_is_lazy_for_incremental_and_reloaded_packs() {
     for id in &ids {
         assert!(manager.has_object_id(id));
     }
-    assert_eq!(cached_location_count(&manager), 8);
+    assert_eq!(
+        cached_location_count(&manager),
+        0,
+        "membership probes must not materialize the global map"
+    );
 
     let reloaded = PackManager::new_with_index_mode(temp.path().to_path_buf(), false);
     assert_eq!(reloaded.pack_count(), 8);

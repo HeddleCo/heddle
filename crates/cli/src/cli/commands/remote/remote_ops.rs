@@ -29,9 +29,9 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{
-    CommitGraphIndex, Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager,
-};
+#[cfg(feature = "client")]
+use repo::CommitGraphIndex;
+use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefPrecondition,
     ReferenceTarget, RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet,
@@ -68,13 +68,14 @@ use super::super::{
     },
     worktree_safety::ensure_worktree_clean,
 };
+#[cfg(feature = "client")]
+use crate::config::UserConfig;
 use crate::{
     cli::{
         Cli, RemoteCommands,
         progress_render::{finish_line, format_transfer_bytes, progress_for},
         should_output_json, style,
     },
-    config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -276,6 +277,7 @@ pub async fn cmd_pull(
         return pull_git_overlay(&repo, &plan, thread.as_deref(), insecure, cli);
     }
 
+    #[cfg(feature = "client")]
     let user_config = UserConfig::load_default()?;
     #[cfg(feature = "client")]
     let (target, server_key) = resolve_remote_with_key(&repo, plan.remote.as_deref())?;

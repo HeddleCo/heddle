@@ -423,7 +423,7 @@ pub(super) fn prepare(
             bail!("initial source differs from canonical empty seed")
         }
         let generation = selected.generation()?;
-        let scratch = repository.heddle_dir().join("source-transfers");
+        let scratch = repository.store().root().join("tmp");
         objects::fs_atomic::create_private_dir_all(&scratch)?;
         let pack = VisibleSourcePack::prepare(
             repository.store(),
@@ -432,7 +432,6 @@ pub(super) fn prepare(
             &redactions,
             &scratch,
             SourceBudget {
-                max_objects: 100_000,
                 max_decoded_bytes: BYTES,
             },
         )?;
@@ -553,7 +552,7 @@ pub(super) fn prepare(
         }
     }
 
-    let scratch = repository.heddle_dir().join("source-transfers");
+    let scratch = repository.store().root().join("tmp");
     objects::fs_atomic::create_private_dir_all(&scratch)?;
     let pack = VisibleSourcePack::prepare(
         repository.store(),
@@ -562,7 +561,6 @@ pub(super) fn prepare(
         &redactions,
         &scratch,
         SourceBudget {
-            max_objects: 100_000,
             max_decoded_bytes: BYTES,
         },
     )?;

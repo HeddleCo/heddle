@@ -833,7 +833,6 @@ mod tests {
             staged.state(),
             scratch.path(),
             SourceBudget {
-                max_objects: 16,
                 max_decoded_bytes: 1024 * 1024,
             },
         )
@@ -1085,7 +1084,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "source-transfer")]
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn thread_publication_prepares_only_selected_source_and_binds_its_revision() {
         use objects::{
@@ -1111,7 +1110,6 @@ mod tests {
             &state,
             root.path(),
             SourceBudget {
-                max_objects: 16,
                 max_decoded_bytes: 256 * 1024,
             },
         )
