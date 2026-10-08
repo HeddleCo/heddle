@@ -24,6 +24,8 @@ mod log_and_errors;
 mod maintenance;
 #[path = "core_functionality/refs_and_remotes.rs"]
 mod refs_and_remotes;
+#[path = "core_functionality/reserved_paths.rs"]
+mod reserved_paths;
 #[path = "core_functionality/undo_and_special.rs"]
 mod undo_and_special;
 

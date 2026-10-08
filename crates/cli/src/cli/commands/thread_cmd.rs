@@ -696,11 +696,23 @@ fn persist_refresh_conflict_state(
         None
     };
     super::merge::apply_merged_tree_external(thread_repo, &tree)?;
-    ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &paths)?;
+    let marker_paths = refresh_conflict_marker_paths(&paths);
+    ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &marker_paths)?;
     thread_repo
         .merge_state_manager()
         .start(ours, theirs, base, paths, structured_conflicts)?;
     Ok(())
+}
+
+/// The conflict paths that may get conflict markers written: never one
+/// through a metadata directory (heddle#2028), which is skipped with a
+/// warning.
+fn refresh_conflict_marker_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| !repo::skip_reserved_worktree_write(std::path::Path::new(path), false))
+        .cloned()
+        .collect()
 }
 
 fn ensure_refresh_conflict_markers_materialized(
@@ -2003,6 +2015,26 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    /// A refresh conflict at `.heddle/config.toml` or inside a nested `.git`
+    /// must not get conflict markers written over it (heddle#2028).
+    #[test]
+    fn refresh_conflict_markers_skip_reserved_paths() {
+        let paths = [
+            ".heddle/config.toml",
+            "vendor/.git/config",
+            "src/lib.rs",
+            "examples/calculator/.heddle/HEAD",
+        ]
+        .map(String::from);
+        assert_eq!(
+            refresh_conflict_marker_paths(&paths),
+            vec![
+                "src/lib.rs".to_string(),
+                "examples/calculator/.heddle/HEAD".to_string()
+            ]
+        );
+    }
 
     /// `promote`'s default checkout path must be byte-identical to the
     /// canonical managed checkout derivation `start` and the per-thread

@@ -88,6 +88,15 @@ pub enum IngestError {
         existing: objects::object::StateId,
         incoming: objects::object::StateId,
     },
+    /// A Git tree has an entry that would write into a metadata directory
+    /// at checkout (heddle#2028). Permanent: the history itself is refused,
+    /// so retrying or `--lossy` cannot import it.
+    #[error("git tree {tree} cannot be imported: entry '{path}' {reason}")]
+    ReservedTreeEntry {
+        tree: String,
+        path: String,
+        reason: objects::object::ReservedMetadataName,
+    },
     #[error("sha map: {0}")]
     ShaMap(#[from] sha_map::ShaMapError),
     #[error("io: {0}")]

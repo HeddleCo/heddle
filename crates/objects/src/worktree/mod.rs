@@ -17,5 +17,8 @@ pub use worktree_diff::{DiffLine, diff_blobs};
 pub use worktree_ignore::{
     WorktreeIgnoreMatcher, build_matcher, build_worktree_ignore, should_ignore,
 };
-pub use worktree_reserved::{is_reserved_directory_child, is_reserved_worktree_path};
+pub use worktree_reserved::{
+    check_worktree_write_path, is_reserved_directory_child, is_reserved_worktree_path,
+    reserved_worktree_write,
+};
 pub use worktree_types::{FileStatus, WorktreeChange, WorktreeStatus};
