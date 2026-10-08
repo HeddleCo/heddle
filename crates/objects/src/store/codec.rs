@@ -9,7 +9,7 @@ use heddle_format::compression::{
 use crate::{
     object::{
         Action, ActionId, ContentHash, PartialTree, State, TREE_DELTA_ANCHOR_INTERVAL,
-        TREE_DELTA_MAX_OPS, Tree, TreeScheme, decode_redacted_projection, decode_tree_delta,
+        TREE_DELTA_MAX_OPS, Tree, decode_redacted_projection, decode_tree_delta,
         decode_tree_delta_header, encode_tree_delta, is_canonical_tree, is_delta_tree,
         is_lean_tree, is_redacted_tree, is_salted_tree, tree_delta,
     },
@@ -70,11 +70,12 @@ pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentH
 /// eligible descendants are cumulative HDC1 deltas against the epoch anchor.
 pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<EncodedTree> {
     let hash = tree.hash();
-    // A V4 salted tree is stored as a full self-keyed HSR1 canonical body. It
-    // is always an anchor (never an HLR1 lean or HDC1 delta — both drop the
-    // per-entry salt), so `base` is irrelevant and it carries the `Lean`
+    // A V4 salted tree is stored as a full self-keyed HSR1 canonical body, and
+    // a tree with a Git source layout as a full HTR4 body. Either is always an
+    // anchor (never an HLR1 lean or HDC1 delta — both drop the per-entry salt
+    // and the layout), so `base` is irrelevant and it carries the `Lean`
     // (anchor, nothing to remember) lineage kind.
-    if tree.scheme() == TreeScheme::V4Salted {
+    if tree.requires_canonical_body() {
         return Ok(EncodedTree {
             hash,
             data: tree.encode_canonical()?,
@@ -89,10 +90,11 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
             kind: TreeEncodingKind::Lean,
         });
     };
-    if base.anchor.scheme() == TreeScheme::V4Salted {
+    if base.anchor.requires_canonical_body() {
         // A V3 child cannot delta against a V4 salted anchor (different hash
-        // scheme, no shared preimage). Store the child as its own lean anchor
-        // rather than hard-failing the write.
+        // scheme, no shared preimage), nor against an anchor whose Git layout
+        // HDC1 cannot carry. Store the child as its own lean anchor rather
+        // than hard-failing the write.
         return Ok(EncodedTree {
             hash,
             data: lean,

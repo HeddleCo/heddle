@@ -6,7 +6,10 @@ use std::{fmt, path::Path, sync::Arc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
-use super::{ContentHash, SpoolId, StateId};
+use super::{
+    ContentHash, SpoolId, StateId,
+    tree_git_layout::{RawGitMode, git_canonical_order},
+};
 
 /// Durable msgpack encoding version for the flat V3 tree body. This is the
 /// serde-representation version, NOT the hash-scheme selector: the scheme is
@@ -247,19 +250,15 @@ impl TreeEntryTarget {
         }
     }
 
-    fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        self.write_payload(|bytes| {
-            hasher.update(bytes);
-        });
-    }
-
     /// Emit the canonical `mode ‖ entry_type ‖ target_payload` byte sequence.
+    /// `layout_flags` are the Git-layout trailer flags of the owning entry
+    /// (zero for every entry without one, which keeps its bytes unchanged).
     ///
     /// This is the single source of truth for both the V3 flat hash
-    /// ([`Self::update_hasher`]) and the V4 leaf preimage
+    /// ([`TreeEntry::update_hasher`]) and the V4 leaf preimage
     /// ([`Tree::v4_leaf_preimage`]), so the two encodings can never drift.
-    fn write_payload(&self, mut emit: impl FnMut(&[u8])) {
-        emit(&[self.mode().to_byte()]);
+    fn write_payload(&self, layout_flags: u8, mut emit: impl FnMut(&[u8])) {
+        emit(&[self.mode().to_byte() | layout_flags]);
         emit(&[self.entry_type().to_byte()]);
         match self {
             TreeEntryTarget::Blob { hash, .. }
@@ -312,11 +311,61 @@ pub fn validate_name(name: &str) -> Result<(), TreeError> {
 pub struct TreeEntry {
     name: String,
     target: TreeEntryTarget,
+    // The source Git mode, recorded only when it differs from the mode Git
+    // writes for `target` (heddle#2018). Checkout and diff ignore it.
+    git_mode: Option<RawGitMode>,
 }
 
 impl TreeEntry {
     pub(crate) fn validate(&self) -> Result<(), TreeError> {
-        validate_name(&self.name)
+        validate_name(&self.name)?;
+        if let Some(mode) = self.git_mode {
+            self.check_raw_git_mode(mode)?;
+        }
+        Ok(())
+    }
+
+    fn new(name: String, target: TreeEntryTarget) -> Self {
+        Self {
+            name,
+            target,
+            git_mode: None,
+        }
+    }
+
+    /// Record the mode this entry had in its source Git tree. A mode Git would
+    /// write anyway is not recorded, so a canonical entry stays byte-identical
+    /// to one built without a source mode. Errors when `mode` does not read as
+    /// this entry's kind and executable bit.
+    pub fn with_raw_git_mode(self, mode: RawGitMode) -> Result<Self, TreeError> {
+        let canonical = RawGitMode::canonical(self.entry_type(), self.is_executable());
+        if canonical == Some(mode) {
+            return Ok(Self {
+                git_mode: None,
+                ..self
+            });
+        }
+        self.check_raw_git_mode(mode)?;
+        Ok(self.with_checked_raw_git_mode(mode))
+    }
+
+    pub(crate) fn with_checked_raw_git_mode(self, mode: RawGitMode) -> Self {
+        Self {
+            git_mode: Some(mode),
+            ..self
+        }
+    }
+
+    /// The recorded source Git mode, present only when it is not canonical.
+    pub fn raw_git_mode(&self) -> Option<RawGitMode> {
+        self.git_mode
+    }
+
+    /// The mode to write for this entry in a Git tree: the recorded source
+    /// mode, else the canonical one. `None` for a spoollink.
+    pub fn git_mode(&self) -> Option<RawGitMode> {
+        self.git_mode
+            .or_else(|| RawGitMode::canonical(self.entry_type(), self.is_executable()))
     }
 
     pub fn file(
@@ -326,37 +375,25 @@ impl TreeEntry {
     ) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
-        Ok(Self {
-            name,
-            target: TreeEntryTarget::Blob { hash, executable },
-        })
+        Ok(Self::new(name, TreeEntryTarget::Blob { hash, executable }))
     }
 
     pub fn directory(name: impl Into<String>, hash: ContentHash) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
-        Ok(Self {
-            name,
-            target: TreeEntryTarget::Tree { hash },
-        })
+        Ok(Self::new(name, TreeEntryTarget::Tree { hash }))
     }
 
     pub fn symlink(name: impl Into<String>, hash: ContentHash) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
-        Ok(Self {
-            name,
-            target: TreeEntryTarget::Symlink { hash },
-        })
+        Ok(Self::new(name, TreeEntryTarget::Symlink { hash }))
     }
 
     pub fn gitlink(name: impl Into<String>, target: GitObjectId) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
-        Ok(Self {
-            name,
-            target: TreeEntryTarget::Gitlink { target },
-        })
+        Ok(Self::new(name, TreeEntryTarget::Gitlink { target }))
     }
 
     /// Build a native child-spool edge: a pointer to `spool_id` anchored at
@@ -368,10 +405,10 @@ impl TreeEntry {
     ) -> Result<Self, TreeError> {
         let name = name.into();
         validate_name(&name)?;
-        Ok(Self {
+        Ok(Self::new(
             name,
-            target: TreeEntryTarget::Spoollink { spool_id, state_id },
-        })
+            TreeEntryTarget::Spoollink { spool_id, state_id },
+        ))
     }
 
     pub fn name(&self) -> &str {
@@ -491,8 +528,15 @@ impl TreeEntry {
         self.mode() == FileMode::Executable
     }
 
-    pub(crate) fn encoded_len(&self) -> usize {
-        1 + 1 + self.target.encoded_payload_len() + self.name.len() + 1
+    /// Length of this entry's hash preimage. `source_position` is the entry's
+    /// position in its tree's recorded Git source order, if any.
+    pub(crate) fn encoded_len(&self, source_position: Option<u32>) -> usize {
+        let flags = self.layout_flags(source_position);
+        1 + 1
+            + self.target.encoded_payload_len()
+            + self.name.len()
+            + 1
+            + super::tree_git_layout::layout_trailer_len(flags)
     }
 
     /// Owned name-plus-target bytes used by streaming page budgets.
@@ -500,10 +544,19 @@ impl TreeEntry {
         self.name.len() + self.target.encoded_payload_len()
     }
 
-    pub(crate) fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        self.target.update_hasher(hasher);
+    /// Feed this entry's V3 preimage, `mode|flags ‖ type ‖ payload ‖ name ‖
+    /// NUL ‖ layout trailer`. Without a layout the flags are zero and the
+    /// trailer is empty, which is the historical preimage.
+    pub(crate) fn update_hasher(&self, hasher: &mut blake3::Hasher, source_position: Option<u32>) {
+        let flags = self.layout_flags(source_position);
+        self.target.write_payload(flags, |bytes| {
+            hasher.update(bytes);
+        });
         hasher.update(self.name.as_bytes());
         hasher.update(&[0]);
+        self.write_layout_trailer(source_position, |bytes| {
+            hasher.update(bytes);
+        });
     }
 }
 
@@ -534,6 +587,12 @@ pub struct Tree {
     // Non-empty iff `scheme == TreeScheme::V4Salted`, in which case
     // `salts.len() == entries.len()` is a maintained invariant.
     salts: Arc<Vec<[u8; 32]>>,
+    // Each entry's position in its source Git tree, parallel to `entries`.
+    // Empty unless the tree was imported from a Git tree whose entries were
+    // not in Git's canonical order (heddle#2018); then it is a permutation of
+    // `0..entries.len()` that differs from Git's order. V3 only. Any mutation
+    // drops it: an edited tree has no source to reproduce.
+    source_positions: Arc<Vec<u32>>,
 }
 
 impl Tree {
@@ -542,6 +601,7 @@ impl Tree {
             entries: Arc::new(Vec::new()),
             scheme: TreeScheme::V3Flat,
             salts: Arc::new(Vec::new()),
+            source_positions: Arc::new(Vec::new()),
         }
     }
 
@@ -551,7 +611,47 @@ impl Tree {
             entries: Arc::new(entries),
             scheme: TreeScheme::V3Flat,
             salts: Arc::new(Vec::new()),
+            source_positions: Arc::new(Vec::new()),
         }
+    }
+
+    /// Build a tree from the entries of a Git tree, in the Git tree's own
+    /// order. The source order is recorded only when it is not Git's
+    /// canonical order. Entries carry their own raw modes
+    /// ([`TreeEntry::with_raw_git_mode`]).
+    ///
+    /// A Git tree with two entries of the same name is not representable and
+    /// is rejected, naming the entry.
+    pub fn from_git_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
+        let canonical = entries
+            .windows(2)
+            .all(|pair| git_canonical_order(&pair[0], &pair[1]) == std::cmp::Ordering::Less);
+        let mut paired: Vec<(TreeEntry, u32)> = Vec::with_capacity(entries.len());
+        for (position, entry) in entries.into_iter().enumerate() {
+            let position = u32::try_from(position).map_err(|_| {
+                TreeError::InvalidStructure("git tree has more than u32::MAX entries".into())
+            })?;
+            paired.push((entry, position));
+        }
+        paired.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        if let Some(pair) = paired
+            .windows(2)
+            .find(|pair| pair[0].0.name == pair[1].0.name)
+        {
+            return Err(TreeError::InvalidStructure(format!(
+                "duplicate entry name '{}'",
+                pair[0].0.name
+            )));
+        }
+        let (entries, positions): (Vec<TreeEntry>, Vec<u32>) = paired.into_iter().unzip();
+        let tree = Self {
+            entries: Arc::new(entries),
+            scheme: TreeScheme::V3Flat,
+            salts: Arc::new(Vec::new()),
+            source_positions: Arc::new(if canonical { Vec::new() } else { positions }),
+        };
+        tree.validate()?;
+        Ok(tree)
     }
 
     /// Build a salted V4 tree from entries and their parallel salts.
@@ -583,10 +683,20 @@ impl Tree {
     /// eager and streaming paths reject the same out-of-order or duplicate
     /// encodings instead of silently canonicalizing them.
     pub fn try_from_decoded_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
+        Self::try_from_decoded_layout(entries, Vec::new())
+    }
+
+    /// [`Self::try_from_decoded_entries`] for a body that carries per-entry
+    /// source positions (empty when it carries none).
+    pub(crate) fn try_from_decoded_layout(
+        entries: Vec<TreeEntry>,
+        source_positions: Vec<u32>,
+    ) -> Result<Self, TreeError> {
         let tree = Self {
             entries: Arc::new(entries),
             scheme: TreeScheme::V3Flat,
             salts: Arc::new(Vec::new()),
+            source_positions: Arc::new(source_positions),
         };
         tree.validate()?;
         Ok(tree)
@@ -610,6 +720,7 @@ impl Tree {
             entries: Arc::new(entries),
             scheme: TreeScheme::V4Salted,
             salts: Arc::new(salts),
+            source_positions: Arc::new(Vec::new()),
         };
         tree.validate()?;
         Ok(tree)
@@ -629,6 +740,43 @@ impl Tree {
     /// range.
     pub fn salt_at(&self, index: usize) -> Option<[u8; 32]> {
         self.salts.get(index).copied()
+    }
+
+    /// The source Git position of each entry, parallel to [`Self::entries`].
+    /// Empty unless the source tree was not in Git's canonical order.
+    pub fn source_positions(&self) -> &[u32] {
+        &self.source_positions
+    }
+
+    /// The source position of the entry at `index`, if the tree records one.
+    pub fn source_position_at(&self, index: usize) -> Option<u32> {
+        self.source_positions.get(index).copied()
+    }
+
+    /// Whether this tree records any part of a non-canonical Git source
+    /// layout: a raw mode on an entry, or the source entry order.
+    pub fn has_git_layout(&self) -> bool {
+        !self.source_positions.is_empty()
+            || self.entries.iter().any(|entry| entry.git_mode.is_some())
+    }
+
+    /// Whether this tree can only be stored as a full, self-keyed canonical
+    /// body (HTR4 / HSR1). The lean, delta, and packed columnar forms carry
+    /// neither salts nor the Git layout.
+    pub fn requires_canonical_body(&self) -> bool {
+        self.scheme == TreeScheme::V4Salted || self.has_git_layout()
+    }
+
+    /// The entries in the order a Git tree lists them: the recorded source
+    /// order when there is one, else Git's canonical order.
+    pub fn git_ordered_entries(&self) -> Vec<&TreeEntry> {
+        let mut ordered: Vec<(usize, &TreeEntry)> = self.entries.iter().enumerate().collect();
+        if self.source_positions.is_empty() {
+            ordered.sort_by(|a, b| git_canonical_order(a.1, b.1));
+        } else {
+            ordered.sort_by_key(|(index, _)| self.source_positions.get(*index).copied());
+        }
+        ordered.into_iter().map(|(_, entry)| entry).collect()
     }
 
     pub fn validate(&self) -> Result<(), TreeError> {
@@ -662,7 +810,63 @@ impl Tree {
             }
             previous_name = Some(&entry.name);
         }
+        self.validate_source_positions()
+    }
+
+    /// Source positions are absent, or a permutation of the entries that
+    /// differs from Git's canonical order. Recording the canonical order would
+    /// give one Git tree two native ids.
+    fn validate_source_positions(&self) -> Result<(), TreeError> {
+        if self.source_positions.is_empty() {
+            return Ok(());
+        }
+        if self.scheme != TreeScheme::V3Flat {
+            return Err(TreeError::InvalidStructure(
+                "only v3 trees record a git source order".into(),
+            ));
+        }
+        if self.source_positions.len() != self.entries.len() {
+            return Err(TreeError::InvalidStructure(format!(
+                "tree has {} entries but {} source positions",
+                self.entries.len(),
+                self.source_positions.len()
+            )));
+        }
+        let mut seen = vec![false; self.entries.len()];
+        for position in self.source_positions.iter() {
+            let slot = usize::try_from(*position)
+                .ok()
+                .and_then(|index| seen.get_mut(index))
+                .ok_or_else(|| {
+                    TreeError::InvalidStructure(format!(
+                        "source position {position} is out of range"
+                    ))
+                })?;
+            if *slot {
+                return Err(TreeError::InvalidStructure(format!(
+                    "source position {position} is repeated"
+                )));
+            }
+            *slot = true;
+        }
+        let ordered = self.git_ordered_entries();
+        if ordered
+            .windows(2)
+            .all(|pair| git_canonical_order(pair[0], pair[1]) == std::cmp::Ordering::Less)
+        {
+            return Err(TreeError::InvalidStructure(
+                "recorded git source order is the canonical order".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// An edited tree has no source tree to reproduce, so it takes Git's
+    /// canonical order. Raw modes stay with their entries.
+    fn drop_source_order(&mut self) {
+        if !self.source_positions.is_empty() {
+            self.source_positions = Arc::new(Vec::new());
+        }
     }
 
     pub fn entries(&self) -> &[TreeEntry] {
@@ -678,6 +882,7 @@ impl Tree {
     }
 
     pub fn insert(&mut self, entry: TreeEntry) {
+        self.drop_source_order();
         match self.scheme {
             TreeScheme::V3Flat => {
                 let entries = Arc::make_mut(&mut self.entries);
@@ -717,6 +922,7 @@ impl Tree {
 
     pub fn remove(&mut self, name: &str) -> Option<TreeEntry> {
         let pos = self.entries.iter().position(|e| e.name == name)?;
+        self.drop_source_order();
         if matches!(self.scheme, TreeScheme::V4Salted) {
             Arc::make_mut(&mut self.salts).remove(pos);
         }
@@ -740,10 +946,15 @@ impl Tree {
 
     /// The historical flat hash: typed BLAKE3 over every entry preimage.
     fn flat_hash_v3(&self) -> ContentHash {
-        let total_len: usize = self.entries.iter().map(TreeEntry::encoded_len).sum();
+        let total_len: usize = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| entry.encoded_len(self.source_position_at(index)))
+            .sum();
         ContentHash::compute_typed_with_len(TREE_EMPTY_PREFIX, total_len as u64, |hasher| {
-            for entry in self.entries.iter() {
-                entry.update_hasher(hasher);
+            for (index, entry) in self.entries.iter().enumerate() {
+                entry.update_hasher(hasher, self.source_position_at(index));
             }
         })
     }
@@ -751,9 +962,10 @@ impl Tree {
     /// The V4 salted per-entry leaf commitment for `entries[index]`.
     ///
     /// `leaf = typed_hasher("tree-v4-leaf", len)(salt ‖ mode ‖ entry_type ‖
-    /// target_payload ‖ name_len(u16 LE) ‖ name)`, where the
+    /// target_payload ‖ name_len(u16 LE) ‖ name ‖ layout trailer)`, where the
     /// `mode ‖ entry_type ‖ target_payload` bytes are exactly those
-    /// [`TreeEntryTarget::write_payload`] emits.
+    /// [`TreeEntryTarget::write_payload`] emits. V4 trees record no source
+    /// order, so the trailer is only ever an entry's raw Git mode.
     ///
     /// Panics only via `debug_assert` if called on a V3 tree or out of range;
     /// production callers go through [`Self::merkle_root_v4`].
@@ -771,10 +983,13 @@ impl Tree {
         buf.extend_from_slice(salt);
         entry
             .target
-            .write_payload(|bytes| buf.extend_from_slice(bytes));
+            .write_payload(entry.layout_flags(None), |bytes| {
+                buf.extend_from_slice(bytes)
+            });
         // Names are bounded to u16::MAX by `validate_name`.
         buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
         buf.extend_from_slice(name);
+        entry.write_layout_trailer(None, |bytes| buf.extend_from_slice(bytes));
         buf
     }
 
@@ -1047,6 +1262,10 @@ struct EncodedTreeV2 {
     // on-disk caches (`worktree-current-tree.bin`, hot sidecars) are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     salts: Option<Vec<[u8; 32]>>,
+    // Parallel per-entry Git source positions (heddle#2018). Omitted unless the
+    // tree records a non-canonical source order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_positions: Option<Vec<u32>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1064,6 +1283,9 @@ struct EncodedTreeEntryV2 {
     spool_id: Option<SpoolId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spool_state_id: Option<StateId>,
+    // Source Git mode digits (heddle#2018), only when not canonical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_mode: Option<String>,
 }
 
 impl Serialize for Tree {
@@ -1113,62 +1335,59 @@ impl From<&Tree> for EncodedTreeV2 {
             version,
             entries: tree.entries.iter().map(EncodedTreeEntryV2::from).collect(),
             salts,
+            source_positions: (!tree.source_positions.is_empty())
+                .then(|| tree.source_positions.as_ref().clone()),
         }
     }
 }
 
 impl From<&TreeEntry> for EncodedTreeEntryV2 {
     fn from(entry: &TreeEntry) -> Self {
+        let name = entry.name.clone();
+        let git_mode = entry.git_mode.map(|mode| {
+            let mut digits = Vec::new();
+            mode.write_digits(&mut digits);
+            String::from_utf8_lossy(&digits).into_owned()
+        });
+        let empty = Self {
+            name,
+            kind: ENTRY_KIND_BLOB,
+            hash: None,
+            executable: None,
+            git_format: None,
+            git_oid: None,
+            spool_id: None,
+            spool_state_id: None,
+            git_mode,
+        };
         match entry.target() {
             TreeEntryTarget::Blob { hash, executable } => Self {
-                name: entry.name.clone(),
                 kind: ENTRY_KIND_BLOB,
                 hash: Some(*hash),
                 executable: Some(*executable),
-                git_format: None,
-                git_oid: None,
-                spool_id: None,
-                spool_state_id: None,
+                ..empty
             },
             TreeEntryTarget::Tree { hash } => Self {
-                name: entry.name.clone(),
                 kind: ENTRY_KIND_TREE,
                 hash: Some(*hash),
-                executable: None,
-                git_format: None,
-                git_oid: None,
-                spool_id: None,
-                spool_state_id: None,
+                ..empty
             },
             TreeEntryTarget::Symlink { hash } => Self {
-                name: entry.name.clone(),
                 kind: ENTRY_KIND_SYMLINK,
                 hash: Some(*hash),
-                executable: None,
-                git_format: None,
-                git_oid: None,
-                spool_id: None,
-                spool_state_id: None,
+                ..empty
             },
             TreeEntryTarget::Gitlink { target } => Self {
-                name: entry.name.clone(),
                 kind: ENTRY_KIND_GITLINK,
-                hash: None,
-                executable: None,
                 git_format: Some(git_format_to_tag(target.format())),
                 git_oid: Some(target.as_bytes().to_vec()),
-                spool_id: None,
-                spool_state_id: None,
+                ..empty
             },
             TreeEntryTarget::Spoollink { spool_id, state_id } => Self {
-                name: entry.name.clone(),
                 kind: ENTRY_KIND_SPOOLLINK,
-                hash: None,
-                executable: None,
-                git_format: None,
-                git_oid: None,
                 spool_id: Some(spool_id.clone()),
                 spool_state_id: Some(*state_id),
+                ..empty
             },
         }
     }
@@ -1182,6 +1401,7 @@ impl TryFrom<EncodedTreeV2> for Tree {
         for entry in encoded.entries {
             entries.push(TreeEntry::try_from(entry)?);
         }
+        let source_positions = encoded.source_positions.unwrap_or_default();
         match encoded.version {
             TREE_FORMAT_VERSION => {
                 if encoded.salts.is_some_and(|salts| !salts.is_empty()) {
@@ -1189,9 +1409,14 @@ impl TryFrom<EncodedTreeV2> for Tree {
                         "v3 tree body must not carry salts".into(),
                     ));
                 }
-                Tree::try_from_decoded_entries(entries)
+                Tree::try_from_decoded_layout(entries, source_positions)
             }
             TREE_FORMAT_VERSION_V4 => {
+                if !source_positions.is_empty() {
+                    return Err(TreeError::InvalidStructure(
+                        "v4 tree body must not carry source positions".into(),
+                    ));
+                }
                 let salts = encoded.salts.ok_or_else(|| {
                     TreeError::InvalidStructure("v4 tree body is missing its salts".into())
                 })?;
@@ -1217,6 +1442,24 @@ impl TryFrom<EncodedTreeEntryV2> for TreeEntry {
     type Error = TreeError;
 
     fn try_from(encoded: EncodedTreeEntryV2) -> Result<Self, Self::Error> {
+        let git_mode = encoded
+            .git_mode
+            .as_deref()
+            .map(|digits| RawGitMode::parse(digits.as_bytes()))
+            .transpose()?;
+        let entry = Self::try_from_encoded_target(encoded)?;
+        match git_mode {
+            Some(mode) => {
+                entry.check_raw_git_mode(mode)?;
+                Ok(entry.with_checked_raw_git_mode(mode))
+            }
+            None => Ok(entry),
+        }
+    }
+}
+
+impl TreeEntry {
+    fn try_from_encoded_target(encoded: EncodedTreeEntryV2) -> Result<Self, TreeError> {
         match encoded.kind {
             ENTRY_KIND_BLOB => TreeEntry::file(
                 encoded.name,
@@ -1430,3 +1673,7 @@ mod cow_tests {
         assert_eq!(decoded.hash(), tree.hash());
     }
 }
+
+#[cfg(test)]
+#[path = "tree_golden_tests.rs"]
+mod tree_golden_tests;

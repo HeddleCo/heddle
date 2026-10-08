@@ -312,7 +312,7 @@ impl FsRepackOperation {
         let mut npk1_tree_hashes = Vec::with_capacity(tree_hashes.len());
         for hash in tree_hashes {
             match ObjectStore::get_tree(&self.store, &hash).map_err(BuildError::from)? {
-                Some(tree) if tree.scheme() == crate::object::TreeScheme::V4Salted => {
+                Some(tree) if tree.requires_canonical_body() => {
                     let data = tree
                         .encode_canonical()
                         .map_err(HeddleError::from)

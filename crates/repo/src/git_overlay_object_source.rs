@@ -12,7 +12,7 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
+    object::{Blob, ContentHash, EntryType, State, StateId, Tree, TreeEntry, parse_git_tree},
     store::ExternalObjectSource,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -170,58 +170,75 @@ impl ExternalObjectSource for GitOverlayObjectSource {
         let oid = ObjectId::from_hex(git.object_format(), &git_sha).map_err(|error| {
             HeddleError::Config(format!("parse mapped Git tree {git_sha}: {error}"))
         })?;
-        let children = if oid == ObjectId::empty_tree(git.object_format()) {
-            Vec::new()
+        let object = if oid == ObjectId::empty_tree(git.object_format()) {
+            None
         } else {
-            match git.read_tree(&oid) {
-                Ok(tree) => tree.entries,
-                Err(sley::GitError::NotFound(_)) => match self.refresh_git()?.read_tree(&oid) {
-                    Ok(tree) => tree.entries,
+            let object = match git.read_object(&oid) {
+                Ok(object) => object,
+                Err(sley::GitError::NotFound(_)) => match self.refresh_git()?.read_object(&oid) {
+                    Ok(object) => object,
                     Err(sley::GitError::NotFound(_)) => {
                         return Err(mapped_object_missing("tree", &git_sha));
                     }
                     Err(error) => return Err(git_read_error(error)),
                 },
                 Err(error) => return Err(git_read_error(error)),
+            };
+            if object.object_type != sley::GitObjectType::Tree {
+                return Err(HeddleError::InvalidObject(format!(
+                    "mapped Git tree {git_sha} is a {}",
+                    object.object_type.as_str()
+                )));
             }
+            Some(object)
         };
+        let body = object
+            .as_ref()
+            .map_or(&[][..], |object| object.body.as_slice());
+        // Read the raw tree so a non-canonical source (odd modes, source
+        // order) translates to the same native tree the importer stored.
+        let children = parse_git_tree(git.object_format(), body)
+            .map_err(|error| HeddleError::InvalidObject(format!("Git tree {git_sha}: {error}")))?;
         let mut entries = Vec::with_capacity(children.len());
         for child in children {
-            let name = String::from_utf8(child.name.as_bytes().to_vec()).map_err(|_| {
+            let name = String::from_utf8(child.name.to_vec()).map_err(|_| {
                 HeddleError::Config(format!(
                     "Git tree {git_sha} has a non-UTF-8 entry; run `heddle import local --lossy` to import it explicitly"
                 ))
             })?;
-            let entry = match child.mode {
-                0o040000 => {
+            let entry = match child.mode.entry_type() {
+                Some(EntryType::Tree) => {
                     let mapped = self
                         .heddle_for_git(&child.oid, KIND_TREE)?
                         .ok_or_else(|| missing_mapping("tree", &child.oid, &git_sha))?;
                     TreeEntry::directory(name, parse_hash(&mapped)?)
                 }
-                mode if mode & 0o170000 == 0o100000 => {
+                Some(EntryType::Blob) => {
                     let mapped = self
                         .heddle_for_git(&child.oid, KIND_BLOB)?
                         .ok_or_else(|| missing_mapping("blob", &child.oid, &git_sha))?;
-                    TreeEntry::file(name, parse_hash(&mapped)?, mode & 0o111 != 0)
+                    TreeEntry::file(name, parse_hash(&mapped)?, child.mode.is_executable())
                 }
-                0o120000 => {
+                Some(EntryType::Symlink) => {
                     let mapped = self
                         .heddle_for_git(&child.oid, KIND_BLOB)?
                         .ok_or_else(|| missing_mapping("symlink blob", &child.oid, &git_sha))?;
                     TreeEntry::symlink(name, parse_hash(&mapped)?)
                 }
-                0o160000 => TreeEntry::gitlink(name, child.oid),
-                mode => {
+                Some(EntryType::Gitlink) => TreeEntry::gitlink(name, child.oid),
+                Some(EntryType::Spoollink) | None => {
                     return Err(HeddleError::Config(format!(
-                        "Git tree {git_sha} entry has unsupported mode {mode:o}"
+                        "Git tree {git_sha} entry has unsupported mode {:o}",
+                        child.mode.value()
                     )));
                 }
             }
+            .and_then(|entry| entry.with_raw_git_mode(child.mode))
             .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
             entries.push(entry);
         }
-        let tree = Tree::from_entries(entries);
+        let tree = Tree::from_git_entries(entries)
+            .map_err(|error| HeddleError::InvalidObject(format!("Git tree {git_sha}: {error}")))?;
         if tree.hash() != *hash {
             return Err(HeddleError::Corruption {
                 expected: *hash,
@@ -313,6 +330,78 @@ fn git_read_error(error: impl std::fmt::Display) -> HeddleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mapping_table(heddle_dir: &std::path::Path) -> Connection {
+        let ingest_dir = heddle_dir.join("ingest");
+        fs::create_dir_all(&ingest_dir).unwrap();
+        let connection = Connection::open(ingest_dir.join("sha_map.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sha_map (
+                    git_sha TEXT PRIMARY KEY NOT NULL,
+                    kind INTEGER NOT NULL,
+                    heddle_repr TEXT NOT NULL,
+                    lossy_entries TEXT
+                );",
+            )
+            .unwrap();
+        connection
+    }
+
+    /// heddle#2018: a non-canonical source tree read through the overlay must
+    /// translate to the same native tree the importer stored — raw modes and
+    /// source order included — or the id check rejects it as corruption.
+    #[test]
+    fn noncanonical_git_tree_reads_through_with_its_layout() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let git = SleyRepository::init(temp.path()).unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let connection = mapping_table(&heddle_dir);
+        let a = git.write_blob(b"a\n").unwrap();
+        let b = git.write_blob(b"b\n").unwrap();
+        let mut body = Vec::new();
+        for (mode, name, oid) in [("100664", "b.txt", b), ("100644", "a.txt", a)] {
+            body.extend_from_slice(mode.as_bytes());
+            body.push(b' ');
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(oid.as_bytes());
+        }
+        let tree_oid = git
+            .write_raw_object(sley::GitObjectType::Tree, body)
+            .unwrap();
+        let a_hash = Blob::from_slice(b"a\n").hash();
+        let b_hash = Blob::from_slice(b"b\n").hash();
+        let expected = Tree::from_git_entries(vec![
+            TreeEntry::file("b.txt", b_hash, false)
+                .unwrap()
+                .with_raw_git_mode(objects::object::RawGitMode::parse(b"100664").unwrap())
+                .unwrap(),
+            TreeEntry::file("a.txt", a_hash, false).unwrap(),
+        ])
+        .unwrap();
+        assert!(expected.has_git_layout());
+        for (git_sha, kind, heddle_repr) in [
+            (a.to_string(), KIND_BLOB, a_hash.to_hex()),
+            (b.to_string(), KIND_BLOB, b_hash.to_hex()),
+            (tree_oid.to_string(), KIND_TREE, expected.hash().to_hex()),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO sha_map (git_sha, kind, heddle_repr) VALUES (?, ?, ?)",
+                    params![git_sha, kind, heddle_repr],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let source = GitOverlayObjectSource::new(temp.path().to_path_buf(), heddle_dir);
+        let tree = source
+            .get_tree(&expected.hash())
+            .expect("layout tree reads through")
+            .expect("mapped tree");
+        assert_eq!(tree, expected);
+    }
 
     #[test]
     fn mapped_missing_git_objects_are_errors_after_refresh() {

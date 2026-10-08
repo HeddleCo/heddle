@@ -53,6 +53,16 @@ fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     Ok(tree)
 }
 
+/// A streamable body for a tree held only in memory: the lean anchor, or the
+/// full HTR4 body when the tree records a Git source layout HLR1 cannot carry.
+fn streamable_body(tree: &Tree) -> Result<Vec<u8>> {
+    if tree.has_git_layout() {
+        Ok(tree.encode_canonical()?)
+    } else {
+        Ok(tree.encode_lean()?)
+    }
+}
+
 /// A V4 salted (HSR1) tree cannot be streamed through the paging reader — its
 /// Merkle-root id is not verifiable by the reader's incremental single-pass
 /// hasher. Surface a loud `Err` (never a silent `Ok(None)` / NotFound) so the
@@ -709,7 +719,7 @@ impl FsStore {
         };
         if let Some(tree) = npk_tree {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(streamable_body(&tree)?)),
                 *tree_id,
                 cursor,
             )?));
@@ -804,7 +814,7 @@ impl FsStore {
         };
         if let Some(tree) = npk_tree {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(streamable_body(&tree)?)),
                 *tree_id,
                 None,
             )?));
@@ -813,7 +823,7 @@ impl FsStore {
             && let Some(tree) = source.get_tree(tree_id)?
         {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(streamable_body(&tree)?)),
                 *tree_id,
                 None,
             )?));

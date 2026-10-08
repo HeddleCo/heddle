@@ -23,7 +23,7 @@ use std::{
 
 use objects::{
     object::{
-        AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, Tree, TreeEntry,
+        AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, TreeEntry,
         thread_replication::git_import_graph::{
             ImportRefDisposition, ImportSkipReason, SkippedImportRef, classify_git_import_ref,
         },
@@ -42,6 +42,7 @@ use crate::{
     IngestError,
     git_walk::{
         CommitEntry, GitSource, RefDiscoveryStats, RefHead, RefNamespace, TreeChild, TreeChildKind,
+        git_tree_from_entries,
     },
     import_options::{
         ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
@@ -891,7 +892,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             self.stats.lossy_trees.insert(git_tree_sha.to_string());
         }
 
-        let tree = Tree::from_entries(entries);
+        let tree = git_tree_from_entries(git_tree_sha, entries)?;
         let hash = tree.hash();
         let data = tree
             .encode_canonical()
@@ -933,37 +934,31 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             }
         };
 
-        match child.kind {
+        let entry = match child.kind {
             TreeChildKind::Blob { executable } => {
                 let hash = self.translate_blob(&child.sha)?;
-                Ok(Some(
-                    TreeEntry::file(name, hash, executable)
-                        .map_err(|e| IngestError::Heddle(e.into()))?,
-                ))
+                TreeEntry::file(name, hash, executable)
             }
             TreeChildKind::Tree => {
                 let hash =
                     self.translate_tree_at(&child.sha, &join_tree_path(path_prefix, &name))?;
-                Ok(Some(
-                    TreeEntry::directory(name, hash).map_err(|e| IngestError::Heddle(e.into()))?,
-                ))
+                TreeEntry::directory(name, hash)
             }
             TreeChildKind::Symlink => {
                 let hash = self.translate_blob(&child.sha)?;
-                Ok(Some(
-                    TreeEntry::symlink(name, hash).map_err(|e| IngestError::Heddle(e.into()))?,
-                ))
+                TreeEntry::symlink(name, hash)
             }
             TreeChildKind::Gitlink => {
                 let target = sley::ObjectId::from_hex(self.git.object_format(), &child.sha)
                     .map_err(|err| {
                         IngestError::Git(format!("parse gitlink {}: {err}", child.sha))
                     })?;
-                Ok(Some(
-                    TreeEntry::gitlink(name, target).map_err(|e| IngestError::Heddle(e.into()))?,
-                ))
+                TreeEntry::gitlink(name, target)
             }
         }
+        .and_then(|entry| entry.with_raw_git_mode(child.mode))
+        .map_err(|e| IngestError::Heddle(e.into()))?;
+        Ok(Some(entry))
     }
 
     fn record_lossy(&mut self, entry: LossyImportEntry) -> crate::Result<()> {
@@ -2263,8 +2258,88 @@ mod tests {
         assert!(message.contains("--lossy"), "error names opt-in: {message}");
     }
 
+    /// Canonical corpus for the heddle#2018 import golden: every entry kind
+    /// Git writes, plus `lib/` next to `lib.rs` and `lib-extra`, where Git's
+    /// canonical order differs from native byte order.
+    fn seed_canonical_golden_repo(path: &Path) {
+        git_output(path, &["init", "-q", "--initial-branch=main"], None);
+        for (name, content) in [
+            ("README.md", "# golden\n"),
+            ("build.sh", "#!/bin/sh\n"),
+            ("lib.rs", "pub mod lib;\n"),
+            ("lib-extra", "extra\n"),
+            ("lib/mod.rs", "pub fn f() {}\n"),
+            ("lib/deep/leaf.txt", "leaf\n"),
+        ] {
+            let file = path.join(name);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
+            std::fs::write(&file, content).expect("write");
+            git_output(path, &["add", "--", name], None);
+        }
+        git_output(path, &["update-index", "--chmod=+x", "build.sh"], None);
+        let target = git_output(path, &["hash-object", "-w", "--stdin"], Some(b"README.md"));
+        git_output(
+            path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{target},link"),
+            ],
+            None,
+        );
+        git_output(
+            path,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,0808080808080808080808080808080808080808,vendor",
+            ],
+            None,
+        );
+        git_output(path, &["commit", "-q", "-m", "golden"], None);
+    }
+
+    /// heddle#2018 guard: an ordinary (canonical) Git repository imports to
+    /// exactly the native tree ids it imported to before the Git-layout
+    /// extension existed. These ids were captured on the pre-change importer.
     #[test]
-    fn import_git_into_normalizes_noncanonical_regular_file_modes() {
+    fn canonical_import_keeps_pinned_native_tree_ids() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_canonical_golden_repo(gitdir.path());
+        import_git_into(gitdir.path(), heddledir.path()).expect("canonical import");
+
+        let repo = repo::Repository::open(heddledir.path()).unwrap();
+        let main = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("main thread");
+        let state = repo.store().get_state(&main).unwrap().expect("main state");
+        let root = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .expect("root tree");
+        let lib = root
+            .get("lib")
+            .and_then(|entry| entry.tree_hash())
+            .expect("lib");
+        assert_eq!(
+            [state.tree.to_hex(), lib.to_hex()],
+            CANONICAL_IMPORT_GOLDEN.map(str::to_string),
+        );
+    }
+
+    const CANONICAL_IMPORT_GOLDEN: [&str; 2] = [
+        "7f97a3639e2e3b322f3a818071c57530ff3a683e245046b9f13f6381e2d3da1d",
+        "e3736d64b9d3cb975b6eadc697c766c0c26fdf13e5fa768c08d34cbabc5fac3c",
+    ];
+
+    #[test]
+    fn import_git_into_records_noncanonical_modes_with_canonical_meaning() {
         let gitdir = TempDir::new().unwrap();
         let heddledir = TempDir::new().unwrap();
         seed_noncanonical_mode_repo(gitdir.path());
@@ -2302,6 +2377,14 @@ mod tests {
             0o100755,
             "100775 must normalize to Git's 100755"
         );
+        // heddle#2018: the source modes are recorded for byte-exact export.
+        for (name, digits) in [("legacy.txt", "100664"), ("run.sh", "100775")] {
+            assert_eq!(
+                tree.get(name).and_then(TreeEntry::raw_git_mode),
+                Some(objects::object::RawGitMode::parse(digits.as_bytes()).unwrap()),
+                "{name} keeps its source mode"
+            );
+        }
     }
 
     #[test]
