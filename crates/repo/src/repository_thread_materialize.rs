@@ -311,8 +311,12 @@ impl Repository {
                 })?
                 .and_then(|record| record.embargo_until);
             let stub = courtesy_stub_text(&tier, embargo_until);
-            fs::write(dest.join(COURTESY_STUB_FILENAME), stub.as_bytes())
-                .map_err(HeddleError::Io)?;
+            objects::nofollow::write_file_beneath(
+                dest,
+                &dest.join(COURTESY_STUB_FILENAME),
+                stub.as_bytes(),
+            )
+            .map_err(HeddleError::Io)?;
             // Record the withheld status keyed by THIS worktree root, not by
             // thread — a sibling worktree of the same thread materialized at a
             // visible tier must keep its own capturable status (heddle#316).
@@ -412,11 +416,9 @@ impl Repository {
                 continue;
             }
             let path = dest.join(rel);
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(HeddleError::Io(e)),
-            }
+            // Never through a symlinked parent: a recorded `link/file` whose
+            // `link` is now a symlink is not in this worktree (heddle#2017).
+            objects::nofollow::remove_leaf_beneath(dest, &path).map_err(HeddleError::Io)?;
             // Collect ancestor directories (within `dest`) so the now-empty ones
             // left by the removed leaf can be pruned after the pass.
             let mut parent = path.parent();
@@ -434,8 +436,14 @@ impl Repository {
         // exactly how an untracked sibling keeps its directory.
         let mut dirs: Vec<PathBuf> = prune_dirs.into_iter().collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        let mut real_parents = objects::nofollow::NoFollowDirectories::new(dest);
         for d in dirs {
-            let _ = fs::remove_dir(&d);
+            if real_parents
+                .parent_is_real_directory(&d)
+                .map_err(HeddleError::Io)?
+            {
+                let _ = fs::remove_dir(&d);
+            }
         }
         Ok(())
     }
@@ -2776,9 +2784,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(dest.join("target.txt"), b"target v2\n").unwrap();
 
-        // Pre-fix this errored with "symlink target escapes repo"
-        // because `validate_symlink_target` was using `repo.root()`
-        // as the allowed base instead of the walk root.
+        // This once errored with "symlink target escapes repo"
+        // because the (since removed, heddle#2017) symlink-escape check
+        // used `repo.root()` as the allowed base instead of the walk root.
         let outcome = repo
             .capture_thread_from_disk("main", &dest)
             .expect("capture must accept symlinks inside the dedicated worktree");

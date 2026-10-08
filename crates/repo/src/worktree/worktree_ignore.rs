@@ -122,6 +122,7 @@ impl WorktreeIgnoreMatcher {
 
     fn matched_relative(&self, path: &Path, is_dir: bool) -> bool {
         if is_reserved_worktree_path(path) {
+            crate::reserved_worktree_paths::note_skipped_reserved_path(path);
             return true;
         }
         let Some(gi) = &self.matcher else {

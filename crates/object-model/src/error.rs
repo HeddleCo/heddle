@@ -243,15 +243,6 @@ pub enum HeddleError {
     InvalidRefName(String),
     #[error("file too large: {0} bytes")]
     InvalidFileSize(u64),
-    #[error(
-        "symlink target escapes repository: {} -> {}",
-        path.display(),
-        target.display()
-    )]
-    InvalidSymlinkTarget {
-        path: std::path::PathBuf,
-        target: std::path::PathBuf,
-    },
     #[error("object corruption: expected {expected}, found {found}")]
     Corruption {
         expected: ContentHash,
@@ -274,6 +265,13 @@ pub enum HeddleError {
     /// withheld leaves.
     #[error("redacted tree: {0}")]
     RedactedTree(String),
+    /// A worktree write would create a path through a repository metadata
+    /// directory (heddle#2028): `.git` at any depth, or the root `.heddle`.
+    #[error("refusing to write '{}': {reason}", path.display())]
+    ReservedWorktreePath {
+        path: std::path::PathBuf,
+        reason: crate::object::ReservedPathComponent,
+    },
 }
 
 impl From<TreeStreamError> for HeddleError {

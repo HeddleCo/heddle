@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread capture-split and thread-move repository operations.
 
-use std::{error::Error, fmt, fs, path::Path};
+use std::{error::Error, fmt, fs, io::Read, path::Path};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::{
-    fs_ops::remove_path_recursively,
+    nofollow::{
+        NoFollowDirectories, open_existing_nofollow, remove_path_beneath, write_file_beneath,
+        write_symlink_beneath,
+    },
     object::{StateId, ThreadName},
     store::ObjectStore,
 };
@@ -85,6 +88,15 @@ impl fmt::Display for ThreadShapingError {
 
 impl Error for ThreadShapingError {}
 
+/// Drop, with a warning, paths a move must never write or remove: those
+/// through a metadata directory (heddle#2028).
+fn writable_move_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| !repo::skip_reserved_worktree_write(Path::new(path), false))
+        .collect()
+}
+
 pub fn capture_split(
     repo: &Repository,
     opts: CaptureSplitOptions,
@@ -92,8 +104,11 @@ pub fn capture_split(
 ) -> Result<ThreadMoveOutput> {
     let current = current_thread(repo)?.ok_or(ThreadShapingError::NoCurrentThread)?;
     let target = load_thread(repo, &opts.into, "load thread")?;
-    let moved_paths =
-        collect_worktree_split_paths(repo, &opts.prefixes, &opts.worktree_status_options)?;
+    let moved_paths = writable_move_paths(collect_worktree_split_paths(
+        repo,
+        &opts.prefixes,
+        &opts.worktree_status_options,
+    )?);
     if moved_paths.is_empty() {
         return Err(ThreadShapingError::NoPathsMatched(no_paths_matched_details(
             "capture split",
@@ -147,8 +162,12 @@ pub fn thread_move(
         Some(&source.base_state),
         "source thread has no base state",
     )?;
-    let moved_paths =
-        collect_state_move_paths(&source_repo, &source_base, &source_current, &opts.prefixes)?;
+    let moved_paths = writable_move_paths(collect_state_move_paths(
+        &source_repo,
+        &source_base,
+        &source_current,
+        &opts.prefixes,
+    )?);
     if moved_paths.is_empty() {
         return Err(ThreadShapingError::NoPathsMatched(no_paths_matched_details(
             "thread move",
@@ -338,13 +357,21 @@ fn apply_selected_worktree_paths(
     target_repo: &Repository,
     paths: &[String],
 ) -> Result<()> {
+    let source_root = source_repo.root();
+    let target_root = target_repo.root();
     for path in paths {
-        let source_path = source_repo.root().join(path);
-        let target_path = target_repo.root().join(path);
-        if source_path.exists() {
-            copy_path(&source_path, &target_path)?;
-        } else if target_path.exists() {
-            remove_path_recursively(&target_path)?;
+        let source_path = source_root.join(path);
+        let target_path = target_root.join(path);
+        // Neither side is read or written through a symlink below its root
+        // (heddle#2017): a source path beneath a symlink is not in that
+        // worktree, and a symlink is copied as a symlink.
+        let source_present = NoFollowDirectories::new(source_root)
+            .parent_is_real_directory(&source_path)?
+            && fs::symlink_metadata(&source_path).is_ok();
+        if source_present {
+            copy_path(target_root, &source_path, &target_path)?;
+        } else {
+            remove_path_beneath(target_root, &target_path)?;
         }
     }
     Ok(())
@@ -393,7 +420,8 @@ fn restore_one_path(
     path: &str,
 ) -> Result<()> {
     let path = Path::new(path);
-    let target_path = repo.root().join(path);
+    let root = repo.root();
+    let target_path = root.join(path);
     if let Some(tree) = baseline_tree
         && let Some(parent) = path.parent()
         && let Some(tree) = repo.resolve_subtree(tree, parent)?
@@ -404,33 +432,69 @@ fn restore_one_path(
             return Ok(());
         };
         let blob = repo.require_blob(&hash)?;
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)?;
+        if entry.entry_type() == objects::object::EntryType::Symlink {
+            write_symlink(root, &target_path, blob.content())?;
+        } else {
+            write_file(root, &target_path, blob.content(), entry.is_executable())?;
         }
-        fs::write(&target_path, blob.content())?;
         return Ok(());
     }
 
-    if target_path.exists() {
-        remove_path_recursively(&target_path)?;
-    }
+    remove_path_beneath(root, &target_path)?;
     Ok(())
 }
 
-fn copy_path(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
-        fs::create_dir_all(to)?;
+/// Copy `from` (a path in another worktree, whose parents the caller has
+/// verified) to `to` beneath `target_root`, never following a symlink on
+/// either side: a symlink is recreated as a symlink, not dereferenced.
+fn copy_path(target_root: &Path, from: &Path, to: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(from)?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(from)?;
+        return write_symlink(target_root, to, target.as_os_str().as_encoded_bytes());
+    }
+    if metadata.is_dir() {
+        NoFollowDirectories::new(target_root).ensure(to)?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
-            copy_path(&entry.path(), &to.join(entry.file_name()))?;
+            copy_path(target_root, &entry.path(), &to.join(entry.file_name()))?;
         }
         return Ok(());
     }
 
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
+    let mut content = Vec::new();
+    open_existing_nofollow(from)?.read_to_end(&mut content)?;
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    write_file(target_root, to, &content, executable)
+}
+
+fn write_file(root: &Path, path: &Path, content: &[u8], executable: bool) -> Result<()> {
+    let file = write_file_beneath(root, path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
-    fs::copy(from, to)?;
+    #[cfg(not(unix))]
+    let _ = (file, executable);
+    Ok(())
+}
+
+fn write_symlink(root: &Path, path: &Path, target: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        write_symlink_beneath(root, path, std::ffi::OsStr::from_bytes(target))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (root, path, target);
     Ok(())
 }
 

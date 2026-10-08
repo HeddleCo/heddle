@@ -95,7 +95,9 @@ pub use repository_materialization::{PartialMaterialization, WarmCanonicalStoreS
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
-pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStateLookupProfile};
+pub use repository_tree::{
+    TreeBuildProfile, WorktreeCompareProfile, WorktreeStateLookupProfile, read_ignore_file,
+};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use sley::Repository as SleyRepository;
 
@@ -106,6 +108,9 @@ mod repository_entry_visibility;
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
 pub use repository_entry_visibility::{EntryVisibilityBinding, EntryVisibilityMark};
+#[cfg(test)]
+#[path = "repository_reserved_path_tests.rs"]
+mod repository_reserved_path_tests;
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;

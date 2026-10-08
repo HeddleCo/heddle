@@ -96,6 +96,8 @@ pub use crypto::owner_root::{
     verify_spool_owner_observation,
 };
 mod repository;
+mod reserved_worktree_paths;
+pub use reserved_worktree_paths::skip_reserved_worktree_write;
 mod repository_key_binding;
 mod repository_redaction;
 #[path = "repository_resolve_for_command.rs"]
@@ -247,7 +249,7 @@ pub use repository::{
     WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
     compute_rewrite_pct, discover_heddle_root, find_merge_base, is_heddle_repository_root,
     is_major_rewrite, is_synthetic_root, merge_context_blobs, open_git_repository_at_root,
-    query_history_from_source,
+    query_history_from_source, read_ignore_file,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{

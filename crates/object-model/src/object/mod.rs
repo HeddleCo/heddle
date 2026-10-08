@@ -26,6 +26,7 @@ pub mod manifest;
 mod operation_id;
 pub mod original_boundary_acceptance;
 mod redaction;
+mod reserved_name;
 mod risk_signal;
 mod semantic_change;
 mod semantic_edges;
@@ -103,6 +104,11 @@ pub use redaction::{
     PURGE_SIGNING_PAYLOAD_VERSION_TAG, PurgeEvidence, REDACTION_SIGNING_PAYLOAD_VERSION_TAG,
     Redaction, RedactionError, RedactionsBlob,
 };
+pub use reserved_name::{
+    MetadataAlias, MetadataName, ReservedMetadataName, ReservedPathComponent,
+    is_reserved_metadata_name, reserved_metadata_name, reserved_path_component,
+    reserved_tree_entry_name,
+};
 pub use risk_signal::{
     MAX_REASON_LEN, ProducerId, RiskSignal, RiskSignalBlob, RiskSignalError, RiskSignalKind,
     SignalAnchor,
@@ -138,8 +144,8 @@ pub use state_context::{
     AnnotationStatus, ContextBlob, ContextError, ContextTarget,
 };
 pub use state_core::{
-    ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status, Verification,
-    parse_commit_extension_headers,
+    ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status,
+    TZ_OFFSET_NEGATIVE_UTC, Verification, git_tz_offset_seconds, parse_commit_extension_headers,
 };
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{

@@ -3265,6 +3265,71 @@ fn thread_move_reassigns_selected_captured_paths_between_threads_at_path(path: &
     );
 }
 
+/// heddle#2017 review: `thread move` restores the source worktree's moved
+/// paths from its base without a dirty check. When the moved `link/secret`
+/// now sits beneath a symlink to an outside directory, the restore must not
+/// reach through `link` and delete the outside `secret`.
+#[test]
+#[cfg(unix)]
+fn thread_move_never_deletes_through_a_symlink() {
+    let main = setup_repo("base.txt", "base");
+    let start = |thread: &str| -> std::path::PathBuf {
+        let started: Value = serde_json::from_str(
+            &heddle(
+                &["--output", "json", "start", thread, "--workspace", "solid"],
+                Some(main.path()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap())
+    };
+    let source_path = start("feature/source");
+    let target_path = start("feature/target");
+    let outside = TempDir::new().unwrap();
+    fs::write(outside.path().join("secret"), "outside").unwrap();
+
+    // A top-level path rides along so the target capture is non-empty and the
+    // move reaches the source restore.
+    fs::write(source_path.join("feature.rs"), "moved work").unwrap();
+    fs::create_dir(source_path.join("link")).unwrap();
+    fs::write(source_path.join("link/secret"), "moved work").unwrap();
+    heddle(&["capture", "-m", "source work"], Some(&source_path)).unwrap();
+    fs::remove_dir_all(source_path.join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), source_path.join("link")).unwrap();
+
+    let result = heddle(
+        &[
+            "--output",
+            "json",
+            "thread",
+            "move",
+            "feature/source",
+            "feature/target",
+            "--path",
+            "feature.rs",
+            "--path",
+            "link/secret",
+        ],
+        Some(main.path()),
+    );
+    eprintln!("thread move: {result:?}");
+
+    assert_eq!(
+        fs::read_to_string(outside.path().join("secret"))
+            .ok()
+            .as_deref(),
+        Some("outside"),
+        "thread move deleted a file through the `link` symlink"
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        fs::read_to_string(target_path.join("feature.rs")).unwrap(),
+        "moved work"
+    );
+    assert!(!source_path.join("feature.rs").exists());
+}
+
 #[test]
 fn thread_absorb_merges_child_thread_into_parent_workspace() {
     let main = setup_repo("base.txt", "base");

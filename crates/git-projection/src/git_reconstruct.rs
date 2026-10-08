@@ -18,7 +18,7 @@
 //! a ref at the commit).
 
 use objects::{
-    object::{AnnotatedTag, Principal, State},
+    object::{AnnotatedTag, Principal, State, TZ_OFFSET_NEGATIVE_UTC},
     store::{ObjectStore, StoreError},
 };
 use repo::Repository as HeddleRepository;
@@ -220,8 +220,13 @@ fn write_actor_line(
     let seconds = checked_actor_timestamp(label, seconds, tz_offset_secs)?;
     out.extend_from_slice(label);
     out.push(b' ');
-    out.extend_from_slice(&who.name);
-    out.extend_from_slice(b" <");
+    // An empty name is written as `author <email>`: the separator belongs to the
+    // name, so there is no name and no space.
+    if !who.name.is_empty() {
+        out.extend_from_slice(&who.name);
+        out.push(b' ');
+    }
+    out.push(b'<');
     out.extend_from_slice(&who.email);
     out.extend_from_slice(b"> ");
     out.extend_from_slice(seconds.to_string().as_bytes());
@@ -251,10 +256,14 @@ fn checked_actor_timestamp(
 }
 
 /// Render a timezone offset — stored as **seconds** east of UTC (#565's `i32`
-/// unit) — as git's `±HHMM` (§5). The sign is
-/// always present; zero is `+0000` (git never emits `-0000` for a real commit);
-/// odd offsets like `-0830` / `+1245` survive verbatim.
+/// unit) — as git's `±HHMM` (§5). The sign is always present; zero is `+0000`
+/// unless it is the [`TZ_OFFSET_NEGATIVE_UTC`] sentinel, which restores git's
+/// `-0000` ("unknown zone", present in old histories); odd offsets like `-0830`
+/// / `+1245` survive verbatim.
 fn format_tz_offset(offset_secs: i32) -> String {
+    if offset_secs == TZ_OFFSET_NEGATIVE_UTC {
+        return "-0000".to_string();
+    }
     let sign = if offset_secs < 0 { '-' } else { '+' };
     let minutes = offset_secs.unsigned_abs() / 60;
     format!("{sign}{:02}{:02}", minutes / 60, minutes % 60)
@@ -371,6 +380,18 @@ mod tests {
         assert_eq!(format_tz_offset(-(8 * 3600 + 30 * 60)), "-0830");
         assert_eq!(format_tz_offset(12 * 3600 + 45 * 60), "+1245");
         assert_eq!(format_tz_offset(5 * 3600 + 30 * 60), "+0530");
+        assert_eq!(format_tz_offset(TZ_OFFSET_NEGATIVE_UTC), "-0000");
+    }
+
+    #[test]
+    fn write_actor_line_omits_separator_for_empty_name() {
+        let principal = Principal::new("", "only@email.example");
+        let mut out = Vec::new();
+
+        write_actor_line(&mut out, b"author", &principal, 1_700_000_000, 0)
+            .expect("empty name should serialize");
+
+        assert_eq!(out, b"author <only@email.example> 1700000000 +0000\n");
     }
 
     #[test]

@@ -696,11 +696,23 @@ fn persist_refresh_conflict_state(
         None
     };
     super::merge::apply_merged_tree_external(thread_repo, &tree)?;
-    ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &paths)?;
+    let marker_paths = refresh_conflict_marker_paths(&paths);
+    ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &marker_paths)?;
     thread_repo
         .merge_state_manager()
         .start(ours, theirs, base, paths, structured_conflicts)?;
     Ok(())
+}
+
+/// The conflict paths that may get conflict markers written: never one
+/// through a metadata directory (heddle#2028), which is skipped with a
+/// warning.
+fn refresh_conflict_marker_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|path| !repo::skip_reserved_worktree_write(std::path::Path::new(path), false))
+        .cloned()
+        .collect()
 }
 
 fn ensure_refresh_conflict_markers_materialized(
@@ -711,22 +723,35 @@ fn ensure_refresh_conflict_markers_materialized(
 ) -> Result<()> {
     let ours_tree = tree_for_state(repo, ours)?;
     let theirs_tree = tree_for_state(repo, theirs)?;
+    let root = repo.root();
     for path in paths {
-        let full_path = repo.root().join(path);
-        let existing = fs::read(&full_path).unwrap_or_default();
+        let full_path = root.join(path);
+        // Read and write without following a symlink in any parent or at the
+        // leaf (heddle#2017): a conflict path beneath a symlink, or a leaf
+        // symlink, is never dereferenced.
+        let mut existing = Vec::new();
+        let mut existing_mode = None;
+        if objects::nofollow::NoFollowDirectories::new(root).parent_is_real_directory(&full_path)?
+            && let Ok(mut file) = objects::nofollow::open_existing_nofollow(&full_path)
+            && file.metadata().is_ok_and(|metadata| metadata.is_file())
+        {
+            existing_mode = file.metadata().ok().map(|metadata| metadata.permissions());
+            std::io::Read::read_to_end(&mut file, &mut existing)?;
+        }
         if !should_materialize_refresh_conflict_markers(&existing) {
             // Already has full conflict-marker triplets; keep user edits.
             continue;
         }
         let ours_content = conflict_side_content(repo, &ours_tree, path)?;
         let theirs_content = conflict_side_content(repo, &theirs_tree, path)?;
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(
-            full_path,
-            format_refresh_conflict_markers(&ours_content, &theirs_content),
+        let file = objects::nofollow::write_file_beneath(
+            root,
+            &full_path,
+            &format_refresh_conflict_markers(&ours_content, &theirs_content),
         )?;
+        if let Some(permissions) = existing_mode {
+            file.set_permissions(permissions)?;
+        }
     }
     Ok(())
 }
@@ -2003,6 +2028,26 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    /// A refresh conflict at `.heddle/config.toml` or inside a nested `.git`
+    /// must not get conflict markers written over it (heddle#2028).
+    #[test]
+    fn refresh_conflict_markers_skip_reserved_paths() {
+        let paths = [
+            ".heddle/config.toml",
+            "vendor/.git/config",
+            "src/lib.rs",
+            "examples/calculator/.heddle/HEAD",
+        ]
+        .map(String::from);
+        assert_eq!(
+            refresh_conflict_marker_paths(&paths),
+            vec![
+                "src/lib.rs".to_string(),
+                "examples/calculator/.heddle/HEAD".to_string()
+            ]
+        );
+    }
 
     /// `promote`'s default checkout path must be byte-identical to the
     /// canonical managed checkout derivation `start` and the per-thread

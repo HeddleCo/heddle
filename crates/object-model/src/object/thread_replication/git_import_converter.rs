@@ -10,7 +10,7 @@ use crate::{
     error::{HeddleError, Result},
     object::{
         Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, HeddleNote,
-        Principal, State, StateId, Status,
+        Principal, State, StateId, Status, git_tz_offset_seconds,
     },
 };
 
@@ -72,8 +72,9 @@ impl GitImportGraph {
         }
         let parsed = sley_object::Commit::parse_ref(commit.object_format.sley(), commit.raw_commit)
             .map_err(|error| invalid(format!("invalid Git commit: {error}")))?;
-        let author = parse_signature(parsed.author)?;
-        let committer = parse_signature(parsed.committer)?;
+        let commit_id = actual_oid.to_string();
+        let author = parse_git_signature(parsed.author, &commit_id, "author")?;
+        let committer = parse_git_signature(parsed.committer, &commit_id, "committer")?;
         let extra_headers = crate::object::parse_commit_extension_headers(commit.raw_commit);
         Self::convert_commit(
             GitImportCommit {
@@ -184,18 +185,45 @@ impl GitImportGraph {
     }
 }
 
-fn parse_signature(raw: &[u8]) -> Result<GitImportSignature> {
-    let value = sley_core::Signature::from_ident_line(raw)
-        .ok_or_else(|| invalid("invalid Git author or committer signature"))?;
+/// Parse a raw Git `author`/`committer` value for `commit`, preserving what
+/// reconstruction needs for a byte-identical commit (the `-0000` timezone sign).
+/// Identities that cannot be reconstructed exactly are rejected with an error
+/// naming the commit and the header, never imported lossily:
+/// - no `<email>`;
+/// - a timestamp outside the range [`DateTime<Utc>`] can hold;
+/// - an empty name written with a separating space (`author  <e> …`), since a
+///   `State` records only the empty name and rebuilds it as `author <e> …`.
+pub fn parse_git_signature(raw: &[u8], commit: &str, field: &str) -> Result<GitImportSignature> {
+    let value = sley_core::Signature::from_ident_line(raw).ok_or_else(|| {
+        invalid(format!(
+            "Git commit {commit}: {field} is not a valid identity (needs `name <email> seconds ±HHMM`): {:?}",
+            String::from_utf8_lossy(raw)
+        ))
+    })?;
+    if value.name.as_bytes().is_empty() && raw.starts_with(b" <") {
+        return Err(invalid(format!(
+            "Git commit {commit}: {field} has an empty name followed by a space, which cannot be \
+             reconstructed byte-exactly: {:?}",
+            String::from_utf8_lossy(raw)
+        )));
+    }
     let time = Utc
         .timestamp_opt(value.time.seconds, 0)
         .single()
-        .ok_or_else(|| invalid("Git signature timestamp is out of range"))?;
+        .ok_or_else(|| {
+            invalid(format!(
+                "Git commit {commit}: {field} timestamp {} is out of range",
+                value.time.seconds
+            ))
+        })?;
     Ok(GitImportSignature {
         name: value.name.as_bytes().to_vec(),
         email: value.email.as_bytes().to_vec(),
         time,
-        tz_offset: i32::from(value.time.timezone_offset_minutes) * 60,
+        tz_offset: git_tz_offset_seconds(
+            value.time.timezone_offset_minutes,
+            value.time.negative_utc,
+        ),
     })
 }
 
