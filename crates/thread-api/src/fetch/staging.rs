@@ -20,11 +20,12 @@ use crate::{contract::*, transport};
 
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
-const SOURCE_OBJECTS: usize = 100_000;
 
 /// Structurally checked source artifacts and original proofs. These bytes grant
 /// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
+    // Close proof files before removing their owning staging directory.
+    pub(super) partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
     pub(super) operations: Vec<SignedOperation>,
@@ -32,7 +33,6 @@ pub struct StagedSource {
     pub(super) state: State,
     #[cfg(feature = "native")]
     pub(super) prefix_original: Option<SignedRecord>,
-    pub(super) partial_trees: Vec<heddle_object_model::object::PartialTree>,
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
     /// Verified converted Git ancestors staged in `ancestry.pack`, keyed by
@@ -538,12 +538,12 @@ pub(super) fn validate_with_receipts_and_carriers(
 pub struct ValidatedSourceArtifacts {
     pub(crate) native_authority: Option<NativePublicProofBundleV1>,
     pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
+    partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
     genesis: ThreadGenesisRecord,
     dependencies: Vec<ThreadGenesisRecord>,
     state: State,
-    partial_trees: Vec<heddle_object_model::object::PartialTree>,
     authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
     ancestry: Vec<ancestry::VerifiedFloor>,
@@ -755,9 +755,10 @@ fn validate_disclosure_artifacts(
         PackReader::open(
             &directory.path().join("source.pack"),
             &directory.path().join("source.idx"),
+            directory.path(),
         )
         .map_err(preparation)?
-        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
+        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_BYTES)
         .map_err(preparation)?;
         if !ancestry.is_empty() {
             return Err(Error::Invalid(
@@ -772,7 +773,7 @@ fn validate_disclosure_artifacts(
             genesis: original.clone(),
             dependencies: Vec::new(),
             state,
-            partial_trees: Vec::new(),
+            partial_trees: None,
             authority_admissions: BTreeMap::new(),
             ancestry: Vec::new(),
         });
@@ -1154,6 +1155,7 @@ fn validate_disclosure_artifacts(
     let pack = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
+        directory.path(),
     )
     .map_err(preparation)?;
     // An older converted commit has no reference proofs or signed entry
@@ -1164,19 +1166,14 @@ fn validate_disclosure_artifacts(
         (references, capture.visibility.as_ref())
     };
     let partial_trees = if allow_partial {
-        pack.validate_visible_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
-            .map_err(preparation)?
-            .partial_trees
-    } else {
-        pack.validate_source_closure_with_metadata(
-            &state,
-            &references,
-            visibility,
-            SOURCE_OBJECTS,
-            SOURCE_BYTES,
+        Some(
+            pack.validate_visible_source_closure(&state, SOURCE_BYTES)
+                .map_err(preparation)?,
         )
-        .map_err(preparation)?;
-        Vec::new()
+    } else {
+        pack.validate_source_closure_with_metadata(&state, &references, visibility, SOURCE_BYTES)
+            .map_err(preparation)?;
+        None
     };
     // Dependency-first installation makes foreign source authority available
     // before admitting a local integration. Cycles cannot settle this graph.

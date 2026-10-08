@@ -18,11 +18,15 @@ heddle-object-model.workspace = true
 memmap2.workspace = true
 rmp-serde.workspace = true
 tracing.workspace = true
+tempfile.workspace = true
+rusqlite = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [features]
-default = ["fs"]
+default = ["fs", "source-transfer"]
 fs = ["dep:heddle-fs-prims"]
+# Exact source traversal needs scratch membership, separate from ordinary pack I/O.
+source-transfer = ["fs", "dep:rusqlite"]
 zstd = ["dep:zstd", "heddle-format/zstd"]
 
 [dev-dependencies]

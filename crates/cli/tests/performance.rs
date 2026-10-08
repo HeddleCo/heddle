@@ -575,7 +575,8 @@ fn test_fs_pack_build_and_read_benchmark() {
     std::fs::write(&index_path, &index_data).unwrap();
 
     let read_start = Instant::now();
-    let reader = objects::store::PackReader::open(&pack_path, &index_path).unwrap();
+    let reader =
+        objects::store::PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
     for (hash, _, expected) in &objects {
         let (_, data) = reader.get_hashed_object(hash).unwrap().unwrap();
         assert_eq!(&data, expected);

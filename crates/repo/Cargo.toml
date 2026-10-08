@@ -95,6 +95,7 @@ semantic-recovery = ["dep:semantic-recovery"]
 async-source = ["objects/async-source"]
 
 [dev-dependencies]
+heddle-pack = { workspace = true, features = ["source-transfer"] }
 hex.workspace = true
 objects = { workspace = true, features = ["async-source", "memory-backend"] }
 proptest.workspace = true

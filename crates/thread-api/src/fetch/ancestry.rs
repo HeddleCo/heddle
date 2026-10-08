@@ -214,6 +214,7 @@ impl AncestryInput {
         let reader = PackReader::open(
             &directory.join("ancestry.pack"),
             &directory.join("ancestry.idx"),
+            directory,
         )
         .map_err(preparation)?;
         let bytes = reader

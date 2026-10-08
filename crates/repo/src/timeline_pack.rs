@@ -56,7 +56,7 @@ impl TimelinePackSet {
         let mut packs = Vec::new();
         let mut operation_locations = HashMap::new();
         for (pack_path, index_path) in paired_pack_paths(&self.packs_dir)? {
-            let reader = PackReader::open(&pack_path, &index_path)?;
+            let reader = PackReader::open(&pack_path, &index_path, &self.packs_dir.join("tmp"))?;
             let pack_index = packs.len();
             for id in reader.list_ids()? {
                 let operation_id = timeline_id_from_pack_id(id)?;

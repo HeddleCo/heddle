@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Exact source closure validation, shared by device and hosted publication.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    fs::File,
     io::{Read, Seek, Write},
 };
 
@@ -19,25 +19,45 @@ pub(super) fn validate(
     max_decoded_bytes: u64,
     references: &[crate::object::source_target::capture::ReferenceProof],
     visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
-) -> Result<Vec<PackObjectId>> {
-    Ok(validate_disclosure(
+) -> Result<()> {
+    validate_disclosure(
         reader,
         selected,
         max_decoded_bytes,
         references,
         visibility,
         false,
-    )?
-    .objects)
+    )
+    .map(|_| ())
 }
 
-/// Verified visible closure. Partial trees retain their original Merkle root
-/// and must be installed in the partial-tree cache, never the full tree store.
+/// Verified disclosure proofs, retained on disk until installed in the partial
+/// tree cache. Object identities remain in the pack's mapped index.
 pub struct VisibleSourceClosure {
-    /// Exact selected State and all visible tree/blob object identities.
-    pub objects: Vec<PackObjectId>,
-    /// Verified Merkle proofs whose hidden leaves remain unavailable.
-    pub partial_trees: Vec<PartialTree>,
+    proofs: tempfile::NamedTempFile,
+    partial_tree_count: usize,
+}
+impl VisibleSourceClosure {
+    pub fn partial_tree_count(&self) -> usize {
+        self.partial_tree_count
+    }
+    /// Decode and visit one verified partial tree at a time.
+    pub fn visit_partial_trees(
+        &self,
+        mut visitor: impl FnMut(&PartialTree) -> Result<()>,
+    ) -> Result<()> {
+        let mut input = std::io::BufReader::new(File::open(self.proofs.path())?);
+        for _ in 0..self.partial_tree_count {
+            let mut length = [0; 8];
+            input.read_exact(&mut length)?;
+            let length = usize::try_from(u64::from_be_bytes(length))
+                .map_err(|_| invalid("partial tree size exceeds platform"))?;
+            let mut bytes = vec![0; length];
+            input.read_exact(&mut bytes)?;
+            visitor(&crate::object::decode_redacted_projection(&bytes)?)?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate_disclosure(
@@ -49,46 +69,27 @@ pub(super) fn validate_disclosure(
     allow_partial: bool,
 ) -> Result<VisibleSourceClosure> {
     let canonical = selected.encode_current_msgpack()?;
-    let mut available = BTreeMap::new();
-    let mut trees = BTreeMap::new();
-    let mut partial_trees = Vec::new();
-    let mut decoded = 0_u64;
+    let mut verified = VisibleSourceClosure {
+        proofs: tempfile::NamedTempFile::new_in(reader.scratch_root())?,
+        partial_tree_count: 0,
+    };
+    let mut decoded = 0;
     reader.visit_objects(|id, kind, data| {
-        decoded = decoded
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| invalid("source pack size overflow"))?;
-        if decoded > max_decoded_bytes {
-            return Err(invalid("source pack decoded byte budget exceeded"));
-        }
-        if available.insert(id, kind).is_some() {
-            return Err(invalid("duplicate source pack object"));
-        }
+        charge_bytes(&mut decoded, data.len() as u64, max_decoded_bytes)?;
         match (id, kind) {
             (PackObjectId::StateId(id), ObjectType::State)
                 if id == selected.id() && data == canonical => {}
             (PackObjectId::Hash(hash), ObjectType::Blob)
                 if ContentHash::compute_typed("blob", data) == hash => {}
             (PackObjectId::Hash(hash), ObjectType::Tree) => {
-                if allow_partial && crate::object::is_redacted_tree(data) {
-                    let partial = crate::object::decode_redacted_projection(data)?;
-                    partial.verify()?;
-                    if partial.declared_root() != hash || !partial.has_redactions() {
-                        return Err(invalid(
-                            "partial source tree differs from its address or is complete",
-                        ));
-                    }
-                    trees.insert(hash, partial.visible_tree()?);
-                    partial_trees.push(partial);
-                    return Ok(());
+                decode_tree(hash, data, allow_partial)?;
+                if crate::object::is_redacted_tree(data) {
+                    verified
+                        .proofs
+                        .write_all(&(data.len() as u64).to_be_bytes())?;
+                    verified.proofs.write_all(data)?;
+                    verified.partial_tree_count += 1;
                 }
-                // Full tree anchors avoid pulling a private historical delta
-                // base into a selected revision's disclosure closure.
-                let tree = Tree::decode_canonical(data)
-                    .map_err(|_| invalid("source pack requires complete canonical tree anchors"))?;
-                if tree.hash() != hash {
-                    return Err(invalid("source tree hash differs from its address"));
-                }
-                trees.insert(hash, tree);
             }
             _ => {
                 return Err(invalid(
@@ -98,48 +99,52 @@ pub(super) fn validate_disclosure(
         }
         Ok(())
     })?;
-    let mut visited = BTreeSet::new();
-    let mut pending = vec![
-        (PackObjectId::StateId(selected.id()), ObjectType::State),
-        (PackObjectId::Hash(selected.tree), ObjectType::Tree),
-    ];
-    while let Some((id, kind)) = pending.pop() {
-        if available.get(&id) != Some(&kind) {
-            return Err(invalid("source closure is incomplete"));
+    let mut visited = super::disk_graph::DiskGraph::new(reader.scratch_root())?;
+    if let Some(visibility) = visibility {
+        visibility.validate(selected)?;
+        for entry in &visibility.entries {
+            visited.insert_file(entry.tree_id)?;
         }
-        if !visited.insert(id) {
-            continue;
+    }
+    visited.insert(PackObjectId::StateId(selected.id()), ObjectType::State)?;
+    visited.insert(PackObjectId::Hash(selected.tree), ObjectType::Tree)?;
+    while let Some((id, kind)) = visited.pop()? {
+        let (actual, bytes) = reader
+            .get_object(&id)?
+            .ok_or_else(|| invalid("source closure is incomplete"))?;
+        if actual != kind {
+            return Err(invalid("source closure object type mismatch"));
         }
         if kind == ObjectType::Tree {
             let PackObjectId::Hash(hash) = id else {
                 return Err(invalid("tree address is not a content hash"));
             };
-            let tree = trees
-                .get(&hash)
-                .ok_or_else(|| invalid("source tree unavailable"))?;
-            for (hash, kind) in children(tree) {
-                pending.push((PackObjectId::Hash(hash), kind));
+            let tree = decode_tree(hash, &bytes, allow_partial)?;
+            if visited.contains_file(hash)? {
+                for index in 0..tree.entries().len() {
+                    if let Some(leaf) = tree.v4_leaf_hash_at(index) {
+                        visited.insert_leaf(hash, leaf)?;
+                    }
+                }
+            }
+            for (hash, kind) in children(&tree) {
+                if visited.insert(PackObjectId::Hash(hash), kind)?
+                    && kind == ObjectType::Blob
+                    && reader.get_hashed_object_type(&hash)? != Some(ObjectType::Blob)
+                {
+                    return Err(invalid(
+                        "source closure is incomplete or has a type mismatch",
+                    ));
+                }
             }
         }
     }
     if let Some(visibility) = visibility {
-        visibility.validate(selected)?;
-        // Reuse the decoded, closure-checked trees. Compute leaves once per
-        // mentioned tree, not once per override, and never consult ambient storage.
-        let mut leaves = BTreeMap::<ContentHash, BTreeSet<ContentHash>>::new();
         for entry in &visibility.entries {
-            if !visited.contains(&PackObjectId::Hash(entry.tree_id)) {
+            if !visited.contains(PackObjectId::Hash(entry.tree_id))? {
                 return Err(invalid("entry visibility tree is outside selected source"));
             }
-            let tree = trees
-                .get(&entry.tree_id)
-                .ok_or_else(|| invalid("entry visibility subject is not a tree"))?;
-            let actual = leaves.entry(entry.tree_id).or_insert_with(|| {
-                (0..tree.entries().len())
-                    .filter_map(|index| tree.v4_leaf_hash_at(index))
-                    .collect()
-            });
-            if !actual.contains(&entry.leaf_hash) {
+            if !visited.contains_leaf(entry.tree_id, entry.leaf_hash)? {
                 return Err(invalid(
                     "entry visibility leaf is absent from selected salted tree",
                 ));
@@ -147,29 +152,42 @@ pub(super) fn validate_disclosure(
         }
     }
     for reference in references {
-        let closure = crate::object::source_target::capture::closure(
+        super::reference_pack::visit(
             &ReferenceReader(reader),
-            reference.descriptor,
-            &reference.scope,
-            reference.state,
+            reference,
+            reader.scratch_root(),
+            |hash, _| {
+                visited.insert(PackObjectId::Hash(hash), ObjectType::Blob)?;
+                Ok(())
+            },
         )?;
-        for hash in closure.blobs.keys() {
-            let id = PackObjectId::Hash(*hash);
-            if available.get(&id) != Some(&ObjectType::Blob) {
-                return Err(invalid("reference closure is incomplete"));
-            }
-            visited.insert(id);
-        }
     }
-    if visited.len() != available.len() {
+    if visited.len() != reader.object_count() {
         return Err(invalid(
             "source pack contains objects outside the selected revision",
         ));
     }
-    Ok(VisibleSourceClosure {
-        objects: visited.into_iter().collect(),
-        partial_trees,
-    })
+    verified.proofs.flush()?;
+    Ok(verified)
+}
+
+fn decode_tree(hash: ContentHash, data: &[u8], allow_partial: bool) -> Result<Tree> {
+    if allow_partial && crate::object::is_redacted_tree(data) {
+        let partial = crate::object::decode_redacted_projection(data)?;
+        partial.verify()?;
+        if partial.declared_root() != hash || !partial.has_redactions() {
+            return Err(invalid(
+                "partial source tree differs from its address or is complete",
+            ));
+        }
+        return Ok(partial.visible_tree()?);
+    }
+    let tree = Tree::decode_canonical(data)
+        .map_err(|_| invalid("source pack requires complete canonical tree anchors"))?;
+    if tree.hash() != hash {
+        return Err(invalid("source tree hash differs from its address"));
+    }
+    Ok(tree)
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::InvalidObject(message.into())
@@ -187,17 +205,9 @@ pub fn build_source_pack<W: Write + Read + Seek + SyncData>(
     builder: StreamingPackBuilder<W>,
     source: &impl ObjectSource,
     selected: &State,
-    max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats)> {
-    build_source_pack_with_references(
-        builder,
-        source,
-        selected,
-        &[],
-        max_objects,
-        max_decoded_bytes,
-    )
+    build_source_pack_with_references(builder, source, selected, &[], max_decoded_bytes)
 }
 
 pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
@@ -205,7 +215,6 @@ pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
     source: &impl ObjectSource,
     selected: &State,
     references: &[crate::object::source_target::capture::ReferenceProof],
-    max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats)> {
     build_disclosure(
@@ -214,7 +223,6 @@ pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
         selected,
         references,
         None,
-        max_objects,
         max_decoded_bytes,
     )
     .map(|(output, stats, _)| (output, stats))
@@ -231,7 +239,6 @@ pub fn build_visible_source_pack<W: Write + Read + Seek + SyncData>(
     selected: &State,
     references: &[crate::object::source_target::capture::ReferenceProof],
     redactions: &EntryRedactions,
-    max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats, bool)> {
     build_disclosure(
@@ -240,7 +247,6 @@ pub fn build_visible_source_pack<W: Write + Read + Seek + SyncData>(
         selected,
         references,
         Some(redactions),
-        max_objects,
         max_decoded_bytes,
     )
 }
@@ -251,12 +257,8 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
     selected: &State,
     references: &[crate::object::source_target::capture::ReferenceProof],
     redactions: Option<&EntryRedactions>,
-    max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats, bool)> {
-    if max_objects < 2 {
-        return Err(invalid("source pack object budget exceeded"));
-    }
     let canonical = selected.encode_current_msgpack()?;
     let mut decoded = 0_u64;
     charge_bytes(&mut decoded, canonical.len() as u64, max_decoded_bytes)?;
@@ -265,10 +267,14 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
         ObjectType::State,
         &canonical,
     )?;
-    let mut discovered = BTreeMap::from([(selected.tree, ObjectType::Tree)]);
+    let scratch_root = builder.scratch_root().to_path_buf();
+    let mut discovered = super::disk_graph::DiskGraph::new(&scratch_root)?;
+    discovered.insert(PackObjectId::Hash(selected.tree), ObjectType::Tree)?;
     let mut partial = false;
-    let mut pending = discovered.clone();
-    while let Some((hash, kind)) = pending.pop_first() {
+    while let Some((id, kind)) = discovered.pop()? {
+        let PackObjectId::Hash(hash) = id else {
+            return Err(invalid("source tree requires a content hash"));
+        };
         match kind {
             ObjectType::Tree => {
                 let tree = source
@@ -296,73 +302,57 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
                     _ => (full, tree),
                 };
                 for (hash, kind) in children(&visible_tree) {
-                    if let Some(expected) = discovered.get(&hash) {
-                        if *expected != kind {
-                            return Err(invalid(
-                                "source object is referenced with conflicting types",
-                            ));
-                        }
-                        continue;
+                    if discovered.insert(PackObjectId::Hash(hash), kind)?
+                        && kind == ObjectType::Blob
+                    {
+                        add_blob(&mut builder, source, hash, &mut decoded, max_decoded_bytes)?;
                     }
-                    // The selected State occupies one slot beyond this set.
-                    // Check before queuing or reading the excess object.
-                    if discovered.len().saturating_add(1) >= max_objects {
-                        return Err(invalid("source pack object budget exceeded"));
-                    }
-                    discovered.insert(hash, kind);
-                    pending.insert(hash, kind);
                 }
                 builder.add_id(PackObjectId::Hash(hash), ObjectType::Tree, &canonical)?;
-            }
-            ObjectType::Blob => {
-                let length = source
-                    .decoded_blob_len(&hash)?
-                    .ok_or_else(|| invalid("selected source blob is missing"))?;
-                if length > max_decoded_bytes.saturating_sub(decoded) {
-                    return Err(invalid("source pack decoded byte budget exceeded"));
-                }
-                let bytes = source
-                    .get_blob_bytes(&hash)?
-                    .ok_or_else(|| invalid("selected source blob is missing"))?;
-                if bytes.len() as u64 != length
-                    || ContentHash::compute_typed("blob", &bytes) != hash
-                {
-                    return Err(invalid(
-                        "source blob differs from its address or declared size",
-                    ));
-                }
-                charge_bytes(&mut decoded, length, max_decoded_bytes)?;
-                builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
             }
             _ => return Err(invalid("unexpected source object type")),
         }
     }
     if !partial {
         for reference in references {
-            let closure = crate::object::source_target::capture::closure(
-                source,
-                reference.descriptor,
-                &reference.scope,
-                reference.state,
-            )?;
-            for (hash, bytes) in closure.blobs {
-                if let Some(kind) = discovered.get(&hash) {
-                    if *kind != ObjectType::Blob {
-                        return Err(invalid("reference object type conflict"));
-                    }
-                    continue;
+            super::reference_pack::visit(source, reference, &scratch_root, |hash, bytes| {
+                if discovered.insert(PackObjectId::Hash(hash), ObjectType::Blob)? {
+                    charge_bytes(&mut decoded, bytes.len() as u64, max_decoded_bytes)?;
+                    builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
                 }
-                if discovered.len().saturating_add(1) >= max_objects {
-                    return Err(invalid("reference pack object budget exceeded"));
-                }
-                charge_bytes(&mut decoded, bytes.len() as u64, max_decoded_bytes)?;
-                discovered.insert(hash, ObjectType::Blob);
-                builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
-            }
+                Ok(())
+            })?;
         }
     }
+    drop(discovered);
     let (output, stats) = builder.finalize()?;
     Ok((output, stats, !partial))
+}
+
+fn add_blob<W: Write + Read + Seek + SyncData>(
+    builder: &mut StreamingPackBuilder<W>,
+    source: &impl ObjectSource,
+    hash: ContentHash,
+    decoded: &mut u64,
+    max_decoded_bytes: u64,
+) -> Result<()> {
+    let length = source
+        .decoded_blob_len(&hash)?
+        .ok_or_else(|| invalid("selected source blob is missing"))?;
+    if length > max_decoded_bytes.saturating_sub(*decoded) {
+        return Err(invalid("source pack decoded byte budget exceeded"));
+    }
+    let bytes = source
+        .get_blob_bytes(&hash)?
+        .ok_or_else(|| invalid("selected source blob is missing"))?;
+    if bytes.len() as u64 != length || ContentHash::compute_typed("blob", &bytes) != hash {
+        return Err(invalid(
+            "source blob differs from its address or declared size",
+        ));
+    }
+    charge_bytes(decoded, length, max_decoded_bytes)?;
+    builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
+    Ok(())
 }
 
 fn charge_bytes(decoded: &mut u64, length: u64, limit: u64) -> Result<()> {

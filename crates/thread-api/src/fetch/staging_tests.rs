@@ -20,6 +20,7 @@ fn partial_source_staging_retains_proof_without_complete_availability() {
     let pack = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
+        &std::env::temp_dir(),
     )
     .expect("original pack");
     let (_, bytes) = pack
@@ -48,8 +49,14 @@ fn partial_source_staging_retains_proof_without_complete_availability() {
     let staged = validate(directory, ready.clone(), operations.clone(), vec![])
         .expect("partial closure with unchanged original source signature");
     assert!(!staged.is_complete());
-    assert_eq!(staged.partial_trees.len(), 1);
-    assert_eq!(staged.partial_trees[0].declared_root(), state.tree);
+    let partials = staged.partial_trees.as_ref().expect("visible closure");
+    assert_eq!(partials.partial_tree_count(), 1);
+    partials
+        .visit_partial_trees(|partial| {
+            assert_eq!(partial.declared_root(), state.tree);
+            Ok(())
+        })
+        .expect("partial proof");
     let destination = tempfile::tempdir().expect("destination");
     let repository = repo::Repository::init_default(destination.path()).expect("repository");
     staged
@@ -636,6 +643,7 @@ fn integrated_fixture(
     let reader = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
+        &std::env::temp_dir(),
     )
     .expect("pack");
     reader
@@ -1114,6 +1122,7 @@ fn source_staging_binds_signed_entry_privacy_to_selected_salted_closure() {
         let reader = PackReader::open(
             &directory.path().join("source.pack"),
             &directory.path().join("source.idx"),
+            &std::env::temp_dir(),
         )
         .expect("pack");
         let (_, bytes) = reader

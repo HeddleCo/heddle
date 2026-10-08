@@ -833,7 +833,6 @@ mod tests {
             staged.state(),
             scratch.path(),
             SourceBudget {
-                max_objects: 16,
                 max_decoded_bytes: 1024 * 1024,
             },
         )
@@ -1111,7 +1110,6 @@ mod tests {
             &state,
             root.path(),
             SourceBudget {
-                max_objects: 16,
                 max_decoded_bytes: 256 * 1024,
             },
         )

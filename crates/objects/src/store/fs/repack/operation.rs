@@ -221,7 +221,7 @@ impl FsRepackOperation {
         let mut logical_bytes = 0u64;
 
         for (pack, index) in &snapshot.old_pack_files {
-            let reader = PackReader::open(pack, index)?;
+            let reader = PackReader::open(pack, index, &self.store.root().join("tmp"))?;
             let mut checkpoint_error = None;
             let visit = reader.visit_objects(|id, object_type, data| {
                 if object_type == ObjectType::Blob

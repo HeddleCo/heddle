@@ -669,75 +669,28 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
             let Some((obj_type, data)) = reader.get_object(id)? else {
                 continue;
             };
-            match (id, obj_type) {
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Blob) => {
-                    self.put_blob_bytes_with_hash(&data, *hash)?;
-                }
-                (pack::PackObjectId::AnnotatedTag(hash), pack::ObjectType::AnnotatedTag) => {
-                    let tag = AnnotatedTag::decode_current_msgpack(&data)
-                        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
-                    if tag.hash() != *hash {
-                        return Err(HeddleError::InvalidObject(
-                            "annotated tag hash mismatch".to_string(),
-                        ));
-                    }
-                    self.put_annotated_tag(&tag)?;
-                }
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Tree) => {
-                    self.put_tree_serialized(&data, *hash)?;
-                }
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Action) => {
-                    self.put_action_serialized(&data, ActionId::from_hash(*hash))?;
-                }
-                (pack::PackObjectId::StateId(change_id), pack::ObjectType::State) => {
-                    self.put_state_serialized(&data, *change_id)?;
-                }
-                (_, pack::ObjectType::TimelineOperation) => {
-                    return Err(HeddleError::InvalidObject(
-                        "timeline operations belong in the timeline pack store".to_string(),
-                    ));
-                }
-                _ => {
-                    return Err(HeddleError::InvalidObject(format!(
-                        "unsupported native pack object: {:?} {:?}",
-                        id, obj_type
-                    )));
-                }
-            }
+            install_pack_entry(self, *id, obj_type, &data)?;
         }
         Ok(ids)
     }
 
-    /// Install a pack and its index from on-disk files
-    /// (typically produced by `StreamingPackBuilder`). The default
-    /// impl reads both files fully and delegates to `install_pack`,
-    /// so any backend that doesn't override this still works (at the
-    /// cost of giving back the bounded-memory promise). Real fs-
-    /// backed stores override this to `rename(2)` both files into the
-    /// pack directory without ever loading them.
-    ///
-    /// On success, the source files at `pack_path`/`index_path` may
-    /// have been moved or removed depending on the backend; callers
-    /// shouldn't continue to rely on them.
-    ///
-    /// Returns the ids of the installed objects — the same set
-    /// `install_pack` reports for the equivalent byte-buffer install,
-    /// so callers (e.g. native sync) read the installed ids off the
-    /// install result instead of tracking them out-of-band.
+    /// Install staged files with a bounded reader. The returned disk inventory
+    /// owns its identities independently of the consumed staging files.
     fn install_pack_streaming(
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<Vec<pack::PackObjectId>> {
-        let pack_data = std::fs::read(pack_path).map_err(StoreError::from)?;
-        let index_data = std::fs::read(index_path).map_err(StoreError::from)?;
-        let ids = self.install_pack(&pack_data, &index_data)?;
-        // Default impl: clean up the staged files. Override
-        // implementations that move/rename should not call super and
-        // should manage the file lifecycle themselves.
-        let _ = std::fs::remove_file(pack_path);
-        let _ = std::fs::remove_file(index_path);
-        Ok(ids)
+    ) -> Result<pack::PackInventory> {
+        let scratch = index_path
+            .parent()
+            .ok_or_else(|| StoreError::InvalidObject("pack index path has no parent".into()))?;
+        let inventory = pack::PackInventory::copy_from_index(index_path, scratch)?;
+        let reader = pack::PackReader::open(pack_path, index_path, scratch)?;
+        reader.visit_objects(|id, kind, data| install_pack_entry(self, id, kind, data))?;
+        drop(reader);
+        std::fs::remove_file(pack_path)?;
+        std::fs::remove_file(index_path)?;
+        Ok(inventory)
     }
 
     fn begin_snapshot_write_batch(&self) -> Result<()> {
@@ -749,4 +702,48 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
     }
 
     fn abort_snapshot_write_batch(&self) {}
+}
+
+fn install_pack_entry(
+    store: &(impl ObjectStore + ?Sized),
+    id: pack::PackObjectId,
+    obj_type: pack::ObjectType,
+    data: &[u8],
+) -> Result<()> {
+    match (&id, obj_type) {
+        (pack::PackObjectId::Hash(hash), pack::ObjectType::Blob) => {
+            store.put_blob_bytes_with_hash(data, *hash)?;
+        }
+        (pack::PackObjectId::AnnotatedTag(hash), pack::ObjectType::AnnotatedTag) => {
+            let tag = AnnotatedTag::decode_current_msgpack(data)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+            if tag.hash() != *hash {
+                return Err(HeddleError::InvalidObject(
+                    "annotated tag hash mismatch".to_string(),
+                ));
+            }
+            store.put_annotated_tag(&tag)?;
+        }
+        (pack::PackObjectId::Hash(hash), pack::ObjectType::Tree) => {
+            store.put_tree_serialized(data, *hash)?;
+        }
+        (pack::PackObjectId::Hash(hash), pack::ObjectType::Action) => {
+            store.put_action_serialized(data, ActionId::from_hash(*hash))?;
+        }
+        (pack::PackObjectId::StateId(change_id), pack::ObjectType::State) => {
+            store.put_state_serialized(data, *change_id)?;
+        }
+        (_, pack::ObjectType::TimelineOperation) => {
+            return Err(HeddleError::InvalidObject(
+                "timeline operations belong in the timeline pack store".to_string(),
+            ));
+        }
+        _ => {
+            return Err(HeddleError::InvalidObject(format!(
+                "unsupported native pack object: {:?} {:?}",
+                id, obj_type
+            )));
+        }
+    }
+    Ok(())
 }

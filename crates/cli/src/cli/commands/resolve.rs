@@ -10,7 +10,9 @@ use objects::{
     store::ObjectStore,
 };
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
-use repo::{MergeState, Repository, thread_replication::source_heads::DefaultHeadRule};
+#[cfg(feature = "client")]
+use repo::thread_replication::source_heads::DefaultHeadRule;
+use repo::{MergeState, Repository};
 use verbs::{
     ConflictRegionReport, ConflictResolutionReport, ResolveReport,
     contains_line_start_conflict_markers, path_is_active_conflict,
@@ -481,6 +483,7 @@ fn cmd_resolve_heads(repo: &Repository, cli: &Cli) -> Result<()> {
 }
 
 /// Clone and pull: say which head is checked out, why, and what remains.
+#[cfg(feature = "client")]
 pub(crate) fn render_source_heads_summary(heads: &SourceHeadsReport) {
     let rule = heads
         .selected_by

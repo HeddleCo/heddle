@@ -4,10 +4,11 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::File,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use bytes::Bytes;
@@ -103,7 +104,8 @@ impl<'a> PackData<'a> {
 pub struct PackReader<'a> {
     data: PackData<'a>,
     index: PackIndex,
-    aliased_offsets: HashSet<u64>,
+    offsets: OnceLock<super::offset_index::OffsetIndex>,
+    scratch_root: PathBuf,
     content_end: usize,
     #[cfg(test)]
     compact_frame_reads: AtomicUsize,
@@ -120,17 +122,22 @@ impl PackReader<'static> {
     /// Open a pack file. mmap-backed when the pack is large enough
     /// to benefit (the same threshold the loose-blob path uses for
     /// its own mmap decision); read-into-heap otherwise.
-    pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        Self::open_with_verification(pack_path, index_path, true)
+    pub fn open(pack_path: &Path, index_path: &Path, scratch_root: &Path) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, scratch_root, true)
     }
 
-    pub(super) fn open_lazy(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        Self::open_with_verification(pack_path, index_path, false)
+    pub(super) fn open_lazy(
+        pack_path: &Path,
+        index_path: &Path,
+        scratch_root: &Path,
+    ) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, scratch_root, false)
     }
 
     fn open_with_verification(
         pack_path: &Path,
         index_path: &Path,
+        scratch_root: &Path,
         verify_checksum: bool,
     ) -> Result<Self> {
         let pack_bytes = read_file_bytes_for_pack(pack_path)?;
@@ -141,11 +148,13 @@ impl PackReader<'static> {
             verify_supported_container_layout(&pack_bytes)?
         };
         let index = PackIndex::from_owned_bytes(index_data)?;
-        let aliased_offsets = index.aliased_offsets()?;
+        let scratch_root = scratch_root.to_path_buf();
+        let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Owned(pack_bytes),
             index,
-            aliased_offsets,
+            offsets,
+            scratch_root,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
@@ -156,11 +165,13 @@ impl PackReader<'static> {
         let pack_data = pack_data.into();
         let (_, _, content_end) = verify_supported_container(&pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
-        let aliased_offsets = index.aliased_offsets()?;
+        let scratch_root = std::env::temp_dir();
+        let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Owned(pack_data),
             index,
-            aliased_offsets,
+            offsets,
+            scratch_root,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
@@ -172,15 +183,33 @@ impl<'a> PackReader<'a> {
     pub fn from_slice(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
         let (_, _, content_end) = verify_supported_container(pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
-        let aliased_offsets = index.aliased_offsets()?;
+        let scratch_root = std::env::temp_dir();
+        let offsets = OnceLock::new();
         Ok(Self {
             data: PackData::Borrowed(pack_data),
             index,
-            aliased_offsets,
+            offsets,
+            scratch_root,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
         })
+    }
+
+    // Metadata point reads need only the mapped identity index. Build the
+    // physical order lazily for all-object visits and shared blob-frame probes.
+    fn offset_index(&self) -> Result<&super::offset_index::OffsetIndex> {
+        if let Some(index) = self.offsets.get() {
+            return Ok(index);
+        }
+        std::fs::create_dir_all(&self.scratch_root)?;
+        let index = super::offset_index::OffsetIndex::new(&self.index, &self.scratch_root)?;
+        // A concurrent reader may win initialization. Dropping our unused
+        // candidate closes its mapping and removes its temporary file.
+        let _ = self.offsets.set(index);
+        self.offsets
+            .get()
+            .ok_or_else(|| StoreError::InvalidObject("physical pack index unavailable".into()))
     }
 
     /// List all object ids in this pack.
@@ -188,64 +217,68 @@ impl<'a> PackReader<'a> {
         self.index.ids()
     }
 
-    /// Verify a complete, explicitly selected source revision before publishing
-    /// the received pack. History, provenance, attachments and child-spool data
-    /// are separate disclosure lanes. This does not confer Thread authority.
+    /// Verify the exact selected closure under a decoded byte budget.
+    #[cfg(feature = "source-transfer")]
     pub fn validate_source_closure(
         &self,
         selected: &crate::object::State,
-        max_objects: usize,
         max_decoded_bytes: u64,
-    ) -> Result<Vec<PackObjectId>> {
-        self.validate_source_closure_with_metadata(
-            selected,
-            &[],
-            None,
-            max_objects,
-            max_decoded_bytes,
-        )
+    ) -> Result<()> {
+        self.validate_source_closure_with_metadata(selected, &[], None, max_decoded_bytes)
     }
+    #[cfg(feature = "source-transfer")]
     pub fn validate_source_closure_with_metadata(
         &self,
         selected: &crate::object::State,
         references: &[crate::object::source_target::capture::ReferenceProof],
         visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
-        max_objects: usize,
         max_decoded_bytes: u64,
-    ) -> Result<Vec<PackObjectId>> {
-        self.validate_source_layout(max_objects, max_decoded_bytes)?;
+    ) -> Result<()> {
+        self.validate_source_layout(max_decoded_bytes)?;
         super::source_pack::validate(self, selected, max_decoded_bytes, references, visibility)
     }
-
-    /// Validate a fetched visible source closure while preserving partial-tree
-    /// proofs. This never authorizes publication as complete source. The caller
-    /// separately verifies original signatures and the selected Thread.
+    /// Preserve verified partial proofs without retaining decoded trees.
+    #[cfg(feature = "source-transfer")]
     pub fn validate_visible_source_closure(
         &self,
         selected: &crate::object::State,
-        max_objects: usize,
         max_decoded_bytes: u64,
     ) -> Result<super::VisibleSourceClosure> {
-        self.validate_source_layout(max_objects, max_decoded_bytes)?;
+        self.validate_source_layout(max_decoded_bytes)?;
         super::source_pack::validate_disclosure(self, selected, max_decoded_bytes, &[], None, true)
     }
-
-    fn validate_source_layout(&self, max_objects: usize, max_decoded_bytes: u64) -> Result<()> {
-        let entries = self.index.entries()?;
-        if entries.is_empty() || entries.len() > max_objects {
-            return Err(StoreError::InvalidObject(
-                "source pack object budget exceeded".into(),
-            ));
+    #[cfg(feature = "source-transfer")]
+    pub(super) fn scratch_root(&self) -> &Path {
+        &self.scratch_root
+    }
+    pub fn object_count(&self) -> usize {
+        self.index.len()
+    }
+    // Point reads support generic packs with repeated identities. Whole-pack
+    // visits need one offset per logical ID so a point lookup cannot substitute
+    // another record's payload. Sorted IDs make this a scalar membership check.
+    fn validate_unique_ids(&self) -> Result<()> {
+        let mut previous = None;
+        for entry in self.index.iter() {
+            let id = entry?.id;
+            if previous == Some(id) {
+                return Err(StoreError::InvalidObject(
+                    "duplicate pack object identity".into(),
+                ));
+            }
+            previous = Some(id);
         }
-        // Retaining the original bytes requires accounting for every physical
-        // record, including records an incomplete index would otherwise hide.
+        Ok(())
+    }
+    #[cfg(feature = "source-transfer")]
+    fn validate_source_layout(&self, max_decoded_bytes: u64) -> Result<()> {
+        if self.index.is_empty() {
+            return Err(StoreError::InvalidObject("source pack is empty".into()));
+        }
+        self.validate_unique_ids()?;
         let (_, mut next, end) = verify_supported_container_layout(self.data.as_slice())?;
-        let offsets = entries
-            .iter()
-            .map(|entry| entry.offset)
-            .collect::<BTreeSet<_>>();
         let mut decoded = 0_u64;
-        for offset in offsets {
+        self.offset_index()?.visit(|offset, _, _| {
             if checked_index_offset(offset)? != next {
                 return Err(StoreError::InvalidObject(
                     "source pack has unindexed or overlapping records".into(),
@@ -271,7 +304,8 @@ impl<'a> PackReader<'a> {
                     "source pack record exceeds container".into(),
                 ));
             }
-        }
+            Ok(())
+        })?;
         if next != end {
             return Err(StoreError::InvalidObject(
                 "source pack has unindexed trailing records".into(),
@@ -360,70 +394,56 @@ impl<'a> PackReader<'a> {
     /// Shared compact frames have one record offset indexed by many logical
     /// ids, so offsets are deduplicated before bytes are counted.
     pub fn encoded_payload_bytes(&self, obj_type: ObjectType) -> Result<u64> {
-        let mut offsets = BTreeSet::new();
-        for id in self.index.ids()? {
-            if let Some(offset) = self.index.find(&id)? {
-                offsets.insert(checked_index_offset(offset)?);
-            }
-        }
         let mut bytes = 0u64;
-        for offset in offsets {
-            let header = decode_tagged_entry_header(self.content_from(offset)?)?;
+        self.offset_index()?.visit(|offset, _, _| {
+            let header =
+                decode_tagged_entry_header(self.content_from(checked_index_offset(offset)?)?)?;
             if header.obj_type == obj_type {
                 bytes = bytes.saturating_add(header.compressed_size as u64);
             }
-        }
+            Ok(())
+        })?;
         Ok(bytes)
     }
 
-    /// Visit every logical object while decoding each shared frame once.
-    ///
-    /// The index-to-frame membership is checked exactly before objects are
-    /// yielded, closing both missing-entry and stale-alias corruption paths.
+    /// Visit every indexed physical record once, checking exact frame membership.
     pub fn visit_objects(
         &self,
         mut visitor: impl FnMut(PackObjectId, ObjectType, &[u8]) -> Result<()>,
     ) -> Result<()> {
-        let mut locations = std::collections::BTreeMap::<usize, Vec<PackObjectId>>::new();
-        for id in self.index.ids()? {
-            let offset = self
-                .index
-                .find(&id)?
-                .ok_or_else(|| StoreError::InvalidObject("indexed object disappeared".into()))?;
-            locations
-                .entry(checked_index_offset(offset)?)
-                .or_default()
-                .push(id);
-        }
-        for (offset, indexed_ids) in locations {
+        self.validate_unique_ids()?;
+        self.offset_index()?.visit(|offset, ordinal, aliases| {
+            let offset = checked_index_offset(offset)?;
             if let Some(objects) = self.read_compact_objects_at(offset)? {
-                let actual = objects.iter().map(|(id, _, _)| *id).collect::<HashSet<_>>();
-                let indexed = indexed_ids.iter().copied().collect::<HashSet<_>>();
-                if actual != indexed
-                    || actual.len() != objects.len()
-                    || indexed.len() != indexed_ids.len()
-                {
+                if objects.len() != aliases {
                     return Err(StoreError::InvalidObject(
                         "compact frame object set differs from its index".into(),
                     ));
                 }
-                for (id, object_type, data) in objects {
-                    visitor(id, object_type, &data)?;
+                let mut unique = HashSet::with_capacity(objects.len());
+                for (id, _, _) in &objects {
+                    if !unique.insert(*id) || self.index.find(id)? != Some(offset as u64) {
+                        return Err(StoreError::InvalidObject(
+                            "compact frame object set differs from its index".into(),
+                        ));
+                    }
                 }
-                continue;
+                for (id, kind, data) in objects {
+                    visitor(id, kind, &data)?;
+                }
+                return Ok(());
             }
-            if indexed_ids.len() != 1 {
+            if aliases != 1 {
                 return Err(StoreError::InvalidObject(
                     "ordinary pack record is indexed by multiple object ids".into(),
                 ));
             }
-            let id = indexed_ids[0];
-            let (object_type, data) = self
+            let id = self.index.entry(ordinal)?.id;
+            let (kind, data) = self
                 .get_object(&id)?
                 .ok_or_else(|| StoreError::InvalidObject("indexed object is missing".into()))?;
-            visitor(id, object_type, &data)?;
-        }
-        Ok(())
+            visitor(id, kind, &data)
+        })
     }
 
     /// Copy a validated subset of non-delta encoded entries into a standalone
@@ -647,7 +667,7 @@ impl<'a> PackReader<'a> {
             self.content_from(header_start)?,
         )
         .ok_or_else(|| StoreError::InvalidObject("Truncated type+size varint".to_string()))?;
-        if (obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64)))
+        if (obj_type == ObjectType::Blob && self.offset_index()?.aliases(offset as u64)?)
             || matches!(obj_type, ObjectType::Tree | ObjectType::State)
         {
             let Some((_, data)) = self.get_object(&id)? else {
@@ -760,7 +780,7 @@ impl<'a> PackReader<'a> {
         };
 
         let shared_blob =
-            obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
+            obj_type == ObjectType::Blob && self.offset_index()?.aliases(offset as u64)?;
         if obj_type != ObjectType::Delta && (shared_blob || is_compact_frame(&decompressed)) {
             #[cfg(test)]
             self.record_compact_frame_read();
@@ -814,7 +834,7 @@ impl<'a> PackReader<'a> {
             return Ok(None);
         }
         let shared_blob =
-            header.obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
+            header.obj_type == ObjectType::Blob && self.offset_index()?.aliases(offset as u64)?;
         if header.obj_type == ObjectType::Blob && !shared_blob {
             return Ok(None);
         }

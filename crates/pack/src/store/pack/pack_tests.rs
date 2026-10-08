@@ -260,7 +260,8 @@ fn test_pack_reader() {
     std::fs::write(&pack_path, &pack_data).expect("Failed to write pack file");
     std::fs::write(&index_path, &index_data).expect("Failed to write index file");
 
-    let reader = PackReader::open(&pack_path, &index_path).expect("Failed to open pack");
+    let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir())
+        .expect("Failed to open pack");
     let (obj_type, retrieved) = reader
         .get_hashed_object(&hash1)
         .expect("Failed to get object")
@@ -526,7 +527,8 @@ fn test_pack_reader_rejects_delta_output_above_limit() {
     std::fs::write(&pack_path, &pack_data).expect("Failed to write pack file");
     std::fs::write(&index_path, index.to_bytes()).expect("Failed to write index file");
 
-    let reader = PackReader::open(&pack_path, &index_path).expect("Failed to open pack");
+    let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir())
+        .expect("Failed to open pack");
     let error = reader
         .get_hashed_object(&target_hash)
         .expect_err("oversized delta output should fail");
@@ -638,7 +640,7 @@ fn test_pack_reader_rejects_truncated_pack() {
     std::fs::write(&pack_path, b"short").unwrap();
     std::fs::write(&index_path, b"").unwrap();
 
-    match PackReader::open(&pack_path, &index_path) {
+    match PackReader::open(&pack_path, &index_path, &std::env::temp_dir()) {
         Err(crate::store::StoreError::InvalidObject(msg)) => {
             assert!(
                 msg.contains("too short") || msg.contains("Pack"),
@@ -669,7 +671,7 @@ fn test_pack_reader_rejects_corrupt_checksum() {
     std::fs::write(&pack_path, &pack_data).unwrap();
     std::fs::write(&index_path, &index_data).unwrap();
 
-    match PackReader::open(&pack_path, &index_path) {
+    match PackReader::open(&pack_path, &index_path, &std::env::temp_dir()) {
         Err(crate::store::StoreError::InvalidObject(msg)) => {
             assert!(
                 msg.contains("checksum"),
@@ -723,7 +725,7 @@ fn test_pack_reader_missing_object_returns_none() {
     std::fs::write(&pack_path, &pack_data).unwrap();
     std::fs::write(&index_path, &index_data).unwrap();
 
-    let reader = PackReader::open(&pack_path, &index_path).unwrap();
+    let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
     // Query for a hash that doesn't exist
     let result = reader.get_hashed_object(&create_test_hash(99)).unwrap();
     assert!(result.is_none(), "non-existent hash should return None");
@@ -762,7 +764,7 @@ fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
 
     // Sanity: untouched index reads cleanly.
     {
-        let reader = PackReader::open(&pack_path, &index_path).unwrap();
+        let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
         let (_, got_a) = reader.get_hashed_object(&hash_a).unwrap().expect("A");
         assert_eq!(got_a, blob_a);
         let (_, got_b) = reader.get_hashed_object(&hash_b).unwrap().expect("B");
@@ -786,7 +788,7 @@ fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
     stale.sort();
     std::fs::write(&index_path, stale.to_bytes()).unwrap();
 
-    let reader = PackReader::open(&pack_path, &index_path).unwrap();
+    let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
     let err = reader
         .get_hashed_object(&hash_a)
         .expect_err("stale index must surface as an error, not silent wrong bytes");
@@ -823,7 +825,7 @@ fn build_and_open_pack(
     // Leak temp_dir so files survive for the reader's lifetime
     std::mem::forget(temp_dir);
 
-    PackReader::open(&pack_path, &index_path).unwrap()
+    PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap()
 }
 
 #[test]
@@ -1101,7 +1103,7 @@ fn test_chain_resets_on_bad_delta() {
     let (pd, id, _) = builder2.build().unwrap();
     std::fs::write(&pack_path, &pd).unwrap();
     std::fs::write(&index_path, &id).unwrap();
-    let reader = PackReader::open(&pack_path, &index_path).unwrap();
+    let reader = PackReader::open(&pack_path, &index_path, &std::env::temp_dir()).unwrap();
     let (_, got) = reader
         .get_hashed_object(&ContentHash::compute(&data1))
         .unwrap()

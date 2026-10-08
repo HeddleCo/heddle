@@ -5,13 +5,21 @@
 //! achieving 50-70% space savings for repositories with many similar objects.
 
 mod compact_frame;
+#[cfg(feature = "source-transfer")]
+mod disk_graph;
+mod disk_sort;
+mod inventory;
 mod manager;
+mod offset_index;
 mod pack_builder;
 mod pack_identity;
 mod pack_index;
 mod pack_reader;
+#[cfg(feature = "source-transfer")]
+mod reference_pack;
 mod repack;
 mod shared;
+#[cfg(feature = "source-transfer")]
 mod source_pack;
 mod streaming_builder;
 pub(crate) mod varint;
@@ -19,12 +27,13 @@ mod versioned_header;
 
 #[cfg(test)]
 mod pack_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "source-transfer"))]
 mod source_pack_tests;
 
 pub use compact_frame::{
     CompactFrameCompression, compress_compact_frame, compress_compact_frame_with,
 };
+pub use inventory::PackInventory;
 pub use manager::PackManager;
 pub use pack_builder::{PackBuilder, RetainedPackBuild};
 pub use pack_identity::{PACK_LOGICAL_ID_CONTEXT, PackLogicalId, PackRepresentationHash};
@@ -43,6 +52,7 @@ pub use shared::{
     write_container_header,
 };
 pub(crate) use shared::{verify_supported_container, verify_supported_container_layout};
+#[cfg(feature = "source-transfer")]
 pub use source_pack::{
     VisibleSourceClosure, build_source_pack, build_source_pack_with_references,
     build_visible_source_pack,

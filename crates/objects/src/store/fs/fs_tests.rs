@@ -435,7 +435,10 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
     let ids = store
         .install_pack_streaming(&staged_pack, &staged_index)
         .expect("streaming install");
-    assert!(ids.contains(&PackObjectId::Hash(blob_hash)));
+    assert!(
+        ids.contains(&PackObjectId::Hash(blob_hash))
+            .expect("inventory membership")
+    );
     assert!(
         !staged_pack.exists(),
         "durable publish must consume pack stage"
@@ -443,6 +446,18 @@ fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
     assert!(
         !staged_index.exists(),
         "durable publish must consume index stage"
+    );
+
+    drop(stage);
+    assert!(
+        ids.contains(&PackObjectId::Hash(blob_hash))
+            .expect("inventory survives removal of staging")
+    );
+    assert_eq!(
+        ids.ids()
+            .collect::<StoreResult<Vec<_>>>()
+            .expect("inventory"),
+        vec![PackObjectId::Hash(blob_hash)]
     );
 
     let loaded = store.get_blob(&blob_hash).unwrap().expect("packed blob");

@@ -309,7 +309,7 @@ impl FsStore {
     /// The path should be the `.heddle` directory.
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root), root.join("tmp"));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,
@@ -340,7 +340,7 @@ impl FsStore {
     /// Create a new filesystem store with custom compression settings.
     pub fn with_compression(root: impl AsRef<Path>, compression: CompressionConfig) -> Self {
         let root = root.as_ref().to_path_buf();
-        let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        let pack_manager = SnapshotPackManager::new(packs_dir(&root), root.join("tmp"));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,

@@ -19,7 +19,6 @@ use super::{Error, PreparedPublication, PublicationOriginals};
 use crate::{Thread, contract::*, transport};
 
 pub struct SourceBudget {
-    pub max_objects: usize,
     pub max_decoded_bytes: u64,
 }
 
@@ -143,7 +142,6 @@ impl SourcePack {
                 selected,
                 references,
                 redactions,
-                budget.max_objects,
                 budget.max_decoded_bytes,
             ),
             None => build_source_pack_with_references(
@@ -151,7 +149,6 @@ impl SourcePack {
                 source,
                 selected,
                 references,
-                budget.max_objects,
                 budget.max_decoded_bytes,
             )
             .map(|(output, stats)| (output, stats, true)),

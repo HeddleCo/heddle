@@ -518,29 +518,27 @@ fn source_pack_exports_and_validates_exact_signed_reference_closure() {
         &Source(repo.store()),
         &first,
         std::slice::from_ref(&proof),
-        1024,
         8 * 1024 * 1024,
     )
     .expect("production reference pack");
     drop(file);
-    let reader = PackReader::open(&path, &index).expect("reader");
-    let objects = reader
+    let reader = PackReader::open(&path, &index, &std::env::temp_dir()).expect("reader");
+    reader
         .validate_source_closure_with_metadata(
             &first,
             std::slice::from_ref(&proof),
             None,
-            1024,
             8 * 1024 * 1024,
         )
         .expect("exact reference closure");
     assert_eq!(
-        objects.len(),
+        reader.object_count(),
         3 + closure.blobs.len(),
         "State/tree/source blob plus exact reference closure"
     );
     assert!(
         reader
-            .validate_source_closure(&first, 1024, 8 * 1024 * 1024)
+            .validate_source_closure(&first, 8 * 1024 * 1024)
             .is_err(),
         "extra reference bytes require signed selection proof"
     );
@@ -548,7 +546,7 @@ fn source_pack_exports_and_validates_exact_signed_reference_closure() {
     changed.scope.thread = Some(ContentHash::from_bytes([99; 32]));
     assert!(
         reader
-            .validate_source_closure_with_metadata(&first, &[changed], None, 1024, 8 * 1024 * 1024)
+            .validate_source_closure_with_metadata(&first, &[changed], None, 8 * 1024 * 1024)
             .is_err(),
         "valid blob addresses cannot replace scope proof"
     );

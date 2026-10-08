@@ -18,7 +18,7 @@
 //!    on disk (256 for `Hash` ids, 256 for `StateId` ids). Each
 //!    `add()` appends one fixed-shape `(id, offset)` record to the
 //!    bucket whose first byte matches the id's first inner byte. At
-//!    finalize, each bucket is small enough to sort in memory; the
+//!    finalize, each bucket is externally sorted in 1 MiB runs; the
 //!    concatenation of `Hash` buckets followed by `StateId` buckets
 //!    in byte order produces the exact same global sort `PackBuilder`
 //!    would have via `entries.sort_by_key(|e| e.id)`.
@@ -30,14 +30,10 @@
 //! - Index entries in bucket buffers: at most 32 bucket files are held
 //!   open at once, each behind a default-capacity `BufWriter` (~8 KB),
 //!   so peak buffering is ~256 KB.
-//! - Sort scratch at finalize: O(largest bucket). For uniformly-
-//!   distributed BLAKE3 hashes / ULID change-ids and N total objects,
-//!   the largest bucket is ~N/256 entries ≈ 40 bytes each. Even at
-//!   100 M objects that's ~16 MB peak.
+//! - Sort scratch at finalize: 1 MiB of records plus two buffered readers.
+//!   At most 64 merge levels can exist for addressable input files.
 //!
-//! Net peak memory: ~20 MB regardless of repo size, modulo the size
-//! of the largest single object (which is unavoidable while the zstd
-//! API is non-streaming).
+//! Memory depends on the largest individual object, never the object count.
 //!
 //! ## Trade-offs vs `PackBuilder`
 //!
@@ -357,6 +353,11 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         Ok(())
     }
 
+    #[cfg(feature = "source-transfer")]
+    pub(super) fn scratch_root(&self) -> &std::path::Path {
+        &self.bucket_dir
+    }
+
     /// Add an object with a content-hash id.
     pub fn add(&mut self, hash: ContentHash, obj_type: ObjectType, data: Vec<u8>) -> Result<()> {
         self.add_id(PackObjectId::Hash(hash), obj_type, data)
@@ -672,7 +673,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         }
         Ok(&mut self.bucket_writers[idx]
             .as_mut()
-            .expect("just inserted above")
+            .ok_or_else(|| StoreError::InvalidObject("index bucket writer unavailable".into()))?
             .writer)
     }
 
@@ -723,7 +724,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         let bw = self
             .pack_writer
             .take()
-            .expect("finalize called twice — pack_writer already consumed");
+            .ok_or_else(|| StoreError::InvalidObject("pack builder is finalized".into()))?;
         let mut writer = bw
             .into_inner()
             .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
@@ -774,18 +775,8 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                 .map_err(StoreError::from)?;
         }
 
-        // 5. Stream the final sorted index directly to disk. We open
-        //    a `BufWriter` against `index_path`, write the index
-        //    container header (magic + version + count — count is
-        //    already known from the per-add bookkeeping), then walk
-        //    the 512 buckets in `(variant, prefix)` order, sorting
-        //    each in memory and writing entries to the file as they
-        //    come off the sort. The intermediate `PackIndex` Vec —
-        //    O(K) in the previous implementation — is gone; the
-        //    largest in-memory state is one bucket's worth of entries.
-        //    Bucket distribution is uniform via BLAKE3 so each bucket
-        //    is ~K/256 entries × ~50 bytes; even at 100M objects that's
-        //    a ~16 MB sort scratch.
+        // Sort fixed-size runs and merge on disk. Hash-prefix buckets only
+        // partition I/O; even one adversarial bucket uses a fixed working set.
         let idx_file = File::create(&self.index_path).map_err(StoreError::from)?;
         let mut idx_writer = BufWriter::new(idx_file);
         write_index_header(&mut idx_writer, self.object_count)?;
@@ -794,14 +785,13 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             if !path.exists() {
                 continue;
             }
-            let bucket_bytes = std::fs::read(path).map_err(StoreError::from)?;
-            let mut entries = decode_bucket_file(&bucket_bytes)?;
-            // Local sort by `PackObjectId` matches the global sort
-            // because all entries in a bucket share the same variant
-            // tag *and* the same first inner byte; only the remaining
-            // bytes differ between them.
-            entries.sort_by_key(|(id, _)| *id);
-            for (id, offset) in entries {
+            let run = super::disk_sort::sort_records::<41>(File::open(path)?, &self.bucket_dir)?;
+            let mut input = std::io::BufReader::new(run.as_file());
+            while let Some(record) = super::disk_sort::read_record::<41>(&mut input)? {
+                let (id, _) = PackObjectId::decode_tagged(&record)?;
+                let offset = u64::from_be_bytes(record[33..].try_into().map_err(|_| {
+                    StoreError::InvalidObject("index bucket offset truncated".into())
+                })?);
                 write_index_entry(&mut idx_writer, id, offset)?;
                 entries_written += 1;
             }
@@ -913,30 +903,6 @@ fn bucket_index_for(id: &PackObjectId) -> usize {
             ANNOTATED_TAG_VARIANT * BUCKETS_PER_VARIANT + hash.as_bytes()[0] as usize
         }
     }
-}
-
-/// Decode `(id, offset)` records from a bucket file. The format
-/// matches `PackObjectId::encode_tagged` followed by a u64 BE offset,
-/// repeated. Unrecognized tags or truncated trailers fail loudly —
-/// we wrote the bytes, so any corruption is a bug, not user input.
-fn decode_bucket_file(bytes: &[u8]) -> Result<Vec<(PackObjectId, u64)>> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let (id, id_len) = PackObjectId::decode_tagged(&bytes[pos..])?;
-        pos += id_len;
-        if pos + 8 > bytes.len() {
-            return Err(StoreError::InvalidObject(
-                "streaming bucket entry truncated at offset".to_string(),
-            ));
-        }
-        let offset = u64::from_be_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
-            StoreError::InvalidObject("streaming bucket bad offset slice".to_string())
-        })?);
-        pos += 8;
-        out.push((id, offset));
-    }
-    Ok(out)
 }
 
 // ---------------------- Tests ----------------------
