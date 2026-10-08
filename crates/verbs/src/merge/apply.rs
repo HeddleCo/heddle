@@ -167,3 +167,77 @@ fn source_subtree_for(
             ))
         })
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{fs, os::unix::fs::symlink};
+
+    use objects::{
+        object::{Blob, Tree, TreeEntry},
+        store::ObjectStore,
+    };
+    use repo::Repository;
+
+    use super::apply_merged_tree;
+
+    fn put_dir(repo: &Repository, name: &str, entries: Vec<TreeEntry>) -> TreeEntry {
+        let hash = repo.store().put_tree(&Tree::from_entries(entries)).unwrap();
+        TreeEntry::directory(name.to_string(), hash).unwrap()
+    }
+
+    fn put_file(repo: &Repository, name: &str, content: &str) -> TreeEntry {
+        let hash = repo.store().put_blob(&Blob::from(content)).unwrap();
+        TreeEntry::file(name.to_string(), hash, false).unwrap()
+    }
+
+    /// heddle#2017: ours tracks `link -> <outside>` (top level and nested);
+    /// the merge result tracks `link/file` instead. Applying it must replace
+    /// the symlinks with real directories and write nothing outside the repo.
+    #[test]
+    fn merge_output_never_writes_through_a_tracked_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let mut config = repo.config().clone();
+        config.set_principal("Merge Tester", "merge@example.com");
+        config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
+        fs::create_dir(temp.path().join("sub")).unwrap();
+        fs::write(temp.path().join("sub/keep.txt"), "keep\n").unwrap();
+        symlink(outside.path(), temp.path().join("link")).unwrap();
+        symlink(outside.path(), temp.path().join("sub/link")).unwrap();
+        repo.snapshot(Some("ours".into()), None).unwrap();
+
+        let merged = Tree::from_entries(vec![
+            put_dir(&repo, "link", vec![put_file(&repo, "file", "top\n")]),
+            put_dir(
+                &repo,
+                "sub",
+                vec![
+                    put_file(&repo, "keep.txt", "keep\n"),
+                    put_dir(&repo, "link", vec![put_file(&repo, "file", "nested\n")]),
+                ],
+            ),
+        ]);
+        apply_merged_tree(&repo, &merged).unwrap();
+
+        assert_eq!(
+            fs::read_dir(outside.path()).unwrap().count(),
+            0,
+            "merge output must never be written outside the repository"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("link/file")).unwrap(),
+            "top\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("sub/link/file")).unwrap(),
+            "nested\n"
+        );
+        assert!(
+            fs::symlink_metadata(temp.path().join("sub/link"))
+                .unwrap()
+                .is_dir()
+        );
+    }
+}

@@ -1840,7 +1840,17 @@ pub(super) fn undo_redo_transaction_id(
 #[derive(Clone)]
 struct PreservedWorktreeFile {
     path: PathBuf,
-    bytes: Vec<u8>,
+    entry: PreservedEntry,
+}
+
+/// A root ignore file as it stood before undo, captured without following a
+/// symlink (heddle#2017). A tracked `.heddleignore -> ~/.ssh/id_ed25519` is
+/// preserved as that symlink, never as the key's bytes copied into the
+/// worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreservedEntry {
+    File(Vec<u8>),
+    Symlink(PathBuf),
 }
 
 fn capture_preserved_worktree_files(repo: &Repository) -> HeddleResult<Vec<PreservedWorktreeFile>> {
@@ -1853,33 +1863,67 @@ fn capture_preserved_worktree_files(repo: &Repository) -> HeddleResult<Vec<Prese
         .into_iter()
         .filter_map(|name| {
             let path = repo.root().join(name);
-            match fs::read(&path) {
-                Ok(bytes) => Some(Ok(PreservedWorktreeFile { path, bytes })),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => Some(Err(HeddleError::Io(error))),
-            }
+            read_optional_worktree_file(&path)
+                .transpose()
+                .map(|entry| entry.map(|entry| PreservedWorktreeFile { path, entry }))
         })
         .collect()
 }
 
-fn read_optional_worktree_file(path: &Path) -> HeddleResult<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(HeddleError::Io(error)),
+/// lstat first: a symlink is captured as its target path, a regular file is
+/// read through a no-follow open, and anything else (a directory, a FIFO) is
+/// not preserved.
+fn read_optional_worktree_file(path: &Path) -> HeddleResult<Option<PreservedEntry>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(HeddleError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(Some(PreservedEntry::Symlink(fs::read_link(path)?)));
     }
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    let mut file = objects::nofollow::open_existing_nofollow(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    Ok(Some(PreservedEntry::File(bytes)))
 }
 
-fn restore_optional_worktree_file(path: &Path, bytes: Option<&[u8]>) -> HeddleResult<()> {
-    match bytes {
-        Some(bytes) => {
-            match fs::read(path) {
-                Ok(current) if current == bytes => return Ok(()),
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(HeddleError::Io(error)),
+fn restore_optional_worktree_file(path: &Path, entry: Option<&PreservedEntry>) -> HeddleResult<()> {
+    match entry {
+        Some(entry) => {
+            if read_optional_worktree_file(path)?.as_ref() == Some(entry) {
+                return Ok(());
             }
-            objects::fs_atomic::write_file_atomic(path, bytes)?;
+            match entry {
+                PreservedEntry::File(bytes) => {
+                    // Publishes by rename, which replaces a symlink at `path`
+                    // rather than writing through it.
+                    objects::fs_atomic::write_file_atomic(path, bytes)?;
+                }
+                PreservedEntry::Symlink(target) => {
+                    #[cfg(unix)]
+                    {
+                        match fs::symlink_metadata(path) {
+                            Ok(metadata) if !metadata.is_dir() => fs::remove_file(path)?,
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(HeddleError::Io(error)),
+                        }
+                        std::os::unix::fs::symlink(target, path)?;
+                        if let Some(parent) = path.parent() {
+                            objects::fs_atomic::sync_directory(parent)?;
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = target;
+                }
+            }
             Ok(())
         }
         None => match fs::remove_file(path) {
@@ -1923,11 +1967,11 @@ impl AtomicMutation for RestorePreservedWorktreeFiles {
             let capture_path = file.path.clone();
             let restore_path = file.path.clone();
             let forward_path = file.path.clone();
-            let forward_bytes = file.bytes.clone();
+            let forward_entry = file.entry.clone();
             tx.step_nonatomic(
                 move || read_optional_worktree_file(&capture_path),
-                move |prior| restore_optional_worktree_file(&restore_path, prior.as_deref()),
-                move || restore_optional_worktree_file(&forward_path, Some(&forward_bytes)),
+                move |prior| restore_optional_worktree_file(&restore_path, prior.as_ref()),
+                move || restore_optional_worktree_file(&forward_path, Some(&forward_entry)),
             )?;
         }
         Ok(StagedCommit::pure(()))

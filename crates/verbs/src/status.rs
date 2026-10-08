@@ -1631,15 +1631,16 @@ fn git_ignore_patterns_for_root(root: &Path, git: &SleyRepository) -> Result<Vec
 }
 
 fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(path).map_err(|err| {
+    // No-follow, regular-file-only, size-capped (heddle#2017).
+    let Some(contents) = repo::read_ignore_file(path).map_err(|err| {
         HeddleError::Config(format!(
             "failed to read ignore file {}: {err}",
             path.display()
         ))
-    })?;
+    })?
+    else {
+        return Ok(());
+    };
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -3536,6 +3537,39 @@ fn remote_tracking_with_verification_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// heddle#2017 review P2-a: an in-tree `.gitignore` symlink is not
+    /// followed (as Git ≥ 2.32), and a FIFO in its place neither hangs nor
+    /// fails the plain-Git observe path.
+    #[test]
+    #[cfg(unix)]
+    fn plain_git_ignore_file_is_not_followed_or_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("rules"), "from-outside-rule\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("rules"), root.path().join(".gitignore"))
+            .unwrap();
+        let mut patterns = Vec::new();
+        append_ignore_file_patterns(&mut patterns, &root.path().join(".gitignore")).unwrap();
+        assert!(patterns.is_empty(), "{patterns:?}");
+
+        fs::remove_file(root.path().join(".gitignore")).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(root.path().join(".gitignore"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = root.path().join(".gitignore");
+        std::thread::spawn(move || {
+            let mut patterns = Vec::new();
+            let _ = tx.send(append_ignore_file_patterns(&mut patterns, &path).map(|()| patterns));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(matches!(outcome, Ok(Ok(_))), "{outcome:?}");
+    }
 
     fn slow_path_bucket(row: &ShortStatusRow<'_>) -> &'static str {
         if row.index == b'?' && row.worktree == b'?' {
