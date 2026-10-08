@@ -144,8 +144,8 @@ pub use state_context::{
     AnnotationStatus, ContextBlob, ContextError, ContextTarget,
 };
 pub use state_core::{
-    ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status, Verification,
-    parse_commit_extension_headers,
+    ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status,
+    TZ_OFFSET_NEGATIVE_UTC, Verification, git_tz_offset_seconds, parse_commit_extension_headers,
 };
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{
