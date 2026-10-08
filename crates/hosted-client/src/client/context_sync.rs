@@ -934,15 +934,10 @@ pub async fn pull_context(
         )
         .await;
         save_mirror(&heddle_dir, &mirror)?;
-        match result {
-            Ok(true) => changed += 1,
-            Ok(false) => {}
-            Err(error) => {
-                client.warn(
-                    "hosted_context_sync_failed",
-                    format!("hosted context {}: {error:#}", annotation.annotation_id),
-                );
-            }
+        if result
+            .with_context(|| format!("hosted context {} sync failed", annotation.annotation_id))?
+        {
+            changed += 1;
         }
     }
     Ok(changed)
