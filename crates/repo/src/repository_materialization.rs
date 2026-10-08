@@ -4,6 +4,7 @@
 use std::{
     collections::BTreeSet,
     fs,
+    io::Write,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -13,6 +14,7 @@ use std::{
 
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty},
+    nofollow::{NoFollowDirectories, create_replacing_leaf, open_existing_nofollow},
     object::{Blob, ContentHash, StateId, Tree, TreeEntryTarget},
     store::ObjectStore,
     util::gitlink_placeholder_bytes,
@@ -23,7 +25,7 @@ use tracing::{debug, instrument};
 use super::{HeddleError, Repository, Result};
 use crate::{
     worktree_index::IndexEntry,
-    worktree_walk::{build_cached_entry, cache_key, validate_symlink_target},
+    worktree_walk::{build_cached_entry, cache_key},
 };
 
 /// State threaded through a single `materialize_write_ops_seeded` call.
@@ -92,7 +94,6 @@ const MATERIALIZE_PARALLEL_THRESHOLD: usize = 32;
 const MATERIALIZE_THREADS_ENV: &str = "HEDDLE_MATERIALIZE_THREADS";
 
 struct MaterializationPlan {
-    validation_root: PathBuf,
     directories: Vec<PathBuf>,
     directory_contexts: Vec<MaterializedDirectoryContext>,
     leaves: Vec<WorktreeWriteOp>,
@@ -156,7 +157,6 @@ pub(crate) enum WorktreeWriteOp {
     Symlink {
         path: PathBuf,
         hash: ContentHash,
-        validation_root: PathBuf,
     },
     GitlinkPlaceholder {
         path: PathBuf,
@@ -367,7 +367,6 @@ impl Repository {
     ) -> Result<MaterializedTree> {
         let plan_start = Instant::now();
         let mut plan = MaterializationPlan {
-            validation_root: dir.to_path_buf(),
             directories: Vec::new(),
             directory_contexts: Vec::new(),
             leaves: Vec::new(),
@@ -386,12 +385,9 @@ impl Repository {
         if !plan.withheld.is_empty() {
             crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
         }
-        for directory in &plan.directories {
-            fs::create_dir_all(directory)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
-        }
+        create_directories_nofollow(dir, &plan.directories)?;
 
-        let (worker_count, file_entries) = self.materialize_write_ops_seeded(&plan.leaves)?;
+        let (worker_count, file_entries) = self.materialize_write_ops_seeded(dir, &plan.leaves)?;
         self.finish_materialization(dir, &canonical, &plan)?;
 
         debug!(
@@ -438,7 +434,6 @@ impl Repository {
         dir: &Path,
     ) -> Result<PartialMaterialization> {
         let mut plan = MaterializationPlan {
-            validation_root: dir.to_path_buf(),
             directories: Vec::new(),
             directory_contexts: Vec::new(),
             leaves: Vec::new(),
@@ -459,11 +454,8 @@ impl Repository {
         if !plan.withheld.is_empty() {
             crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
         }
-        for directory in &plan.directories {
-            fs::create_dir_all(directory)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
-        }
-        self.materialize_write_ops_seeded(&plan.leaves)?;
+        create_directories_nofollow(dir, &plan.directories)?;
+        self.materialize_write_ops_seeded(dir, &plan.leaves)?;
         self.finish_materialization(dir, &canonical, &plan)?;
 
         debug!(
@@ -650,11 +642,8 @@ impl Repository {
             }
             TreeEntryTarget::Symlink { hash } => {
                 plan.symlink_count += 1;
-                plan.leaves.push(WorktreeWriteOp::Symlink {
-                    path,
-                    hash: *hash,
-                    validation_root: plan.validation_root.clone(),
-                });
+                plan.leaves
+                    .push(WorktreeWriteOp::Symlink { path, hash: *hash });
             }
             TreeEntryTarget::Gitlink { target } => {
                 plan.file_count += 1;
@@ -670,16 +659,34 @@ impl Repository {
         Ok(())
     }
 
-    pub(crate) fn materialize_write_ops(&self, writes: &[WorktreeWriteOp]) -> Result<usize> {
-        self.materialize_write_ops_seeded(writes)
+    pub(crate) fn materialize_write_ops(
+        &self,
+        root: &Path,
+        writes: &[WorktreeWriteOp],
+    ) -> Result<usize> {
+        self.materialize_write_ops_seeded(root, writes)
             .map(|(worker_count, _)| worker_count)
     }
 
+    /// Write `writes` beneath the checkout `root` without ever traversing a
+    /// symlink below it (heddle#2017; see [`objects::nofollow`]).
+    ///
+    /// Parents are verified or created no-follow first, replacing any symlink
+    /// in the way with a real directory. Files and gitlink placeholders are
+    /// then written in parallel with `O_EXCL | O_NOFOLLOW`. Symlink leaves go
+    /// last and one at a time, each after a fresh parent check: they are the
+    /// only writes in a batch that could turn a verified directory into a
+    /// symlink (a case-folding name collision, say), so nothing may be written
+    /// beneath one after it lands.
     pub(crate) fn materialize_write_ops_seeded(
         &self,
+        root: &Path,
         writes: &[WorktreeWriteOp],
     ) -> Result<(usize, Vec<SeededWorktreeEntry>)> {
-        prepare_parent_directories(writes)?;
+        prepare_parent_directories(root, writes)?;
+        let (symlinks, writes): (Vec<&WorktreeWriteOp>, Vec<&WorktreeWriteOp>) = writes
+            .iter()
+            .partition(|write| matches!(write, WorktreeWriteOp::Symlink { .. }));
 
         let requested_threads = requested_materialization_threads();
         let worker_count = materialization_worker_count(writes.len(), requested_threads);
@@ -701,12 +708,12 @@ impl Repository {
         // survives the `thread::scope` seam below — each worker gets its own
         // clone and increments the shared atomic counter.
         let progress = self.progress();
-        progress.set_total(writes.len());
+        progress.set_total(writes.len() + symlinks.len());
 
         let result = if worker_count <= 1 {
-            let mut seeded = Vec::with_capacity(writes.len());
+            let mut seeded = Vec::with_capacity(writes.len() + symlinks.len());
             for write in writes {
-                seeded.push(self.materialize_write_op(write, &context)?);
+                seeded.push(self.materialize_write_op(root, write, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
@@ -720,14 +727,14 @@ impl Repository {
                     workers.push(scope.spawn(move || -> Result<Vec<SeededWorktreeEntry>> {
                         let mut seeded = Vec::with_capacity(chunk.len());
                         for write in chunk {
-                            seeded.push(self.materialize_write_op(write, context)?);
+                            seeded.push(self.materialize_write_op(root, write, context)?);
                             progress.inc(1);
                         }
                         Ok(seeded)
                     }));
                 }
 
-                let mut seeded = Vec::with_capacity(writes.len());
+                let mut seeded = Vec::with_capacity(writes.len() + symlinks.len());
                 for worker in workers {
                     seeded.extend(worker.join().map_err(|_| {
                         HeddleError::Config("materialization worker panicked".to_string())
@@ -739,6 +746,13 @@ impl Repository {
 
             Ok((worker_count, seeded))
         };
+        let result = result.and_then(|(worker_count, mut seeded)| {
+            for write in symlinks {
+                seeded.push(self.materialize_write_op(root, write, &context)?);
+                progress.inc(1);
+            }
+            Ok((worker_count, seeded))
+        });
 
         let reflinks = context.reflink_count.load(Ordering::Relaxed);
         let copies = context.copy_count.load(Ordering::Relaxed);
@@ -756,6 +770,7 @@ impl Repository {
 
     fn materialize_write_op(
         &self,
+        root: &Path,
         write: &WorktreeWriteOp,
         context: &MaterializationContext,
     ) -> Result<SeededWorktreeEntry> {
@@ -767,33 +782,25 @@ impl Repository {
             } => {
                 self.materialize_blob(path, hash, *executable, context)?;
             }
-            WorktreeWriteOp::Symlink {
-                path,
-                hash,
-                validation_root,
-            } => {
+            WorktreeWriteOp::Symlink { path, hash } => {
                 let blob = self
                     .store
                     .get_blob(hash)?
                     .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
+                // Like Git, write the target exactly as tracked, whatever it
+                // names: absolute, `../`-escaping or dangling. Creating a
+                // symlink writes nothing outside the checkout; what must
+                // never happen is a later write *through* it, which the
+                // no-follow writers guarantee (heddle#2017).
                 #[cfg(unix)]
                 {
-                    let target = std::str::from_utf8(blob.content()).map_err(|_| {
-                        HeddleError::InvalidObject("invalid symlink target".to_string())
-                    })?;
-                    let target_path = Path::new(target);
-                    let symlink_dir = path.parent().unwrap_or(validation_root);
-                    if !validate_symlink_target(validation_root, symlink_dir, target_path) {
-                        return Err(HeddleError::InvalidSymlinkTarget {
-                            path: path
-                                .strip_prefix(validation_root)
-                                .unwrap_or(path)
-                                .to_path_buf(),
-                            target: target_path.to_path_buf(),
-                        });
-                    }
+                    use std::os::unix::ffi::OsStrExt;
+
+                    let target = std::ffi::OsStr::from_bytes(blob.content());
+                    objects::nofollow::refuse_symlinked_parent(root, path)?;
                     remove_materialized_leaf(path)?;
-                    std::os::unix::fs::symlink(target, path)?;
+                    std::os::unix::fs::symlink(target, path)
+                        .map_err(|e| HeddleError::Io(enrich_fs_error(path, "creating", e)))?;
                 }
                 // Windows symlink materialization is unimplemented;
                 // the projection layer (ProjFS) handles symlinks
@@ -803,12 +810,13 @@ impl Repository {
                 // bindings rather than ship a half-implementation.
                 #[cfg(not(unix))]
                 {
-                    let _ = (blob, path, validation_root);
+                    let _ = (blob, path, root);
                 }
             }
             WorktreeWriteOp::GitlinkPlaceholder { path, target } => {
                 remove_materialized_leaf(path)?;
-                fs::write(path, gitlink_placeholder_bytes(target))
+                create_replacing_leaf(path)?
+                    .write_all(&gitlink_placeholder_bytes(target))
                     .map_err(|err| HeddleError::Io(enrich_fs_error(path, "writing", err)))?;
             }
         }
@@ -883,12 +891,13 @@ impl Repository {
             .redaction_stub_for_blob(hash)
             .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?
         {
-            let _ = fs::remove_file(dest);
-            fs::write(dest, stub.as_bytes())?;
+            let mut file = create_replacing_leaf(dest)?;
+            file.write_all(stub.as_bytes())
+                .map_err(|err| HeddleError::Io(enrich_fs_error(dest, "writing", err)))?;
             // Stubs are never executable — overwriting a tracked
             // executable with a stub correctly drops the +x bit so
             // operators don't accidentally run the redaction notice.
-            set_file_mode(dest, false)?;
+            set_file_mode(&file, false)?;
             // The redaction stub path doesn't reflink/clone — count
             // it as a copy so observability stays accurate.
             context.record_copy();
@@ -940,9 +949,10 @@ impl Repository {
         // with the canonical store anymore (no hardlinks), but a
         // previous `goto` could still have left an unrelated file
         // here that we should overwrite cleanly.
-        let _ = fs::remove_file(dest);
-        fs::write(dest, blob.content())?;
-        set_file_mode(dest, executable)?;
+        let mut file = create_replacing_leaf(dest)?;
+        file.write_all(blob.content())
+            .map_err(|err| HeddleError::Io(enrich_fs_error(dest, "writing", err)))?;
+        set_file_mode(&file, executable)?;
         context.record_copy();
         Ok(())
     }
@@ -998,7 +1008,7 @@ impl Repository {
         use objects::fs_clone::ReflinkOutcome;
         match objects::fs_clone::try_reflink(source, dest) {
             Ok(ReflinkOutcome::Cloned) => {
-                set_file_mode(dest, executable)?;
+                set_file_mode(&open_existing_nofollow(dest)?, executable)?;
                 context.record_reflink();
                 Ok(true)
             }
@@ -1092,7 +1102,18 @@ fn classify_clone_failure<'a>(
     }
 }
 
-fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
+/// Create the planned directories beneath `root` without traversing a
+/// symlink. The root itself is created (and may sit beneath symlinked
+/// ancestors) by the caller.
+fn create_directories_nofollow(root: &Path, directories: &[PathBuf]) -> Result<()> {
+    let mut nofollow = NoFollowDirectories::new(root);
+    for directory in directories {
+        nofollow.ensure(directory)?;
+    }
+    Ok(())
+}
+
+fn prepare_parent_directories(root: &Path, writes: &[WorktreeWriteOp]) -> Result<()> {
     let mut parents = BTreeSet::new();
     for write in writes {
         if let Some(parent) = write.path().parent() {
@@ -1100,9 +1121,10 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
         }
     }
 
+    fs::create_dir_all(root).map_err(|e| HeddleError::Io(enrich_fs_error(root, "creating", e)))?;
+    let mut nofollow = NoFollowDirectories::new(root);
     for parent in parents {
-        fs::create_dir_all(&parent)
-            .map_err(|e| HeddleError::Io(enrich_fs_error(&parent, "creating", e)))?;
+        nofollow.ensure(&parent)?;
     }
 
     Ok(())
@@ -1143,7 +1165,7 @@ fn remove_materialized_leaf(path: &Path) -> Result<()> {
     }
 }
 
-fn set_file_mode(path: &Path, executable: bool) -> Result<()> {
+fn set_file_mode(file: &fs::File, executable: bool) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1154,11 +1176,11 @@ fn set_file_mode(path: &Path, executable: bool) -> Result<()> {
         // materialized checkouts do not inherit a restrictive object
         // store mode such as `0o600`.
         let mode = if executable { 0o755 } else { 0o644 };
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, executable);
+        let _ = (file, executable);
     }
     Ok(())
 }
@@ -1801,11 +1823,14 @@ mod tests {
         let hash = repo.store().put_blob(&blob).unwrap();
         let file_path = temp_dir.path().join("nested/deep/file.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: file_path.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: file_path.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         assert_eq!(
@@ -1833,18 +1858,21 @@ mod tests {
         let regular = temp_dir.path().join("worktree/file.txt");
         let exec = temp_dir.path().join("worktree/run.sh");
 
-        repo.materialize_write_ops(&[
-            WorktreeWriteOp::Blob {
-                path: regular.clone(),
-                hash,
-                executable: false,
-            },
-            WorktreeWriteOp::Blob {
-                path: exec.clone(),
-                hash,
-                executable: true,
-            },
-        ])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[
+                WorktreeWriteOp::Blob {
+                    path: regular.clone(),
+                    hash,
+                    executable: false,
+                },
+                WorktreeWriteOp::Blob {
+                    path: exec.clone(),
+                    hash,
+                    executable: true,
+                },
+            ],
+        )
         .unwrap();
 
         let regular_mode = std::fs::metadata(&regular).unwrap().permissions().mode() & 0o777;
@@ -1887,17 +1915,23 @@ mod tests {
         let worktree_a = temp_dir.path().join("wt-a/file.txt");
         let worktree_b = temp_dir.path().join("wt-b/file.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_a.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_a.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_b.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_b.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         // Simulate a misbehaving agent: re-assert mode 0o644 (the
@@ -1939,17 +1973,23 @@ mod tests {
         let worktree_a = temp_dir.path().join("wt-a/file.txt");
         let worktree_b = temp_dir.path().join("wt-b/file.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_a.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_a.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_b.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_b.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         let tmp = temp_dir.path().join("wt-a/file.txt.tmp");
@@ -1994,11 +2034,14 @@ mod tests {
         let hash = repo.store().put_blob(&blob).unwrap();
         let worktree = temp_dir.path().join("wt/file.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         let loose = repo
@@ -2039,17 +2082,23 @@ mod tests {
         let worktree_a = temp_dir.path().join("worktree-a/file.txt");
         let worktree_b = temp_dir.path().join("worktree-b/file.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_a.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_a.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_b.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_b.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         assert_eq!(std::fs::read(&worktree_a).unwrap(), blob.content());
@@ -2071,11 +2120,13 @@ mod tests {
         let symlink_hash = repo.store().put_blob(&symlink_blob).unwrap();
         let path = temp_dir.path().join("worktree/link.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
-            path: path.clone(),
-            hash: symlink_hash,
-            validation_root: temp_dir.path().to_path_buf(),
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Symlink {
+                path: path.clone(),
+                hash: symlink_hash,
+            }],
+        )
         .unwrap();
 
         let meta = std::fs::symlink_metadata(&path).unwrap();
@@ -2099,17 +2150,21 @@ mod tests {
         let second_hash = repo.store().put_blob(&Blob::from("second")).unwrap();
         let path = temp_dir.path().join("worktree/link.txt");
 
-        repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
-            path: path.clone(),
-            hash: first_hash,
-            validation_root: temp_dir.path().to_path_buf(),
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Symlink {
+                path: path.clone(),
+                hash: first_hash,
+            }],
+        )
         .unwrap();
-        repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
-            path: path.clone(),
-            hash: second_hash,
-            validation_root: temp_dir.path().to_path_buf(),
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Symlink {
+                path: path.clone(),
+                hash: second_hash,
+            }],
+        )
         .unwrap();
 
         assert_eq!(std::fs::read_link(&path).unwrap(), PathBuf::from("second"));
@@ -2128,18 +2183,20 @@ mod tests {
         let target_path = base_dir.join("target.txt");
         let link_path = base_dir.join("link.txt");
 
-        repo.materialize_write_ops(&[
-            WorktreeWriteOp::Blob {
-                path: target_path.clone(),
-                hash: target_hash,
-                executable: false,
-            },
-            WorktreeWriteOp::Symlink {
-                path: link_path.clone(),
-                hash: symlink_hash,
-                validation_root: temp_dir.path().to_path_buf(),
-            },
-        ])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[
+                WorktreeWriteOp::Blob {
+                    path: target_path.clone(),
+                    hash: target_hash,
+                    executable: false,
+                },
+                WorktreeWriteOp::Symlink {
+                    path: link_path.clone(),
+                    hash: symlink_hash,
+                },
+            ],
+        )
         .unwrap();
 
         assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "target");
@@ -2178,17 +2235,23 @@ mod tests {
 
         let worktree_a = temp_dir.path().join("worktree-a/file.txt");
         let worktree_b = temp_dir.path().join("worktree-b/file.txt");
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_a.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_a.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
-        repo.materialize_write_ops(&[WorktreeWriteOp::Blob {
-            path: worktree_b.clone(),
-            hash,
-            executable: false,
-        }])
+        repo.materialize_write_ops(
+            temp_dir.path(),
+            &[WorktreeWriteOp::Blob {
+                path: worktree_b.clone(),
+                hash,
+                executable: false,
+            }],
+        )
         .unwrap();
 
         // (a)+(b) read back ok.

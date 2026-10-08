@@ -28,8 +28,7 @@ use crate::{
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{
-        WalkDirectory, WalkEntry, WorktreeWalkPolicy, cache_key, read_blob_with_hash,
-        validate_symlink_target, walk_worktree,
+        WalkDirectory, WalkEntry, WorktreeWalkPolicy, cache_key, read_blob_with_hash, walk_worktree,
     },
 };
 
@@ -1312,29 +1311,9 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             state.entries.push(tree_entry.clone());
             return Ok(());
         }
+        // Recorded exactly, whatever the target names, as Git records it
+        // (heddle#2017). The walk never descends through a symlink.
         let target = fs::read_link(entry.path)?;
-        // Validate symlink escape against the *walk root*, not
-        // `repo.root()`. When `capture_thread_from_disk` builds a
-        // tree from a dedicated thread worktree, the walk root is
-        // the thread's checkout path (not the main repo) and
-        // symlinks should be allowed to point inside it. Pre-fix
-        // every symlink in such a worktree was rejected the moment
-        // the slow path ran, breaking `thread switch` auto-capture
-        // for any thread containing a symlink. For the common case
-        // where `build_tree(self.root)` runs against the main repo
-        // root, `walk_root == self.repo.root()` and behaviour is
-        // unchanged.
-        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
-        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
-            return Err(HeddleError::InvalidSymlinkTarget {
-                path: entry
-                    .path
-                    .strip_prefix(self.walk_root)
-                    .unwrap_or(entry.path)
-                    .to_path_buf(),
-                target,
-            });
-        }
 
         let blob = Blob::new(objects::util::symlink_target_bytes(&target));
         let hash = blob.hash();

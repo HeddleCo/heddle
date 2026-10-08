@@ -340,20 +340,33 @@ fn test_undo_capture_requires_hard_before_rewriting_worktree() {
     );
 }
 
+/// heddle#2017: Git records and checks out symlinks whatever their target, so
+/// a `.venv` interpreter link or a `../` link must capture, and `undo --hard`
+/// must restore both with their exact targets.
 #[test]
 #[cfg(unix)]
-fn test_capture_escaping_symlink_error_names_path_and_target() {
+fn test_escaping_symlinks_capture_and_restore_exactly() {
     let temp = TempDir::new().unwrap();
     drop(Repository::init_default(temp.path()).unwrap());
     std::fs::create_dir(temp.path().join(".git")).unwrap();
     std::fs::create_dir_all(temp.path().join(".venv/bin")).unwrap();
     std::os::unix::fs::symlink("/usr/bin/python3", temp.path().join(".venv/bin/python")).unwrap();
+    std::os::unix::fs::symlink("../outside", temp.path().join("rel-link")).unwrap();
+    heddle_must_succeed(&["capture", "-m", "links"], temp.path());
 
-    let error = heddle(&["capture", "-m", "venv"], Some(temp.path()))
-        .expect_err("escaping symlink must be rejected");
-    assert!(
-        error.contains(".venv/bin/python -> /usr/bin/python3"),
-        "{error}"
+    std::fs::remove_file(temp.path().join(".venv/bin/python")).unwrap();
+    std::fs::remove_file(temp.path().join("rel-link")).unwrap();
+    std::fs::write(temp.path().join("other.txt"), "other\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "drop links"], temp.path());
+    heddle_must_succeed(&["undo", "--hard"], temp.path());
+
+    assert_eq!(
+        std::fs::read_link(temp.path().join(".venv/bin/python")).unwrap(),
+        std::path::Path::new("/usr/bin/python3")
+    );
+    assert_eq!(
+        std::fs::read_link(temp.path().join("rel-link")).unwrap(),
+        std::path::Path::new("../outside")
     );
 }
 

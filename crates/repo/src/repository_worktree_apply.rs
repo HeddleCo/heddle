@@ -11,6 +11,7 @@ use std::{
 use objects::{
     RecoveryDetails,
     fs_atomic::{enrich_fs_error, is_directory_not_empty as fs_is_directory_not_empty},
+    nofollow::NoFollowDirectories,
     object::{EntryType, Tree, TreeEntry},
     store::ObjectStore,
     worktree::should_ignore as should_ignore_path,
@@ -291,21 +292,28 @@ impl Repository {
             return Ok(WorktreeApplyReport::default());
         }
 
+        // Removals and directory creation never traverse a symlink below the
+        // root (heddle#2017): a removal whose parent is a symlink is skipped,
+        // as Git skips it, and a symlink where a directory now belongs is
+        // replaced by a real directory rather than written through.
         let delete_start = Instant::now();
+        let mut removal_parents = NoFollowDirectories::new(self.root());
         for path in &plan.removals {
-            remove_existing_path(path)?;
+            if removal_parents.parent_is_real_directory(path)? {
+                remove_existing_path(path)?;
+            }
         }
         let delete_phase_ms = delete_start.elapsed().as_millis();
 
         let mkdir_start = Instant::now();
+        let mut directories = NoFollowDirectories::new(self.root());
         for directory in &plan.directories {
-            fs::create_dir_all(directory)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
+            directories.ensure(directory)?;
         }
         let mkdir_phase_ms = mkdir_start.elapsed().as_millis();
 
         let write_start = Instant::now();
-        let worker_count = self.materialize_write_ops(&plan.writes)?;
+        let worker_count = self.materialize_write_ops(self.root(), &plan.writes)?;
         let write_phase_ms = write_start.elapsed().as_millis();
 
         let index_update_start = Instant::now();
@@ -420,7 +428,6 @@ impl Repository {
                 plan.writes.push(WorktreeWriteOp::Symlink {
                     path: self.root().join(rel_path),
                     hash: entry.require_content_hash(),
-                    validation_root: self.root().to_path_buf(),
                 });
             }
             EntryType::Tree => {
@@ -540,7 +547,6 @@ impl Repository {
             plan.writes.push(WorktreeWriteOp::Symlink {
                 path: self.root().join(rel_path),
                 hash: to_hash,
-                validation_root: self.root().to_path_buf(),
             });
             return Ok(());
         }
@@ -811,6 +817,11 @@ impl Repository {
         path: &Path,
         source_subtree: &Tree,
     ) -> Result<()> {
+        // A tracked path beneath a symlink is not in the worktree; never
+        // reach through the symlink to delete what it points at (heddle#2017).
+        if !NoFollowDirectories::new(self.root()).parent_is_real_directory(path)? {
+            return Ok(());
+        }
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

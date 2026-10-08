@@ -189,11 +189,16 @@ fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<ReflinkOutcome> {
         Ok(f) => f,
         Err(err) => return classify_clone_err(source, err),
     };
-    let dst = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dest)?;
+    // The caller unlinks any previous dest. `create_new` + `O_NOFOLLOW` keeps
+    // a symlink at `dest` from being written through (heddle#2017).
+    let dst = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dest)?
+    };
 
     // SAFETY: ioctl with two valid fds; FICLONE expects an `int` fd
     // as the third arg.
