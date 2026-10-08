@@ -692,7 +692,6 @@ impl Fixture {
             &refs,
             scratch.path(),
             thread_api::publication::SourceBudget {
-                max_objects: 100_000,
                 max_decoded_bytes: 256 * 1024 * 1024,
             },
         )

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack index for fast object lookup within packfiles.
 
-use std::collections::HashSet;
-
 use bytes::Bytes;
 
 use crate::store::{
@@ -119,14 +117,35 @@ impl PackIndex {
                 "Index entry count exceeds platform limits".to_string(),
             )
         })?;
-        Ok(Self {
+        let index = Self {
             entries: Vec::new(),
             encoded: Some(EncodedIndex {
                 data,
                 entries_start: header.header_len,
                 count,
             }),
-        })
+        };
+        if header.header_len + count * INDEX_ENTRY_LEN
+            != index
+                .encoded
+                .as_ref()
+                .map_or(0, |encoded| encoded.data.len())
+        {
+            return Err(crate::store::StoreError::InvalidObject(
+                "index has trailing bytes".into(),
+            ));
+        }
+        let mut previous = None;
+        for entry in index.iter() {
+            let entry = entry?;
+            if previous.is_some_and(|id| id > entry.id) {
+                return Err(crate::store::StoreError::InvalidObject(
+                    "index identities are not ordered".into(),
+                ));
+            }
+            previous = Some(entry.id);
+        }
+        Ok(index)
     }
 }
 
@@ -201,15 +220,24 @@ impl PackIndex {
         Ok(self.entries()?.into_iter().map(|entry| entry.id).collect())
     }
 
-    pub(super) fn aliased_offsets(&self) -> Result<HashSet<u64>> {
-        let mut seen = HashSet::new();
-        let mut aliases = HashSet::new();
-        for entry in self.entries()? {
-            if !seen.insert(entry.offset) {
-                aliases.insert(entry.offset);
-            }
+    pub fn len(&self) -> usize {
+        self.encoded
+            .as_ref()
+            .map_or(self.entries.len(), |index| index.count)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub(super) fn entry(&self, index: usize) -> Result<IndexEntry> {
+        match &self.encoded {
+            Some(encoded) => encoded.entry(index),
+            None => self.entries.get(index).copied().ok_or_else(|| {
+                crate::store::StoreError::InvalidObject("index entry out of range".into())
+            }),
         }
-        Ok(aliases)
+    }
+    pub(super) fn iter(&self) -> impl Iterator<Item = Result<IndexEntry>> + '_ {
+        (0..self.len()).map(|index| self.entry(index))
     }
 }
 

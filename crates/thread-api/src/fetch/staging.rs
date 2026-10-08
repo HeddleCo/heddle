@@ -20,11 +20,14 @@ use crate::{contract::*, transport};
 
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
-const SOURCE_OBJECTS: usize = 100_000;
 
 /// Structurally checked source artifacts and original proofs. These bytes grant
 /// no authority. Dropping this value removes its temporary files.
 pub struct StagedSource {
+    // Close proof files before removing their owning staging directory.
+    #[cfg(feature = "native")]
+    pub(super) partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
+    _scratch_lease: heddle_pack::store::pack::ScratchLease,
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
     pub(super) operations: Vec<SignedOperation>,
@@ -32,7 +35,7 @@ pub struct StagedSource {
     pub(super) state: State,
     #[cfg(feature = "native")]
     pub(super) prefix_original: Option<SignedRecord>,
-    pub(super) partial_trees: Vec<heddle_object_model::object::PartialTree>,
+    #[cfg(feature = "native")]
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
     /// Verified converted Git ancestors staged in `ancestry.pack`, keyed by
@@ -284,6 +287,7 @@ impl StagedSource {
             .filter(|floor| floor.coverage == import_ancestry_page::Coverage::Floor)
             .map(|floor| (floor.tip, &floor.members))
     }
+    #[cfg(feature = "native")]
     pub(super) fn ancestry_paths(&self) -> Option<[std::path::PathBuf; 2]> {
         let pack = self.directory.path().join("ancestry.pack");
         pack.exists()
@@ -340,6 +344,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         let directory = tempfile::Builder::new()
             .prefix("thread-download-")
             .tempdir_in(scratch)?;
+        let _scratch_lease = heddle_pack::store::pack::ScratchLease::acquire(directory.path())?;
         let mut files = [
             tokio::fs::File::create(directory.path().join("source.pack")).await?,
             tokio::fs::File::create(directory.path().join("source.idx")).await?,
@@ -428,7 +433,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         .map_err(|error| Error::Preparation(error.to_string()))?
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 fn validate(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -450,7 +455,7 @@ struct DisclosureInput {
     require_import_ancestry: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 pub(crate) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -521,6 +526,7 @@ pub(super) fn validate_with_receipts_and_carriers(
     // Install reads the ready genesis, including claims omitted above.
     ready.thread_genesis = Some(value.genesis.clone());
     Ok(StagedSource {
+        _scratch_lease: value._scratch_lease,
         directory: value.directory,
         ready,
         #[cfg(feature = "native")]
@@ -528,7 +534,9 @@ pub(super) fn validate_with_receipts_and_carriers(
         operations: value.operations,
         dependencies: value.dependencies,
         state: value.state,
+        #[cfg(feature = "native")]
         partial_trees: value.partial_trees,
+        #[cfg(feature = "native")]
         authority_admissions: value.authority_admissions,
         ancestry: value.ancestry,
     })
@@ -538,12 +546,14 @@ pub(super) fn validate_with_receipts_and_carriers(
 pub struct ValidatedSourceArtifacts {
     pub(crate) native_authority: Option<NativePublicProofBundleV1>,
     pub(crate) import_authority: Option<ImportPublicProofBundleV1>,
+    #[cfg(feature = "native")]
+    partial_trees: Option<heddle_pack::store::pack::VisibleSourceClosure>,
+    _scratch_lease: heddle_pack::store::pack::ScratchLease,
     directory: tempfile::TempDir,
     operations: Vec<SignedOperation>,
     genesis: ThreadGenesisRecord,
     dependencies: Vec<ThreadGenesisRecord>,
     state: State,
-    partial_trees: Vec<heddle_object_model::object::PartialTree>,
     authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
     ancestry: Vec<ancestry::VerifiedFloor>,
@@ -589,6 +599,7 @@ impl ValidatedSourceArtifacts {
         }
         ready.thread_genesis = Some(self.genesis);
         Ok(StagedSource {
+            _scratch_lease: self._scratch_lease,
             directory: self.directory,
             ready,
             #[cfg(feature = "native")]
@@ -596,7 +607,9 @@ impl ValidatedSourceArtifacts {
             operations: self.operations,
             dependencies: self.dependencies,
             state: self.state,
+            #[cfg(feature = "native")]
             partial_trees: self.partial_trees,
+            #[cfg(feature = "native")]
             authority_admissions: self.authority_admissions,
             ancestry: self.ancestry,
         })
@@ -672,6 +685,7 @@ fn validate_disclosure_artifacts(
         ancestry,
         require_import_ancestry,
     } = input;
+    let scratch_lease = heddle_pack::store::pack::ScratchLease::acquire(directory.path())?;
     if !ancestry.is_empty() && carriers.is_none() {
         return Err(Error::Invalid(
             "import ancestry requires independently authenticated import carriers",
@@ -755,9 +769,10 @@ fn validate_disclosure_artifacts(
         PackReader::open(
             &directory.path().join("source.pack"),
             &directory.path().join("source.idx"),
+            directory.path(),
         )
         .map_err(preparation)?
-        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
+        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_BYTES)
         .map_err(preparation)?;
         if !ancestry.is_empty() {
             return Err(Error::Invalid(
@@ -767,12 +782,14 @@ fn validate_disclosure_artifacts(
         return Ok(ValidatedSourceArtifacts {
             import_authority: None,
             native_authority: None,
+            _scratch_lease: scratch_lease,
             directory,
             operations,
             genesis: original.clone(),
             dependencies: Vec::new(),
             state,
-            partial_trees: Vec::new(),
+            #[cfg(feature = "native")]
+            partial_trees: None,
             authority_admissions: BTreeMap::new(),
             ancestry: Vec::new(),
         });
@@ -1154,6 +1171,7 @@ fn validate_disclosure_artifacts(
     let pack = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
+        directory.path(),
     )
     .map_err(preparation)?;
     // An older converted commit has no reference proofs or signed entry
@@ -1163,20 +1181,15 @@ fn validate_disclosure_artifacts(
     } else {
         (references, capture.visibility.as_ref())
     };
-    let partial_trees = if allow_partial {
-        pack.validate_visible_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
-            .map_err(preparation)?
-            .partial_trees
-    } else {
-        pack.validate_source_closure_with_metadata(
-            &state,
-            &references,
-            visibility,
-            SOURCE_OBJECTS,
-            SOURCE_BYTES,
+    let _partial_trees = if allow_partial {
+        Some(
+            pack.validate_visible_source_closure(&state, SOURCE_BYTES)
+                .map_err(preparation)?,
         )
-        .map_err(preparation)?;
-        Vec::new()
+    } else {
+        pack.validate_source_closure_with_metadata(&state, &references, visibility, SOURCE_BYTES)
+            .map_err(preparation)?;
+        None
     };
     // Dependency-first installation makes foreign source authority available
     // before admitting a local integration. Cycles cannot settle this graph.
@@ -1225,13 +1238,15 @@ fn validate_disclosure_artifacts(
     Ok(ValidatedSourceArtifacts {
         import_authority: None,
         native_authority: None,
+        _scratch_lease: scratch_lease,
         directory,
         genesis: genesis_record,
         operations: ordered,
         authority_admissions,
         dependencies,
         state,
-        partial_trees,
+        #[cfg(feature = "native")]
+        partial_trees: _partial_trees,
         ancestry: verified_ancestry.floors,
     })
 }
@@ -1361,6 +1376,6 @@ fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[path = "staging_tests.rs"]
 mod tests;

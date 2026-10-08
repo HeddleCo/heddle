@@ -104,7 +104,10 @@ impl TimelineStore {
         recover_pack_install_intents(&root.join(PACKS_DIR))?;
         let store = Self {
             lock: RepoLock::at(root.join(LOCK_FILE)),
-            packs: RwLock::new(TimelinePackSet::open(root.join(PACKS_DIR))?),
+            packs: RwLock::new(TimelinePackSet::open(
+                root.join(PACKS_DIR),
+                heddle_dir.as_ref().join(TMP_DIR),
+            )?),
             root,
         };
         store.init()?;

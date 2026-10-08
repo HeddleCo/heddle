@@ -134,7 +134,12 @@ fn streaming_pack_layout() -> (TempDir, std::path::PathBuf, std::path::PathBuf, 
 
 fn bench_pack_reads(c: &mut Criterion) {
     let raw = raw_pack_fixture();
-    let reader = PackReader::from_bytes(raw.pack_data.clone(), &raw.index_data).unwrap();
+    let reader = PackReader::from_bytes(
+        raw.pack_data.clone(),
+        &raw.index_data,
+        &std::env::temp_dir(),
+    )
+    .unwrap();
     let sample_ids: Vec<PackObjectId> = raw.ids.iter().step_by(32).copied().collect();
 
     let mut warm = c.benchmark_group("pack_io_get_object_bytes_warm");
@@ -158,7 +163,14 @@ fn bench_pack_reads(c: &mut Criterion) {
     let cold_id = raw.ids[raw.ids.len() / 2];
     cold.bench_function("raw_reopen", |b| {
         b.iter_batched(
-            || PackReader::from_bytes(raw.pack_data.clone(), &raw.index_data).unwrap(),
+            || {
+                PackReader::from_bytes(
+                    raw.pack_data.clone(),
+                    &raw.index_data,
+                    &std::env::temp_dir(),
+                )
+                .unwrap()
+            },
             |reader| {
                 let (_ty, bytes) = reader
                     .get_object_bytes(black_box(&cold_id))
@@ -178,8 +190,12 @@ fn bench_pack_reads(c: &mut Criterion) {
         } else {
             delta_pack_fixture(depth)
         };
-        let reader =
-            PackReader::from_bytes(fixture.pack_data.clone(), &fixture.index_data).unwrap();
+        let reader = PackReader::from_bytes(
+            fixture.pack_data.clone(),
+            &fixture.index_data,
+            &std::env::temp_dir(),
+        )
+        .unwrap();
         let id = *fixture.ids.last().unwrap();
         delta.throughput(Throughput::Bytes(BLOB_SIZE as u64));
         delta.bench_with_input(BenchmarkId::from_parameter(depth), &id, |b, id| {

@@ -22,6 +22,7 @@ pub const NETWORK_DAEMON_PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_DAEMON_NAME: &str = "heddle-netd";
 
 /// Same-uid control socket file name under `<heddle_home>/state/`.
+#[cfg(all(unix, feature = "client"))]
 pub const NETWORK_DAEMON_SOCKET: &str = "heddle-netd.sock";
 
 /// Box-scoped endpoint-discovery file:
@@ -32,6 +33,7 @@ pub fn network_daemon_endpoint_path(heddle_home: &Path) -> PathBuf {
 
 /// Box-scoped control socket path:
 /// `<heddle_home>/state/heddle-netd.sock`.
+#[cfg(all(unix, feature = "client"))]
 pub fn network_daemon_socket_path(heddle_home: &Path) -> PathBuf {
     repo::daemon::box_state_dir_in(heddle_home).join(NETWORK_DAEMON_SOCKET)
 }

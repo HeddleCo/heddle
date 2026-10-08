@@ -19,7 +19,6 @@ use super::{Error, PreparedPublication, PublicationOriginals};
 use crate::{Thread, contract::*, transport};
 
 pub struct SourceBudget {
-    pub max_objects: usize,
     pub max_decoded_bytes: u64,
 }
 
@@ -35,7 +34,7 @@ pub struct PublicationOptions {
 }
 
 pub struct SourcePack {
-    directory: tempfile::TempDir,
+    directory: heddle_pack::store::pack::ScratchDir,
     revision: StateId,
     artifacts: [PackExtent; 2],
 }
@@ -119,9 +118,7 @@ impl SourcePack {
         scratch_root: &Path,
         budget: SourceBudget,
     ) -> Result<(Self, bool), Error> {
-        let directory = tempfile::Builder::new()
-            .prefix("thread-source-")
-            .tempdir_in(scratch_root)?;
+        let directory = heddle_pack::store::pack::ScratchDir::new(scratch_root, "thread-source-")?;
         let pack_path = directory.path().join("source.pack");
         let index_path = directory.path().join("source.idx");
         let pack = OpenOptions::new()
@@ -143,7 +140,6 @@ impl SourcePack {
                 selected,
                 references,
                 redactions,
-                budget.max_objects,
                 budget.max_decoded_bytes,
             ),
             None => build_source_pack_with_references(
@@ -151,7 +147,6 @@ impl SourcePack {
                 source,
                 selected,
                 references,
-                budget.max_objects,
                 budget.max_decoded_bytes,
             )
             .map(|(output, stats)| (output, stats, true)),

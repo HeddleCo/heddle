@@ -48,19 +48,53 @@ fn reader(entries: Vec<(PackObjectId, ObjectType, Vec<u8>)>) -> PackReader<'stat
         builder.add_id(id, kind, data);
     }
     let (pack, index, _) = builder.build().expect("pack");
-    PackReader::from_bytes(pack, index).expect("reader")
+    PackReader::from_bytes(pack, index, &std::env::temp_dir()).expect("reader")
+}
+
+#[test]
+fn source_metadata_point_read_does_not_sort_physical_offsets() {
+    let (state, entries) = fixture();
+    let mut builder = PackBuilder::for_repack(CompressionConfig::default(), 0);
+    for (id, kind, bytes) in entries {
+        builder.add_id(id, kind, bytes);
+    }
+    let (pack, index, _) = builder.build().expect("pack");
+    let directory = tempfile::tempdir().expect("metadata fixture");
+    let pack_path = directory.path().join("source.pack");
+    let index_path = directory.path().join("source.idx");
+    let scratch = directory.path().join("tmp");
+    std::fs::write(&pack_path, pack).expect("pack bytes");
+    std::fs::write(&index_path, index).expect("index bytes");
+    let reader = PackReader::open(&pack_path, &index_path, &scratch).expect("reader");
+    let (kind, bytes) = reader
+        .get_object(&PackObjectId::StateId(state.id()))
+        .expect("point read")
+        .expect("selected State");
+    assert_eq!(kind, ObjectType::State);
+    assert_eq!(
+        bytes,
+        state.encode_current_msgpack().expect("canonical State")
+    );
+    assert!(
+        !scratch.exists(),
+        "a metadata point lookup needs no disk sort"
+    );
+    reader
+        .validate_source_closure(&state, 65536)
+        .expect("full closure");
+    assert!(
+        scratch.exists(),
+        "full closure traversal builds the disk index"
+    );
 }
 #[test]
 fn selected_source_closure_is_complete_without_private_history_or_child_spools() {
     let (state, entries) = fixture();
-    let verified = reader(entries)
-        .validate_source_closure(&state, 16, 65536)
+    let reader = reader(entries);
+    reader
+        .validate_source_closure(&state, 65536)
         .expect("complete selected source");
-    assert_eq!(
-        verified.len(),
-        3,
-        "symlink reuse is deduplicated, external spools and provenance are not traversed"
-    );
+    assert_eq!(reader.object_count(), 3);
 }
 
 #[test]
@@ -132,17 +166,24 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
         temp.path().join("buckets"),
     )
     .expect("builder");
-    build_visible_source_pack(builder, &source, &state, &[], &redactions, 16, 65536)
+    build_visible_source_pack(builder, &source, &state, &[], &redactions, 65536)
         .expect("visible closure requires no hidden bytes");
     assert_eq!(source.blob_reads.get(), 1);
-    let packed = PackReader::open(&path, &index).expect("pack reader");
+    let packed = PackReader::open(&path, &index, &std::env::temp_dir()).expect("pack reader");
     let verified = packed
-        .validate_visible_source_closure(&state, 16, 65536)
+        .validate_visible_source_closure(&state, 65536)
         .expect("verified disclosure");
-    assert_eq!(verified.objects.len(), 3);
-    assert_eq!(verified.partial_trees.len(), 1);
-    assert_eq!(verified.partial_trees[0].declared_root(), state.tree);
-    assert_eq!(verified.partial_trees[0].redacted_count(), 2);
+    assert_eq!(packed.object_count(), 3);
+    assert_eq!(verified.partial_tree_count(), 1);
+    let mut partial_trees = Vec::new();
+    verified
+        .visit_partial_trees(|partial| {
+            partial_trees.push(partial.clone());
+            Ok(())
+        })
+        .expect("partial proofs");
+    assert_eq!(partial_trees[0].declared_root(), state.tree);
+    assert_eq!(partial_trees[0].redacted_count(), 2);
     assert!(
         packed
             .get_hashed_object(&secret.hash())
@@ -156,7 +197,7 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
             .is_none()
     );
     assert!(
-        packed.validate_source_closure(&state, 16, 65536).is_err(),
+        packed.validate_source_closure(&state, 65536).is_err(),
         "partial disclosure must not become complete source availability"
     );
     let mut records = Vec::new();
@@ -181,11 +222,11 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
     ));
     assert!(
         reader(extra)
-            .validate_visible_source_closure(&state, 16, 65536)
+            .validate_visible_source_closure(&state, 65536)
             .is_err(),
         "hidden bytes cannot be smuggled alongside a valid partial proof"
     );
-    let partial = &verified.partial_trees[0];
+    let partial = &partial_trees[0];
     let mut forged = partial.leaves().to_vec();
     let hidden = forged
         .iter_mut()
@@ -203,7 +244,7 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
     root.2 = forged;
     assert!(
         reader(records)
-            .validate_visible_source_closure(&state, 16, 65536)
+            .validate_visible_source_closure(&state, 65536)
             .is_err(),
         "a changed opaque commitment no longer proves the selected root"
     );
@@ -250,33 +291,34 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
         temp.path().join("changed-buckets"),
     )
     .expect("changed builder");
-    let (_, _, complete) = build_visible_source_pack(
-        builder,
-        &changed_source,
-        &changed,
-        &[],
-        &redactions,
-        16,
-        65536,
-    )
-    .expect("fresh visible closure");
+    let (_, _, complete) =
+        build_visible_source_pack(builder, &changed_source, &changed, &[], &redactions, 65536)
+            .expect("fresh visible closure");
     assert!(
         complete,
         "ancestor overrides do not taint a different salted leaf"
     );
-    PackReader::open(&changed_path, &changed_index)
+    PackReader::open(&changed_path, &changed_index, &std::env::temp_dir())
         .expect("changed reader")
-        .validate_source_closure(&changed, 16, 65536)
+        .validate_source_closure(&changed, 65536)
         .expect("actually complete source");
 }
 #[test]
 fn publication_rejects_missing_source_and_unselected_objects() {
     let (state, entries) = fixture();
+    let mut repeated = entries.clone();
+    repeated.push(entries[2].clone());
+    assert!(
+        reader(repeated)
+            .validate_source_closure(&state, 65536)
+            .is_err(),
+        "a selected source disclosure requires one record per identity"
+    );
     let mut missing = entries.clone();
     missing.pop();
     assert!(
         reader(missing)
-            .validate_source_closure(&state, 16, 65536)
+            .validate_source_closure(&state, 65536)
             .is_err(),
         "missing content must not produce an availability receipt"
     );
@@ -289,7 +331,7 @@ fn publication_rejects_missing_source_and_unselected_objects() {
     ));
     assert!(
         reader(extra)
-            .validate_source_closure(&state, 16, 65536)
+            .validate_source_closure(&state, 65536)
             .is_err(),
         "unselected content cannot persist inside a source pack"
     );
@@ -297,20 +339,13 @@ fn publication_rejects_missing_source_and_unselected_objects() {
     false_hash[2].2 = b"changed content".to_vec();
     assert!(
         reader(false_hash)
-            .validate_source_closure(&state, 16, 65536)
+            .validate_source_closure(&state, 65536)
             .is_err(),
         "pack checksum alone does not verify logical object identity"
     );
+
     assert!(
-        reader(entries.clone())
-            .validate_source_closure(&state, 2, 65536)
-            .is_err(),
-        "object budget"
-    );
-    assert!(
-        reader(entries)
-            .validate_source_closure(&state, 16, 1)
-            .is_err(),
+        reader(entries).validate_source_closure(&state, 1).is_err(),
         "decoded byte budget"
     );
 }
@@ -334,10 +369,10 @@ fn publication_rejects_unindexed_bytes_even_when_selected_objects_are_complete()
     )
     .expect("unindexed record");
     append_container_checksum(&mut pack);
-    let reader =
-        PackReader::from_bytes(pack, index).expect("well-formed container with trailing record");
+    let reader = PackReader::from_bytes(pack, index, &std::env::temp_dir())
+        .expect("well-formed container with trailing record");
     assert!(
-        reader.validate_source_closure(&state, 16, 65536).is_err(),
+        reader.validate_source_closure(&state, 65536).is_err(),
         "an unindexed record must not cross the selected disclosure boundary"
     );
 }
@@ -378,7 +413,7 @@ impl crate::object::ObjectSource for SelectedSource {
 fn export_selected(
     source: &SelectedSource,
     state: &State,
-    max_objects: usize,
+
     max_bytes: u64,
 ) -> crate::store::Result<PackReader<'static>> {
     let dir = tempfile::tempdir().expect("source spool");
@@ -389,9 +424,13 @@ fn export_selected(
         CompressionConfig::default(),
         dir.path().join("buckets"),
     )?;
-    let (pack, stats) = build_source_pack(builder, source, state, max_objects, max_bytes)?;
+    let (pack, stats) = build_source_pack(builder, source, state, max_bytes)?;
     assert_eq!(stats.object_count, 3);
-    PackReader::from_bytes(pack.into_inner(), std::fs::read(index_path)?)
+    PackReader::from_bytes(
+        pack.into_inner(),
+        std::fs::read(index_path)?,
+        &std::env::temp_dir(),
+    )
 }
 #[test]
 fn source_export_reads_only_selected_content_and_emits_a_complete_pack() {
@@ -400,19 +439,16 @@ fn source_export_reads_only_selected_content_and_emits_a_complete_pack() {
         entries,
         blob_reads: std::cell::Cell::new(0),
     };
-    let reader = export_selected(&source, &state, 16, 65536).expect("source-only export");
+    let reader = export_selected(&source, &state, 65536).expect("source-only export");
     assert_eq!(
         source.blob_reads.get(),
         1,
         "a file and symlink sharing content need only one read"
     );
-    assert_eq!(
-        reader
-            .validate_source_closure(&state, 16, 65536)
-            .expect("exact closure")
-            .len(),
-        3
-    );
+    reader
+        .validate_source_closure(&state, 65536)
+        .expect("exact closure");
+    assert_eq!(reader.object_count(), 3);
 }
 #[test]
 fn source_export_checks_address_and_budget_before_publication() {
@@ -422,22 +458,42 @@ fn source_export_checks_address_and_budget_before_publication() {
         blob_reads: std::cell::Cell::new(0),
     };
     assert!(
-        export_selected(&source, &state, 2, 65536).is_err(),
-        "object budget must apply before writing the excess object"
-    );
-    assert_eq!(
-        source.blob_reads.get(),
-        0,
-        "known excess objects must not be loaded"
-    );
-    assert!(
-        export_selected(&source, &state, 16, 1).is_err(),
+        export_selected(&source, &state, 1).is_err(),
         "decoded byte budget"
     );
     assert_eq!(source.blob_reads.get(), 0);
     source.entries[2].2 = b"wrong bytes under the original address".to_vec();
     assert!(
-        export_selected(&source, &state, 16, 65536).is_err(),
+        export_selected(&source, &state, 65536).is_err(),
         "producer must reject a corrupt source address"
     );
+}
+
+#[test]
+fn buffered_source_readers_keep_validation_scratch_under_the_supplied_root() {
+    let (state, entries) = fixture();
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    for (id, kind, bytes) in entries {
+        builder.add_id(id, kind, bytes);
+    }
+    let (pack, index, _) = builder.build().expect("pack");
+    let directory = tempfile::tempdir().expect("store");
+    let scratch = directory.path().join("tmp");
+    let borrowed = PackReader::from_slice(&pack, &index, &scratch).expect("borrowed reader");
+    let owned = PackReader::from_bytes(pack.clone(), &index, &scratch).expect("owned reader");
+    for reader in [&borrowed, &owned] {
+        let closure = reader
+            .validate_visible_source_closure(&state, 65536)
+            .expect("closure");
+        assert_eq!(
+            std::fs::read_dir(&scratch).expect("scratch files").count(),
+            1,
+            "proof scratch lives in the caller's root"
+        );
+        drop(closure);
+        assert_eq!(
+            std::fs::read_dir(&scratch).expect("clean scratch").count(),
+            0
+        );
+    }
 }

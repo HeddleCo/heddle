@@ -129,7 +129,8 @@ pub(super) fn verify_staged(
     expected_trees: &HashSet<ContentHash>,
     context: &RepackContext,
 ) -> std::result::Result<(), RepackError> {
-    let reader = PackReader::open(&staging.pack, &staging.index).map_err(RepackError::operation)?;
+    let reader = PackReader::open(&staging.pack, &staging.index, &staging.root)
+        .map_err(RepackError::operation)?;
     let ids = reader.list_ids().map_err(RepackError::operation)?;
     let actual = ids.iter().copied().collect::<HashSet<_>>();
     if actual != *expected_generic || actual.len() != ids.len() {

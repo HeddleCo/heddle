@@ -6,9 +6,11 @@ use std::{fs, path::Path, time::SystemTime};
 use anyhow::{Context, Result, anyhow};
 // The discussion wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
+#[cfg(any(feature = "client", test))]
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::DiscussWaitLineOutput;
 pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    AnchorOutput, DiscussWaitLineOutput, DiscussionListOutput, DiscussionOutput,
-    DiscussionShowOutput, DiscussionWriteOutput, ResolutionOutput, TurnOutput,
+    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
+    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 use objects::{
     lock::RepositoryLockExt,
@@ -38,11 +40,13 @@ use super::{
     },
     snapshot::ensure_current_state,
 };
+#[cfg(feature = "client")]
+use crate::cli::cli_args::DiscussWaitArgs;
 use crate::{
     cli::{
         cli_args::{
             Cli, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussNewArgs, DiscussReopenArgs,
-            DiscussReplyArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
+            DiscussReplyArgs, DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
         },
         should_output_json,
     },
@@ -1191,6 +1195,7 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
     }
 }
 
+#[cfg(any(feature = "client", test))]
 fn format_wait_skip(line: &DiscussWaitLineOutput) -> String {
     match line
         .skip_reason

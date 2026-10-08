@@ -1094,6 +1094,7 @@ fn ancestry_staging_retains_bounded_allocations() {
     let reader = objects::store::pack::PackReader::open(
         &directory.path().join("ancestry.pack"),
         &directory.path().join("ancestry.idx"),
+        &std::env::temp_dir(),
     )
     .expect("staged pack");
     let mut persisted = 0;

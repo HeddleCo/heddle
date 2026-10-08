@@ -9,6 +9,7 @@ pub(crate) fn print_next(action: &str) {
 
 /// `Next:` for a command that must stay runnable as printed: record IDs
 /// are shown in full rather than abbreviated for reading.
+#[cfg(feature = "client")]
 pub(crate) fn print_next_exact(action: &str) {
     if !action.trim().is_empty() {
         println!("Next: {}", style::bold(action));

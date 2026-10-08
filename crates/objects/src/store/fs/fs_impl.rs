@@ -48,6 +48,14 @@ use crate::{
 /// reporting the compressed size of every loose blob.
 const BLOB_HEADER_PEEK: usize = 13;
 
+fn pack_is_corrupt(validation: Result<()>) -> Result<bool> {
+    match validation {
+        Ok(()) => Ok(false),
+        Err(HeddleError::InvalidObject(_) | HeddleError::Corruption { .. }) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     tree.validate()?;
     Ok(tree)
@@ -382,18 +390,25 @@ impl FsStore {
     }
 }
 
-/// Validate every entry in a pack against its tagged id (checksum
-/// validation) and return the installed id list. This is the shared
-/// validated core for both install seams: the byte-buffer install
-/// (`install_pack`) and the memory-bounded temp-file install
-/// (`install_pack_streaming`) both run their pack through here, so
-/// both apply the same checksum validation and report the same
-/// installed ids regardless of how the bytes reach the store.
+/// Validate all logical objects before the buffered install returns its IDs.
+/// The streaming seam uses the same validator with a disk metadata visitor.
 fn validate_and_list_pack(
     store: &FsStore,
     reader: &crate::store::pack::PackReader,
 ) -> Result<Vec<PackObjectId>> {
-    let ids = reader.list_ids()?;
+    validate_pack(store, reader)?;
+    reader.list_ids()
+}
+
+fn validate_pack(store: &FsStore, reader: &crate::store::pack::PackReader) -> Result<()> {
+    visit_validated_pack(store, reader, |_, _, _| Ok(()))
+}
+
+fn visit_validated_pack(
+    store: &FsStore,
+    reader: &crate::store::pack::PackReader,
+    mut visitor: impl FnMut(PackObjectId, ObjectType, &[u8]) -> Result<()>,
+) -> Result<()> {
     reader.visit_objects(|id, object_type, data| {
         if let (PackObjectId::Hash(hash), ObjectType::Tree) = (id, object_type)
             && is_delta_tree(data)
@@ -422,11 +437,11 @@ fn validate_and_list_pack(
             }
             let anchor = codec::decode_tree_serialized_with_key(&anchor_body, header.anchor, None)?;
             codec::decode_tree_serialized_with_key(data, hash, Some(&anchor))?;
-            return Ok(());
+        } else {
+            validate_pack_entry(&id, object_type, data)?;
         }
-        validate_pack_entry(&id, object_type, data)
-    })?;
-    Ok(ids)
+        visitor(id, object_type, data)
+    })
 }
 
 fn state_entries_from_pack(
@@ -1290,17 +1305,17 @@ impl FsStore {
             match path.extension().and_then(|value| value.to_str()) {
                 Some("pack") => {
                     let index = path.with_extension("idx");
-                    let valid = crate::store::pack::PackReader::open(&path, &index)
-                        .and_then(|reader| validate_and_list_pack(self, &reader).map(|_| ()))
-                        .is_ok();
-                    if !valid {
-                        let _ = fs::remove_file(&path);
-                        let _ = fs::remove_file(&index);
+                    let validation =
+                        crate::store::pack::PackReader::open(&path, &index, &self.root.join("tmp"))
+                            .and_then(|reader| validate_pack(self, &reader));
+                    if pack_is_corrupt(validation)? {
+                        fs::remove_file(&path)?;
+                        fs::remove_file(&index)?;
                         removed += 1;
                     }
                 }
-                Some("npk") if super::npk1::Npk1Pack::open(&path).is_err() => {
-                    let _ = fs::remove_file(&path);
+                Some("npk") if pack_is_corrupt(super::npk1::Npk1Pack::open(&path).map(|_| ()))? => {
+                    fs::remove_file(&path)?;
                     removed += 1;
                 }
                 _ => {}
@@ -2173,7 +2188,11 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, pack_data, index_data))]
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
-        let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
+        let reader = crate::store::pack::PackReader::from_slice(
+            pack_data,
+            index_data,
+            &self.root.join("tmp"),
+        )?;
         let ids = validate_and_list_pack(self, &reader)?;
         let state_entries = self.states_needing_loose_copies(&reader, &ids)?;
         let attachment_entries = attachment_entries_from_pack(&reader, &ids)?;
@@ -2230,32 +2249,77 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self))]
     fn install_pack_streaming(
         &self,
-        pack_path: &std::path::Path,
-        index_path: &std::path::Path,
-    ) -> Result<Vec<PackObjectId>> {
-        // Validate + list ids through the same core as the byte-buffer
-        // seam, but via an mmap-backed reader so the pack is never
-        // copied into the heap — the memory-bounded promise survives.
-        // Drop the reader (releasing the mmap) before the rename so
-        // the file move isn't racing an open mapping.
-        let ids = {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            validate_and_list_pack(self, &reader)?
-        };
-        let state_entries = {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            self.states_needing_loose_copies(&reader, &ids)?
-        };
-        let attachment_entries = {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            attachment_entries_from_pack(&reader, &ids)?
-        };
-        self.install_pack_files_streaming(pack_path, index_path)?;
-        self.write_packed_state_mirrors_batch(state_entries)?;
-        for attachment in attachment_entries {
-            self.put_state_attachment(&attachment)?;
+        pack_path: &Path,
+        index_path: &Path,
+    ) -> Result<crate::store::pack::PackInventory> {
+        use std::io::{BufReader, BufWriter, Read, Write};
+        let directory =
+            crate::store::pack::ScratchDir::new(&self.root.join("tmp"), "pack-install-")?;
+        let scratch = directory.path();
+        let inventory =
+            crate::store::pack::PackInventory::copy_from_index(index_path, &self.root.join("tmp"))?;
+        // Mirrors and attachments are also staged on disk. Validate every
+        // object before publishing either immutable files or derived metadata.
+        let mut metadata = tempfile::NamedTempFile::new_in(scratch)?;
+        {
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path, scratch)?;
+            let mut writer = BufWriter::new(metadata.as_file_mut());
+            visit_validated_pack(self, &reader, |id, kind, data| {
+                let retain = match id {
+                    PackObjectId::StateId(state) => self.holds_state(&state)?,
+                    _ => kind == ObjectType::StateAttachment,
+                };
+                if retain {
+                    let mut key = Vec::with_capacity(33);
+                    id.encode_tagged(&mut key);
+                    writer.write_all(&key)?;
+                    writer.write_all(&(data.len() as u64).to_be_bytes())?;
+                    writer.write_all(data)?;
+                }
+                Ok(())
+            })?;
+            writer.flush()?;
         }
-        Ok(ids)
+        self.install_pack_files_streaming(pack_path, index_path)?;
+        if metadata.as_file().metadata()?.len() == 0 {
+            return Ok(inventory);
+        }
+        let mut input = BufReader::new(File::open(metadata.path())?);
+        self.begin_snapshot_write_batch_impl()?;
+        let result = (|| {
+            loop {
+                let mut header = [0; 41];
+                if input.read(&mut header[..1])? == 0 {
+                    break;
+                }
+                input.read_exact(&mut header[1..])?;
+                let (id, _) = PackObjectId::decode_tagged(&header[..33])?;
+                let length = usize::try_from(u64::from_be_bytes(header[33..].try_into().map_err(
+                    |_| HeddleError::InvalidObject("metadata length truncated".into()),
+                )?))
+                .map_err(|_| {
+                    HeddleError::InvalidObject("metadata length exceeds platform".into())
+                })?;
+                let mut data = vec![0; length];
+                input.read_exact(&mut data)?;
+                match id {
+                    PackObjectId::StateId(state) => {
+                        ObjectStore::put_state_serialized(self, &data, state)?
+                    }
+                    _ => {
+                        self.put_state_attachment(&StateAttachment::decode_current_msgpack(
+                            &data,
+                        )?)?;
+                    }
+                }
+            }
+            self.flush_snapshot_write_batch_impl()
+        })();
+        if result.is_err() {
+            self.abort_snapshot_write_batch_impl();
+        }
+        result?;
+        Ok(inventory)
     }
 
     #[instrument(skip(self))]
@@ -2496,7 +2560,7 @@ mod enumeration_tests {
     ) -> PackManager {
         fs::write(dir.path().join(format!("{name}.pack")), pack_data).unwrap();
         fs::write(dir.path().join(format!("{name}.idx")), index_data).unwrap();
-        PackManager::new(dir.path().to_path_buf())
+        PackManager::new(dir.path().to_path_buf(), dir.path().join("tmp"))
     }
 
     fn raw_mixed_manager() -> (TempDir, PackManager, Vec<(ContentHash, ObjectType)>) {
@@ -2623,7 +2687,7 @@ mod enumeration_tests {
     #[test]
     fn type_only_enumeration_matches_full_decode_across_fixture_set() {
         let empty_dir = TempDir::new().unwrap();
-        let empty = PackManager::new(empty_dir.path().to_path_buf());
+        let empty = PackManager::new(empty_dir.path().to_path_buf(), empty_dir.path().join("tmp"));
         let loose_hash = ContentHash::compute(b"loose only");
         assert_new_matches_legacy("loose-only", &empty, vec![loose_hash], ObjectType::Blob);
 

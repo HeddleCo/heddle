@@ -82,7 +82,7 @@ pub fn reuse_native_pack_encoded_subset_in(
     if !source_pack_path.is_file() || !source_index_path.is_file() {
         return Ok(None);
     }
-    let reader = PackReader::open(source_pack_path, &source_index_path)?;
+    let reader = PackReader::open(source_pack_path, &source_index_path, root)?;
     let expected = objects
         .iter()
         .map(|object| {
@@ -540,7 +540,10 @@ impl PackChunkSpool {
         )
     }
 
-    pub fn install_into(&mut self, store: &impl ObjectStore) -> Result<Vec<PackObjectId>> {
+    pub fn install_into(
+        &mut self,
+        store: &impl ObjectStore,
+    ) -> Result<objects::store::pack::PackInventory> {
         if !self.is_complete() {
             return Err(ProtocolError::InvalidState(
                 "native pack spool is incomplete".to_string(),
@@ -937,7 +940,8 @@ mod tests {
 
         assert_eq!(stats.object_count, wanted.len());
         assert!(stats.encoded_bytes_copied > 0);
-        let reused = PackReader::open(&bundle.pack_path, &bundle.index_path).unwrap();
+        let reused =
+            PackReader::open(&bundle.pack_path, &bundle.index_path, &std::env::temp_dir()).unwrap();
         let mut reused_ids = reused.list_ids().unwrap();
         reused_ids.sort();
         let mut wanted_ids = vec![blob.0, tree.0, state.0];
@@ -1288,7 +1292,12 @@ mod tests {
         }
 
         assert!(spool.is_complete());
-        let installed_ids = spool.install_into(&dest_store).unwrap();
+        let installed_ids = spool
+            .install_into(&dest_store)
+            .unwrap()
+            .ids()
+            .collect::<objects::store::Result<Vec<_>>>()
+            .unwrap();
 
         assert_eq!(installed_ids, vec![PackObjectId::Hash(hash)]);
         let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();
@@ -1371,7 +1380,12 @@ mod tests {
             "expected final pack chunk after finish"
         );
         assert!(spool.is_complete());
-        let mut installed_ids = spool.install_into(&dest_store).unwrap();
+        let mut installed_ids = spool
+            .install_into(&dest_store)
+            .unwrap()
+            .ids()
+            .collect::<objects::store::Result<Vec<_>>>()
+            .unwrap();
         let mut expected_ids = vec![PackObjectId::Hash(hash), PackObjectId::Hash(large_hash)];
         installed_ids.sort();
         expected_ids.sort();
