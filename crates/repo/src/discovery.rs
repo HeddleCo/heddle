@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{OnceLock, RwLock},
 };
 
 use objects::{
     Progress,
-    error::{HeddleError, Result},
+    error::{HeddleError, Result, UntrustedRepositoryReason},
     fs_atomic::enrich_fs_error,
     object::ThreadName,
     store::{FsStore, ObjectStore, ShallowInfo},
@@ -116,6 +116,356 @@ pub fn discover_heddle_root(start: &Path) -> Option<PathBuf> {
     bounded_ancestor_paths(&start)
         .into_iter()
         .find(|path| is_heddle_repository_root(path))
+}
+
+/// Repository roots the user explicitly trusts (`[safe] repositories` in the
+/// Heddle user config), canonicalized. Each process that opens repositories
+/// registers them once at startup (the CLI, the mount workers); a library
+/// caller that never registers any gets the strict default.
+static SAFE_REPOSITORIES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Directory inside an enclosing repository's `.heddle` that records the
+/// nested repositories and checkouts Heddle itself created in its worktree.
+const TRUSTED_NESTED_DIR: &str = "trusted-nested";
+
+/// Register the user's explicitly trusted repository roots, the analogue of
+/// Git's `safe.directory`. A listed root is opened even when it lies inside
+/// another repository's worktree or another user owns it. The first
+/// registration wins; later calls are ignored.
+pub fn set_safe_repositories(roots: impl IntoIterator<Item = PathBuf>) {
+    let roots = roots
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect();
+    let _ = SAFE_REPOSITORIES.set(roots);
+}
+
+/// Refuse repository metadata the user never vouched for (heddle#2034).
+///
+/// A `.heddle` directory is ordinary content below a worktree root, so a
+/// checkout (Heddle's, or Git's for a vendored clone or submodule) can plant
+/// `sub/.heddle/{HEAD,config.toml,hooks,objectstore}`. Opening that
+/// repository from inside `sub/` would hand its config (TLS CA, upstream URL,
+/// remotes), its hooks, and its store pointer control over this user's
+/// commands. Mirroring Git's `safe.bareRepository=explicit` and
+/// `safe.directory`, `root` is refused unless it is listed in
+/// [`set_safe_repositories`], or both of these hold:
+///
+/// - the current user owns its `.heddle` entry, the directory it resolves to,
+///   the store a checkout pointer names, and (when `.heddle` is a symlink) the
+///   root directory holding that symlink;
+/// - every enclosing Heddle repository whose worktree contains it vouches for
+///   it with a creation record (see [`record_nested_repository_trust`]).
+///   Metadata inside an enclosing `.heddle` (managed thread checkouts) is not
+///   in that repository's worktree.
+///
+/// The creation record lives in the enclosing repository's root `.heddle`,
+/// which no checkout may write, and binds the nested `.heddle`'s file
+/// identity, so neither checked-out content nor a later replacement at the
+/// same path can forge it. Content-based signals (a nested `.git`, its
+/// `info/exclude`, its index) are all attacker-writable and are not trusted.
+///
+/// Refusing the whole repository rather than filtering individual config keys
+/// fails closed: hooks, remotes, the hydrator config and the store pointer are
+/// as dangerous as the TLS CA, and a key added later would be honoured by
+/// default.
+///
+/// Windows has no ownership check: `std` exposes no owner SID, and a
+/// per-user profile directory already carries an owner-only ACL. The embedded
+/// check, which is the checked-out-content defence, applies on every platform.
+pub fn ensure_repository_trusted(root: &Path) -> Result<()> {
+    let safe = SAFE_REPOSITORIES
+        .get()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    ensure_repository_trusted_with(root, safe, current_users(), &|_, metadata| {
+        owner_of(metadata)
+    })
+}
+
+/// The owners whose repositories this process trusts by ownership.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TrustedOwners {
+    pub(super) euid: u32,
+    /// The invoking user under `sudo` (Git's `SUDO_UID` rule): root acting
+    /// for a user still trusts that user's repositories.
+    pub(super) sudo_uid: Option<u32>,
+}
+
+impl TrustedOwners {
+    fn accepts(self, owner: u32) -> bool {
+        owner == self.euid || self.sudo_uid == Some(owner)
+    }
+}
+
+#[cfg(unix)]
+fn current_users() -> Option<TrustedOwners> {
+    let euid = crate::daemon::peer::current_euid();
+    let sudo_uid = (euid == 0)
+        .then(|| std::env::var("SUDO_UID").ok()?.trim().parse::<u32>().ok())
+        .flatten();
+    Some(TrustedOwners { euid, sudo_uid })
+}
+
+#[cfg(not(unix))]
+fn current_users() -> Option<TrustedOwners> {
+    None
+}
+
+#[cfg(unix)]
+fn owner_of(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.uid()
+}
+
+#[cfg(not(unix))]
+fn owner_of(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
+/// Owner uid of a path, given its metadata. A parameter so tests can model
+/// files another user owns without running as root.
+pub(super) type OwnerOf<'a> = &'a dyn Fn(&Path, &fs::Metadata) -> u32;
+
+/// [`ensure_repository_trusted`] with the trust inputs supplied explicitly.
+/// `owners` is `None` where the platform has no uid ownership model.
+pub(super) fn ensure_repository_trusted_with(
+    root: &Path,
+    safe_repositories: &[PathBuf],
+    owners: Option<TrustedOwners>,
+    owner_of: OwnerOf<'_>,
+) -> Result<()> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if safe_repositories.contains(&root) {
+        return Ok(());
+    }
+    let heddle_dir = root.join(".heddle");
+    if let Some(owners) = owners {
+        ensure_owned(&root, &heddle_dir, owners, owner_of)?;
+    }
+    for enclosing in enclosing_repository_roots(&root) {
+        if !nested_record_vouches(&enclosing, &root) {
+            return Err(untrusted(
+                &root,
+                UntrustedRepositoryReason::Embedded { enclosing },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_owned(
+    root: &Path,
+    heddle_dir: &Path,
+    owners: TrustedOwners,
+    owner_of: OwnerOf<'_>,
+) -> Result<()> {
+    let foreign = |path: &Path, metadata: &fs::Metadata| {
+        let owner = owner_of(path, metadata);
+        (!owners.accepts(owner)).then(|| {
+            untrusted(
+                root,
+                UntrustedRepositoryReason::ForeignOwner {
+                    path: path.to_path_buf(),
+                    owner,
+                    current: owners.euid,
+                },
+            )
+        })
+    };
+    // Metadata failures are left to `Repository::open`, which reports a
+    // missing or unreadable repository loudly.
+    if let Ok(entry) = fs::symlink_metadata(heddle_dir) {
+        if let Some(refusal) = foreign(heddle_dir, &entry) {
+            return Err(refusal);
+        }
+        if entry.file_type().is_symlink()
+            && let Ok(parent) = fs::metadata(root)
+            && let Some(refusal) = foreign(root, &parent)
+        {
+            return Err(refusal);
+        }
+    }
+    if let Ok(target) = fs::metadata(heddle_dir)
+        && let Some(refusal) = foreign(heddle_dir, &target)
+    {
+        return Err(refusal);
+    }
+    if let Some(store) = pointed_store(heddle_dir)
+        && let Ok(metadata) = fs::metadata(&store)
+        && let Some(refusal) = foreign(&store, &metadata)
+    {
+        return Err(refusal);
+    }
+    Ok(())
+}
+
+/// Heddle repositories above `root` whose worktree contains it: every
+/// ancestor repository root, except one whose `.heddle` holds `root`.
+fn enclosing_repository_roots(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    bounded_ancestor_paths(root)
+        .into_iter()
+        .skip(1)
+        .filter(move |enclosing| {
+            is_heddle_repository_root(enclosing) && !root.starts_with(enclosing.join(".heddle"))
+        })
+}
+
+/// Record name for the nested repository at `relative` inside an enclosing
+/// worktree: a digest, so arbitrary path bytes never become file names.
+fn nested_record_path(enclosing: &Path, relative: &Path) -> PathBuf {
+    let digest = blake3::hash(relative.as_os_str().as_encoded_bytes());
+    enclosing
+        .join(".heddle")
+        .join(TRUSTED_NESTED_DIR)
+        .join(digest.to_hex().as_str())
+}
+
+/// Identity of the nested `.heddle` entry the record vouches for. Binding it
+/// means a repository later deleted and replaced at the same path (for
+/// example by a checkout) is not covered by the old record.
+fn nested_record_body(root: &Path) -> Option<String> {
+    let metadata = fs::symlink_metadata(root.join(".heddle")).ok()?;
+    Some(format!("identity {}\n", file_identity(&metadata)))
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+
+    format!("{}:{}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn file_identity(_metadata: &fs::Metadata) -> String {
+    "unavailable".to_string()
+}
+
+fn nested_record_vouches(enclosing: &Path, root: &Path) -> bool {
+    let Ok(relative) = root.strip_prefix(enclosing) else {
+        return false;
+    };
+    let Some(expected) = nested_record_body(root) else {
+        return false;
+    };
+    fs::read_to_string(nested_record_path(enclosing, relative))
+        .is_ok_and(|recorded| recorded == expected)
+}
+
+/// Vouch for a repository or checkout Heddle just created at `root` in every
+/// enclosing worktree, so implicit discovery admits it (see
+/// [`ensure_repository_trusted`]). Called by the constructors that create
+/// `.heddle` metadata; a standalone repository has nothing to record.
+pub(super) fn record_nested_repository_trust(root: &Path) -> Result<()> {
+    let root = root.canonicalize().map_err(|error| {
+        HeddleError::Io(enrich_fs_error(
+            root,
+            "resolving new repository root",
+            error,
+        ))
+    })?;
+    let Some(body) = nested_record_body(&root) else {
+        return Ok(());
+    };
+    for enclosing in enclosing_repository_roots(&root) {
+        let Ok(relative) = root.strip_prefix(&enclosing) else {
+            continue;
+        };
+        let record = nested_record_path(&enclosing, relative);
+        if let Some(parent) = record.parent() {
+            objects::fs_atomic::create_private_dir_all(parent)?;
+        }
+        objects::fs_atomic::write_file_atomic(&record, body.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn untrusted(root: &Path, reason: UntrustedRepositoryReason) -> HeddleError {
+    HeddleError::UntrustedRepository {
+        root: root.to_path_buf(),
+        reason,
+    }
+}
+
+/// The canonical store a checkout's `.heddle/objectstore` pointer names, when
+/// it is a readable absolute pointer. Malformed pointers are reported by
+/// [`super::Repository::open`]; trust only needs the store they would select.
+fn pointed_store(heddle_dir: &Path) -> Option<PathBuf> {
+    let pointer = fs::read_to_string(heddle_dir.join("objectstore")).ok()?;
+    let store = parse_objectstore_pointer(&pointer)?.objectstore;
+    store
+        .is_absolute()
+        .then(|| store.canonicalize().ok())
+        .flatten()
+}
+
+/// Refuse to operate from inside a metadata-less virtualized thread mount;
+/// see [`metadataless_managed_thread_root`].
+pub(super) fn refuse_metadataless_mount(start: &Path) -> Result<()> {
+    match metadataless_managed_thread_root(start) {
+        Some(mount_root) => Err(HeddleError::Config(format!(
+            "'{}' is a Heddle-managed virtualized thread mount with no checkout \
+             metadata of its own; refusing to operate on the parent repository from \
+             inside it. Run heddle from the repository root, or use a solid/materialized \
+             thread checkout.",
+            mount_root.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The config file of the repository Heddle would open from `start`, for
+/// callers that read repository config without opening it (TLS CA discovery,
+/// first-screen help, the status fast path). Applies the same admission as
+/// [`super::Repository::open`]: the virtualized-mount guard and
+/// [`ensure_repository_trusted`]. A checkout's config is its store's, since
+/// that is the config `open` loads.
+pub fn discover_repository_config(start: &Path) -> Result<Option<PathBuf>> {
+    let absolute = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(start)
+    };
+    let start = absolute.canonicalize().unwrap_or(absolute);
+    refuse_metadataless_mount(&start)?;
+    let Some(root) = discover_heddle_root(&start) else {
+        return Ok(None);
+    };
+    ensure_repository_trusted(&root)?;
+    let heddle_dir = root.join(".heddle");
+    if heddle_dir.join("objects").is_dir() {
+        return Ok(Some(heddle_dir.join("config.toml")));
+    }
+    Ok(pointed_store(&heddle_dir).map(|store| store.join("config.toml")))
+}
+
+pub(super) struct WorktreePointer {
+    pub(super) objectstore: PathBuf,
+    pub(super) source_authority: RepositorySourceAuthority,
+}
+
+pub(super) fn parse_objectstore_pointer(content: &str) -> Option<WorktreePointer> {
+    let mut objectstore = None;
+    let mut source_authority = None;
+    for line in content.lines() {
+        if let Some(path) = line.strip_prefix("objectstore:") {
+            let path = path.trim();
+            if !path.is_empty() {
+                objectstore = Some(PathBuf::from(path));
+            }
+        } else if let Some(authority) = line.strip_prefix("source-authority:") {
+            source_authority = match authority.trim() {
+                "native" => Some(RepositorySourceAuthority::Native),
+                "git-overlay" => Some(RepositorySourceAuthority::GitOverlay),
+                _ => return None,
+            };
+        }
+    }
+    Some(WorktreePointer {
+        objectstore: objectstore?,
+        source_authority: source_authority?,
+    })
 }
 
 /// Open only the Git repository rooted at `root`; never inherit an ancestor.
@@ -300,6 +650,7 @@ impl Repository {
 
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
         objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
+        record_nested_repository_trust(&root)?;
         // Establish recovery serialization during initialization, so later
         // observation never has to create the repository lock file.
         let _installation =
@@ -358,6 +709,7 @@ impl Repository {
         // Owner-only `.heddle` tree: holds keys, credentials, and object store.
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
         objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
+        record_nested_repository_trust(&root)?;
         // Establish recovery serialization during initialization, so later
         // observation never has to create the repository lock file.
         let _installation =

@@ -149,6 +149,43 @@ pub enum LockError {
     Io(#[source] io::Error),
 }
 
+/// Why discovery refused a repository candidate. See
+/// [`HeddleError::UntrustedRepository`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UntrustedRepositoryReason {
+    /// The candidate lies inside the worktree of the enclosing repository at
+    /// `enclosing`, so its `.heddle` may be tracked or checked-out content.
+    Embedded { enclosing: std::path::PathBuf },
+    /// The repository metadata at `path` is owned by `owner`, not by the
+    /// current effective user `current`.
+    ForeignOwner {
+        path: std::path::PathBuf,
+        owner: u32,
+        current: u32,
+    },
+}
+
+impl fmt::Display for UntrustedRepositoryReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Embedded { enclosing } => write!(
+                f,
+                "it lies inside the worktree of the Heddle repository at {}, so its metadata may be checked-out content",
+                enclosing.display()
+            ),
+            Self::ForeignOwner {
+                path,
+                owner,
+                current,
+            } => write!(
+                f,
+                "{} is owned by uid {owner}, not by the current user (uid {current})",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Error type for repository/storage-adjacent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum HeddleError {
@@ -170,6 +207,17 @@ pub enum HeddleError {
     RepositoryExists(std::path::PathBuf),
     #[error("repository clone at {0} is incomplete and must be repaired from its origin")]
     IncompleteClone(std::path::PathBuf),
+    /// Discovery found repository metadata the user never vouched for: it
+    /// lies inside another Heddle repository's worktree (so it may be
+    /// checked-out content), or another user owns it. Opening it would let
+    /// its config, hooks, and store pointer act on this user's behalf.
+    #[error(
+        "refusing to use the Heddle repository at {root}: {reason}. If you trust it, add it to `[safe] repositories` in your Heddle user config"
+    )]
+    UntrustedRepository {
+        root: std::path::PathBuf,
+        reason: UntrustedRepositoryReason,
+    },
     #[error(
         "repository config at {path} uses repository format {found} but this binary supports {supported}; upgrade Heddle before opening it"
     )]
