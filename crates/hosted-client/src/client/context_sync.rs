@@ -1629,6 +1629,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_history_failure_aborts_pull_without_skipping() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
+
+        let (_temp, repo, annotation) = seed_local_context_annotation("retain this context");
+        let mut second = annotation.clone();
+        second.annotation_id = uuid::Uuid::now_v7().to_string();
+        second.revisions[0].revision_id = uuid::Uuid::now_v7().to_string();
+        second.revisions[0].content = "second context must not be fetched after failure".into();
+        let state_id = repo.head().expect("head").expect("source state");
+        let state = repo
+            .store()
+            .get_state(&state_id)
+            .expect("read state")
+            .expect("state");
+        let root = repo
+            .set_context_blob(
+                None,
+                &ContextTarget::file("lib.rs").expect("target"),
+                &ContextBlob::new(vec![annotation.clone(), second.clone()]),
+            )
+            .expect("two contexts");
+        put_context_attachment(&repo, &state, Some(root)).expect("attachment");
+        let (client, server, fixture) = start_with_context(ContextFixture::default()).await;
+        let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
+        let mut client = client.with_warning_sink(warnings.clone());
+        let published = push_context(&repo, &mut client, "acme/widgets", "main")
+            .await
+            .expect("publish original context");
+        assert!(published.complete(), "{published:?}");
+        assert_eq!(published.accepted, 2);
+        fixture.history_requests.lock().expect("requests").clear();
+        fixture
+            .fail_history
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let result = pull_context(
+            &repo,
+            &mut client,
+            "acme/widgets",
+            repo.head().expect("head"),
+        )
+        .await;
+        let requests = fixture.history_requests.lock().expect("requests").clone();
+        client.close().await;
+        server.await.expect("server finished");
+
+        let error = result.expect_err("failed history must stop context pull");
+        assert!(
+            format!("{error:#}").contains("injected context history failure"),
+            "{error:#}"
+        );
+        assert_eq!(requests.len(), 1, "stop before the next history RPC");
+        assert!(requests[0] == annotation.annotation_id || requests[0] == second.annotation_id);
+        assert!(
+            warnings.warnings().is_empty(),
+            "failure must be returned, not skipped"
+        );
+    }
+
+    #[tokio::test]
     async fn hosted_context_publication_refuses_to_discard_source_visibility() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let (_temp, repo, mut annotation) = seed_local_context_annotation("confidential");
