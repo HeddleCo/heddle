@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-mount-v0.28.13...heddle-mount-v0.28.14) - 2026-10-08
+
+### Other
+
+- Fix CI fixtures that capture without a principal, and the coverage feature name. ([#2001](https://github.com/HeddleCo/heddle/pull/2001))
+
 ## [0.28.13](https://github.com/HeddleCo/heddle/compare/heddle-mount-v0.28.12...heddle-mount-v0.28.13) - 2026-10-08
 
 ### Other

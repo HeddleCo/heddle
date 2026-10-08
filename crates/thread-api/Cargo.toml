@@ -45,7 +45,7 @@ semantic-analysis = ["dep:semantic"]
 root-attachment = ["signing", "dep:biscuit-verifier", "dep:base64", "dep:chrono"]
 
 [dependencies]
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.13", optional = true }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.28.14", optional = true }
 base64 = { workspace = true, optional = true }
 api.workspace = true
 semantic = { workspace = true, optional = true }
@@ -55,7 +55,7 @@ crypto = { workspace = true, optional = true }
 heddle-object-model = { workspace = true, optional = true }
 heddle-pack = { workspace = true, optional = true }
 wire = { workspace = true, optional = true }
-biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.28.13", optional = true }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.28.14", optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 heddle-perf-contract = { workspace = true, optional = true }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.28.13...heddle-repo-v0.28.14) - 2026-10-08
+
+### Other
+
+- receive imported ancestry on Fetch, stop the visibility walk at the import floor, fast adoption compression ([#2004](https://github.com/HeddleCo/heddle/pull/2004)) ([#2005](https://github.com/HeddleCo/heddle/pull/2005))
+- Fix CI fixtures that capture without a principal, and the coverage feature name. ([#2001](https://github.com/HeddleCo/heddle/pull/2001))
+
 ## [0.28.13](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.28.12...heddle-repo-v0.28.13) - 2026-10-08
 
 ### Other
