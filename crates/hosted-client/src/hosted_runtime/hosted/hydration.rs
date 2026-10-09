@@ -701,6 +701,54 @@ mod tests {
         );
     }
 
+    /// The hydrator keeps one client for the life of the process and resolves
+    /// the remote thread on every hydrate. A name that moves to a new id
+    /// between hydrates must be re-resolved, not served from a client cache.
+    #[tokio::test]
+    async fn hydrate_resolves_a_moved_thread_name_afresh() {
+        use super::super::test_server::{ThreadListingFixture, start_with_thread_listing};
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let fixture = ThreadListingFixture {
+            overviews: Vec::new(),
+            page_size: 64,
+            requests: Arc::default(),
+            resolution_failure: None,
+            resolution_requests: Arc::default(),
+            resolved_thread_byte: Arc::default(),
+        };
+        let (mut client, server, captured) = start_with_thread_listing(fixture).await;
+        let (_temp, repo) = temp_repo();
+        let state = StateId::from_bytes([1; 32]);
+        let hash = Blob::new(b"moved".to_vec()).hash();
+        for byte in [3_u8, 9] {
+            *captured.resolved_thread_byte.lock().expect("byte") = Some(byte);
+            // The fixture serves no content, so hydration itself fails; the
+            // resolution it performed first is what this test observes.
+            let _ = super::hydrate_with_rpc_timeout(
+                &mut client,
+                &repo,
+                "acme/widgets",
+                "main",
+                state,
+                hash,
+                Duration::from_secs(5),
+            )
+            .await;
+            let resolved = client
+                .resolve_thread_ref("acme/widgets", "main")
+                .await
+                .expect("resolve");
+            assert_eq!(resolved.id.expect("id").value, vec![byte; 32]);
+        }
+        assert_eq!(
+            captured.resolution_requests.lock().expect("requests").len(),
+            4,
+            "each hydrate and each direct resolve asks the server"
+        );
+        client.close().await;
+        server.await.expect("server");
+    }
+
     /// Issue #1410: `hydrate` must forward the requested blake3, not
     /// drop it and treat every miss as "hydrate the whole tip".
     #[test]

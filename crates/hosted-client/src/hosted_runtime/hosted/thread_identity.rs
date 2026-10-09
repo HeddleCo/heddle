@@ -117,10 +117,25 @@ impl HostedClient {
         if let Ok(id) = uuid::Uuid::parse_str(address) {
             return Ok(contract::SpoolRef { id: id.to_string() });
         }
-        let mut cache = self.resolutions.entries().await;
-        if let Some(spool) = cache.spools.get(address) {
+        // Without an opted-in command cache every call asks the server, so a
+        // long-lived client never pins a name to an identity that has moved.
+        let Some(cache) = &self.resolutions else {
+            return self.resolve_spool_remote(address).await;
+        };
+        // Held across the request so concurrent handles resolve a name once.
+        let mut entries = cache.entries().await;
+        if let Some(spool) = entries.spools.get(address) {
             return Ok(spool.clone());
         }
+        let spool = self.resolve_spool_remote(address).await?;
+        entries.spools.insert(address.to_owned(), spool.clone());
+        Ok(spool)
+    }
+
+    async fn resolve_spool_remote(
+        &self,
+        address: &str,
+    ) -> Result<contract::SpoolRef, ProtocolError> {
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -134,12 +149,9 @@ impl HostedClient {
             })
             .await
             .map_err(super::helpers::native_client_error)?;
-        match resolved_entity(response)
-            .inspect_err(|error| self.resolutions.invalidate_protocol_error(error))?
-        {
+        match resolved_entity(response).inspect_err(|error| self.invalidate_resolutions(error))? {
             contract::entity_ref::Entity::Spool(spool) => {
                 uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
-                cache.spools.insert(address.to_owned(), spool.clone());
                 Ok(spool)
             }
             _ => Err(ProtocolError::InvalidState(
@@ -162,11 +174,24 @@ impl HostedClient {
                 id: Some(contract::ThreadId { value }),
             });
         }
+        let Some(cache) = &self.resolutions else {
+            return self.resolve_thread_remote(spool, name_or_id).await;
+        };
         let key = (spool.id.clone(), name_or_id.to_owned());
-        let mut cache = self.resolutions.entries().await;
-        if let Some(thread) = cache.threads.get(&key) {
+        let mut entries = cache.entries().await;
+        if let Some(thread) = entries.threads.get(&key) {
             return Ok(thread.clone());
         }
+        let reference = self.resolve_thread_remote(spool, name_or_id).await?;
+        entries.threads.insert(key, reference.clone());
+        Ok(reference)
+    }
+
+    async fn resolve_thread_remote(
+        &self,
+        spool: contract::SpoolRef,
+        name_or_id: &str,
+    ) -> Result<contract::ThreadRef, ProtocolError> {
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -183,8 +208,8 @@ impl HostedClient {
             })
             .await
             .map_err(super::helpers::native_client_error)?;
-        let resolved = resolved_entity(response)
-            .inspect_err(|error| self.resolutions.invalidate_protocol_error(error))?;
+        let resolved =
+            resolved_entity(response).inspect_err(|error| self.invalidate_resolutions(error))?;
         let contract::entity_ref::Entity::Thread(reference) = resolved else {
             return Err(ProtocolError::InvalidState(
                 "Thread name resolution returned another resource type".into(),
@@ -197,8 +222,13 @@ impl HostedClient {
                 "Thread name resolution returned an inconsistent identity".into(),
             ));
         }
-        cache.threads.insert(key, reference.clone());
         Ok(reference)
+    }
+
+    fn invalidate_resolutions(&self, error: &ProtocolError) {
+        if let Some(cache) = &self.resolutions {
+            cache.invalidate_protocol_error(error);
+        }
     }
 
     pub(super) async fn current_owner_state(&self) -> Result<contract::OwnerState, ProtocolError> {

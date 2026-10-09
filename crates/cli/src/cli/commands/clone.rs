@@ -1652,6 +1652,7 @@ async fn clone_network(
     let mut client = session
         .connect(authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
@@ -2012,6 +2013,7 @@ pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> 
     let mut client = session
         .connect(&authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
@@ -2226,6 +2228,7 @@ async fn clone_monorepo(
     let mut client = session
         .connect(authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));

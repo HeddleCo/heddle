@@ -760,7 +760,7 @@ mod tests {
         let client = super::super::HostedClient {
             connection: connection.clone(),
             context: super::super::CallContextFactory::default(),
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(super::super::NoopWarnings),
             server_key: None,

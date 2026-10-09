@@ -1,4 +1,9 @@
-//! Command-scoped stable identities. Only explicit resource/authority failures
+//! Opt-in, command-scoped stable identities. Only
+//! [`HostedClient::with_command_resolution_cache`](super::HostedClient::with_command_resolution_cache)
+//! creates a cache, and it lives as long as that client and its clones, so only
+//! short-lived commands (clone) may opt in. Long-lived clients (lazy hydration,
+//! discussion live) resolve afresh every time. Only explicit resource/authority
+//! failures of resolution calls, or of calls that carried a cached identity,
 //! discard successful resolutions; transport failures never expire them.
 use std::{
     collections::HashMap,
@@ -15,10 +20,10 @@ use api::{
     },
     v2::{
         MethodDescriptor,
-        client::{MessageReader, RpcTransport},
+        client::{MessageReader, Rpc, RpcTransport},
     },
 };
-use thread_api::transport::Error;
+use thread_api::{rpc, transport::Error};
 
 #[derive(Default)]
 pub(super) struct ResolutionCache {
@@ -52,12 +57,38 @@ impl ResolutionCache {
                 | wire::ProtocolError::AuthorizationFailed(_)
                 | wire::ProtocolError::AuthenticationFailed(_)
         ) {
-            self.generation.fetch_add(1, Ordering::AcqRel);
+            self.invalidate();
         }
     }
 
-    fn observe_error<T>(&self, result: &Result<T, Error>) {
-        if let Err(Error::Remote(failure)) = result
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Whether a call resolves names or carries a cached identity: a cached
+    /// address, or a cached Spool id (Thread refs always embed their Spool
+    /// id). Judged when the call is sent, because that is when the cache was
+    /// consulted. The lock is held for the whole of a first resolution,
+    /// including endpoint discovery on the same task, so a contended lock
+    /// cannot be inspected: report it as used, which only costs one extra
+    /// resolution.
+    fn call_uses_resolutions(&self, method: &'static MethodDescriptor, request: &[u8]) -> bool {
+        if method.path == rpc::WorkspaceServiceResolveResources::METHOD.path {
+            return true;
+        }
+        let Ok(entries) = self.entries.try_lock() else {
+            return true;
+        };
+        entries.spools.iter().any(|(address, spool)| {
+            contains(request, address.as_bytes()) || contains(request, spool.id.as_bytes())
+        }) || entries.threads.keys().any(|(spool, name)| {
+            contains(request, spool.as_bytes()) && contains(request, name.as_bytes())
+        })
+    }
+
+    fn observe_error<T>(&self, used_resolutions: bool, result: &Result<T, Error>) {
+        if used_resolutions
+            && let Err(Error::Remote(failure)) = result
             && matches!(
                 CallFailureCode::try_from(failure.code),
                 Ok(CallFailureCode::NotFound
@@ -65,33 +96,57 @@ impl ResolutionCache {
                     | CallFailureCode::Unauthenticated)
             )
         {
-            self.generation.fetch_add(1, Ordering::AcqRel);
+            self.invalidate();
         }
     }
 }
 
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
 /// Keep invalidation at the native RPC boundary, including terminal stream
 /// failures, so callers cannot accidentally retain revoked name resolutions.
+/// Without a cache this is a pass-through.
 pub(super) struct ResolutionTransport<T> {
     inner: T,
-    cache: Arc<ResolutionCache>,
+    cache: Option<Arc<ResolutionCache>>,
 }
 
 impl<T> ResolutionTransport<T> {
-    pub fn new(inner: T, cache: Arc<ResolutionCache>) -> Self {
+    pub fn new(inner: T, cache: Option<Arc<ResolutionCache>>) -> Self {
         Self { inner, cache }
+    }
+
+    fn scope(
+        &self,
+        method: &'static MethodDescriptor,
+        request: &[u8],
+    ) -> Option<(Arc<ResolutionCache>, bool)> {
+        let cache = self.cache.clone()?;
+        let used = cache.call_uses_resolutions(method, request);
+        Some((cache, used))
+    }
+}
+
+fn observe_error<T>(scope: &Option<(Arc<ResolutionCache>, bool)>, result: &Result<T, Error>) {
+    if let Some((cache, used)) = scope {
+        cache.observe_error(*used, result);
     }
 }
 
 pub(super) struct ResolutionReader<R> {
     inner: R,
-    cache: Arc<ResolutionCache>,
+    scope: Option<(Arc<ResolutionCache>, bool)>,
 }
 impl<R: MessageReader<Error = Error>> MessageReader for ResolutionReader<R> {
     type Error = Error;
     async fn next(&mut self) -> Result<Option<Vec<u8>>, Error> {
         let result = self.inner.next().await;
-        self.cache.observe_error(&result);
+        observe_error(&self.scope, &result);
         result
     }
     fn cancel(&mut self) {
@@ -108,8 +163,9 @@ impl<T: RpcTransport<Error = Error>> RpcTransport for ResolutionTransport<T> {
         method: &'static MethodDescriptor,
         request: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
+        let scope = self.scope(method, &request);
         let result = self.inner.unary(method, request).await;
-        self.cache.observe_error(&result);
+        observe_error(&scope, &result);
         result
     }
     async fn observe(
@@ -117,11 +173,12 @@ impl<T: RpcTransport<Error = Error>> RpcTransport for ResolutionTransport<T> {
         method: &'static MethodDescriptor,
         request: Vec<u8>,
     ) -> Result<Self::Reader, Error> {
+        let scope = self.scope(method, &request);
         let result = self.inner.observe(method, request).await;
-        self.cache.observe_error(&result);
+        observe_error(&scope, &result);
         Ok(ResolutionReader {
             inner: result?,
-            cache: self.cache.clone(),
+            scope,
         })
     }
     async fn exchange(
@@ -129,14 +186,15 @@ impl<T: RpcTransport<Error = Error>> RpcTransport for ResolutionTransport<T> {
         method: &'static MethodDescriptor,
         opening: Vec<u8>,
     ) -> Result<(Self::Writer, Self::Reader), Error> {
+        let scope = self.scope(method, &opening);
         let result = self.inner.exchange(method, opening).await;
-        self.cache.observe_error(&result);
+        observe_error(&scope, &result);
         let (writer, reader) = result?;
         Ok((
             writer,
             ResolutionReader {
                 inner: reader,
-                cache: self.cache.clone(),
+                scope,
             },
         ))
     }
@@ -184,7 +242,7 @@ mod tests {
                     }
                     .into(),
                 ))),
-                cache: cache.clone(),
+                scope: Some((cache.clone(), true)),
             };
             assert!(reader.next().await.is_err());
             assert!(cache.entries().await.spools.is_empty(), "{code:?}");
@@ -215,7 +273,7 @@ mod tests {
                 .into(),
             ),
         ] {
-            cache.observe_error::<()>(&Err(error));
+            cache.observe_error::<()>(true, &Err(error));
             assert_eq!(
                 cache.entries().await.spools.get("acme/widgets"),
                 Some(&spool)
@@ -242,8 +300,10 @@ mod tests {
             requests: Arc::default(),
             resolution_failure: None,
             resolution_requests: Arc::default(),
+            resolved_thread_byte: Arc::default(),
         };
         let (client, server, captured) = start_with_thread_listing(fixture).await;
+        let client = client.with_command_resolution_cache();
         let other = client.clone();
         let (first, second) = tokio::join!(
             client.resolve_thread_ref("acme/widgets", "main"),
@@ -280,13 +340,16 @@ mod tests {
                 requests: Arc::default(),
                 resolution_failure: Some(code),
                 resolution_requests: Arc::default(),
+                resolved_thread_byte: Arc::default(),
             };
             let (client, server, _) = start_with_thread_listing(fixture).await;
+            let client = client.with_command_resolution_cache();
+            let cache = client.resolutions.clone().expect("command cache");
             client
                 .resolve_spool_ref("acme/widgets")
                 .await
                 .expect("spool");
-            assert!(!client.resolutions.entries().await.spools.is_empty());
+            assert!(!cache.entries().await.spools.is_empty());
             assert!(
                 client
                     .resolve_thread_ref("acme/widgets", "main")
@@ -294,12 +357,165 @@ mod tests {
                     .is_err()
             );
             assert_eq!(
-                client.resolutions.entries().await.spools.is_empty(),
+                cache.entries().await.spools.is_empty(),
                 code != CallFailureCode::Unavailable,
                 "{code:?}"
             );
             client.close().await;
             server.await.expect("server");
         }
+    }
+
+    struct NoWriter;
+    impl api::v2::client::MessageWriter for NoWriter {
+        type Error = Error;
+        async fn send(&mut self, _: Vec<u8>) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn finish(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+        fn abort(&mut self) {}
+    }
+
+    /// Every call fails with the same remote code.
+    struct Failing(CallFailureCode);
+    impl Failing {
+        fn error(&self) -> Error {
+            Error::Remote(
+                CallFailure {
+                    code: self.0 as i32,
+                    message: "gone".into(),
+                    error: None,
+                }
+                .into(),
+            )
+        }
+    }
+    impl RpcTransport for Failing {
+        type Error = Error;
+        type Reader = FailureReader;
+        type Writer = NoWriter;
+        async fn unary(&self, _: &'static MethodDescriptor, _: Vec<u8>) -> Result<Vec<u8>, Error> {
+            Err(self.error())
+        }
+        async fn observe(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Self::Reader, Error> {
+            Ok(FailureReader(Some(self.error())))
+        }
+        async fn exchange(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<(Self::Writer, Self::Reader), Error> {
+            Err(self.error())
+        }
+    }
+
+    async fn seeded(spool: &SpoolRef) -> Arc<ResolutionCache> {
+        let cache = Arc::new(ResolutionCache::default());
+        cache
+            .entries()
+            .await
+            .spools
+            .insert("acme/widgets".into(), spool.clone());
+        cache
+    }
+
+    #[tokio::test]
+    async fn only_resolution_scoped_failures_clear_resolutions() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let spool = SpoolRef {
+            id: uuid::Uuid::now_v7().to_string(),
+        };
+        let unrelated = rpc::ThreadServiceReviseIntent::METHOD;
+        let resolve = rpc::WorkspaceServiceResolveResources::METHOD;
+        let other_spool = uuid::Uuid::now_v7().to_string();
+        for code in [
+            CallFailureCode::NotFound,
+            CallFailureCode::PermissionDenied,
+            CallFailureCode::Unauthenticated,
+        ] {
+            let cache = seeded(&spool).await;
+            let transport = ResolutionTransport::new(Failing(code), Some(cache.clone()));
+
+            // A NotFound for another Spool is unrelated to anything cached,
+            // whether it ends a unary call or a stream.
+            assert!(
+                transport
+                    .unary(unrelated, other_spool.clone().into_bytes())
+                    .await
+                    .is_err()
+            );
+            let mut stream = transport
+                .observe(unrelated, other_spool.clone().into_bytes())
+                .await
+                .expect("stream opens");
+            assert!(stream.next().await.is_err());
+            assert!(
+                transport
+                    .exchange(unrelated, other_spool.clone().into_bytes())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                cache.entries().await.spools.get("acme/widgets"),
+                Some(&spool),
+                "unrelated {code:?} must keep the cache"
+            );
+
+            // A call that carried the cached Spool id clears it, as does a
+            // terminal stream failure of such a call.
+            assert!(
+                transport
+                    .unary(unrelated, spool.id.clone().into_bytes())
+                    .await
+                    .is_err()
+            );
+            assert!(cache.entries().await.spools.is_empty(), "{code:?} used");
+            let cache = seeded(&spool).await;
+            let transport = ResolutionTransport::new(Failing(code), Some(cache.clone()));
+            let mut stream = transport
+                .observe(unrelated, spool.id.clone().into_bytes())
+                .await
+                .expect("stream opens");
+            assert!(stream.next().await.is_err());
+            assert!(cache.entries().await.spools.is_empty(), "{code:?} stream");
+
+            // A failed resolution always clears.
+            let cache = seeded(&spool).await;
+            let transport = ResolutionTransport::new(Failing(code), Some(cache.clone()));
+            assert!(transport.unary(resolve, Vec::new()).await.is_err());
+            assert!(cache.entries().await.spools.is_empty(), "{code:?} resolve");
+        }
+    }
+
+    #[tokio::test]
+    async fn clients_resolve_afresh_unless_the_command_opts_in() {
+        use super::super::test_server::{ThreadListingFixture, start_with_thread_listing};
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let fixture = ThreadListingFixture {
+            overviews: Vec::new(),
+            page_size: 64,
+            requests: Arc::default(),
+            resolution_failure: None,
+            resolution_requests: Arc::default(),
+            resolved_thread_byte: Arc::default(),
+        };
+        let (client, server, captured) = start_with_thread_listing(fixture).await;
+        assert!(client.resolutions.is_none());
+        for byte in [3_u8, 9] {
+            *captured.resolved_thread_byte.lock().expect("resolved byte") = Some(byte);
+            let thread = client
+                .resolve_thread_ref("acme/widgets", "main")
+                .await
+                .expect("thread");
+            assert_eq!(thread.id.expect("id").value, vec![byte; 32]);
+        }
+        client.close().await;
+        server.await.expect("server");
     }
 }

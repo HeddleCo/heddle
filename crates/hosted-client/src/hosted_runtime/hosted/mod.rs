@@ -201,7 +201,9 @@ pub enum PullMaterialization {
 #[derive(Clone)]
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
-    resolutions: Arc<resolution::ResolutionCache>,
+    /// Present only when the command opted in with
+    /// [`HostedClient::with_command_resolution_cache`].
+    resolutions: Option<Arc<resolution::ResolutionCache>>,
     context: CallContextFactory,
     on_human_signature: Option<HumanSignatureCallback>,
     warnings: Arc<dyn WarningSink>,
@@ -354,7 +356,7 @@ impl HostedClient {
             connection: HostedConnection::connect_via_netd(server, config, descriptor, http)
                 .await?,
             context,
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -404,7 +406,7 @@ impl HostedClient {
                 description,
             ),
             context,
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -427,7 +429,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -445,7 +447,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -462,7 +464,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            resolutions: Arc::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -478,6 +480,15 @@ impl HostedClient {
 
     /// Install the caller-owned warning Adapter used by best-effort hosted
     /// reconciliation. The default is quiet for embedders.
+    /// Reuse name resolutions across this client and its clones for one
+    /// short-lived command (clone). Long-lived clients must not call this:
+    /// the cache is only dropped by a resolution or authority failure, so a
+    /// renamed Spool or moved Thread name would stay pinned to its old id.
+    pub fn with_command_resolution_cache(mut self) -> Self {
+        self.resolutions = Some(Arc::default());
+        self
+    }
+
     pub fn with_warning_sink(mut self, warnings: Arc<dyn WarningSink>) -> Self {
         self.warnings = warnings;
         self

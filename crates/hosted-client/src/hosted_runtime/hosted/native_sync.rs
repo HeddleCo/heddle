@@ -2837,6 +2837,7 @@ mod tests {
             requests: Arc::new(Mutex::new(Vec::new())),
             resolution_failure: None,
             resolution_requests: Arc::new(Mutex::new(Vec::new())),
+            resolved_thread_byte: Default::default(),
         };
         let (mut client, server, captured) =
             super::super::test_server::start_with_thread_listing(fixture).await;
