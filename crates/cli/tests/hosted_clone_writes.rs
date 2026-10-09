@@ -3507,3 +3507,23 @@ fn fresh_clone_labels_disconnected_peer_and_stops_sync() {
 fn clone_recovery_labels_disconnected_peer_and_stops_sync() {
     on_large_stack(|| assert_clone_stage_failure("disconnect", true));
 }
+
+#[test]
+fn fresh_clone_rpc_and_https_budget() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture.captured.lock().expect("reset calls").calls.clear();
+        let before = fixture.https.connections.load(std::sync::atomic::Ordering::SeqCst);
+        fixture.run_at(fixture._temp.path(), &[
+            "clone", &fixture.remote(), fixture.clone.to_str().expect("path"),
+        ]);
+        let calls = fixture.captured.lock().expect("calls").calls.clone();
+        let resolve = calls.iter().filter(|call| call.ends_with("/ResolveResources")).count();
+        let threads = calls.iter().filter(|call| call.ends_with("/ObserveThreads")).count();
+        let https = fixture.https.connections.load(std::sync::atomic::Ordering::SeqCst) - before;
+        println!("clone budget: ResolveResources={resolve}, ObserveThreads={threads}, HTTPS connections={https}");
+        fixture.assert_identity();
+        assert_eq!((resolve, threads, https), (2, 1, 1), "clone round-trip budget: {calls:?}");
+        fixture.close().await;
+    });
+}

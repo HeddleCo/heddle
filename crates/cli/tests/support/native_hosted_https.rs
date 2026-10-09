@@ -6,7 +6,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -144,6 +144,7 @@ pub struct TestHttpsServer {
     pub authority: String,
     pub certificate_pem: String,
     pub proxy_uri: String,
+    pub connections: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -182,15 +183,18 @@ impl TestHttpsServer {
         let routes = Arc::new(Mutex::new(routes_for(&authority)));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
+        let connections = Arc::new(AtomicUsize::new(0));
+        let thread_connections = Arc::clone(&connections);
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _)) => serve_https(
-                        stream,
-                        Arc::clone(&tls),
-                        Arc::clone(&routes),
-                        Arc::clone(&thread_requests),
-                    ),
+                    Ok((stream, _)) => {
+                        thread_connections.fetch_add(1, Ordering::SeqCst);
+                        let tls = Arc::clone(&tls);
+                        let routes = Arc::clone(&routes);
+                        let requests = Arc::clone(&thread_requests);
+                        thread::spawn(move || serve_https(stream, tls, routes, requests));
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
                     }
@@ -202,6 +206,7 @@ impl TestHttpsServer {
             authority,
             certificate_pem,
             proxy_uri: proxy.uri.clone(),
+            connections,
             stop,
             thread: Some(thread),
         }
@@ -242,6 +247,7 @@ fn serve_https<R>(
         .expect("set endpoint descriptor read timeout");
     let connection = ServerConnection::new(tls).expect("create test TLS connection");
     let mut stream = StreamOwned::new(connection, stream);
+    loop {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -271,18 +277,15 @@ fn serve_https<R>(
         "200 OK"
     };
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         body.len()
     );
     let response_written = stream
         .write_all(response.as_bytes())
         .and_then(|_| stream.write_all(&body))
         .and_then(|_| stream.flush());
-    if response_written.is_ok() {
-        stream.conn.send_close_notify();
-        let _ = stream
-            .sock
-            .set_read_timeout(Some(Duration::from_millis(250)));
-        let _ = stream.conn.complete_io(&mut stream.sock);
+    if response_written.is_err() {
+        return;
+    }
     }
 }
