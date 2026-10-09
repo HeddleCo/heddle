@@ -14,6 +14,9 @@ use sley::{
 use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
+#[path = "support/git_checkout.rs"]
+mod git_checkout;
+
 fn write_commit(
     repo: &SleyRepository,
     parent: Option<ObjectId>,
@@ -97,9 +100,11 @@ fn run(temp: &TempDir, cwd: &Path, args: &[&str]) -> std::process::Output {
         .current_dir(cwd)
         .env("PATH", "")
         .env("HOME", temp.path())
+        .env("HEDDLE_HOME", temp.path().join("heddle-home"))
         .env("HEDDLE_CONFIG", config(temp))
         .env("HEDDLE_FSMONITOR", "off")
         .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
         .output()
         .expect("run Heddle without PATH lookup")
 }
@@ -130,6 +135,93 @@ fn link_overlay_to_hosted(checkout: &Path) {
     config.hosted.upstream_url = Some("https://hosted.example.test".to_string());
     config.hosted.namespace = Some("acme/widget".to_string());
     config.save(&path).expect("save hosted linkage");
+}
+
+const HOSTILE_METADATA: &[(&str, &[u8])] = &[
+    (".heddle/config.toml", b"pwned = true\n"),
+    (".GIT/hooks/post-checkout", b"#!/bin/sh\necho pwned\n"),
+];
+
+#[test]
+fn overlay_clone_refuses_hostile_git_metadata() {
+    // Test each refusal independently as well as a tree carrying both paths.
+    for files in [
+        &HOSTILE_METADATA[..1],
+        &HOSTILE_METADATA[1..],
+        HOSTILE_METADATA,
+    ] {
+        let temp = TempDir::new().expect("tempdir");
+        let source_path = temp.path().join("source.git");
+        let checkout = temp.path().join("checkout");
+        let (source, first) = seed_source(&source_path);
+        let hostile = git_checkout::write_commit(&source, Some(first), files);
+        publish_branch(&source, "main", Some(first), hostile);
+
+        let output = run(
+            &temp,
+            temp.path(),
+            &[
+                "clone",
+                source_path.to_str().expect("source UTF-8"),
+                checkout.to_str().expect("checkout UTF-8"),
+            ],
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !checkout.exists(),
+            "refused clone published its destination: {error}"
+        );
+        assert!(!output.status.success(), "hostile clone must be refused");
+        assert!(
+            (error.contains("cannot be imported") || error.contains("invalid path"))
+                && files
+                    .iter()
+                    .any(|(path, _)| error.contains(path.split('/').next().expect("root path"))),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn overlay_pull_refuses_hostile_git_metadata_without_changing_checkout() {
+    for files in [
+        &HOSTILE_METADATA[..1],
+        &HOSTILE_METADATA[1..],
+        HOSTILE_METADATA,
+    ] {
+        let temp = TempDir::new().expect("tempdir");
+        let source_path = temp.path().join("source.git");
+        let checkout = temp.path().join("checkout");
+        let (source, first) = seed_source(&source_path);
+        clone_source(&temp, &source_path, &checkout);
+        let before = git_checkout::MetadataSnapshot::record(&checkout);
+        let hostile = git_checkout::write_commit(&source, Some(first), files);
+        publish_branch(&source, "main", Some(first), hostile);
+
+        let output = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+        before.assert_unchanged(&checkout);
+        assert_eq!(
+            std::fs::read(checkout.join("tracked.txt")).expect("tracked file"),
+            b"one\n"
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "hostile pull must be refused");
+        assert!(
+            (error.contains("cannot be imported") || error.contains("invalid path"))
+                && files
+                    .iter()
+                    .any(|(path, _)| error.contains(path.split('/').next().expect("root path"))),
+            "{error}"
+        );
+        assert_eq!(
+            SleyRepository::discover(&checkout)
+                .expect("open checkout")
+                .references()
+                .read_ref("refs/heads/main")
+                .expect("local branch"),
+            Some(ReferenceTarget::Direct(first))
+        );
+    }
 }
 
 #[test]

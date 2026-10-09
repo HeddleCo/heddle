@@ -2686,7 +2686,8 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
     Repository::ensure_git_overlay_local_excludes(repo.root())?;
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
     let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
-    let checkout = sley_worktree::checkout_branch_filtered(
+    let path_policy = sley_worktree::WorktreePathPolicy::new().reserve_root_name(".heddle");
+    let checkout = sley_worktree::checkout_branch_filtered_with_path_policy(
         Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
@@ -2694,18 +2695,20 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
         branch,
         hosted_clone_reflog_committer(),
         &config,
+        &path_policy,
     )
     .map_err(anyhow::Error::msg)?;
     if checkout.oid.is_null() {
         let branch_ref = format!("refs/heads/{branch}");
         anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
     }
-    sley_worktree::reset_index_and_worktree_to_commit(
+    sley_worktree::reset_index_and_worktree_to_commit_with_path_policy(
         Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),
         &checkout.oid,
+        &path_policy,
     )
     .map_err(anyhow::Error::msg)?;
     Ok(())
@@ -2909,6 +2912,72 @@ mod tests {
 
         assert_eq!(repo.capability_label(), "native-heddle");
         assert_eq!(output.repository_capability, Some("native-heddle"));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_git_overlay_branch_checkout_reserves_root_metadata() {
+        assert_hosted_checkout_reserves_root_metadata(false);
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_git_overlay_reset_reserves_root_metadata() {
+        assert_hosted_checkout_reserves_root_metadata(true);
+    }
+
+    #[cfg(feature = "client")]
+    fn assert_hosted_checkout_reserves_root_metadata(already_attached: bool) {
+        use crate::git_checkout_test_support::{MetadataSnapshot, write_commit};
+
+        for path in [
+            ".heddle/config.toml",
+            ".HEDDLE/config.toml",
+            ".GIT/hooks/post-checkout",
+        ] {
+            let temp = tempfile::TempDir::new().expect("fixture directory");
+            let git = SleyRepository::init(temp.path()).expect("initialize Git checkout");
+            let repo =
+                Repository::init_git_overlay_sidecar(temp.path()).expect("initialize sidecar");
+            let commit = write_commit(&git, None, &[(path, b"pwned = true\n")]);
+            heddle_git_projection::git_core::set_reference(
+                &git,
+                "refs/heads/main",
+                commit,
+                sley::RefPrecondition::MustNotExist,
+                "fixture branch",
+            )
+            .expect("publish fixture branch");
+            let head = if already_attached {
+                "ref: refs/heads/main\n".to_string()
+            } else {
+                let clean = write_commit(&git, None, &[]);
+                format!("{clean}\n")
+            };
+            std::fs::write(git.git_dir().join("HEAD"), head).expect("set fixture HEAD");
+            git.write_index(
+                &sley::Index {
+                    version: 2,
+                    entries: Vec::new(),
+                    extensions: Vec::new(),
+                    checksum: None,
+                },
+                sley::IndexWriteOptions::default(),
+            )
+            .expect("initialize clean fixture index");
+            let before = MetadataSnapshot::record(temp.path());
+
+            let result = finish_hosted_git_overlay_checkout(&repo, "main");
+            before.assert_unchanged(temp.path());
+            assert!(!temp.path().join(".HEDDLE").exists());
+            let error = result
+                .expect_err("hostile checkout must be refused")
+                .to_string();
+            assert!(
+                error.contains("invalid path") && error.contains(path),
+                "{error}"
+            );
+        }
     }
 
     #[cfg(feature = "client")]
