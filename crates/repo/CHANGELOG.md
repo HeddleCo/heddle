@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.28.14...heddle-repo-v0.29.0) - 2026-10-09
+
+### Other
+
+- Fail on unavailable historical trees and blobs ([#2038](https://github.com/HeddleCo/heddle/pull/2038)) ([#2046](https://github.com/HeddleCo/heddle/pull/2046))
+- Bound native Fetch source memory with disk-backed traversal ([#2045](https://github.com/HeddleCo/heddle/pull/2045))
+- Refuse untrusted nested repositories at discovery ([#2034](https://github.com/HeddleCo/heddle/pull/2034)) ([#2037](https://github.com/HeddleCo/heddle/pull/2037))
+- Check out any symlink target; never write through a symlink ([#2017](https://github.com/HeddleCo/heddle/pull/2017)) ([#2039](https://github.com/HeddleCo/heddle/pull/2039))
+- Reserve .git/.heddle aliases as tree entry names on import and checkout ([#2028](https://github.com/HeddleCo/heddle/pull/2028)) ([#2033](https://github.com/HeddleCo/heddle/pull/2033))
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.28.13...heddle-repo-v0.28.14) - 2026-10-08
 
 ### Other
