@@ -100,7 +100,7 @@ impl DescriptorKeyring {
             &signed.signature,
         )
         .map_err(|_| HostedError::InvalidDescriptorSignature)?;
-        Ok(VerifiedEndpointDescriptor(descriptor.clone(), None))
+        Ok(VerifiedEndpointDescriptor(descriptor.clone(), None, None))
     }
 }
 
@@ -109,9 +109,27 @@ impl DescriptorKeyring {
 pub struct VerifiedEndpointDescriptor(
     EndpointDescriptor,
     Option<super::descriptor_trust::HostedRootSelection>,
+    Option<BootstrapHttp>,
 );
 
 impl VerifiedEndpointDescriptor {
+    pub(super) fn with_http(mut self, http: BootstrapHttp) -> Self {
+        self.2 = Some(http);
+        self
+    }
+    pub(super) fn http(&self, config: &ClientConfig) -> BootstrapHttp {
+        match &self.2 {
+            Some(http)
+                if http.config.tls_ca_certificate_pem == config.tls_ca_certificate_pem
+                    && http.config.tls_domain_name == config.tls_domain_name
+                    && http.config.timeout_secs == config.timeout_secs =>
+            {
+                http.clone()
+            }
+            _ => BootstrapHttp::new(config),
+        }
+    }
+
     pub fn hosted_root(&self) -> Option<&super::descriptor_trust::HostedRootSelection> {
         self.1.as_ref()
     }
@@ -174,20 +192,20 @@ impl VerifiedEndpointDescriptor {
             return Err(HostedError::DescriptorOutsideValidityWindow);
         }
         validate_descriptor(&endpoint.endpoint_descriptor, now_unix_millis)?;
-        Ok(Self(endpoint.endpoint_descriptor.clone(), None))
+        Ok(Self(endpoint.endpoint_descriptor.clone(), None, None))
     }
 }
 
 pub async fn fetch_ephemeral_descriptor_set(
     url: &str,
-    config: &ClientConfig,
+    http: &BootstrapHttp,
 ) -> Result<EndpointDescriptorSetDocument> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "endpoint descriptor URL must use HTTPS".to_string(),
         ));
     }
-    let (client, request_url, host_header) = bootstrap_http_client(url, config).await?;
+    let (client, request_url, host_header) = http.client(url).await?;
     let mut request = client.get(request_url);
     if let Some(host_header) = host_header {
         request = request.header(HOST, host_header);
@@ -226,14 +244,14 @@ pub async fn fetch_ephemeral_descriptor_set(
 
 pub async fn fetch_descriptor_key_document(
     url: &str,
-    config: &ClientConfig,
+    http: &BootstrapHttp,
 ) -> Result<DescriptorKeyDocument> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "descriptor trust URL must use HTTPS".to_string(),
         ));
     }
-    let (client, request_url, host_header) = bootstrap_http_client(url, config).await?;
+    let (client, request_url, host_header) = http.client(url).await?;
     let mut request = client.get(request_url);
     if let Some(host_header) = host_header {
         request = request.header(HOST, host_header);
@@ -270,33 +288,81 @@ pub async fn fetch_descriptor_key_document(
     })
 }
 
-pub(super) async fn bootstrap_http_client(
-    url: &str,
-    config: &ClientConfig,
-) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
-    heddle_perf_contract::record_network_client_initialization();
-    // Library callers (including the lazy worker) do not run the CLI's main.
-    // Reuse ring already selected by this crate, preserving a caller-installed
-    // provider when present; reqwest's no-provider build otherwise panics.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(config.timeout_secs.max(1)))
-        .redirect(Policy::none());
-    if let Some(ca_pem) = config.tls_ca_certificate_pem.as_deref() {
-        let certificates = reqwest::Certificate::from_pem_bundle(ca_pem.as_bytes())?;
-        if certificates.is_empty() {
-            return Err(HostedError::InvalidDescriptor(
-                "TLS CA certificate bundle contains no certificates".to_string(),
-            ));
+/// One command's HTTPS pool and immutable TLS policy, shared by descriptor
+/// discovery and hosted witness requests. Client construction is single-flight.
+#[derive(Debug, Clone)]
+pub struct BootstrapHttp {
+    config: ClientConfig,
+    client: std::sync::Arc<tokio::sync::OnceCell<HttpPool>>,
+}
+
+#[derive(Debug)]
+struct HttpPool {
+    client: Client,
+    target: BootstrapTarget,
+    origin: reqwest::Url,
+}
+
+impl BootstrapHttp {
+    pub fn new(config: &ClientConfig) -> Self {
+        Self {
+            config: config.clone(),
+            client: std::sync::Arc::default(),
         }
-        builder = builder.tls_certs_merge(certificates);
     }
 
-    let target = bootstrap_target(url, config.tls_domain_name.as_deref()).await?;
-    if let Some((server_name, addresses)) = target.resolution {
-        builder = builder.resolve_to_addrs(&server_name, &addresses);
+    pub(super) async fn client(
+        &self,
+        url: &str,
+    ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
+        let config = &self.config;
+        let mut request_url = reqwest::Url::parse(url).map_err(HostedError::transport)?;
+        let pool = self
+            .client
+            .get_or_try_init(|| async {
+                heddle_perf_contract::record_network_client_initialization();
+                // Preserve a caller-installed provider, including library callers.
+                let _ = rustls::crypto::ring::default_provider().install_default();
+                let mut builder = Client::builder()
+                    .timeout(Duration::from_secs(config.timeout_secs.max(1)))
+                    .redirect(Policy::none());
+                if let Some(ca_pem) = config.tls_ca_certificate_pem.as_deref() {
+                    let certificates = reqwest::Certificate::from_pem_bundle(ca_pem.as_bytes())?;
+                    if certificates.is_empty() {
+                        return Err(HostedError::InvalidDescriptor(
+                            "TLS CA certificate bundle contains no certificates".to_string(),
+                        ));
+                    }
+                    builder = builder.tls_certs_merge(certificates);
+                }
+                let target = bootstrap_target(url, config.tls_domain_name.as_deref()).await?;
+                if let Some((server_name, addresses)) = &target.resolution {
+                    builder = builder.resolve_to_addrs(server_name, addresses);
+                }
+                Ok::<_, HostedError>(HttpPool {
+                    client: builder.build()?,
+                    target,
+                    origin: request_url.clone(),
+                })
+            })
+            .await?;
+        let host_header = if config.tls_domain_name.is_some() {
+            // A TLS alias resolves to the first authority's network target.
+            // Refuse cross-origin reuse rather than routing it to that target.
+            if request_url.origin() != pool.origin.origin() {
+                return Err(HostedError::InvalidDescriptor(
+                    "TLS server-name override cannot span HTTPS authorities".into(),
+                ));
+            }
+            request_url
+                .set_host(pool.target.url.host_str())
+                .map_err(HostedError::transport)?;
+            pool.target.host_header.clone()
+        } else {
+            None
+        };
+        Ok((pool.client.clone(), request_url, host_header))
     }
-    Ok((builder.build()?, target.url, target.host_header))
 }
 
 pub(super) async fn bounded_response_body(
@@ -324,6 +390,7 @@ pub(super) async fn bounded_response_body(
     Ok(body)
 }
 
+#[derive(Debug)]
 struct BootstrapTarget {
     url: reqwest::Url,
     host_header: Option<HeaderValue>,
@@ -440,7 +507,7 @@ fn validate_descriptor(descriptor: &EndpointDescriptor, now_unix_millis: i64) ->
 mod tests {
     use config::ClientConfig;
 
-    use super::{bootstrap_target, fetch_ephemeral_descriptor_set};
+    use super::{BootstrapHttp, bootstrap_target, fetch_ephemeral_descriptor_set};
 
     #[tokio::test]
     async fn bootstrap_server_name_override_preserves_the_network_target_and_http_authority() {
@@ -462,7 +529,7 @@ mod tests {
         let config = ClientConfig::default().with_tls_ca_certificate_pem("not a PEM certificate");
         let error = fetch_ephemeral_descriptor_set(
             "https://127.0.0.1:1/.well-known/heddle/iroh-endpoint",
-            &config,
+            &BootstrapHttp::new(&config),
         )
         .await
         .unwrap_err();

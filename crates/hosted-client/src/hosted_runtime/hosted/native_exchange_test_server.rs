@@ -141,9 +141,11 @@ pub(crate) async fn start_with_scope(
     });
     let mut lookup = super::descriptor_trust::HostedWitnessLookup::new(
         "https://weft.example.test",
-        &config::UserConfig::default()
-            .hosted_runtime_config(None)
-            .expect("configuration"),
+        super::BootstrapHttp::new(
+            &config::UserConfig::default()
+                .hosted_runtime_config(None)
+                .expect("configuration"),
+        ),
     )
     .expect("witness lookup");
     lookup.test_responses = Some(super::descriptor_trust::TestWitnessResponses {

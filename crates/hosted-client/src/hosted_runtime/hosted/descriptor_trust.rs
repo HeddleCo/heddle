@@ -85,19 +85,19 @@ pub(crate) struct TestWitnessResponses {
 /// original statement, Thread identity or account identity is sent to lookup.
 pub struct HostedWitnessLookup {
     server: String,
-    config: config::ClientConfig,
+    http: super::bootstrap::BootstrapHttp,
     proofs: Mutex<ProofCache>,
     #[cfg(test)]
     pub(crate) test_responses: Option<TestWitnessResponses>,
 }
 
 impl HostedWitnessLookup {
-    pub fn new(server: &str, config: &config::ClientConfig) -> super::Result<Self> {
+    pub fn new(server: &str, http: super::bootstrap::BootstrapHttp) -> super::Result<Self> {
         let server = canonical_server_authority(server)
             .map_err(|error| super::HostedError::DescriptorTrust(error.to_string()))?;
         Ok(Self {
             server,
-            config: config.clone(),
+            http,
             proofs: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             test_responses: None,
@@ -117,8 +117,7 @@ impl HostedWitnessLookup {
         }
         api::import_authority::canonical_https(&self.server, true)?;
         let url = format!("{}/.well-known/heddle/hosted-witnesses", self.server);
-        let (client, url, host) =
-            super::bootstrap::bootstrap_http_client(&url, &self.config).await?;
+        let (client, url, host) = self.http.client(&url).await?;
         let mut request = client.get(url);
         if let Some(host) = host {
             request = request.header(reqwest::header::HOST, host);
@@ -245,8 +244,7 @@ impl thread_api::hybrid::history::HistoryProofLookup for HostedWitnessLookup {
             "{}/.well-known/heddle/hosted-witness-history-proof",
             self.server
         );
-        let (client, url, host) =
-            super::bootstrap::bootstrap_http_client(&url, &self.config).await?;
+        let (client, url, host) = self.http.client(&url).await?;
         let mut outgoing = client
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
@@ -707,8 +705,11 @@ mod tests {
                 ),
                 "the response was issued after the request's sampled time"
             );
-            let mut lookup = HostedWitnessLookup::new(&authority, &config::ClientConfig::default())
-                .expect("selected HTTPS origin");
+            let mut lookup = HostedWitnessLookup::new(
+                &authority,
+                crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig::default()),
+            )
+            .expect("selected HTTPS origin");
             lookup.test_responses = Some(TestWitnessResponses {
                 set: Some(fresh.clone()),
                 proofs: vec![],

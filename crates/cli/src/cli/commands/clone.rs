@@ -1652,6 +1652,7 @@ async fn clone_network(
     let mut client = session
         .connect(authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
@@ -1847,24 +1848,37 @@ async fn clone_network_connected(
         }
         configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
 
-        // Both hosted views must be installed before publishing the checkout
-        // or clearing its recovery intent. A failed stage stops later RPCs.
-        hosted_client::client::discussion_sync::pull_discussions(
-            &local_repo,
-            client,
-            repo_path,
-            Some(final_state),
-        )
-        .await
-        .context("post-install discussion sync failed; source installed; clone intent retained")?;
-        hosted_client::client::context_sync::pull_context(
-            &local_repo,
-            client,
-            repo_path,
-            Some(final_state),
-        )
-        .await
-        .context("post-install context sync failed; source installed; clone intent retained")?;
+        // Context needs the installed State; both views must finish before
+        // publishing the checkout or clearing recovery intent. Cloned handles
+        // share the connection, resolution cache, credentials and HTTP pool.
+        let mut discussion_client = client.clone();
+        let mut context_client = client.clone();
+        let (discussions, context) = tokio::join!(
+            hosted_client::client::discussion_sync::pull_discussions(
+                &local_repo,
+                &mut discussion_client,
+                repo_path,
+                Some(final_state),
+            ),
+            hosted_client::client::context_sync::pull_context(
+                &local_repo,
+                &mut context_client,
+                repo_path,
+                Some(final_state),
+            ),
+        );
+        let discussions = discussions.context(
+            "post-install discussion sync failed; source installed; clone intent retained",
+        );
+        let context = context
+            .context("post-install context sync failed; source installed; clone intent retained");
+        match (discussions, context) {
+            (Err(discussions), Err(context)) => {
+                return Err(discussions.context(format!("{context:#}")));
+            }
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+            _ => {}
+        }
 
         // Ordering invariant: the reachable object closure is hash-complete;
         // one whole-filesystem barrier commits all direct clone data; only
@@ -1999,6 +2013,7 @@ pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> 
     let mut client = session
         .connect(&authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
@@ -2213,6 +2228,7 @@ async fn clone_monorepo(
     let mut client = session
         .connect(authority)
         .await?
+        .with_command_resolution_cache()
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));

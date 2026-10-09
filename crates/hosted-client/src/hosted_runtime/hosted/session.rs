@@ -34,6 +34,7 @@ pub enum HostedAuthMode {
 
 pub struct HostedSession {
     config: ClientConfig,
+    http: super::BootstrapHttp,
     renewable_authority_credential: Option<RenewableAuthorityCredential>,
 }
 
@@ -133,6 +134,7 @@ impl HostedSession {
         }
         enforce_bearer_proof(&config)?;
         Ok(Self {
+            http: super::BootstrapHttp::new(&config),
             config,
             renewable_authority_credential,
         })
@@ -154,7 +156,7 @@ impl HostedSession {
         &self,
         server: &str,
     ) -> super::Result<super::VerifiedEndpointDescriptor> {
-        resolve_and_verify_endpoint_descriptor(server, &self.config).await
+        resolve_and_verify_endpoint_descriptor(server, &self.config, &self.http).await
     }
 
     /// Renew a locally minted authority that is due, before handing out the
@@ -173,7 +175,7 @@ impl HostedSession {
 
     pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
-        match HostedClient::connect_via_netd(server, &self.config, None).await {
+        match HostedClient::connect_via_netd(server, &self.config, None, &self.http).await {
             Ok(client) => {
                 return self.rotated(client).await;
             }
@@ -204,7 +206,7 @@ impl HostedSession {
     /// on (heddle#1620).
     pub async fn connect_outbound(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
-        match HostedClient::connect_via_netd(server, &self.config, None).await {
+        match HostedClient::connect_via_netd(server, &self.config, None, &self.http).await {
             Ok(client) => {
                 return self.rotated(client).await;
             }
@@ -237,7 +239,12 @@ impl HostedClient {
     /// verification and Iroh address selection remain inside the hosted-call
     /// module instead of being repeated by each caller.
     pub async fn connect_server(server: &str, config: &ClientConfig) -> Result<Self> {
-        let descriptor = resolve_and_verify_endpoint_descriptor(server, config).await?;
+        let descriptor = resolve_and_verify_endpoint_descriptor(
+            server,
+            config,
+            &super::BootstrapHttp::new(config),
+        )
+        .await?;
         Ok(Self::connect_with_config(&descriptor, config).await?)
     }
 

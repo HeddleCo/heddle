@@ -59,6 +59,9 @@ pub(crate) struct ThreadListingFixture {
     pub requests: Arc<Mutex<Vec<v2::ObserveThreadsRequest>>>,
     pub resolution_failure: Option<CallFailureCode>,
     pub resolution_requests: Arc<Mutex<Vec<String>>>,
+    /// When set, thread-name resolution returns this id byte (x32) instead,
+    /// so a test can move a name to a new id between calls.
+    pub resolved_thread_byte: Arc<Mutex<Option<u8>>>,
 }
 
 #[derive(Clone, Default)]
@@ -391,7 +394,20 @@ async fn serve_call(
                 let mut results = vec![v2::ResourceResolution {
                     resource: Some(v2::EntityRef {
                         entity: if let Some(name) = thread_name {
-                            listed_thread
+                            let moved = thread_listing.as_ref().and_then(|fixture| {
+                                (*fixture
+                                    .resolved_thread_byte
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner()))
+                                .map(|byte| v2::ThreadRef {
+                                    spool: Some(spool.clone()),
+                                    id: Some(v2::ThreadId {
+                                        value: vec![byte; 32],
+                                    }),
+                                })
+                            });
+                            moved
+                                .or(listed_thread)
                                 .or_else(|| {
                                     thread_listing.is_none().then(|| v2::ThreadRef {
                                         spool: Some(spool.clone()),
