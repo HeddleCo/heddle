@@ -168,6 +168,7 @@ impl HostedConnection {
         server: &str,
         config: &ClientConfig,
         descriptor: Option<&super::VerifiedEndpointDescriptor>,
+        http: &super::BootstrapHttp,
     ) -> Result<Arc<Self>> {
         let socket_path =
             hosted_bridge::hosted_bridge_socket_path(&repo::identity::heddle_home_dir());
@@ -176,7 +177,8 @@ impl HostedConnection {
         }
         let ensured =
             hosted_bridge::ensure_via_netd(&socket_path, server, config.allow_insecure).await?;
-        verify_netd_weft_identity(server, config, descriptor, ensured.weft_endpoint_id).await?;
+        verify_netd_weft_identity(server, config, descriptor, http, ensured.weft_endpoint_id)
+            .await?;
 
         let proxy_endpoint = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -372,12 +374,13 @@ async fn verify_netd_weft_identity(
     server: &str,
     config: &ClientConfig,
     descriptor: Option<&super::VerifiedEndpointDescriptor>,
+    http: &super::BootstrapHttp,
     netd_weft: EndpointId,
 ) -> Result<()> {
     let verified = match descriptor {
         Some(descriptor) => descriptor.endpoint_addr()?.id,
         None if super::resolver::configures_endpoint_trust(config) => {
-            super::resolver::resolve_and_verify_netd_endpoint(server, config, netd_weft)
+            super::resolver::resolve_and_verify_netd_endpoint(server, config, http, netd_weft)
                 .await?
                 .endpoint_addr()?
                 .id
@@ -667,6 +670,7 @@ mod tests {
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
             None,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig::default()),
         )
         .await
         .expect("connect through warm netd bridge");
@@ -704,6 +708,7 @@ mod tests {
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
             None,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig::default()),
         )
         .await
         .expect("connect through warm netd bridge");
@@ -755,6 +760,7 @@ mod tests {
         let client = super::super::HostedClient {
             connection: connection.clone(),
             context: super::super::CallContextFactory::default(),
+            resolutions: None,
             on_human_signature: None,
             warnings: Arc::new(super::super::NoopWarnings),
             server_key: None,
@@ -785,6 +791,7 @@ mod tests {
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
             None,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig::default()),
         )
         .await
         .expect("warm Discover must succeed with Weft's endpoint key");
@@ -865,13 +872,17 @@ mod tests {
                     }
                 }
             });
-            let connection = HostedConnection::connect_via_netd(
-                super::hosted_bridge::tests::TEST_WEFT_SERVER,
-                &config::ClientConfig::default(),
-                Some(&descriptor),
-            )
-            .await
-            .expect("verified Ready route");
+            let connection =
+                HostedConnection::connect_via_netd(
+                    super::hosted_bridge::tests::TEST_WEFT_SERVER,
+                    &config::ClientConfig::default(),
+                    Some(&descriptor),
+                    &crate::hosted_runtime::hosted::BootstrapHttp::new(
+                        &config::ClientConfig::default(),
+                    ),
+                )
+                .await
+                .expect("verified Ready route");
             let context = api::heddle::api::common::CallContext {
                 bearer_capability: b"bearer-secret".to_vec(),
                 request_proof: Some(Default::default()),
@@ -936,6 +947,7 @@ mod tests {
             super::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
             None,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig::default()),
         )
         .await
         .expect_err("missing Weft identity must reject the proxy route");

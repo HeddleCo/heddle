@@ -221,9 +221,13 @@ async fn ensure_weft(
     if allow_insecure {
         config.allow_insecure = true;
     }
-    let descriptor = resolve_and_verify_endpoint_descriptor(server, &config)
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let descriptor = resolve_and_verify_endpoint_descriptor(
+        server,
+        &config,
+        &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
     let connection = connect_weft(&bridge.endpoint, &descriptor).await?;
     let expires_at_unix_millis = descriptor.document().expires_at_unix_millis;
     bridge.weft.lock().await.insert(

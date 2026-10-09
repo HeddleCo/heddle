@@ -19,8 +19,11 @@ use super::{
 pub(super) async fn resolve_and_verify_endpoint_descriptor(
     server: &str,
     config: &ClientConfig,
+    http: &super::bootstrap::BootstrapHttp,
 ) -> Result<VerifiedEndpointDescriptor> {
-    resolve_endpoint(server, config, None).await
+    resolve_endpoint(server, config, http, None)
+        .await
+        .map(|descriptor| descriptor.with_http(http.clone()))
 }
 
 /// Whether `config` carries descriptor or TLS trust policy beyond the
@@ -39,14 +42,18 @@ pub(super) fn configures_endpoint_trust(config: &ClientConfig) -> bool {
 pub(super) async fn resolve_and_verify_netd_endpoint(
     server: &str,
     config: &ClientConfig,
+    http: &super::bootstrap::BootstrapHttp,
     endpoint_id: iroh::EndpointId,
 ) -> Result<VerifiedEndpointDescriptor> {
-    resolve_endpoint(server, config, Some(endpoint_id)).await
+    resolve_endpoint(server, config, http, Some(endpoint_id))
+        .await
+        .map(|descriptor| descriptor.with_http(http.clone()))
 }
 
 async fn resolve_endpoint(
     server: &str,
     config: &ClientConfig,
+    http: &super::bootstrap::BootstrapHttp,
     endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
     let canonical_server = canonical_server_authority(server)
@@ -56,9 +63,14 @@ async fn resolve_endpoint(
         config.descriptor_public_key.as_ref(),
     ) {
         (Some(key_id), Some(public_key)) => {
-            let descriptor =
-                verify_live_set_against_root(&canonical_server, public_key, config, endpoint_id)
-                    .await?;
+            let descriptor = verify_live_set_against_root(
+                &canonical_server,
+                public_key,
+                config,
+                http,
+                endpoint_id,
+            )
+            .await?;
             Ok(descriptor.with_hosted_root(HostedRootSelection {
                 authority: canonical_server,
                 root_id: key_id.into(),
@@ -70,7 +82,7 @@ async fn resolve_endpoint(
             "ambiguous security posture: both descriptor trust fields are required".to_string(),
         )),
         (None, None) => {
-            resolve_automatic_descriptor_trust(&canonical_server, config, endpoint_id).await
+            resolve_automatic_descriptor_trust(&canonical_server, config, http, endpoint_id).await
         }
     }
 }
@@ -78,6 +90,7 @@ async fn resolve_endpoint(
 async fn resolve_automatic_descriptor_trust(
     canonical_server: &str,
     config: &ClientConfig,
+    http: &super::bootstrap::BootstrapHttp,
     endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
     if let Some(pin) = load_automatic_pin(canonical_server)
@@ -89,7 +102,8 @@ async fn resolve_automatic_descriptor_trust(
         // The pin is the root. A served set cannot rotate it; unattested
         // entries fail closed without touching the store.
         let descriptor =
-            verify_live_set_against_root(canonical_server, &root, config, endpoint_id).await?;
+            verify_live_set_against_root(canonical_server, &root, config, http, endpoint_id)
+                .await?;
         return Ok(descriptor.with_hosted_root(HostedRootSelection {
             authority: canonical_server.into(),
             root_id: pin.key_id,
@@ -99,7 +113,7 @@ async fn resolve_automatic_descriptor_trust(
     }
 
     let document =
-        match fetch_descriptor_key_document(&descriptor_key_url(canonical_server), config).await {
+        match fetch_descriptor_key_document(&descriptor_key_url(canonical_server), http).await {
             Err(HostedError::DescriptorTrustUnavailable) => {
                 return Err(HostedError::DescriptorTrust(format!(
                     "server does not publish descriptor trust; configure both values or upgrade \
@@ -117,7 +131,8 @@ async fn resolve_automatic_descriptor_trust(
     let public_key = validate_descriptor_pair(&document.key_id, &document.public_key)
         .map_err(|error| HostedError::InvalidDescriptor(error.to_string()))?;
     let verified =
-        verify_live_set_against_root(canonical_server, &public_key, config, endpoint_id).await?;
+        verify_live_set_against_root(canonical_server, &public_key, config, http, endpoint_id)
+            .await?;
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {
@@ -140,9 +155,10 @@ async fn verify_live_set_against_root(
     canonical_server: &str,
     root_public_key: &[u8; 32],
     config: &ClientConfig,
+    http: &super::bootstrap::BootstrapHttp,
     endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
-    let set = fetch_ephemeral_descriptor_set(&descriptor_url(canonical_server), config).await?;
+    let set = fetch_ephemeral_descriptor_set(&descriptor_url(canonical_server), http).await?;
     let now = now_unix_millis()?;
     let (trusted, rejects) = trusted_live_entries(&set, root_public_key, now);
     fail_if_none_trusted(&trusted, &rejects)?;
@@ -364,6 +380,10 @@ mod tests {
                 descriptor_key_id: Some("key-1".to_string()),
                 ..Default::default()
             },
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config::ClientConfig {
+                descriptor_key_id: Some("key-1".to_string()),
+                ..Default::default()
+            }),
         )
         .await
         .unwrap_err();

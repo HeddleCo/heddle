@@ -105,7 +105,7 @@ impl HostedClient {
     async fn fetch_preferred_source(
         &self,
         repository: &repo::Repository,
-        remote: &Remote<IrohTransport<Credentials>>,
+        remote: &Remote<impl api::v2::client::RpcTransport<Error = thread_api::transport::Error>>,
         open: FetchOpen,
         limits: Limits,
         scratch: &Path,

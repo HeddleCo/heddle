@@ -184,7 +184,7 @@ impl DeviceRpc {
         let config = config::UserConfig::load_default()?.hosted_runtime_config(None)?;
         let lookup = super::super::hosted::descriptor_trust::HostedWitnessLookup::new(
             &snapshot.root.authority,
-            &config,
+            super::super::hosted::BootstrapHttp::new(&config),
         )?;
         #[cfg(test)]
         let lookup = {
@@ -256,7 +256,7 @@ impl DeviceRpc {
         let config = config::UserConfig::load_default()?.hosted_runtime_config(None)?;
         let lookup = super::super::hosted::descriptor_trust::HostedWitnessLookup::new(
             &snapshot.root.authority,
-            &config,
+            super::super::hosted::BootstrapHttp::new(&config),
         )?;
         #[cfg(test)]
         let lookup = {
