@@ -23,20 +23,11 @@ impl Repository {
         theirs: &State,
         base: Option<&State>,
     ) -> Result<Option<ContentHash>> {
-        let final_tree = self
-            .store
-            .get_tree(&state.tree)?
-            .ok_or_else(|| super::HeddleError::NotFound(format!("tree {}", state.tree)))?;
-        let ours_tree = self
-            .store
-            .get_tree(&ours.tree)?
-            .ok_or_else(|| super::HeddleError::NotFound(format!("tree {}", ours.tree)))?;
-        let theirs_tree = self
-            .store
-            .get_tree(&theirs.tree)?
-            .ok_or_else(|| super::HeddleError::NotFound(format!("tree {}", theirs.tree)))?;
+        let final_tree = self.require_tree(&state.tree)?;
+        let ours_tree = self.require_tree(&ours.tree)?;
+        let theirs_tree = self.require_tree(&theirs.tree)?;
         let base_tree = match base {
-            Some(base_state) => self.store.get_tree(&base_state.tree)?,
+            Some(base_state) => Some(self.require_tree(&base_state.tree)?),
             None => None,
         };
         let ours_root = self.get_state_provenance_root(ours)?;
@@ -67,6 +58,28 @@ impl Repository {
         Ok(Some(tree_hash))
     }
 
+    fn provenance_for_merge_entry(
+        &self,
+        root: Option<&ContentHash>,
+        entry: Option<&TreeEntry>,
+        state: &State,
+        path: &Path,
+    ) -> Result<Option<FileProvenance>> {
+        let Some(hash) = entry
+            .filter(|entry| entry.is_blob())
+            .and_then(TreeEntry::blob_hash)
+        else {
+            return Ok(None);
+        };
+        let blob = self.require_blob(&hash)?;
+        if let Some(root) = root
+            && let Some(provenance) = self.get_file_provenance_from_root(root, path)?
+        {
+            return Ok(Some(provenance));
+        }
+        Ok(synthesize_file_provenance_from_blob(Some(&blob), state))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_merge_provenance_tree_recursive(
         &self,
@@ -92,24 +105,25 @@ impl Repository {
                     let Some(tree_hash) = entry.tree_hash() else {
                         continue;
                     };
-                    let Some(subtree) = self.store.get_tree(&tree_hash)? else {
-                        continue;
-                    };
+                    let subtree = self.require_tree(&tree_hash)?;
                     let ours_subtree = ours_tree
                         .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
                         .and_then(|te| te.tree_hash())
-                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
+                        .map(|hash| self.require_tree(&hash))
+                        .transpose()?;
                     let theirs_subtree = theirs_tree
                         .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
                         .and_then(|te| te.tree_hash())
-                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
+                        .map(|hash| self.require_tree(&hash))
+                        .transpose()?;
                     let base_subtree = base_tree
                         .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
                         .and_then(|te| te.tree_hash())
-                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
+                        .map(|hash| self.require_tree(&hash))
+                        .transpose()?;
                     if let Some(sub_hash) = self.build_merge_provenance_tree_recursive(
                         &entry_path,
                         &subtree,
@@ -175,67 +189,33 @@ impl Repository {
         let Some(final_hash) = final_entry.blob_hash() else {
             return Ok(None);
         };
-        let Some(final_blob) = self.store.get_blob(&final_hash)? else {
-            return Ok(None);
-        };
+        let final_blob = self.require_blob(&final_hash)?;
         let Some(final_lines) = split_text_lines(final_blob.content()) else {
             return Ok(None);
         };
 
-        let ours_entry = ours_tree.and_then(|tree| lookup_tree_entry(self, tree, path));
-        let theirs_entry = theirs_tree.and_then(|tree| lookup_tree_entry(self, tree, path));
-        let base_entry = base_tree.and_then(|tree| lookup_tree_entry(self, tree, path));
+        let ours_entry = ours_tree
+            .map(|tree| lookup_tree_entry(self, tree, path))
+            .transpose()?
+            .flatten();
+        let theirs_entry = theirs_tree
+            .map(|tree| lookup_tree_entry(self, tree, path))
+            .transpose()?
+            .flatten();
+        let base_entry = base_tree
+            .map(|tree| lookup_tree_entry(self, tree, path))
+            .transpose()?
+            .flatten();
 
-        let ours_prov = match (ours_root, ours_entry.as_ref()) {
-            (Some(root), Some(entry)) if entry.is_blob() => {
-                self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    let blob = entry
-                        .blob_hash()
-                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                    synthesize_file_provenance_from_blob(blob.as_ref(), ours)
-                })
+        let ours_prov =
+            self.provenance_for_merge_entry(ours_root, ours_entry.as_ref(), ours, path)?;
+        let theirs_prov =
+            self.provenance_for_merge_entry(theirs_root, theirs_entry.as_ref(), theirs, path)?;
+        let base_prov = match base {
+            Some(state) => {
+                self.provenance_for_merge_entry(base_root, base_entry.as_ref(), state, path)?
             }
-            (_, Some(entry)) if entry.is_blob() => {
-                let blob = entry
-                    .blob_hash()
-                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                synthesize_file_provenance_from_blob(blob.as_ref(), ours)
-            }
-            _ => None,
-        };
-        let theirs_prov = match (theirs_root, theirs_entry.as_ref()) {
-            (Some(root), Some(entry)) if entry.is_blob() => {
-                self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    let blob = entry
-                        .blob_hash()
-                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                    synthesize_file_provenance_from_blob(blob.as_ref(), theirs)
-                })
-            }
-            (_, Some(entry)) if entry.is_blob() => {
-                let blob = entry
-                    .blob_hash()
-                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                synthesize_file_provenance_from_blob(blob.as_ref(), theirs)
-            }
-            _ => None,
-        };
-        let base_prov = match (base_root, base_entry.as_ref(), base) {
-            (Some(root), Some(entry), Some(base_state)) if entry.is_blob() => {
-                self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    let blob = entry
-                        .blob_hash()
-                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                    synthesize_file_provenance_from_blob(blob.as_ref(), base_state)
-                })
-            }
-            (_, Some(entry), Some(base_state)) if entry.is_blob() => {
-                let blob = entry
-                    .blob_hash()
-                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
-                synthesize_file_provenance_from_blob(blob.as_ref(), base_state)
-            }
-            _ => None,
+            None => None,
         };
 
         let ours_same = ours_entry

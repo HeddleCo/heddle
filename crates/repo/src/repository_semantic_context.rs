@@ -5,14 +5,16 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    ops::ControlFlow,
     path::{Path, PathBuf},
 };
 
 use objects::{
     error::HeddleError,
     object::{
-        Blob, ContentHash, DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind,
-        SemanticIndexRoot, SemanticTreeNode, State, StateId, Tree, diff_trees, resolve_tree_path,
+        Blob, ContentHash, DiffKind, FileChangeSet, LeafPolicy, ObjectSource, SemanticEntryKind,
+        SemanticIndexRoot, SemanticTreeNode, State, StateId, Tree, diff_trees_visit,
+        resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -39,13 +41,7 @@ impl<S: ObjectStore> ObjectSource for OverlaySource<'_, S> {
         {
             return Ok(Some((*tree).clone()));
         }
-        if let Some(tree) = self.store.get_tree(hash)? {
-            return Ok(Some(tree));
-        }
-        if *hash == Tree::new().hash() {
-            return Ok(Some(Tree::new()));
-        }
-        Ok(None)
+        self.store.get_tree(hash)
     }
 
     fn get_blob(&self, hash: &ContentHash) -> objects::error::Result<Option<Blob>> {
@@ -88,11 +84,13 @@ pub fn build_semantic_context(
         blobs: source_blobs,
         trees: source_trees,
     };
-    let from_tree = prior
-        .map(|state| state.tree)
-        .unwrap_or_else(|| Tree::new().hash());
-    let changes = diff_trees(&overlay, &from_tree, &new.tree)
-        .map_err(|err| HeddleError::InvalidObject(format!("tree diff failed: {err}")))?;
+    let from_tree = prior.map(|state| state.tree);
+    let mut changes = FileChangeSet::new();
+    let _ = diff_trees_visit(&overlay, from_tree.as_ref(), &new.tree, |change| {
+        changes.push(change);
+        ControlFlow::<()>::Continue(())
+    })
+    .map_err(HeddleError::from)?;
     let prior_root = prior
         .map(|state| repo.attached_semantic_index(&state.id()))
         .transpose()?
@@ -142,7 +140,7 @@ pub fn build_semantic_context(
     for path in &changed_paths {
         let path_str = path.to_string_lossy();
         let Some((fns, bytes)) =
-            parse_tree_functions_sized(&overlay, Some(&new.tree), &path_str, cache)
+            parse_tree_functions_sized(&overlay, Some(&new.tree), &path_str, cache)?
         else {
             continue;
         };
@@ -157,7 +155,7 @@ pub fn build_semantic_context(
             prior_tree.as_ref(),
             &prior_path.to_string_lossy(),
             cache,
-        ) {
+        )? {
             prior_functions.insert(path.clone(), fns);
         }
     }
@@ -279,8 +277,8 @@ fn parse_tree_functions(
     tree: Option<&ContentHash>,
     path: &str,
     cache: &SemanticParseCache,
-) -> Option<Vec<FunctionDef>> {
-    parse_tree_functions_sized(source, tree, path, cache).map(|(fns, _)| fns)
+) -> Result<Option<Vec<FunctionDef>>> {
+    Ok(parse_tree_functions_sized(source, tree, path, cache)?.map(|(fns, _)| fns))
 }
 
 pub(crate) fn parse_tree_functions_sized(
@@ -288,27 +286,27 @@ pub(crate) fn parse_tree_functions_sized(
     tree: Option<&ContentHash>,
     path: &str,
     cache: &SemanticParseCache,
-) -> Option<(Vec<FunctionDef>, usize)> {
-    let tree = tree?;
+) -> Result<Option<(Vec<FunctionDef>, usize)>> {
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
     let language = Language::from_path(Path::new(path));
     if matches!(language, Language::Unknown) {
-        return None;
+        return Ok(None);
     }
-    let bytes = match blob_bytes_at_path(source, tree, path) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return None,
-        Err(err) => {
-            warn!(error = %err, path, "semantic context: blob load failed; skip parse");
-            return None;
-        }
+    let Some(bytes) = blob_bytes_at_path(source, tree, path)? else {
+        return Ok(None);
     };
     if bytes.len() > PARSE_BUDGET_BYTES {
-        return None;
+        return Ok(None);
     }
     let byte_len = bytes.len();
-    let source = std::str::from_utf8(&bytes).ok()?;
-    let parsed = cache.parse(source, language)?;
-    Some((parsed.extract_functions(), byte_len))
+    let Ok(source) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    Ok(cache
+        .parse(source, language)
+        .map(|parsed| (parsed.extract_functions(), byte_len)))
 }
 
 fn blob_bytes_at_path(
@@ -320,5 +318,5 @@ fn blob_bytes_at_path(
     let Some(hash) = resolved.and_then(|target| target.content_hash) else {
         return Ok(None);
     };
-    Ok(source.get_blob(&hash)?.map(|blob| blob.content().to_vec()))
+    Ok(Some(source.require_blob(&hash)?.content().to_vec()))
 }

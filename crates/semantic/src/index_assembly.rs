@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Object-source semantic index assembly, independent of repository capture.
 
-use crate::{
-    parser::Language,
-    semantic_index::{
-        extract_semantic_file, grammar_version, grammar_version_by_name, language_name,
-    },
-};
+use std::collections::{BTreeMap, HashMap};
+
 use objects::{
     error::HeddleError,
     object::{
@@ -15,7 +11,13 @@ use objects::{
     },
     store::{ObjectSource, ObjectStore},
 };
-use std::collections::{BTreeMap, HashMap};
+
+use crate::{
+    parser::Language,
+    semantic_index::{
+        extract_semantic_file, grammar_version, grammar_version_by_name, language_name,
+    },
+};
 
 const MAX_SEMANTIC_TREE_DEPTH: usize = 1024;
 
@@ -325,9 +327,7 @@ impl<'store, S: ObjectSource> SemanticIndexBuilder<'store, S> {
         if sem_entry.kind != SemanticEntryKind::Dir {
             return Ok(None);
         }
-        let Some(source_tree) = self.store.get_tree(&source_hash)? else {
-            return Ok(None);
-        };
+        let source_tree = self.store.require_tree(&source_hash)?;
         let Some(blob) = self.store.get_blob(&sem_entry.node)? else {
             return Ok(None);
         };
@@ -391,11 +391,8 @@ impl<'store, S: ObjectSource> SemanticIndexBuilder<'store, S> {
             .source_blobs
             .and_then(|blobs| blobs.get(&source_hash).copied())
         {
-            Some(bytes) => Some(objects::object::Blob::from(bytes.to_vec())),
-            None => self.store.get_blob(&source_hash)?,
-        };
-        let Some(blob) = blob else {
-            return Ok(opaque);
+            Some(bytes) => objects::object::Blob::from(bytes.to_vec()),
+            None => self.store.require_blob(&source_hash)?,
         };
         self.work_bytes = self.work_bytes.saturating_add(blob.size());
         self.check_work()?;
@@ -546,10 +543,10 @@ pub struct ParentIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::parser::ParseBudget;
-    use crate::semantic_index::EXTRACTOR_VERSION;
     use objects::object::{Blob, SemanticEntryKind, SemanticTreeEntry, State, StateId, TreeEntry};
+
+    use super::*;
+    use crate::{parser::ParseBudget, semantic_index::EXTRACTOR_VERSION};
 
     struct ReadOnly<'a>(&'a objects::store::InMemoryStore);
     impl ObjectSource for ReadOnly<'_> {

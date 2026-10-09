@@ -112,7 +112,7 @@ pub(crate) fn populate_new_function_corpus(
             continue;
         }
         let Some((functions, bytes)) =
-            parse_tree_functions_sized(source, Some(new_tree), &path, cache)
+            parse_tree_functions_sized(source, Some(new_tree), &path, cache)?
         else {
             warn!(
                 path,

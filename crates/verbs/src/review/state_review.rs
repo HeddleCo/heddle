@@ -540,9 +540,7 @@ fn load_persisted_risk_signals(
     let Some(hash) = attachment_hash(repo, state_id, StateAttachmentKind::RiskSignals)? else {
         return Ok(Vec::new());
     };
-    let Some(blob) = repo.store().get_blob(&hash).map_err(map_repository_error)? else {
-        return Ok(Vec::new());
-    };
+    let blob = repo.require_blob(&hash).map_err(map_repository_error)?;
     let decoded = RiskSignalBlob::decode(blob.content())
         .map_err(|err| LocalReviewError::internal(format!("decode risk signals: {err}")))?;
     Ok(decoded
@@ -601,10 +599,7 @@ fn changed_files_as_symbols(
     state: &State,
     changed_paths: &[ChangedPath],
 ) -> objects::error::Result<Vec<PathSymbol>> {
-    let new_tree = match repo.store().get_tree(&state.tree)? {
-        Some(t) => t,
-        None => return Ok(Vec::new()),
-    };
+    let new_tree = repo.require_tree(&state.tree)?;
     let new_files = collect_files(repo, &new_tree, "")?;
 
     let mut out: Vec<PathSymbol> = Vec::new();
@@ -615,9 +610,8 @@ fn changed_files_as_symbols(
         if let Some(hash) = new_files.get(path) {
             #[cfg(feature = "semantic")]
             {
-                if let Some(blob) = repo.store().get_blob(hash)? {
-                    emitted_any = extract_file_symbols(path, blob.content(), &mut out);
-                }
+                let blob = repo.require_blob(hash)?;
+                emitted_any = extract_file_symbols(path, blob.content(), &mut out);
             }
             #[cfg(not(feature = "semantic"))]
             {
@@ -673,9 +667,8 @@ fn collect_files(
             format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(hash) = entry.tree_hash()
-                && let Some(subtree) = repo.store().get_tree(&hash)?
-            {
+            if let Some(hash) = entry.tree_hash() {
+                let subtree = repo.require_tree(&hash)?;
                 let sub = collect_files(repo, &subtree, &path)?;
                 out.extend(sub);
             }
@@ -726,48 +719,42 @@ struct DiffSummary {
     changed_paths: Vec<ChangedPath>,
 }
 
-/// Compute a summary diff for `state` vs its first parent. Errors
-/// from the object store propagate; missing trees / blobs are skipped
-/// silently (treated as zero-change for that path) so a partially
-/// pruned object store never blocks the review surface. The
-/// distinction matters: missing-object errors must become zero (the
-/// summary is best-effort, callers want a payload they can render),
-/// but genuine I/O errors must still propagate so a corrupt store
-/// surfaces loudly instead of silently truncating the review.
+/// Compute a summary diff for `state` vs its first parent. Referenced
+/// trees and blobs must be available; a missing object cannot mean zero changes.
 fn compute_state_diff_summary(
     repo: &Repository,
     state: &State,
     base_state_id: Option<StateId>,
 ) -> objects::error::Result<DiffSummary> {
-    use objects::object::Tree;
+    use std::ops::ControlFlow;
+
+    use objects::object::{FileChangeSet, diff_trees_visit};
     let parent_id = base_state_id.as_ref().or_else(|| state.parents.first());
-    let parent_tree_hash = if let Some(parent_id) = parent_id {
-        match repo.store().get_state(parent_id)? {
-            Some(parent_state) => parent_state.tree,
-            None => Tree::new().hash(),
-        }
-    } else {
-        Tree::new().hash()
+    let parent_tree_hash = match parent_id {
+        Some(parent_id) => Some(
+            repo.store()
+                .get_state(parent_id)?
+                .ok_or(objects::HeddleError::StateNotFound(*parent_id))?
+                .tree,
+        ),
+        None => None,
     };
-
-    // Resolve both tree objects up front so the missing-tree case
-    // becomes a synthesized empty changeset rather than an error from
-    // the recursive diff. `get_tree` returns `Ok(None)` for missing
-    // (not an error), and propagates only on genuine I/O — matching
-    // the policy the doc-comment claims.
-    let parent_tree_obj = repo.store().get_tree(&parent_tree_hash)?;
-    let new_tree_obj = repo.store().get_tree(&state.tree)?;
-
-    // If either tree is missing from the local store the diff is not
-    // meaningful — return an empty summary instead of erroring out.
-    // This mirrors the "Modified branch tolerates missing blobs" stance
-    // for the *tree* level: a partially pruned store should never block
-    // review payload retrieval, only render an empty summary.
-    let changes = if parent_tree_obj.is_some() && new_tree_obj.is_some() {
-        repo.diff_trees(&parent_tree_hash, &state.tree)?
-    } else {
-        objects::object::FileChangeSet::new()
-    };
+    let parent_tree_obj = parent_tree_hash
+        .as_ref()
+        .map(|hash| repo.require_tree(hash))
+        .transpose()?;
+    let new_tree_obj = repo.require_tree(&state.tree)?;
+    let mut changes = FileChangeSet::new();
+    let _ = diff_trees_visit(
+        repo.store(),
+        parent_tree_hash.as_ref(),
+        &state.tree,
+        |change| {
+            changes.push(change);
+            ControlFlow::<()>::Continue(())
+        },
+    )
+    .map_err(objects::HeddleError::from)?;
 
     // Compute per-file line deltas. We only count `Modified` here for
     // the symmetric add/remove totals; `Added` files contribute every
@@ -780,13 +767,10 @@ fn compute_state_diff_summary(
     let mut changed_paths: Vec<ChangedPath> = Vec::with_capacity(changes.len());
 
     let parent_files = match parent_tree_obj.as_ref() {
-        Some(t) => collect_files(repo, t, "")?,
+        Some(tree) => collect_files(repo, tree, "")?,
         None => std::collections::HashMap::new(),
     };
-    let new_files = match new_tree_obj.as_ref() {
-        Some(t) => collect_files(repo, t, "")?,
-        None => std::collections::HashMap::new(),
-    };
+    let new_files = collect_files(repo, &new_tree_obj, "")?;
 
     let mut added_files: u32 = 0;
     let mut modified_files: u32 = 0;
@@ -796,40 +780,26 @@ fn compute_state_diff_summary(
         match change.kind {
             DiffKind::Added => {
                 added_files += 1;
-                // Missing blob (`get_blob` returns `Ok(None)`) → file
-                // counts but contributes zero lines. Genuine I/O
-                // errors still propagate via `?` — same shape as the
-                // Modified branch's intent, but here we keep the
-                // distinction explicit so a corrupt store surfaces
-                // rather than getting silently swallowed.
-                if let Some(hash) = new_files.get(&change.path)
-                    && let Some(blob) = repo.store().get_blob(hash)?
-                {
+                if let Some(hash) = new_files.get(&change.path) {
+                    let blob = repo.require_blob(hash)?;
                     added_lines = added_lines.saturating_add(line_count(blob.content()));
                 }
             }
             DiffKind::Deleted => {
                 deleted_files += 1;
-                if let Some(hash) = parent_files.get(&change.path)
-                    && let Some(blob) = repo.store().get_blob(hash)?
-                {
+                if let Some(hash) = parent_files.get(&change.path) {
+                    let blob = repo.require_blob(hash)?;
                     removed_lines = removed_lines.saturating_add(line_count(blob.content()));
                 }
             }
             DiffKind::Modified => {
                 modified_files += 1;
-                // `get_blob` already returns `Ok(None)` for a missing
-                // blob, so `?` here only fires on genuine I/O. Match
-                // the Added/Deleted branches' propagation policy
-                // explicitly instead of the older `.ok().flatten()`
-                // form, which silently swallowed IO errors and
-                // conflated them with "missing".
                 let old_blob = match parent_files.get(&change.path) {
-                    Some(h) => repo.store().get_blob(h)?,
+                    Some(h) => Some(repo.require_blob(h)?),
                     None => None,
                 };
                 let new_blob = match new_files.get(&change.path) {
-                    Some(h) => repo.store().get_blob(h)?,
+                    Some(h) => Some(repo.require_blob(h)?),
                     None => None,
                 };
                 if let (Some(old), Some(new)) = (old_blob, new_blob) {
@@ -1239,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn local_payload_tolerates_a_missing_tree() {
+    fn local_payload_rejects_a_missing_tree() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
         let mut state = repo
@@ -1251,20 +1221,12 @@ mod tests {
         let missing_tree_state_id = state.id();
         repo.store().put_state(&state).expect("put mutated state");
 
-        let payload = review
+        let error = review
             .get_review_payload(missing_tree_state_id, false)
-            .expect("missing tree must not block the review payload");
-
-        assert_eq!(payload.summary.files_changed, 0);
-        assert_eq!(payload.in_budget_signals.len(), 1);
-        assert_eq!(
-            payload.in_budget_signals[0].kind,
-            ReviewSignalKind::DiffSummary
-        );
-        assert_eq!(
-            payload.in_budget_signals[0].producer.module,
-            "review_show.diff_summary"
-        );
+            .expect_err("missing tree must not produce a zero-change review");
+        let message = error.to_string();
+        assert!(message.contains(&state.tree.to_hex()), "{message}");
+        assert!(message.contains("not available locally"), "{message}");
     }
 
     #[test]

@@ -288,9 +288,8 @@ impl Repository {
             // The stub itself is untracked and so never in either set (heddle#316
             // CLASS 1).
             let mut withheld_leaves = BTreeSet::new();
-            if let Some(tree) = self.store().get_tree(&state.tree)? {
-                collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
-            }
+            let tree = self.require_tree(&state.tree)?;
+            collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
             self.reconcile_materialized_root(dest, &canonical, &BTreeSet::new(), &withheld_leaves)?;
             // Persist the clobber-proof per-root record: a withheld materialize
             // leaves ONLY the untracked courtesy stub, so the tracked-leaf set is
@@ -1016,15 +1015,7 @@ fn collect_expected_dirs(
 ) -> Result<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     let mut set: HashSet<String> = HashSet::new();
-    let Some(tree) = repo.store().get_tree(&manifest.tree_hash)? else {
-        // Tree missing from the store would be a serious anomaly —
-        // surface it so the caller bails to the slow path which will
-        // re-derive everything from the worktree.
-        return Err(HeddleError::Config(format!(
-            "tree {} referenced by manifest is missing",
-            manifest.tree_hash
-        )));
-    };
+    let tree = repo.require_tree(&manifest.tree_hash)?;
     collect_subdirs_into(repo, &tree, "", &mut set)?;
     Ok(set)
 }
@@ -1241,13 +1232,7 @@ fn stat_cache_no_op(repo: &Repository, manifest: &ThreadManifest, root: &Path) -
     // number of memory-mapped object reads; on the predicate's
     // hot path it's bounded by the tree's directory fan-out, not
     // file count.
-    let expected_dirs: HashSet<String> = match collect_expected_dirs(repo, manifest) {
-        Ok(s) => s,
-        // Any error walking the tree → conservatively bail to the
-        // slow path. `Ok(false)` keeps correctness; the worst case
-        // is a wasted full rebuild.
-        Err(_) => return Ok(false),
-    };
+    let expected_dirs: HashSet<String> = collect_expected_dirs(repo, manifest)?;
 
     // Walk the worktree. For every file we see, check it against the
     // manifest. Track which manifest paths we've actually seen so we

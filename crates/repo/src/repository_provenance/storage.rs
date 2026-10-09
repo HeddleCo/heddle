@@ -23,9 +23,7 @@ impl Repository {
         let Some((name, rest)) = split_path(path) else {
             return Ok(None);
         };
-        let Some(tree) = self.store.get_tree(root)? else {
-            return Ok(None);
-        };
+        let tree = self.require_tree(root)?;
         let Some(entry) = tree.get(name) else {
             return Ok(None);
         };

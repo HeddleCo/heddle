@@ -127,14 +127,7 @@ fn leaf_content_blob_resolves_symlinks_and_nested_paths() {
         .is_none()
     );
     assert!(
-        resolve_tree_path(
-            &fx.store,
-            &fx.root,
-            Path::new("missing/ghost/inner.txt"),
-            LeafPolicy::LeafContentBlob,
-        )
-        .unwrap()
-        .is_none()
+        matches!(resolve_tree_path(&fx.store, &fx.root, Path::new("missing/ghost/inner.txt"), LeafPolicy::LeafContentBlob).unwrap_err(), TreePathResolveError::SubtreeMissing(hash) if hash == fx.missing_subtree_hash)
     );
 }
 
@@ -174,14 +167,7 @@ fn entry_policy_returns_terminal_entry_for_any_leaf_type() {
         .is_none()
     );
     assert!(
-        resolve_tree_path(
-            &fx.store,
-            &fx.root,
-            Path::new("missing/ghost/inner.txt"),
-            LeafPolicy::Entry,
-        )
-        .unwrap()
-        .is_none()
+        matches!(resolve_tree_path(&fx.store, &fx.root, Path::new("missing/ghost/inner.txt"), LeafPolicy::Entry).unwrap_err(), TreePathResolveError::SubtreeMissing(hash) if hash == fx.missing_subtree_hash)
     );
 }
 

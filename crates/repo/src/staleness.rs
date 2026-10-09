@@ -52,10 +52,7 @@ pub fn check_annotation_staleness(
     }
 
     // Load the current code tree.
-    let tree = match repo.store().get_tree(&current_state.tree)? {
-        Some(t) => t,
-        None => return Ok(StalenessStatus::FileMissing),
-    };
+    let tree = repo.require_tree(&current_state.tree)?;
 
     // Resolve file content from the tree.
     let path_str = file_path.to_string_lossy();
@@ -122,14 +119,18 @@ pub fn live_symbol_lines(
     state: &State,
     path: &str,
     symbol: &str,
-) -> Option<(u32, u32)> {
-    let tree = repo.store().get_tree(&state.tree).ok().flatten()?;
-    let blob = get_blob_at_path(repo.store(), &tree, path).ok().flatten()?;
+) -> Result<Option<(u32, u32)>, anyhow::Error> {
+    let tree = repo.require_tree(&state.tree)?;
+    let Some(blob) = get_blob_at_path(repo.store(), &tree, path)? else {
+        return Ok(None);
+    };
     let file_path = std::path::Path::new(path);
-    match resolve_current_symbol_for_repo(blob.content(), file_path, symbol, None) {
-        SymbolResolution::Resolved { start, end } => Some((start, end)),
-        SymbolResolution::Missing | SymbolResolution::Ambiguous { .. } => None,
-    }
+    Ok(
+        match resolve_current_symbol_for_repo(blob.content(), file_path, symbol, None) {
+            SymbolResolution::Resolved { start, end } => Some((start, end)),
+            SymbolResolution::Missing | SymbolResolution::Ambiguous { .. } => None,
+        },
+    )
 }
 
 /// Internal: tree-sitter resolution of a symbol selector. Exactly one
@@ -190,7 +191,7 @@ fn get_blob_at_path(
         Path::new(path),
         LeafPolicy::LeafContentBlob,
     )
-    .map_err(anyhow::Error::from)?;
+    .map_err(crate::HeddleError::from)?;
     Ok(resolved.and_then(|target| target.blob))
 }
 
@@ -211,7 +212,7 @@ where
         LeafPolicy::LeafContentBlob,
     )
     .await
-    .map_err(anyhow::Error::from)?;
+    .map_err(crate::HeddleError::from)?;
     Ok(resolved.and_then(|target| target.blob))
 }
 
@@ -348,7 +349,7 @@ mod tests {
         ];
 
         let mut sync_changes = Vec::new();
-        let _ = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+        let _ = diff_trees_visit(&store, Some(&from_hash), &to_hash, |change| {
             sync_changes.push(FileChange::into_tuple(change));
             std::ops::ControlFlow::<()>::Continue(())
         })
@@ -357,7 +358,7 @@ mod tests {
         let mut async_changes = Vec::new();
         let _ = block_on(diff_trees_visit_async(
             &async_store,
-            &from_hash,
+            Some(&from_hash),
             &to_hash,
             |change| {
                 async_changes.push(FileChange::into_tuple(change));
@@ -747,7 +748,7 @@ mod tests {
             }
         );
         assert_eq!(
-            live_symbol_lines(&repo, &state, "pricing.py", "amount"),
+            live_symbol_lines(&repo, &state, "pricing.py", "amount").unwrap(),
             None,
             "an ambiguous selector has no single live range"
         );

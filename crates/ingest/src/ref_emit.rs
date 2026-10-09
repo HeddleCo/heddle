@@ -259,13 +259,10 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
         if !state.parents.is_empty() {
             return Ok(false);
         }
-        let Some(tree) = self
+        let tree = self
             .store
-            .get_tree(&state.tree)
-            .map_err(IngestError::from)?
-        else {
-            return Ok(false);
-        };
+            .require_tree(&state.tree)
+            .map_err(IngestError::from)?;
         Ok(tree == Tree::new())
     }
 }

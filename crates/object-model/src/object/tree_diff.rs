@@ -134,7 +134,7 @@ pub fn diff_trees<S: ObjectSource + ?Sized>(
     let mut changes = FileChangeSet::new();
     // The visitor never short-circuits here, so the `ControlFlow` result is
     // always `Continue(())`; we ignore it and return the collected set.
-    let _ = diff_trees_visit(store, from, to, |change| {
+    let _ = diff_trees_visit(store, Some(from), to, |change| {
         changes.push(change);
         ControlFlow::<()>::Continue(())
     })?;
@@ -142,7 +142,8 @@ pub fn diff_trees<S: ObjectSource + ?Sized>(
 }
 
 /// Diff two trees with internal iteration, invoking `visitor` for each
-/// [`FileChange`] in traversal order.
+/// [`FileChange`] in traversal order. `from: None` explicitly represents a
+/// parentless state's absent baseline; every supplied hash must resolve.
 ///
 /// This is the streaming counterpart to [`diff_trees`]. The visitor returns a
 /// [`ControlFlow`]: `Continue(())` keeps walking, while `Break(value)` stops
@@ -157,7 +158,7 @@ pub fn diff_trees<S: ObjectSource + ?Sized>(
 /// two paths are behavior-identical.
 pub fn diff_trees_visit<S, V, B>(
     store: &S,
-    from: &crate::object::ContentHash,
+    from: Option<&crate::object::ContentHash>,
     to: &crate::object::ContentHash,
     mut visitor: V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
@@ -165,11 +166,11 @@ where
     S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
-    if from == to {
+    let from_tree = from.map(|hash| store.require_tree(hash)).transpose()?;
+    if from == Some(to) {
         return Ok(ControlFlow::Continue(()));
     }
-    let from_tree = store.get_tree(from)?;
-    let to_tree = store.get_tree(to)?;
+    let to_tree = Some(store.require_tree(to)?);
     let mut stack = vec![DiffFrame {
         from: from_tree,
         to: to_tree,
@@ -178,8 +179,8 @@ where
         to_index: 0,
     }];
 
-    while !stack.is_empty() {
-        match advance_merge(stack.last_mut().expect("stack is not empty")) {
+    while let Some(frame) = stack.last_mut() {
+        match advance_merge(frame) {
             DiffStep::Emit(change) => {
                 if let ControlFlow::Break(b) = visitor(change) {
                     return Ok(ControlFlow::Break(b));
@@ -191,17 +192,10 @@ where
                 name,
             } => {
                 let from_subtree = from_hash
-                    .map(|hash| store.get_tree(&hash))
-                    .transpose()?
-                    .flatten();
-                let to_subtree = to_hash
-                    .map(|hash| store.get_tree(&hash))
-                    .transpose()?
-                    .flatten();
-                let prefix = child_path(
-                    &stack.last().expect("parent frame remains on stack").prefix,
-                    &name,
-                );
+                    .map(|hash| store.require_tree(&hash))
+                    .transpose()?;
+                let to_subtree = to_hash.map(|hash| store.require_tree(&hash)).transpose()?;
+                let prefix = child_path(&frame.prefix, &name);
                 stack.push(DiffFrame {
                     from: from_subtree,
                     to: to_subtree,
@@ -222,7 +216,7 @@ where
 #[cfg(feature = "async-source")]
 pub async fn diff_trees_visit_async<S, V, B>(
     store: &S,
-    from: &crate::object::ContentHash,
+    from: Option<&crate::object::ContentHash>,
     to: &crate::object::ContentHash,
     mut visitor: V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
@@ -231,11 +225,14 @@ where
     V: FnMut(FileChange) -> ControlFlow<B> + Send,
     B: Send,
 {
-    if from == to {
+    let from_tree = match from {
+        Some(hash) => Some(store.require_tree(hash).await?),
+        None => None,
+    };
+    if from == Some(to) {
         return Ok(ControlFlow::Continue(()));
     }
-    let from_tree = store.get_tree(from).await?;
-    let to_tree = store.get_tree(to).await?;
+    let to_tree = Some(store.require_tree(to).await?);
     let mut stack = vec![DiffFrame {
         from: from_tree,
         to: to_tree,
@@ -244,8 +241,8 @@ where
         to_index: 0,
     }];
 
-    while !stack.is_empty() {
-        match advance_merge(stack.last_mut().expect("stack is not empty")) {
+    while let Some(frame) = stack.last_mut() {
+        match advance_merge(frame) {
             DiffStep::Emit(change) => {
                 if let ControlFlow::Break(b) = visitor(change) {
                     return Ok(ControlFlow::Break(b));
@@ -257,17 +254,14 @@ where
                 name,
             } => {
                 let from_subtree = match from_hash {
-                    Some(hash) => store.get_tree(&hash).await?,
+                    Some(hash) => Some(store.require_tree(&hash).await?),
                     None => None,
                 };
                 let to_subtree = match to_hash {
-                    Some(hash) => store.get_tree(&hash).await?,
+                    Some(hash) => Some(store.require_tree(&hash).await?),
                     None => None,
                 };
-                let prefix = child_path(
-                    &stack.last().expect("parent frame remains on stack").prefix,
-                    &name,
-                );
+                let prefix = child_path(&frame.prefix, &name);
                 stack.push(DiffFrame {
                     from: from_subtree,
                     to: to_subtree,

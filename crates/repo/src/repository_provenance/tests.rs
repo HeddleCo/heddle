@@ -490,19 +490,38 @@ fn lookup_tree_entry_characterizes_entry_policy_paths() {
         .unwrap();
     let tree = store.get_tree(&root_hash).unwrap().unwrap();
 
-    let file = lookup_tree_entry(&repo, &tree, Path::new("file.txt")).unwrap();
+    let file = lookup_tree_entry(&repo, &tree, Path::new("file.txt"))
+        .unwrap()
+        .unwrap();
     assert_eq!(file.blob_hash(), Some(blob_hash));
 
-    let link = lookup_tree_entry(&repo, &tree, Path::new("link")).unwrap();
+    let link = lookup_tree_entry(&repo, &tree, Path::new("link"))
+        .unwrap()
+        .unwrap();
     assert!(link.is_symlink());
 
-    let dir = lookup_tree_entry(&repo, &tree, Path::new("dir")).unwrap();
+    let dir = lookup_tree_entry(&repo, &tree, Path::new("dir"))
+        .unwrap()
+        .unwrap();
     assert!(dir.is_tree());
 
-    let nested = lookup_tree_entry(&repo, &tree, Path::new("dir/inner.txt")).unwrap();
+    let nested = lookup_tree_entry(&repo, &tree, Path::new("dir/inner.txt"))
+        .unwrap()
+        .unwrap();
     assert_eq!(nested.blob_hash(), Some(nested_blob_hash));
 
-    assert!(lookup_tree_entry(&repo, &tree, Path::new("nope.txt")).is_none());
-    assert!(lookup_tree_entry(&repo, &tree, Path::new("dir/missing.txt")).is_none());
-    assert!(lookup_tree_entry(&repo, &tree, Path::new("missing/ghost/inner.txt")).is_none());
+    assert!(
+        lookup_tree_entry(&repo, &tree, Path::new("nope.txt"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        lookup_tree_entry(&repo, &tree, Path::new("dir/missing.txt"))
+            .unwrap()
+            .is_none()
+    );
+    let error = lookup_tree_entry(&repo, &tree, Path::new("missing/ghost/inner.txt")).unwrap_err();
+    assert!(
+        matches!(error, objects::HeddleError::MissingObject { object_type, .. } if object_type == "tree")
+    );
 }

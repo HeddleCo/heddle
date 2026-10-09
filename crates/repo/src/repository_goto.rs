@@ -466,7 +466,7 @@ impl Repository {
         let load_duration_ms = load_start.elapsed().as_millis();
 
         let current_tree = match &current_state {
-            Some(current_state) => self.store.get_tree(&current_state.tree)?,
+            Some(current_state) => Some(self.require_tree(&current_state.tree)?),
             None => None,
         };
 
