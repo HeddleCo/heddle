@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.28.14...heddle-git-projection-v0.29.0) - 2026-10-09
+
+### Fixed
+
+- *(git)* reconstruct -0000 timezone and empty author name byte-exactly ([#2016](https://github.com/HeddleCo/heddle/pull/2016)) ([#2041](https://github.com/HeddleCo/heddle/pull/2041))
+
+### Other
+
+- Fail on unavailable historical trees and blobs ([#2038](https://github.com/HeddleCo/heddle/pull/2038)) ([#2046](https://github.com/HeddleCo/heddle/pull/2046))
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.28.13...heddle-git-projection-v0.28.14) - 2026-10-08
 
 ### Other
