@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-config-v0.28.14...heddle-config-v0.29.0) - 2026-10-09
+
+### Other
+
+- Refuse untrusted nested repositories at discovery ([#2034](https://github.com/HeddleCo/heddle/pull/2034)) ([#2037](https://github.com/HeddleCo/heddle/pull/2037))
+
 ### Added
 
 - `ClientConfig::preferred_region` prefers same-region root-attested

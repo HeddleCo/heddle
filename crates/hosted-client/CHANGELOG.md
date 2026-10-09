@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.28.14...heddle-hosted-client-v0.29.0) - 2026-10-09
+
+### Fixed
+
+- *(cli)* keep iroh alive and label clone sync failures ([#2044](https://github.com/HeddleCo/heddle/pull/2044))
+
+### Other
+
+- Bound native Fetch source memory with disk-backed traversal ([#2045](https://github.com/HeddleCo/heddle/pull/2045))
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.28.13...heddle-hosted-client-v0.28.14) - 2026-10-08
 
 ### Other
