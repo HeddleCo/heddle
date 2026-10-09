@@ -243,49 +243,70 @@ fn serve_https<R>(
         .set_nonblocking(false)
         .expect("make endpoint descriptor connection blocking");
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .expect("set endpoint descriptor read timeout");
     let connection = ServerConnection::new(tls).expect("create test TLS connection");
     let mut stream = StreamOwned::new(connection, stream);
     loop {
-    let mut request = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-        let count = match stream.read(&mut chunk) {
-            Ok(count) => count,
-            Err(_) => return,
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = match stream.read(&mut chunk) {
+                Ok(count) => count,
+                Err(_) => return,
+            };
+            if count == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("header")
+            + 4;
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("body size"))
+            })
+            .unwrap_or(0);
+        let remaining = (header_end + content_length).saturating_sub(request.len());
+        if remaining > 0 {
+            let mut body = vec![0; remaining];
+            if stream.read_exact(&mut body).is_err() {
+                return;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        requests
+            .lock()
+            .expect("record HTTP request")
+            .push(path.to_string());
+        let body =
+            routes.lock().expect("lock endpoint descriptor routes")(path).unwrap_or_default();
+        let status = if body.is_empty() {
+            "404 Not Found"
+        } else {
+            "200 OK"
         };
-        if count == 0 {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+            body.len()
+        );
+        let response_written = stream
+            .write_all(response.as_bytes())
+            .and_then(|_| stream.write_all(&body))
+            .and_then(|_| stream.flush());
+        if response_written.is_err() {
             return;
         }
-        request.extend_from_slice(&chunk[..count]);
-    }
-    let request = String::from_utf8_lossy(&request);
-    let path = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("/");
-    requests
-        .lock()
-        .expect("record HTTP request")
-        .push(path.to_string());
-    let body = routes.lock().expect("lock endpoint descriptor routes")(path).unwrap_or_default();
-    let status = if body.is_empty() {
-        "404 Not Found"
-    } else {
-        "200 OK"
-    };
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-        body.len()
-    );
-    let response_written = stream
-        .write_all(response.as_bytes())
-        .and_then(|_| stream.write_all(&body))
-        .and_then(|_| stream.flush());
-    if response_written.is_err() {
-        return;
-    }
     }
 }

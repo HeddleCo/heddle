@@ -74,6 +74,9 @@ pub struct PublicationCapture {
     /// Fail a clone's observation or metadata RPC, after source installation.
     pub fail_clone_stage: Option<String>,
     pub clone_observations: Vec<bool>,
+    pub clone_metadata_obstruction: Option<std::path::PathBuf>,
+    pub clone_sync_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub overlapped_clone_syncs: usize,
     pub failed_clone_call: Option<usize>,
     pub failed_clone_at: Option<std::time::Instant>,
     /// Apply the next discussion command, then lose its receipt, so the
@@ -424,21 +427,44 @@ async fn serve_call(
     } else {
         None
     };
+    let barrier = fixture
+        .captured
+        .lock()
+        .expect("sync barrier")
+        .clone_sync_barrier
+        .clone();
+    if let Some(barrier) = barrier
+        && annotation.is_some()
+        && tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait())
+            .await
+            .is_ok()
+    {
+        fixture
+            .captured
+            .lock()
+            .expect("overlap")
+            .overlapped_clone_syncs += 1;
+    }
+    let obstruction = {
+        let capture = fixture.captured.lock().expect("metadata obstruction");
+        (annotation == Some(true)
+            && capture
+                .clone_observations
+                .iter()
+                .filter(|annotation| **annotation)
+                .count()
+                >= 2)
+            .then(|| capture.clone_metadata_obstruction.clone())
+            .flatten()
+    };
+    if let Some(path) = obstruction {
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir_all(path).expect("obstruct local metadata lock");
+    }
     let fail = match failed_stage.as_deref() {
         Some("discussion") | Some("disconnect") => annotation == Some(false),
         Some("context") => annotation == Some(true),
-        Some("metadata") => {
-            method.ends_with("/ResolveResources")
-                && fixture
-                    .captured
-                    .lock()
-                    .expect("observations")
-                    .clone_observations
-                    .iter()
-                    .filter(|annotation| **annotation)
-                    .count()
-                    >= 2
-        }
+        Some("both") => annotation.is_some(),
         _ => false,
     };
     if fail {

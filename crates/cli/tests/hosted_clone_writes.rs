@@ -3457,10 +3457,10 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
     assert!(
         !calls[failed + 1..]
             .iter()
-            .any(|call| call.ends_with("/ObserveCollaboration")
+            .any(|call| (recovery && call.ends_with("/ObserveCollaboration"))
                 || call.ends_with("/ObserveThreads")
                 || call.ends_with("/ResolveResources")),
-        "no sync or metadata after failed stage: {calls:?}"
+        "no subsequent metadata lookup after failed stage: {calls:?}"
     );
     {
         let mut capture = fixture.captured.lock().expect("restore peer");
@@ -3483,20 +3483,12 @@ fn fresh_clone_labels_context_failure_and_retains_intent() {
     on_large_stack(|| assert_clone_stage_failure("context", false));
 }
 #[test]
-fn fresh_clone_labels_metadata_failure_and_retains_intent() {
-    on_large_stack(|| assert_clone_stage_failure("metadata", false));
-}
-#[test]
 fn clone_recovery_labels_discussion_failure_and_retains_intent() {
     on_large_stack(|| assert_clone_stage_failure("discussion", true));
 }
 #[test]
 fn clone_recovery_labels_context_failure_and_retains_intent() {
     on_large_stack(|| assert_clone_stage_failure("context", true));
-}
-#[test]
-fn clone_recovery_labels_metadata_failure_and_retains_intent() {
-    on_large_stack(|| assert_clone_stage_failure("metadata", true));
 }
 
 #[test]
@@ -3513,17 +3505,177 @@ fn fresh_clone_rpc_and_https_budget() {
     on_large_stack(|| async {
         let fixture = Fixture::uninstalled().await;
         fixture.captured.lock().expect("reset calls").calls.clear();
-        let before = fixture.https.connections.load(std::sync::atomic::Ordering::SeqCst);
-        fixture.run_at(fixture._temp.path(), &[
-            "clone", &fixture.remote(), fixture.clone.to_str().expect("path"),
-        ]);
+        let before = fixture
+            .https
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst);
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
         let calls = fixture.captured.lock().expect("calls").calls.clone();
-        let resolve = calls.iter().filter(|call| call.ends_with("/ResolveResources")).count();
-        let threads = calls.iter().filter(|call| call.ends_with("/ObserveThreads")).count();
-        let https = fixture.https.connections.load(std::sync::atomic::Ordering::SeqCst) - before;
-        println!("clone budget: ResolveResources={resolve}, ObserveThreads={threads}, HTTPS connections={https}");
+        let resolve = calls
+            .iter()
+            .filter(|call| call.ends_with("/ResolveResources"))
+            .count();
+        let threads = calls
+            .iter()
+            .filter(|call| call.ends_with("/ObserveThreads"))
+            .count();
+        let https = fixture
+            .https
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst)
+            - before;
+        println!(
+            "clone budget: ResolveResources={resolve}, ObserveThreads={threads}, HTTPS connections={https}"
+        );
         fixture.assert_identity();
-        assert_eq!((resolve, threads, https), (2, 1, 1), "clone round-trip budget: {calls:?}");
+        assert_eq!(
+            (resolve, threads, https),
+            (2, 1, 1),
+            "clone round-trip budget: {calls:?}"
+        );
         fixture.close().await;
     });
+}
+
+#[test]
+fn concurrent_clone_sync_reports_both_labels_and_retains_source() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        {
+            let mut capture = fixture.captured.lock().expect("failure injection");
+            capture.calls.clear();
+            capture.fail_clone_stage = Some("both".into());
+            capture.clone_sync_barrier = Some(std::sync::Arc::new(tokio::sync::Barrier::new(2)));
+        }
+        let output = fixture.output_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        assert!(!output.status.success());
+        let error = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            error.contains("post-install discussion sync failed"),
+            "{error}"
+        );
+        assert!(
+            error.contains("post-install context sync failed"),
+            "{error}"
+        );
+        assert!(error.contains("injected clone sync failure"), "{error}");
+        let capture = fixture.captured.lock().expect("capture").clone();
+        assert_eq!(
+            capture.overlapped_clone_syncs, 2,
+            "both requests must reach the peer before either is answered"
+        );
+        assert!(repo::clone_intent::CloneIntent::path(&fixture.clone).exists());
+        let source = Repository::open(&fixture.source).expect("source");
+        let state = source.head().expect("HEAD").expect("state");
+        let installed = objects::store::FsStore::new(fixture.clone.join(".heddle"));
+        assert!(
+            installed
+                .get_state(&state)
+                .expect("read installed State")
+                .is_some()
+        );
+        {
+            let mut capture = fixture.captured.lock().expect("restore peer");
+            capture.fail_clone_stage = None;
+            capture.clone_sync_barrier = None;
+        }
+        fixture.run_at(&fixture.clone, &["status"]);
+        assert!(!repo::clone_intent::CloneIntent::path(&fixture.clone).exists());
+        assert_eq!(
+            std::fs::read(fixture.clone.join("story.txt")).expect("checkout"),
+            b"source only\n"
+        );
+        fixture.close().await;
+    });
+}
+
+async fn assert_clone_metadata_failure(recovery: bool) {
+    let fixture = if recovery {
+        Fixture::new().await
+    } else {
+        Fixture::uninstalled().await
+    };
+    if recovery {
+        repo::clone_intent::CloneIntent {
+            origin: fixture.remote(),
+            endpoint: fixture.https.authority.clone(),
+            repository: "spool/acme".into(),
+            thread: Some("main".into()),
+            advertised_head: Some("main".into()),
+            depth: None,
+            lazy: false,
+        }
+        .create(&fixture.clone)
+        .expect("recovery intent");
+    }
+    let lock = fixture.clone.join(".heddle/thread_records/.lock");
+    {
+        let mut capture = fixture.captured.lock().expect("inject obstruction");
+        capture.fail_clone_stage = Some("metadata-local".into());
+        capture.clone_observations.clear();
+        capture.clone_metadata_obstruction = Some(lock.clone());
+    }
+    let output = if recovery {
+        fixture.output_at(&fixture.clone, &["status"])
+    } else {
+        fixture.output_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        )
+    };
+    let error = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{error}");
+    let label = if recovery {
+        "clone recovery metadata sync failed"
+    } else {
+        "post-install metadata sync failed"
+    };
+    assert!(error.contains(label), "{error}");
+    assert!(repo::clone_intent::CloneIntent::path(&fixture.clone).exists());
+    assert!(lock.is_dir(), "local metadata persistence was obstructed");
+    {
+        let mut capture = fixture.captured.lock().expect("restore fixture");
+        capture.fail_clone_stage = None;
+        capture.clone_metadata_obstruction = None;
+    }
+    std::fs::remove_dir(&lock).expect("restore metadata persistence");
+    fixture.run_at(&fixture.clone, &["status"]);
+    assert!(!repo::clone_intent::CloneIntent::path(&fixture.clone).exists());
+    fixture.assert_identity();
+    fixture.close().await;
+}
+
+#[test]
+fn fresh_clone_labels_metadata_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_metadata_failure(false));
+}
+#[test]
+fn clone_recovery_labels_metadata_failure_and_retains_intent() {
+    on_large_stack(|| assert_clone_metadata_failure(true));
 }
