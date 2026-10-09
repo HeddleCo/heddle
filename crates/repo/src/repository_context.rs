@@ -32,9 +32,7 @@ impl Repository {
         let Some(blob_hash) = self.lookup_context_leaf_for_target(context_root, target)? else {
             return Ok(None);
         };
-        let Some(blob) = self.store.get_blob(&blob_hash)? else {
-            return Ok(None);
-        };
+        let blob = self.require_blob(&blob_hash)?;
         ContextBlob::decode(blob.content())
             .map(Some)
             .map_err(|e| HeddleError::InvalidObject(format!("invalid context blob: {e}")))
@@ -115,10 +113,7 @@ impl Repository {
         context_root: &ContentHash,
         prefix: Option<&Path>,
     ) -> Result<Vec<ContextEntry>> {
-        let tree = match self.store.get_tree(context_root)? {
-            Some(t) => t,
-            None => return Ok(Vec::new()),
-        };
+        let tree = self.require_tree(context_root)?;
         let mut results = BTreeMap::new();
         self.walk_context_tree(
             &tree,
@@ -183,9 +178,7 @@ impl Repository {
         let Some((name, rest)) = split_path(path) else {
             return Ok(None);
         };
-        let Some(tree) = self.store.get_tree(root)? else {
-            return Ok(None);
-        };
+        let tree = self.require_tree(root)?;
         let Some(entry) = tree.get(name) else {
             return Ok(None);
         };
@@ -216,12 +209,10 @@ impl Repository {
         if rest.as_os_str().is_empty() {
             new_tree.insert(TreeEntry::file(name, blob_hash, false)?);
         } else {
-            let subtree = tree
-                .get(name)
-                .filter(|e| e.is_tree())
-                .and_then(|e| e.tree_hash())
-                .and_then(|hash| self.store.get_tree(&hash).ok().flatten())
-                .unwrap_or_default();
+            let subtree = match tree.get(name).and_then(TreeEntry::tree_hash) {
+                Some(hash) => self.require_tree(&hash)?,
+                None => Tree::new(),
+            };
 
             let sub_hash = self.insert_leaf_at_path(&subtree, rest, blob_hash)?;
             new_tree.insert(TreeEntry::directory(name, sub_hash)?);
@@ -250,9 +241,8 @@ impl Repository {
                     {
                         continue;
                     }
-                    if let Some(tree_hash) = entry.tree_hash()
-                        && let Some(subtree) = self.store.get_tree(&tree_hash)?
-                    {
+                    if let Some(tree_hash) = entry.tree_hash() {
+                        let subtree = self.require_tree(&tree_hash)?;
                         self.walk_context_tree(&subtree, &entry_path, prefix, results, mode)?;
                     }
                 }
@@ -266,9 +256,8 @@ impl Repository {
                     {
                         continue;
                     }
-                    if let Some(blob_hash) = entry.blob_hash()
-                        && let Some(blob) = self.store.get_blob(&blob_hash)?
-                    {
+                    if let Some(blob_hash) = entry.blob_hash() {
+                        let blob = self.require_blob(&blob_hash)?;
                         let context = ContextBlob::decode(blob.content()).map_err(|error| {
                             HeddleError::InvalidObject(format!("invalid context blob: {error}"))
                         })?;

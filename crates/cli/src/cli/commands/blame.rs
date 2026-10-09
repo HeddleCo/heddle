@@ -9,12 +9,9 @@ use anyhow::{Result, anyhow};
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
     AgentInfo, BlameLine, BlameOrigin, BlameOutput, ContextSnippet, PrincipalInfo,
 };
-use objects::{
-    object::{
-        AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,
-        StateId, Tree,
-    },
-    store::ObjectStore,
+use objects::object::{
+    AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,
+    StateId, Tree,
 };
 use repo::Repository;
 use verbs::{fit_author as core_fit_author, summarize_context_line};
@@ -139,17 +136,11 @@ fn cmd_blame_with_output_kind(
 
     let state_obj = require_resolved_state(&repo, &target_state_id)?;
 
-    let tree = repo
-        .store()
-        .get_tree(&state_obj.tree)?
-        .ok_or_else(|| anyhow!("Tree not found"))?;
+    let tree = repo.require_tree(&state_obj.tree)?;
 
     let content_hash = find_file_in_tree(&repo, &tree, Path::new(&file))?;
 
-    let blob = repo
-        .store()
-        .get_blob(&content_hash)?
-        .ok_or_else(|| anyhow!("Blob not found"))?;
+    let blob = repo.require_blob(&content_hash)?;
 
     let content = String::from_utf8_lossy(blob.content());
     let lines: Vec<&str> = content.lines().collect();
@@ -377,10 +368,7 @@ fn find_file_in_tree(repo: &Repository, tree: &Tree, file: &Path) -> Result<Cont
     let Some(hash) = entry.tree_hash() else {
         return Err(anyhow!(blame_file_not_found_advice(file)));
     };
-    let subtree = repo
-        .store()
-        .get_tree(&hash)?
-        .ok_or_else(|| anyhow!(blame_file_not_found_advice(file)))?;
+    let subtree = repo.require_tree(&hash)?;
     find_file_in_tree(repo, &subtree, rest)
 }
 

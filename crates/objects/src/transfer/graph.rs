@@ -1056,15 +1056,7 @@ fn collect_missing_blobs_recursive(
     tree_hash: &ContentHash,
     missing: &mut Vec<ContentHash>,
 ) -> Result<()> {
-    let Some(tree) = store.get_tree(tree_hash).map_err(|err| {
-        HeddleError::InvalidObject(format!(
-            "load tree {} while collecting lazy hydration missing blobs: {err}",
-            tree_hash.to_hex()
-        ))
-    })?
-    else {
-        return Ok(());
-    };
+    let tree = store.require_tree(tree_hash)?;
 
     for entry in tree.entries() {
         match entry.target() {
@@ -1156,10 +1148,7 @@ fn collect_tree_hashes(
         return Ok(());
     }
 
-    let tree = match store.get_tree(&tree_hash)? {
-        Some(tree) => tree,
-        None => return Ok(()),
-    };
+    let tree = store.require_tree(&tree_hash)?;
 
     for entry in tree.entries() {
         match entry.target() {

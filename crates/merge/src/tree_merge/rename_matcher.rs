@@ -311,9 +311,8 @@ pub(crate) fn flatten_tree(
                 }
             }
             EntryType::Tree => {
-                if let Some(hash) = entry.tree_hash()
-                    && let Some(subtree) = store.get_tree(&hash)?
-                {
+                if let Some(hash) = entry.tree_hash() {
+                    let subtree = store.require_tree(&hash)?;
                     result.extend(flatten_tree(store, &subtree, &path)?);
                 }
             }
@@ -566,17 +565,11 @@ fn load_candidate_files<'a>(
 ) -> Result<Vec<CandidateFile<'a>>> {
     let mut files = Vec::with_capacity(entries.len());
     for &(index, path, hash) in entries {
-        let blob = store.get_blob(hash)?;
-        let (size, content) = match blob {
-            Some(blob) => {
-                stats.blob_loads += 1;
-                stats.blob_bytes_loaded += blob.content().len();
-                let size = Some(blob.content().len());
-                let content = load_content.then(|| blob.content().to_vec());
-                (size, content)
-            }
-            None => (None, None),
-        };
+        let blob = store.require_blob(hash)?;
+        stats.blob_loads += 1;
+        stats.blob_bytes_loaded += blob.content().len();
+        let size = Some(blob.content().len());
+        let content = load_content.then(|| blob.content().to_vec());
 
         files.push(CandidateFile {
             index,

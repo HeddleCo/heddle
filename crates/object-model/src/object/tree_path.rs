@@ -54,9 +54,10 @@ impl From<TreePathResolveError> for HeddleError {
     fn from(value: TreePathResolveError) -> Self {
         match value {
             TreePathResolveError::Store { source, .. } => *source,
-            TreePathResolveError::SubtreeMissing(hash) => {
-                HeddleError::InvalidObject(format!("subtree {} missing from store", hash.short()))
-            }
+            TreePathResolveError::SubtreeMissing(hash) => HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: hash.to_hex(),
+            },
         }
     }
 }
@@ -64,11 +65,11 @@ impl From<TreePathResolveError> for HeddleError {
 impl std::fmt::Display for TreePathResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TreePathResolveError::Store { hash, .. } => {
-                write!(f, "failed to load tree {}", hash.short())
+            TreePathResolveError::Store { hash, source } => {
+                write!(f, "failed to load object {}: {source}", hash.short())
             }
             TreePathResolveError::SubtreeMissing(hash) => {
-                write!(f, "subtree {} missing from store", hash.short())
+                write!(f, "missing tree object: {hash} is not available locally")
             }
         }
     }
@@ -88,8 +89,8 @@ pub fn split_path(path: &Path) -> Option<(&str, &Path)> {
 /// according to `policy`.
 ///
 /// `Ok(None)` means the path is absent or terminates at the wrong entry type for the
-/// policy. Store failures and missing subtrees are policy-dependent; see
-/// [`TreePathResolveError`].
+/// policy. Referenced objects must exist for every policy; missing trees and
+/// blobs return errors instead of masquerading as absent paths.
 pub fn resolve_tree_path<S: ObjectSource>(
     store: &S,
     root: &ContentHash,
@@ -103,9 +104,7 @@ pub fn resolve_tree_path<S: ObjectSource>(
         return Ok(None);
     }
 
-    let Some(tree) = load_subtree(store, root, policy)? else {
-        return Ok(None);
-    };
+    let tree = load_subtree(store, root)?;
     resolve_from_tree(store, &tree, &segments, policy)
 }
 
@@ -123,9 +122,7 @@ pub async fn resolve_tree_path_async<S: AsyncObjectSource + ?Sized>(
         return Ok(None);
     }
 
-    let Some(tree) = load_subtree_async(store, root, policy).await? else {
-        return Ok(None);
-    };
+    let tree = load_subtree_async(store, root).await?;
     resolve_from_tree_async(store, &tree, &segments, policy).await
 }
 
@@ -188,9 +185,7 @@ fn resolve_from_tree<S: ObjectSource>(
         let Some(tree_hash) = entry.tree_hash() else {
             return Ok(None);
         };
-        let Some(subtree) = load_subtree(store, &tree_hash, policy)? else {
-            return Ok(None);
-        };
+        let subtree = load_subtree(store, &tree_hash)?;
         current_tree = Cow::Owned(subtree);
     }
 
@@ -218,9 +213,7 @@ async fn resolve_from_tree_async<S: AsyncObjectSource + ?Sized>(
         let Some(tree_hash) = entry.tree_hash() else {
             return Ok(None);
         };
-        let Some(subtree) = load_subtree_async(store, &tree_hash, policy).await? else {
-            return Ok(None);
-        };
+        let subtree = load_subtree_async(store, &tree_hash).await?;
         current_tree = Cow::Owned(subtree);
     }
 
@@ -255,17 +248,13 @@ fn resolve_leaf<S: ObjectSource>(
             let Some(content_hash) = entry.leaf_content_hash() else {
                 return Ok(None);
             };
-            let blob = match store.get_blob(&content_hash) {
-                Ok(Some(blob)) => Some(blob),
-                Ok(None) => None,
-                Err(source) => {
-                    return Err(TreePathResolveError::Store {
-                        hash: content_hash,
-                        source: Box::new(source),
-                    });
+            let blob = store.require_blob(&content_hash).map_err(|source| {
+                TreePathResolveError::Store {
+                    hash: content_hash,
+                    source: Box::new(source),
                 }
-            };
-            Ok(blob.map(|blob| ResolvedTreeTarget {
+            })?;
+            Ok(Some(ResolvedTreeTarget {
                 entry,
                 content_hash: Some(content_hash),
                 blob: Some(blob),
@@ -303,17 +292,13 @@ async fn resolve_leaf_async<S: AsyncObjectSource + ?Sized>(
             let Some(content_hash) = entry.leaf_content_hash() else {
                 return Ok(None);
             };
-            let blob = match store.get_blob(&content_hash).await {
-                Ok(Some(blob)) => Some(blob),
-                Ok(None) => None,
-                Err(source) => {
-                    return Err(TreePathResolveError::Store {
-                        hash: content_hash,
-                        source: Box::new(source),
-                    });
+            let blob = store.require_blob(&content_hash).await.map_err(|source| {
+                TreePathResolveError::Store {
+                    hash: content_hash,
+                    source: Box::new(source),
                 }
-            };
-            Ok(blob.map(|blob| ResolvedTreeTarget {
+            })?;
+            Ok(Some(ResolvedTreeTarget {
                 entry,
                 content_hash: Some(content_hash),
                 blob: Some(blob),
@@ -332,25 +317,14 @@ fn entry_content_hash(entry: &TreeEntry) -> Option<ContentHash> {
 fn load_subtree<S: ObjectSource>(
     store: &S,
     hash: &ContentHash,
-    policy: LeafPolicy,
-) -> std::result::Result<Option<Tree>, TreePathResolveError> {
-    match policy {
-        LeafPolicy::Entry => Ok(store.get_tree(hash).ok().flatten()),
-        LeafPolicy::LeafContentBlob => match store.get_tree(hash) {
-            Ok(tree) => Ok(tree),
-            Err(source) => Err(TreePathResolveError::Store {
-                hash: *hash,
-                source: Box::new(source),
-            }),
-        },
-        LeafPolicy::BlobOnly => match store.get_tree(hash) {
-            Ok(Some(tree)) => Ok(Some(tree)),
-            Ok(None) => Err(TreePathResolveError::SubtreeMissing(*hash)),
-            Err(source) => Err(TreePathResolveError::Store {
-                hash: *hash,
-                source: Box::new(source),
-            }),
-        },
+) -> std::result::Result<Tree, TreePathResolveError> {
+    match store.get_tree(hash) {
+        Ok(Some(tree)) => Ok(tree),
+        Ok(None) => Err(TreePathResolveError::SubtreeMissing(*hash)),
+        Err(source) => Err(TreePathResolveError::Store {
+            hash: *hash,
+            source: Box::new(source),
+        }),
     }
 }
 
@@ -358,24 +332,13 @@ fn load_subtree<S: ObjectSource>(
 async fn load_subtree_async<S: AsyncObjectSource + ?Sized>(
     store: &S,
     hash: &ContentHash,
-    policy: LeafPolicy,
-) -> std::result::Result<Option<Tree>, TreePathResolveError> {
-    match policy {
-        LeafPolicy::Entry => Ok(store.get_tree(hash).await.ok().flatten()),
-        LeafPolicy::LeafContentBlob => match store.get_tree(hash).await {
-            Ok(tree) => Ok(tree),
-            Err(source) => Err(TreePathResolveError::Store {
-                hash: *hash,
-                source: Box::new(source),
-            }),
-        },
-        LeafPolicy::BlobOnly => match store.get_tree(hash).await {
-            Ok(Some(tree)) => Ok(Some(tree)),
-            Ok(None) => Err(TreePathResolveError::SubtreeMissing(*hash)),
-            Err(source) => Err(TreePathResolveError::Store {
-                hash: *hash,
-                source: Box::new(source),
-            }),
-        },
+) -> std::result::Result<Tree, TreePathResolveError> {
+    match store.get_tree(hash).await {
+        Ok(Some(tree)) => Ok(tree),
+        Ok(None) => Err(TreePathResolveError::SubtreeMissing(*hash)),
+        Err(source) => Err(TreePathResolveError::Store {
+            hash: *hash,
+            source: Box::new(source),
+        }),
     }
 }

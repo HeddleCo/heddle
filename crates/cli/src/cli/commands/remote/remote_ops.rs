@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pull, remote management, and serve commands.
 
-use std::path::Path;
+use std::{ops::ControlFlow, path::Path};
 
 use anyhow::{Context, Result};
 /// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
@@ -25,7 +25,7 @@ use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
 use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
-    object::{StateId, ThreadName, Tree},
+    object::{StateId, ThreadName, diff_trees_visit},
     store::ObjectStore,
 };
 use refs::Head;
@@ -1146,18 +1146,19 @@ fn changed_paths_between_states(
         .get_state(new_state)?
         .context("new pulled state was not found in Heddle storage")?;
     let old_tree = match old_state {
-        Some(old_state) => repo
-            .store()
-            .get_state(old_state)?
-            .map(|state| state.tree)
-            .unwrap_or_else(|| Tree::new().hash()),
-        None => Tree::new().hash(),
+        Some(old_state) => Some(
+            repo.store()
+                .get_state(old_state)?
+                .ok_or(objects::HeddleError::StateNotFound(*old_state))?
+                .tree,
+        ),
+        None => None,
     };
-    let mut paths = repo
-        .diff_trees(&old_tree, &new_state.tree)?
-        .iter()
-        .map(|change| change.path.clone())
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    let _ = diff_trees_visit(repo.store(), old_tree.as_ref(), &new_state.tree, |change| {
+        paths.push(change.path);
+        ControlFlow::<()>::Continue(())
+    })?;
     paths.sort_unstable();
     paths.dedup();
     Ok(paths)

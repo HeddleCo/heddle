@@ -2030,9 +2030,7 @@ pub fn thread_is_unclaimed_bootstrap(
     if !state.parents.is_empty() {
         return Ok(false);
     }
-    let Some(tree) = heddle_repo.store().get_tree(&state.tree)? else {
-        return Ok(false);
-    };
+    let tree = heddle_repo.require_tree(&state.tree)?;
     Ok(tree == Tree::new())
 }
 

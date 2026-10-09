@@ -859,7 +859,7 @@ impl Repository {
 
     /// Look up the subtree at `rel_path` within `root_tree`. Returns `None`
     /// if the path isn't reachable as a `Tree`-typed entry (missing entry,
-    /// blob entry, or unresolved hash). Used by callers to derive the
+    /// blob entry). Missing recorded trees are errors. Used by callers to derive the
     /// source subtree for [`Self::remove_tracked_descendants_with_source`].
     pub fn resolve_subtree(&self, root_tree: &Tree, rel_path: &Path) -> Result<Option<Tree>> {
         // Walk component-by-component, owning the current subtree at each
@@ -902,7 +902,7 @@ impl Repository {
         let Some(tree_hash) = entry.tree_hash() else {
             return Ok(None);
         };
-        self.store().get_tree(&tree_hash)
+        Ok(Some(self.require_tree(&tree_hash)?))
     }
 }
 
@@ -1188,10 +1188,7 @@ fn remove_tracked_descendants_inner(
                 let Some(tree_hash) = entry.tree_hash() else {
                     continue;
                 };
-                let nested = match repo.store().get_tree(&tree_hash)? {
-                    Some(t) => t,
-                    None => continue,
-                };
+                let nested = repo.require_tree(&tree_hash)?;
                 remove_tracked_descendants_inner(repo, &child, &nested)?;
             }
         }

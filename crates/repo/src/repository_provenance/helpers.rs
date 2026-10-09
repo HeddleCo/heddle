@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{collections::HashMap, path::Path};
 
-pub(super) use objects::util::split_text_lines;
-use objects::{
-    object::{
-        Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State,
-        Tree, TreeEntry, resolve_tree_path,
-    },
-    store::ObjectStore,
+use objects::object::{
+    Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State, Tree,
+    TreeEntry, resolve_tree_path,
 };
+pub(super) use objects::util::split_text_lines;
 
 use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
 
@@ -62,10 +59,7 @@ pub(super) fn synthesize_file_provenance_from_blob(
 }
 
 pub(super) fn load_blob_bytes(repo: &Repository, hash: ContentHash) -> Result<Vec<u8>> {
-    let blob = repo
-        .store()
-        .get_blob(&hash)?
-        .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
+    let blob = repo.require_blob(&hash)?;
     if std::str::from_utf8(blob.content()).is_err() {
         return Err(HeddleError::InvalidObject(
             "provenance references binary data".to_string(),
@@ -134,7 +128,11 @@ pub(super) fn coalesce_line_spans(line_origin_sets: &[u32]) -> Vec<LineSpan> {
 
 pub(super) use objects::object::split_path;
 
-pub(super) fn lookup_tree_entry(repo: &Repository, tree: &Tree, path: &Path) -> Option<TreeEntry> {
+pub(super) fn lookup_tree_entry(
+    repo: &Repository,
+    tree: &Tree,
+    path: &Path,
+) -> Result<Option<TreeEntry>> {
     lookup_tree_entry_from_source(repo.store(), tree, path)
 }
 
@@ -142,9 +140,9 @@ pub(super) fn lookup_tree_entry_from_source<S: objects::store::ObjectSource>(
     source: &S,
     tree: &Tree,
     path: &Path,
-) -> Option<TreeEntry> {
-    resolve_tree_path(source, &tree.hash(), path, LeafPolicy::Entry)
-        .ok()
-        .flatten()
-        .map(|target| target.entry)
+) -> Result<Option<TreeEntry>> {
+    Ok(
+        resolve_tree_path(source, &tree.hash(), path, LeafPolicy::Entry)?
+            .map(|target| target.entry),
+    )
 }

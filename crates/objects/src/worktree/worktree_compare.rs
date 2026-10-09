@@ -126,9 +126,8 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                     let subtree = match tree_entries.get(&name) {
                         Some(tree_entry) if tree_entry.is_tree() => tree_entry
                             .tree_hash()
-                            .map(|hash| store.get_tree(&hash))
-                            .transpose()?
-                            .flatten(),
+                            .map(|hash| store.require_tree(&hash))
+                            .transpose()?,
                         _ => None,
                     };
 
@@ -155,9 +154,8 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                 EntryType::Blob | EntryType::Gitlink | EntryType::Symlink
             ) {
                 status.deleted.push(rel_path);
-            } else if let Some(tree_hash) = entry.tree_hash()
-                && let Some(subtree) = store.get_tree(&tree_hash)?
-            {
+            } else if let Some(tree_hash) = entry.tree_hash() {
+                let subtree = store.require_tree(&tree_hash)?;
                 mark_all_deleted(store, &rel_path, &subtree, status)?;
             }
         }
@@ -180,9 +178,8 @@ fn mark_all_deleted<S: ObjectStore + ?Sized>(
                 status.deleted.push(path);
             }
             EntryType::Tree => {
-                if let Some(tree_hash) = entry.tree_hash()
-                    && let Some(subtree) = store.get_tree(&tree_hash)?
-                {
+                if let Some(tree_hash) = entry.tree_hash() {
+                    let subtree = store.require_tree(&tree_hash)?;
                     mark_all_deleted(store, &path, &subtree, status)?;
                 }
             }

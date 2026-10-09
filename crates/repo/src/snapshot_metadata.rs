@@ -256,9 +256,8 @@ fn collect_tree_paths(
             format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(tree_hash) = entry.tree_hash()
-                && let Some(subtree) = repo.store().get_tree(&tree_hash)?
-            {
+            if let Some(tree_hash) = entry.tree_hash() {
+                let subtree = repo.require_tree(&tree_hash)?;
                 collect_tree_paths(repo, &subtree, &path, out)?;
             }
         } else {

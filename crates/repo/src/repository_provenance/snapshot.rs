@@ -63,10 +63,7 @@ impl Repository {
         state: &State,
         parents: &[ParentRef<'_>],
     ) -> Result<Option<ContentHash>> {
-        let current_tree = self
-            .store
-            .get_tree(&state.tree)?
-            .ok_or_else(|| super::HeddleError::NotFound(format!("tree {}", state.tree)))?;
+        let current_tree = self.require_tree(&state.tree)?;
 
         let Some(tree_hash) =
             self.build_provenance_tree_recursive(Path::new(""), &current_tree, parents, state)?
@@ -92,9 +89,7 @@ impl Repository {
                     let Some(tree_hash) = entry.tree_hash() else {
                         continue;
                     };
-                    let Some(subtree) = self.store.get_tree(&tree_hash)? else {
-                        continue;
-                    };
+                    let subtree = self.require_tree(&tree_hash)?;
                     // For each parent, descend into the same-name
                     // subtree if one exists. Parents that lack the
                     // subdir simply contribute nothing for this branch
@@ -110,9 +105,7 @@ impl Repository {
                         let Some(child_tree_hash) = child_entry.tree_hash() else {
                             continue;
                         };
-                        let Some(subtree_obj) = self.store.get_tree(&child_tree_hash)? else {
-                            continue;
-                        };
+                        let subtree_obj = self.require_tree(&child_tree_hash)?;
                         parent_subtrees.push(ParentRef {
                             state: parent.state,
                             tree: subtree_obj,
@@ -161,9 +154,7 @@ impl Repository {
         let Some(current_hash) = current_entry.blob_hash() else {
             return Ok(None);
         };
-        let Some(current_blob) = self.store.get_blob(&current_hash)? else {
-            return Ok(None);
-        };
+        let current_blob = self.require_blob(&current_hash)?;
         let Some(current_lines) = split_text_lines(current_blob.content()) else {
             return Ok(None);
         };
@@ -174,7 +165,7 @@ impl Repository {
         let mut parent_provenances: Vec<FileProvenance> = Vec::with_capacity(parents.len());
         let mut parent_blob_hashes: Vec<ContentHash> = Vec::with_capacity(parents.len());
         for parent in parents {
-            let Some(parent_entry) = lookup_tree_entry(self, &parent.tree, path) else {
+            let Some(parent_entry) = lookup_tree_entry(self, &parent.tree, path)? else {
                 continue;
             };
             if !parent_entry.is_blob() {
@@ -183,7 +174,7 @@ impl Repository {
             let Some(parent_hash) = parent_entry.blob_hash() else {
                 continue;
             };
-            let parent_blob = self.store.get_blob(&parent_hash)?;
+            let parent_blob = Some(self.require_blob(&parent_hash)?);
 
             // Pull from the parent's stored provenance root if we have
             // one, otherwise synthesize a single-origin record for the

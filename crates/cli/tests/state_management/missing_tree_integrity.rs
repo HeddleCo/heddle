@@ -158,3 +158,115 @@ fn test_revert_missing_parent_tree_fails_loud_not_silent_empty() {
     );
     assert_missing_tree_error(&err, &parent_tree_hex);
 }
+
+/// Retain the tip's content and all state descriptors, but omit an older
+/// tree, as a tip-only hosted clone does.
+fn historical_tree_fixture() -> (TempDir, String, String, String) {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("a.txt"), "first\n").unwrap();
+    fs::write(temp.path().join("unchanged.txt"), "unchanged\n").unwrap();
+    heddle(&["capture", "-m", "first"], Some(temp.path())).unwrap();
+    let repo = Repository::open(temp.path()).unwrap();
+    let first = repo.current_state().unwrap().unwrap();
+    drop(repo);
+    fs::write(temp.path().join("a.txt"), "second\n").unwrap();
+    heddle(&["capture", "-m", "second"], Some(temp.path())).unwrap();
+    let repo = Repository::open(temp.path()).unwrap();
+    let second = repo.current_state().unwrap().unwrap();
+    drop(repo);
+    fs::write(temp.path().join("a.txt"), "tip\n").unwrap();
+    heddle(&["capture", "-m", "tip"], Some(temp.path())).unwrap();
+    assert!(delete_tree_object(temp.path(), &first.tree.to_hex()));
+    (
+        temp,
+        first.state_id.to_string_full(),
+        second.state_id.to_string_full(),
+        first.tree.to_hex(),
+    )
+}
+
+fn assert_historical_tree_unavailable(args: &[&str], temp: &TempDir, tree: &str) {
+    for json in [false, true] {
+        let mut args = args.to_vec();
+        if json {
+            args.extend(["--output", "json"]);
+        }
+        let output = super::heddle_output(&args, Some(temp.path())).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "missing historical tree must fail, stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "must not render fabricated content"
+        );
+        assert!(stderr.contains("not available locally"), "{stderr}");
+        if json {
+            let envelope: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+            assert_eq!(envelope["kind"], "repository_integrity_error");
+            assert!(
+                envelope["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(tree)),
+                "{stderr}"
+            );
+        } else {
+            assert_missing_tree_error(&stderr, tree);
+        }
+    }
+}
+
+#[test]
+fn test_diff_missing_historical_tree_is_not_empty() {
+    let (temp, first, second, tree) = historical_tree_fixture();
+    assert_historical_tree_unavailable(&["diff", &first, &second, "--patch"], &temp, &tree);
+    assert_historical_tree_unavailable(&["diff", &second, &first, "--stat"], &temp, &tree);
+}
+
+#[test]
+fn test_log_path_missing_historical_tree_is_not_empty() {
+    let (temp, _, second, tree) = historical_tree_fixture();
+    assert_historical_tree_unavailable(&["log", &second, "--path", "unchanged.txt"], &temp, &tree);
+}
+
+#[test]
+fn test_show_missing_historical_tree_is_not_empty() {
+    let (temp, first, _, tree) = historical_tree_fixture();
+    assert_historical_tree_unavailable(&["show", &first], &temp, &tree);
+}
+
+#[test]
+fn test_diff_missing_historical_blob_is_not_empty() {
+    let (temp, _, second, _) = historical_tree_fixture();
+    // The fixture promoted every blob to loose storage while removing packs.
+    let hash = objects::object::Blob::from_slice(b"second\n").hash();
+    let hex = hash.to_hex();
+    let path = temp
+        .path()
+        .join(".heddle/objects/blobs")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    fs::remove_file(path).expect("remove historical blob");
+    let output = super::heddle_output(
+        &["diff", &second, "--patch", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        !output.status.success(),
+        "missing blob must fail: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("blob") && stderr.contains("not available locally"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&hex), "{stderr}");
+    let envelope: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(envelope["kind"], "repository_integrity_error");
+}

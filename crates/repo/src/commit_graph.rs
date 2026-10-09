@@ -7,7 +7,7 @@ use anyhow::Result;
 #[cfg(feature = "async-source")]
 use objects::store::AsyncObjectSource;
 use objects::{
-    object::{ContentHash, StateId, Tree, diff_trees},
+    object::{ContentHash, StateId, diff_trees_visit},
     store::{FsStore, ObjectSource, ObjectStore},
 };
 use oplog::OpLogBackend;
@@ -358,28 +358,34 @@ where
             return Ok(());
         }
 
-        let Some(node) = self.nodes.get(&id) else {
-            return Ok(());
-        };
+        let node = self
+            .nodes
+            .get(&id)
+            .ok_or(objects::HeddleError::StateNotFound(id))?;
         let state_tree = node.tree_hash;
         let parent_id = node.parents.first().copied();
 
         let parent_tree = if let Some(pid) = parent_id {
-            self.nodes
-                .get(&pid)
-                .map(|n| n.tree_hash)
-                .unwrap_or_else(|| Tree::new().hash())
+            Some(
+                self.nodes
+                    .get(&pid)
+                    .map(|n| n.tree_hash)
+                    .ok_or(objects::HeddleError::StateNotFound(pid))?,
+            )
         } else {
-            Tree::new().hash()
+            None
         };
 
         let source = HistoryObjectSource::new(self.source);
-        let changes = diff_trees(&source, &parent_tree, &state_tree)?;
         let mut bloom = [0u8; 256];
-        for change in changes.iter() {
+        let _ = diff_trees_visit(&source, parent_tree.as_ref(), &state_tree, |change| {
             bloom_insert(&mut bloom, &change.path);
-        }
-        self.nodes.get_mut(&id).unwrap().bloom = Some(bloom);
+            std::ops::ControlFlow::<()>::Continue(())
+        })?;
+        self.nodes
+            .get_mut(&id)
+            .ok_or(objects::HeddleError::StateNotFound(id))?
+            .bloom = Some(bloom);
         self.persistence_dirty = true;
         Ok(())
     }
@@ -755,6 +761,13 @@ mod tests {
         let mut lazy_graph = CommitGraphIndex::new(&repo);
         lazy_graph.ensure_loaded(tip.id())?;
         assert!(lazy_graph.node_metadata(&parent.id()).is_none());
+        let error = lazy_graph
+            .ensure_bloom_populated(tip.id())
+            .expect_err("an unavailable parent cannot supply an empty comparison tree");
+        assert!(
+            matches!(error.downcast_ref::<objects::HeddleError>(), Some(objects::HeddleError::StateNotFound(id)) if *id == parent.id())
+        );
+        assert!(lazy_graph.node_bloom(&tip.id()).is_none());
         drop(lazy_graph);
 
         // Emulate the exact poisoned v2 cache shape written by older builds,
