@@ -448,21 +448,29 @@ impl HostedClient {
         &mut self,
         repo_path: &str,
     ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
-        Ok(self.advertised_pull_refs(repo_path).await?.refs)
+        Ok(self.advertised_pull_refs(repo_path, None).await?.refs)
     }
 
     async fn advertised_pull_refs(
         &mut self,
         repo_path: &str,
+        snapshot: Option<&[ThreadOverview]>,
     ) -> Result<PullBootstrapRefs, ProtocolError> {
-        let overviews = self.observe_thread_overviews(repo_path).await?;
+        let observed;
+        let overviews = match snapshot {
+            Some(overviews) => overviews,
+            None => {
+                observed = self.observe_thread_overviews(repo_path).await?;
+                &observed
+            }
+        };
         let mut refs = Vec::new();
         let mut head_thread = None;
         for overview in overviews {
             if head_thread.is_none() && (overview.name == "main" || overview.name == "master") {
                 head_thread = Some(overview.name.clone());
             }
-            if let Some(entry) = hosted_ref_from_overview(&overview)? {
+            if let Some(entry) = hosted_ref_from_overview(overview)? {
                 refs.push(entry);
             }
         }
@@ -1355,7 +1363,7 @@ impl HostedClient {
         let started = Instant::now();
         let local_tip = local_thread_tip(repo, local_thread.unwrap_or(remote_thread))?;
         let complete = self
-            .fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip)
+            .fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip, None)
             .await?;
         Ok((
             complete,
@@ -1377,7 +1385,7 @@ impl HostedClient {
     ) -> Result<PullComplete, ProtocolError> {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
         let local_tip = local_thread_tip(repo, local_thread.unwrap_or(remote_thread))?;
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip)
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, local_tip, None)
             .await
     }
 
@@ -1390,7 +1398,7 @@ impl HostedClient {
         materialization: PullMaterialization,
     ) -> Result<PullComplete, ProtocolError> {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, None)
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, None, None)
             .await
     }
 
@@ -1406,7 +1414,12 @@ impl HostedClient {
         F: FnOnce(&PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        let advertised = self.advertised_pull_refs(repo_path).await?;
+        // Retain this complete, paged snapshot for every Thread installed by
+        // this clone. Other reads and later pulls still observe current heads.
+        let overviews = self.observe_thread_overviews(repo_path).await?;
+        let advertised = self
+            .advertised_pull_refs(repo_path, Some(&overviews))
+            .await?;
         if advertised.refs.is_empty() {
             return Err(ProtocolError::InvalidState(
                 "Fetch requires a started Thread with published source; this spool has none".into(),
@@ -1426,13 +1439,13 @@ impl HostedClient {
         }
         let repo = initialize(&advertised)?;
         let complete = self
-            .fetch_hosted_thread(&repo, repo_path, &track, None, None)
+            .fetch_hosted_thread(&repo, repo_path, &track, None, None, Some(&overviews))
             .await?;
         for entry in &advertised.refs {
             if !entry.is_user_thread() || entry.name == track {
                 continue;
             }
-            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None, None)
+            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None, None, Some(&overviews))
                 .await?;
         }
         Ok((complete, repo))
@@ -1464,9 +1477,16 @@ impl HostedClient {
         remote_thread: &str,
         target_state: StateId,
     ) -> Result<usize, ProtocolError> {
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, Some(target_state), None)
-            .await
-            .map(|complete| usize::from(complete.success))
+        self.fetch_hosted_thread(
+            repo,
+            repo_path,
+            remote_thread,
+            Some(target_state),
+            None,
+            None,
+        )
+        .await
+        .map(|complete| usize::from(complete.success))
     }
 
     pub async fn hydrate_missing_blobs_for_state(
@@ -1491,14 +1511,19 @@ impl HostedClient {
         remote_thread: &str,
         target_state: Option<StateId>,
         local_tip: Option<StateId>,
+        snapshot: Option<&[ThreadOverview]>,
     ) -> Result<PullComplete, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let resolved = self.resolve_thread_ref(repo_path, remote_thread).await?;
-        let overview = self
-            .observe_thread_overviews(repo_path)
-            .await?
-            .into_iter()
-            .find(|overview| {
+        let observed;
+        let overviews = match snapshot {
+            Some(overviews) => overviews,
+            None => {
+                observed = self.observe_thread_overviews(repo_path).await?;
+                &observed
+            }
+        };
+        let overview = overviews.iter().find(|overview| {
                 overview.name == remote_thread && overview.r#ref.as_ref() == Some(&resolved)
             })
             .ok_or_else(|| {
@@ -1514,7 +1539,7 @@ impl HostedClient {
         // State's content. Hydrate replay trees through the fork base before
         // pull advances the checkout; ready must not discover missing trees
         // halfway through a rebase. Each Fetch keeps its own admission budget.
-        let mut pending = fetch_revisions(&overview, &spool, target_state)?
+        let mut pending = fetch_revisions(overview, &spool, target_state)?
             .into_iter()
             .map(|(state, revision)| (state, revision, reference.clone(), true))
             .collect::<std::collections::VecDeque<_>>();
@@ -2816,7 +2841,10 @@ mod tests {
         let (mut client, server, captured) =
             super::super::test_server::start_with_thread_listing(fixture).await;
 
-        let advertised = client.advertised_pull_refs("acme/widgets").await.unwrap();
+        let advertised = client
+            .advertised_pull_refs("acme/widgets", None)
+            .await
+            .unwrap();
         assert_eq!(advertised.refs.len(), 67);
         assert_eq!(advertised.head_thread.as_deref(), Some("main"));
         assert!(advertised.refs.iter().any(|entry| entry.name == "wanted"));

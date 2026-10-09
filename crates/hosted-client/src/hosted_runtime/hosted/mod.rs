@@ -35,6 +35,7 @@ mod native_transport_tests;
 mod netd_trust_tests;
 pub(crate) mod operation_id;
 mod provider_transport;
+mod resolution;
 mod resolver;
 #[cfg(test)]
 mod security_rotation_tests;
@@ -69,7 +70,7 @@ use std::sync::Arc;
 
 use api::heddle::api::common::CallContext;
 pub use bootstrap::{
-    DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
+    BootstrapHttp, DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
     fetch_ephemeral_descriptor_set,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
@@ -200,6 +201,7 @@ pub enum PullMaterialization {
 #[derive(Clone)]
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
+    resolutions: Arc<resolution::ResolutionCache>,
     context: CallContextFactory,
     on_human_signature: Option<HumanSignatureCallback>,
     warnings: Arc<dyn WarningSink>,
@@ -241,18 +243,21 @@ impl HostedClient {
         &self,
     ) -> anyhow::Result<
         thread_api::Remote<
-            thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+            impl api::v2::client::RpcTransport<Error = thread_api::transport::Error> + use<>,
         >,
     > {
         let credentials = self.context.native_credentials()?;
         let timeout = self.context.progress_timeout();
         let transport = || {
-            thread_api::transport::IrohTransport::new(
-                self.connection.connection.clone(),
-                credentials.clone(),
-                api::framing::MAX_CONTROL_BODY,
-                timeout,
-            )
+            Ok::<_, thread_api::transport::Error>(resolution::ResolutionTransport::new(
+                thread_api::transport::IrohTransport::new(
+                    self.connection.connection.clone(),
+                    credentials.clone(),
+                    api::framing::MAX_CONTROL_BODY,
+                    timeout,
+                )?,
+                self.resolutions.clone(),
+            ))
         };
         let description = self
             .connection
@@ -323,7 +328,9 @@ impl HostedClient {
             // The caller already verified `descriptor`; netd is only used
             // when it holds a session to that exact Weft identity. Otherwise
             // netd is bypassed and the verified descriptor is dialed directly.
-            match Self::connect_via_netd(server, config, Some(descriptor)).await {
+            match Self::connect_via_netd(server, config, Some(descriptor), &descriptor.http(config))
+                .await
+            {
                 Ok(client) => return Ok(client),
                 Err(error) => {
                     tracing::debug!(%error, "netd hosted bridge unusable; connecting locally");
@@ -340,11 +347,14 @@ impl HostedClient {
         server: &str,
         config: &ClientConfig,
         descriptor: Option<&VerifiedEndpointDescriptor>,
+        http: &BootstrapHttp,
     ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         let client = Self {
-            connection: HostedConnection::connect_via_netd(server, config, descriptor).await?,
+            connection: HostedConnection::connect_via_netd(server, config, descriptor, http)
+                .await?,
             context,
+            resolutions: Arc::default(),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -352,7 +362,7 @@ impl HostedClient {
             witness_lookup: descriptor
                 .and_then(|value| value.hosted_root())
                 .map(|root| {
-                    descriptor_trust::HostedWitnessLookup::new(root.authority(), config)
+                    descriptor_trust::HostedWitnessLookup::new(root.authority(), http.clone())
                         .map(Arc::new)
                 })
                 .transpose()?,
@@ -394,6 +404,7 @@ impl HostedClient {
                 description,
             ),
             context,
+            resolutions: Arc::default(),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -401,8 +412,11 @@ impl HostedClient {
             witness_lookup: descriptor
                 .hosted_root()
                 .map(|root| {
-                    descriptor_trust::HostedWitnessLookup::new(root.authority(), config)
-                        .map(Arc::new)
+                    descriptor_trust::HostedWitnessLookup::new(
+                        root.authority(),
+                        descriptor.http(config),
+                    )
+                    .map(Arc::new)
                 })
                 .transpose()?,
         })
@@ -413,6 +427,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
+            resolutions: Arc::default(),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -430,6 +445,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
+            resolutions: Arc::default(),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -446,6 +462,7 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
+            resolutions: Arc::default(),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,

@@ -407,10 +407,14 @@ async fn netd_matching_pin_honours_custom_ca_and_reuses_warm_session() {
     let fixture = Fixture::start(NetdWarm::Attested).await;
     let _home = PinHeddleHome::new(fixture.home.path());
     for _ in 0..2 {
-        let client =
-            HostedClient::connect_via_netd(fixture.https.authority(), &fixture.config, None)
-                .await
-                .expect("matching pinned route");
+        let client = HostedClient::connect_via_netd(
+            fixture.https.authority(),
+            &fixture.config,
+            None,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&fixture.config),
+        )
+        .await
+        .expect("matching pinned route");
         assert!(client.reused_warm_connection());
         client.close().await;
     }
@@ -428,6 +432,7 @@ async fn netd_pin_accepts_any_attested_live_endpoint_in_the_set() {
     let preferred = super::resolver::resolve_and_verify_endpoint_descriptor(
         fixture.https.authority(),
         &fixture.config,
+        &crate::hosted_runtime::hosted::BootstrapHttp::new(&fixture.config),
     )
     .await
     .expect("first verified endpoint");
@@ -435,9 +440,14 @@ async fn netd_pin_accepts_any_attested_live_endpoint_in_the_set() {
         preferred.endpoint_addr().expect("preferred address").id,
         fixture.weft.endpoint.id()
     );
-    let client = HostedClient::connect_via_netd(fixture.https.authority(), &fixture.config, None)
-        .await
-        .expect("warm endpoint is attested even though it is not first");
+    let client = HostedClient::connect_via_netd(
+        fixture.https.authority(),
+        &fixture.config,
+        None,
+        &crate::hosted_runtime::hosted::BootstrapHttp::new(&fixture.config),
+    )
+    .await
+    .expect("warm endpoint is attested even though it is not first");
     assert!(client.reused_warm_connection());
     assert_eq!(fixture.weft.authenticated(), 1);
     client.close().await;
@@ -456,6 +466,7 @@ async fn netd_preserves_an_already_verified_descriptor() {
         let descriptor = super::resolver::resolve_and_verify_endpoint_descriptor(
             fixture.https.authority(),
             &fixture.config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&fixture.config),
         )
         .await
         .expect("caller verified descriptor");
@@ -533,9 +544,14 @@ async fn netd_honours_tls_name_and_rejects_invalid_tls_policy() {
     let fixture = Fixture::start(NetdWarm::Attested).await;
     let _home = PinHeddleHome::new(fixture.home.path());
     let config = fixture.config.clone().with_tls_domain_name("127.0.0.1");
-    let client = HostedClient::connect_via_netd(fixture.https.authority(), &config, None)
-        .await
-        .expect("matching TLS name");
+    let client = HostedClient::connect_via_netd(
+        fixture.https.authority(),
+        &config,
+        None,
+        &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+    )
+    .await
+    .expect("matching TLS name");
     assert!(client.reused_warm_connection());
     client.close().await;
     for invalid in [
@@ -574,7 +590,14 @@ async fn netd_rejection(
     config: &ClientConfig,
     expectation: &str,
 ) -> super::HostedError {
-    match HostedClient::connect_via_netd(server, config, None).await {
+    match HostedClient::connect_via_netd(
+        server,
+        config,
+        None,
+        &crate::hosted_runtime::hosted::BootstrapHttp::new(config),
+    )
+    .await
+    {
         Ok(client) => {
             client.close().await;
             panic!("netd route accepted: {expectation}");

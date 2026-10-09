@@ -36,17 +36,25 @@ async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
         let server = server_with_root("first-key", &root, 2);
         let config = trusted_config(&server);
 
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         let pin = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin.key_id, "first-key");
         assert_eq!(pin.public_key, hex::encode(root.public_key()));
         assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
 
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             server.requests(),
             [KEY_PATH, DESCRIPTOR_PATH, DESCRIPTOR_PATH]
@@ -63,10 +71,13 @@ async fn tls_authenticates_first_contact_and_configured_ca_allows_it() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = server_with_root("tls-key", &root, 1);
-        let untrusted_error =
-            resolve_and_verify_endpoint_descriptor(server.authority(), &Default::default())
-                .await
-                .unwrap_err();
+        let untrusted_error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &Default::default(),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&Default::default()),
+        )
+        .await
+        .unwrap_err();
         let message = untrusted_error.to_string();
         assert!(message.contains("HTTPS request failed"));
         assert!(
@@ -75,9 +86,13 @@ async fn tls_authenticates_first_contact_and_configured_ca_allows_it() {
         );
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
 
-        resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
+        )
+        .await
+        .unwrap();
         assert!(load_automatic_pin(server.authority()).unwrap().is_some());
     })
     .await;
@@ -89,9 +104,13 @@ async fn failed_tls_chain_is_rejected_outright() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = server_with_root("tls-fail", &root, 1);
-        let error = resolve_and_verify_endpoint_descriptor(server.authority(), &Default::default())
-            .await
-            .unwrap_err();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &Default::default(),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&Default::default()),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("HTTPS request failed"));
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
     })
@@ -135,6 +154,7 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
             let result = resolve_and_verify_endpoint_descriptor(
                 server.authority(),
                 &trusted_config(&server),
+                &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
             )
             .await;
             assert!(result.is_err(), "{name} unexpectedly succeeded");
@@ -153,9 +173,13 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
         let server =
             TestHttpsServer::start(routes_for_root("candidate", &published_root, &attestor, 1));
         assert!(
-            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-                .await
-                .is_err()
+            resolve_and_verify_endpoint_descriptor(
+                server.authority(),
+                &trusted_config(&server),
+                &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server))
+            )
+            .await
+            .is_err()
         );
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
         assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
@@ -185,10 +209,13 @@ async fn unattested_and_tampered_entries_are_never_dialed() {
                 VecDeque::from([TestResponse::json(set_document(&[entry]))]),
             ),
         ]));
-        let error =
-            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-                .await
-                .unwrap_err();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("signature is invalid"),
             "{error}"
@@ -225,13 +252,21 @@ async fn ephemeral_rotation_under_the_pinned_root_does_not_change_the_pin() {
             ),
         ]));
         let config = trusted_config(&server);
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         let before = fs::read(super::descriptor_trust_path()).unwrap();
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         assert_eq!(fs::read(super::descriptor_trust_path()).unwrap(), before);
         let pin = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin.key_id, "stable-root");
@@ -268,9 +303,13 @@ async fn served_set_cannot_swap_the_pinned_root() {
             ),
         ]));
         let config = trusted_config(&server);
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         let before = fs::read(super::descriptor_trust_path()).unwrap();
 
         let error = tokio::time::timeout(
@@ -325,10 +364,13 @@ async fn expired_and_not_yet_valid_entries_are_excluded() {
                 VecDeque::from([TestResponse::json(set_document(&[expired, pending]))]),
             ),
         ]));
-        let error =
-            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-                .await
-                .unwrap_err();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("expired or not yet valid"),
             "{error}"
@@ -362,9 +404,13 @@ async fn region_preference_selects_local_then_falls_back_to_remote() {
             ),
         ]));
         let config = trusted_config(&server).with_preferred_region("hel");
-        let verified = resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        let verified = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             verified.document().endpoint_id,
             hex::encode(local_ephemeral.public_key())
@@ -391,9 +437,13 @@ async fn region_preference_selects_local_then_falls_back_to_remote() {
             ),
         ]));
         let config = trusted_config(&server).with_preferred_region("hel");
-        let verified = resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        let verified = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             verified.document().endpoint_id,
             hex::encode(remote_ephemeral.public_key())
@@ -464,9 +514,13 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
         )]));
         let public_key: [u8; 32] = root.public_key().try_into().unwrap();
         let config = trusted_config(&server).with_descriptor_trust("explicit-id", public_key);
-        resolve_and_verify_endpoint_descriptor(server.authority(), &config)
-            .await
-            .unwrap();
+        resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &config,
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&config),
+        )
+        .await
+        .unwrap();
         assert_eq!(server.requests(), [DESCRIPTOR_PATH]);
         assert!(!super::descriptor_trust_path().exists());
     })
@@ -474,10 +528,13 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
 
     with_isolated_home_async(|_| async {
         let server = TestHttpsServer::start(HashMap::new());
-        let error =
-            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-                .await
-                .unwrap_err();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains(
             "server does not publish descriptor trust; configure both values or upgrade the server"
         ));
@@ -500,10 +557,13 @@ async fn missing_iroh_endpoint_is_named_and_never_downgrades() {
             ))]),
         )]));
 
-        let error =
-            resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
-                .await
-                .unwrap_err();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server),
+            &crate::hosted_runtime::hosted::BootstrapHttp::new(&trusted_config(&server)),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             error

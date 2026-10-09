@@ -117,6 +117,10 @@ impl HostedClient {
         if let Ok(id) = uuid::Uuid::parse_str(address) {
             return Ok(contract::SpoolRef { id: id.to_string() });
         }
+        let mut cache = self.resolutions.entries().await;
+        if let Some(spool) = cache.spools.get(address) {
+            return Ok(spool.clone());
+        }
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -130,9 +134,12 @@ impl HostedClient {
             })
             .await
             .map_err(super::helpers::native_client_error)?;
-        match resolved_entity(response)? {
+        match resolved_entity(response)
+            .inspect_err(|error| self.resolutions.invalidate_protocol_error(error))?
+        {
             contract::entity_ref::Entity::Spool(spool) => {
                 uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
+                cache.spools.insert(address.to_owned(), spool.clone());
                 Ok(spool)
             }
             _ => Err(ProtocolError::InvalidState(
@@ -155,6 +162,11 @@ impl HostedClient {
                 id: Some(contract::ThreadId { value }),
             });
         }
+        let key = (spool.id.clone(), name_or_id.to_owned());
+        let mut cache = self.resolutions.entries().await;
+        if let Some(thread) = cache.threads.get(&key) {
+            return Ok(thread.clone());
+        }
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -171,7 +183,8 @@ impl HostedClient {
             })
             .await
             .map_err(super::helpers::native_client_error)?;
-        let resolved = resolved_entity(response)?;
+        let resolved = resolved_entity(response)
+            .inspect_err(|error| self.resolutions.invalidate_protocol_error(error))?;
         let contract::entity_ref::Entity::Thread(reference) = resolved else {
             return Err(ProtocolError::InvalidState(
                 "Thread name resolution returned another resource type".into(),
@@ -184,6 +197,7 @@ impl HostedClient {
                 "Thread name resolution returned an inconsistent identity".into(),
             ));
         }
+        cache.threads.insert(key, reference.clone());
         Ok(reference)
     }
 
