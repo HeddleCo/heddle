@@ -234,6 +234,10 @@ pub(super) fn base_command(binary: &Path, cwd: &Path) -> Command {
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         command.env("TMPDIR", tmpdir);
     }
+    // The coverage-instrumented child needs its profile path or it writes default_*.profraw into the fixture.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command
 }
 
