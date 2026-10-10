@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-cli-args-v0.29.0...heddle-cli-args-v0.30.0) - 2026-10-10
+
+### Added
+
+- *(cli)* add heddle import cancel ([#2056](https://github.com/HeddleCo/heddle/pull/2056))
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-cli-args-v0.28.13...heddle-cli-args-v0.28.14) - 2026-10-08
 
 ### Other
