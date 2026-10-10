@@ -89,7 +89,7 @@ pub(crate) use remote_ops::{
     resolved_default_remote_name,
 };
 #[cfg(feature = "client")]
-pub use source_import::{cmd_import_retry, cmd_import_status, cmd_import_url};
+pub use source_import::{cmd_import_cancel, cmd_import_retry, cmd_import_status, cmd_import_url};
 
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
 fn push_output_from_outcome(

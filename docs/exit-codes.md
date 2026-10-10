@@ -31,6 +31,37 @@ code. Each typed kind-to-code pair is pinned by a regression test in `exit.rs`.
 `2` is reserved for `set -e` / unhandled panic and is never emitted
 intentionally — let it surface naturally.
 
+## Hosted import cancellation
+
+`heddle import cancel <operation-or-job> --to <handle>/<spool> [--server <host>]`
+requests cancellation through `OperationService/CancelOperation` using your
+normal hosted credentials. You can also use a hosted HTTPS URL for `--to`.
+Use the operation/job record ID returned by import URL or retry, the same ID
+accepted by `heddle import status`; a client `--op-id` or HYBRID logical job ID
+is not an operation record ID.
+
+The request carries the exact observed operation version. The server rechecks
+permission and whether the operation accepts cancellation. A refusal preserves
+the server's explanation. Exit 0 acknowledges the cancellation request; it does
+not prove the worker has stopped or rolled back. Run
+`heddle import status <operation> --to <destination>` to observe the outcome.
+Status exits 76 when the import reaches the `canceled` terminal state.
+
+Cancel supports `--json`, `--output json`, and `--output json-compact`. A successful
+request emits one `import_cancel` document with `status: "requested"`; JSON errors
+use the ordinary stderr error envelope. `--op-id` identifies the cancellation
+request, independently of the import's operation/job ID.
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | Cancellation requested. |
+| 64 | Invalid arguments. |
+| 74 | IO failure. |
+| 75 | Transient failure; safe to retry. |
+| 76 | Cancellation refused or request rejected. |
+| 77 | Caller is not authorized. |
+| 78 | Missing configuration or operation. |
+
 ## Agent notes
 
 - **`75` (TempFail) is the only "safe to retry" code.** If you retry on any

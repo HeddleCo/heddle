@@ -135,6 +135,7 @@ const SWEPT: &[&str] = &[
     "import url",
     "import status",
     "import retry",
+    "import cancel",
     "agent capture",
     "agent ready",
     "agent task create",

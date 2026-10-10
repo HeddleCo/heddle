@@ -18,8 +18,8 @@ use cli::cli::commands::cmd_context_reason_git;
 use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::{
-    cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_import_retry,
-    cmd_import_status, cmd_import_url, cmd_promote,
+    cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_import_cancel,
+    cmd_import_retry, cmd_import_status, cmd_import_url, cmd_promote,
 };
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
@@ -463,6 +463,10 @@ async fn async_main() -> Result<()> {
             }
             #[cfg(feature = "client")]
             cli::cli::ImportCommands::Retry(retry) => cmd_import_retry(&cli, retry.clone()).await,
+            #[cfg(feature = "client")]
+            cli::cli::ImportCommands::Cancel(cancel) => {
+                cmd_import_cancel(&cli, cancel.operation.clone()).await
+            }
         },
 
         Commands::Help { all, topics } => {
@@ -1000,7 +1004,8 @@ fn is_global_flags_only(raw: &[String]) -> bool {
 
 fn raw_wants_json(raw: &[String]) -> bool {
     let command = Cli::command();
-    let mut wants_json = false;
+    let mut wants_json = cli::cli::help::command_path_from_raw_flag(&command, raw, "--json")
+        .is_some_and(|path| path == ["import", "cancel"]);
     let mut index = 0;
 
     while index < raw.len() {
@@ -1532,6 +1537,11 @@ mod tests {
         assert!(!raw_wants_json(&args(&["--output", "text"])));
         assert!(!raw_wants_json(&args(&["--output=text"])));
         assert!(!raw_wants_json(&args(&["--output", "--no-color"])));
+        #[cfg(feature = "client")]
+        {
+            assert!(raw_wants_json(&args(&["import", "cancel", "--json"])));
+            assert!(!raw_wants_json(&args(&["import", "status", "--json"])));
+        }
     }
 
     #[test]

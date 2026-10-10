@@ -129,6 +129,19 @@ pub struct ImportOperationOutput {
     pub failure: Option<String>,
 }
 
+/// Acknowledgement of a hosted import cancellation request, not completion.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ImportCancelOutput")]
+pub struct ImportCancelOutput {
+    pub output_kind: &'static str,
+    pub action: &'static str,
+    pub status: &'static str,
+    pub success: bool,
+    pub destination: String,
+    pub operation_id: String,
+    pub client_operation_id: String,
+}
+
 /// Finite result returned after an explicit import retry is admitted.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ImportRetryOutput")]
