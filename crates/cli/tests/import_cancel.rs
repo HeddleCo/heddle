@@ -406,9 +406,10 @@ async fn import_cancel_twice_is_idempotent() {
             assert_eq!(document["state"], "canceled");
         }
     }
-    let capture = fixture.captured.lock().expect("cancellation count");
-    assert_eq!(capture.cancel_requests.len(), 1);
-    assert!(!capture.import_jobs[0].record.cancellation_supported);
-    drop(capture);
+    {
+        let capture = fixture.captured.lock().expect("cancellation count");
+        assert_eq!(capture.cancel_requests.len(), 1);
+        assert!(!capture.import_jobs[0].record.cancellation_supported);
+    }
     fixture.close().await;
 }

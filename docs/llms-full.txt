@@ -3353,20 +3353,31 @@ not prove the worker has stopped or rolled back. Run
 `heddle import status <operation> --to <destination>` to observe the outcome.
 Status exits 76 when the import reaches the `canceled` terminal state.
 
-Cancel supports `--json`, `--output json`, and `--output json-compact`. A successful
-request emits one `import_cancel` document with `status: "requested"`; JSON errors
+Cancel supports `--output json` and `--output json-compact`. A successful
+request emits one `import_cancel` document with `status: "requested"`; full JSON
+also includes the observed `state`. If the observed operation is already
+`completed`, `failed`, or `canceled`, cancel skips the RPC and exits 0. Full JSON
+reports `status: "already_terminal"` with that `state` and omits
+`client_operation_id` because no cancellation was submitted. Compact JSON retains
+the status and operation ID. Repeating cancel after worker acknowledgement is
+therefore successful, even if the import failed. JSON errors
 use the ordinary stderr error envelope. `--op-id` identifies the cancellation
 request, independently of the import's operation/job ID.
 
 | Code | Meaning |
 | ---: | --- |
-| 0 | Cancellation requested. |
+| 0 | Cancellation requested or operation already terminal. |
 | 64 | Invalid arguments. |
 | 74 | IO failure. |
 | 75 | Transient failure; safe to retry. |
 | 76 | Cancellation refused or request rejected. |
 | 77 | Caller is not authorized. |
-| 78 | Missing configuration or operation. |
+| 78 | Missing configuration or operation (including a foreign operation). |
+
+Operation observations are account-scoped. An operation owned by another account
+is hidden, so cancel exits 78 with `hosted import operation was not found` before
+submitting a cancellation. A visible operation whose cancellation is denied
+still exits 77; an unsupported cancellation exits 76.
 
 ## Agent notes
 
