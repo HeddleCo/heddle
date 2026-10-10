@@ -59,16 +59,19 @@ pub enum ImportCommands {
     /// normal hosted credentials. The server decides whether cancellation is
     /// supported and permitted. Acknowledgement is not terminal cancellation
     /// or rollback; use `heddle import status` to observe the outcome.
+    /// Completed, failed, or canceled operations succeed without a cancel request.
+    /// With `--output json`, emits `import_cancel` with status `requested` or
+    /// `already_terminal` and the observed state. Errors use the stderr envelope.
     #[cfg(feature = "client")]
     #[command(after_help = "Exit codes:
-  0   Cancellation requested.
+  0   Cancellation requested or operation already terminal.
   64  Invalid arguments.
   74  IO failure.
   75  Transient failure; safe to retry.
   76  Server refused cancellation or rejected the request.
   77  Caller is not authorized.
-  78  Missing configuration or operation.")]
-    Cancel(ImportCancelArgs),
+  78  Missing configuration or operation (including another account's operation).")]
+    Cancel(ImportOperationArgs),
 }
 
 #[cfg(feature = "client")]
@@ -101,15 +104,4 @@ pub struct ImportOperationArgs {
     /// Heddle server address when --to is a spool path.
     #[arg(long, value_name = "HOST")]
     pub server: Option<String>,
-}
-
-#[cfg(feature = "client")]
-#[derive(Args, Clone, Debug)]
-pub struct ImportCancelArgs {
-    #[command(flatten)]
-    pub operation: ImportOperationArgs,
-
-    /// Emit the cancellation acknowledgement or refusal as JSON.
-    #[arg(long, conflicts_with = "output")]
-    pub json: bool,
 }

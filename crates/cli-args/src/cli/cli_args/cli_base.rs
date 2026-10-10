@@ -100,12 +100,6 @@ impl Cli {
     }
 
     pub fn output_mode(&self) -> Option<config::OutputMode> {
-        #[cfg(feature = "client")]
-        if let Commands::Import(args) = &self.command
-            && matches!(&args.command, super::ImportCommands::Cancel(cancel) if cancel.json)
-        {
-            return Some(config::OutputMode::Json);
-        }
         self.output.map(Into::into)
     }
 

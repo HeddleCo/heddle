@@ -174,7 +174,7 @@ fn credential(caller: uuid::Uuid) -> (String, Ed25519Signer) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn import_cancel_reaches_cancelled_terminal_state() {
     for output_args in [
-        vec!["--json"],
+        vec!["--output", "json"],
         vec!["--output", "json-compact"],
         vec!["--output", "text"],
     ] {
@@ -283,11 +283,17 @@ async fn import_cancel_denies_another_accounts_operation() {
     let fixture = Fixture::new().await;
     let output = fixture.run(
         uuid::Uuid::from_u128(3),
-        &["import", "cancel", &fixture.operation.id, "--json"],
+        &[
+            "import",
+            "cancel",
+            &fixture.operation.id,
+            "--output",
+            "json",
+        ],
     );
     assert_eq!(
         output.status.code(),
-        Some(77),
+        Some(78),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -295,17 +301,104 @@ async fn import_cancel_denies_another_accounts_operation() {
     assert!(
         error
             .to_string()
-            .contains("caller is not allowed to cancel this operation"),
+            .contains("hosted import operation was not found"),
         "{error}"
     );
     {
         let capture = fixture.captured.lock().expect("jobs");
         assert_eq!(
             capture.cancel_requests.len(),
-            1,
-            "server must enforce cancel authority"
+            0,
+            "foreign operation must be hidden before cancellation"
         );
         assert!(!capture.import_jobs[0].record.cancellation_requested);
     }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_cancel_already_terminal_skips_rpc() {
+    for (state, name) in [
+        (v2::operation_record::State::Completed, "completed"),
+        (v2::operation_record::State::Failed, "failed"),
+        (v2::operation_record::State::Canceled, "canceled"),
+    ] {
+        for format in ["json", "json-compact", "text"] {
+            let fixture = Fixture::new().await;
+            {
+                let mut capture = fixture.captured.lock().expect("terminal job");
+                capture.import_jobs[0].record.state = state as i32;
+                capture.import_jobs[0].record.cancellation_supported = false;
+            }
+            let output = fixture.run(
+                uuid::Uuid::from_u128(2),
+                &[
+                    "import",
+                    "cancel",
+                    &fixture.operation.id,
+                    "--output",
+                    format,
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if format == "text" {
+                let text = String::from_utf8_lossy(&output.stdout);
+                assert!(text.contains(&format!("already {name}")), "{text}");
+            } else {
+                let document: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).expect("terminal JSON");
+                assert_eq!(document["status"], "already_terminal");
+                if format == "json" {
+                    assert_eq!(document["state"], name);
+                    assert!(document.get("client_operation_id").is_none());
+                }
+            }
+            assert!(
+                fixture
+                    .captured
+                    .lock()
+                    .expect("no cancel RPC")
+                    .cancel_requests
+                    .is_empty()
+            );
+            fixture.close().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_cancel_twice_is_idempotent() {
+    let fixture = Fixture::new().await;
+    for expected in ["requested", "already_terminal"] {
+        let output = fixture.run(
+            uuid::Uuid::from_u128(2),
+            &[
+                "import",
+                "cancel",
+                &fixture.operation.id,
+                "--output",
+                "json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("cancel JSON");
+        assert_eq!(document["status"], expected);
+        if expected == "already_terminal" {
+            assert_eq!(document["state"], "canceled");
+        }
+    }
+    let capture = fixture.captured.lock().expect("cancellation count");
+    assert_eq!(capture.cancel_requests.len(), 1);
+    assert!(!capture.import_jobs[0].record.cancellation_supported);
+    drop(capture);
     fixture.close().await;
 }

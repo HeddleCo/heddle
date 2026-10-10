@@ -2345,13 +2345,12 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
         .expect("global --output should be included in command options");
     assert_eq!(output.possible_values, vec!["json", "json-compact", "text"]);
     for command in &catalog.commands {
-        assert_eq!(
-            command
+        assert!(
+            !command
                 .options
                 .iter()
                 .any(|option| option.long.as_deref() == Some("json")),
-            command.display == "import cancel",
-            "--json is scoped to import cancel; other commands use --output: {}",
+            "commands use --output: {}",
             command.path.join(" ")
         );
     }

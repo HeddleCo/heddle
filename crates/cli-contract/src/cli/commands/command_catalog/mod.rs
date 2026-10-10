@@ -1289,7 +1289,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     "source_authority",
                 ),
                 &[
-                    (0, "cancellation requested"),
+                    (0, "cancellation requested or operation already terminal"),
                     (64, "invalid arguments"),
                     (74, "IO failure"),
                     (75, "transient failure; safe to retry"),

@@ -76,7 +76,7 @@ pub use commands_git_projection::{BridgeCommands, BridgeGitCommands, GitSource, 
 pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_import::{ImportArgs, ImportCommands};
 #[cfg(feature = "client")]
-pub use commands_import::{ImportCancelArgs, ImportOperationArgs, ImportUrlArgs};
+pub use commands_import::{ImportOperationArgs, ImportUrlArgs};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationStampArgs,
     IntegrationTargetArgs,

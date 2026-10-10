@@ -103,11 +103,15 @@ pub async fn serve(
                     .find(|job| job.record.r#ref == body.operation)
                     .expect("operation");
                 if caller != job.owner {
-                    Err((
-                        CallFailureCode::PermissionDenied,
-                        "caller is not allowed to cancel this operation",
-                    ))
-                } else if !job.record.cancellation_supported {
+                    Err((CallFailureCode::PermissionDenied, "operation unavailable"))
+                } else if !job.record.cancellation_supported
+                    || matches!(
+                        v2::operation_record::State::try_from(job.record.state),
+                        Ok(v2::operation_record::State::Completed
+                            | v2::operation_record::State::Failed
+                            | v2::operation_record::State::Canceled)
+                    )
+                {
                     Err((
                         CallFailureCode::FailedPrecondition,
                         "operation does not accept cancellation",
@@ -157,23 +161,32 @@ pub async fn serve(
                     .import_jobs
                     .iter_mut()
                     .filter(|job| {
-                        body.operations
-                            .contains(job.record.r#ref.as_ref().expect("ref"))
+                        job.owner == caller
+                            && body
+                                .operations
+                                .contains(job.record.r#ref.as_ref().expect("ref"))
                     })
                     .map(|job| {
                         // Model the worker acknowledging the durable cancel request.
                         if job.record.cancellation_requested {
                             job.record.state = v2::operation_record::State::Canceled as i32;
+                            job.record.cancellation_supported = false;
                             job.record.version = vec![3; 32];
                         }
                         job.record.clone()
                     })
                     .collect::<Vec<_>>()
             };
-            assert_eq!(records.len(), 1);
+            assert!(records.len() <= 1);
             for mut frame in snapshot_frames(server_key) {
                 let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
-                    .then(|| v2::operation_event::Payload::Operation(records[0].clone()));
+                    .then(|| {
+                        records
+                            .first()
+                            .cloned()
+                            .map(v2::operation_event::Payload::Operation)
+                    })
+                    .flatten();
                 if let Some(v2::stream_frame::Body::Checkpoint(checkpoint)) = frame.body.as_mut() {
                     checkpoint.page = Some(v2::PageInfo {
                         exhausted: true,

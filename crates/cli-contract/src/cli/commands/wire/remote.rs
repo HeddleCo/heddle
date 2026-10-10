@@ -129,17 +129,19 @@ pub struct ImportOperationOutput {
     pub failure: Option<String>,
 }
 
-/// Acknowledgement of a hosted import cancellation request, not completion.
+/// Cancellation acknowledgement or an observed terminal import state.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ImportCancelOutput")]
 pub struct ImportCancelOutput {
     pub output_kind: &'static str,
     pub action: &'static str,
     pub status: &'static str,
+    pub state: &'static str,
     pub success: bool,
     pub destination: String,
     pub operation_id: String,
-    pub client_operation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_operation_id: Option<String>,
 }
 
 /// Finite result returned after an explicit import retry is admitted.

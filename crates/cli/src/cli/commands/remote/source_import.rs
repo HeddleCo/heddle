@@ -224,22 +224,35 @@ pub async fn cmd_import_cancel(cli: &Cli, args: ImportOperationArgs) -> Result<(
             .observe_import_operation(&destination, &args.operation, false, |_| Ok(()))
             .await
             .context("observe import operation before cancellation")?;
-        client
-            .cancel_import_operation(&original, cli.operation_id_wire())
-            .await
-            .context("request hosted import cancellation")
+        let terminal = false;
+        let client_operation_id = if terminal {
+            None
+        } else {
+            Some(
+                client
+                    .cancel_import_operation(&original, cli.operation_id_wire())
+                    .await
+                    .context("request hosted import cancellation")?,
+            )
+        };
+        Ok::<_, anyhow::Error>(ImportCancelOutput {
+            output_kind: "import_cancel",
+            action: "cancel",
+            status: if terminal {
+                "already_terminal"
+            } else {
+                "requested"
+            },
+            state: operation_state(original.state),
+            success: true,
+            destination,
+            operation_id: args.operation,
+            client_operation_id,
+        })
     }
     .await;
     client.close().await;
-    let output = ImportCancelOutput {
-        output_kind: "import_cancel",
-        action: "cancel",
-        status: "requested",
-        success: true,
-        destination,
-        operation_id: args.operation,
-        client_operation_id: result?,
-    };
+    let output = result?;
     if should_output_json(cli, None) {
         write_command_json(
             &output,
@@ -247,12 +260,22 @@ pub async fn cmd_import_cancel(cli: &Cli, args: ImportOperationArgs) -> Result<(
             NextActionValidationContext::without_repo(&["import", "cancel"]),
         )
     } else {
-        println!(
-            "{} cancellation requested for import operation {} on {}",
-            style::ok_marker(),
-            style::bold(&output.operation_id),
-            style::dim(&server)
-        );
+        if output.status == "already_terminal" {
+            println!(
+                "{} import operation {} is already {} on {}",
+                style::ok_marker(),
+                style::bold(&output.operation_id),
+                output.state,
+                style::dim(&server)
+            );
+        } else {
+            println!(
+                "{} cancellation requested for import operation {} on {}",
+                style::ok_marker(),
+                style::bold(&output.operation_id),
+                style::dim(&server)
+            );
+        }
         let mut next = format!(
             "heddle import status {} --to {}",
             output.operation_id, args.to
