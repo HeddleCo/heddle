@@ -224,7 +224,7 @@ pub async fn cmd_import_cancel(cli: &Cli, args: ImportOperationArgs) -> Result<(
             .observe_import_operation(&destination, &args.operation, false, |_| Ok(()))
             .await
             .context("observe import operation before cancellation")?;
-        let terminal = false;
+        let terminal = is_terminal(original.state);
         let client_operation_id = if terminal {
             None
         } else {

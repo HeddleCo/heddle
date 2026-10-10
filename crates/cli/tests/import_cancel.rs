@@ -257,7 +257,13 @@ async fn import_cancel_reports_server_refusal() {
         .cancellation_supported = false;
     let output = fixture.run(
         uuid::Uuid::from_u128(2),
-        &["import", "cancel", &fixture.operation.id],
+        &[
+            "import",
+            "cancel",
+            &fixture.operation.id,
+            "--output",
+            "json",
+        ],
     );
     assert_eq!(
         output.status.code(),
@@ -265,6 +271,10 @@ async fn import_cancel_reports_server_refusal() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(output.stdout.is_empty(), "refusal belongs on stderr");
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("JSON refusal envelope");
+    assert_eq!(error["exit_code"], 76);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("operation does not accept cancellation"),
