@@ -28,6 +28,10 @@ use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
 use tokio::task::JoinHandle;
 
+#[path = "import_operations.rs"]
+mod import_operations;
+pub use import_operations::ImportJob;
+
 const PUBLICATION_FRAME_BYTES: usize = 512 * 1024;
 const ORIGINAL_BATCH_BYTES: usize = 256 * 1024;
 const ORIGINAL_BATCH_OPERATIONS: usize = 128;
@@ -36,6 +40,8 @@ const PUBLICATION_METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct PublicationCapture {
+    pub import_jobs: Vec<ImportJob>,
+    pub cancel_requests: Vec<v2::CancelOperationRequest>,
     pub import_requests: Vec<v2::ImportSourceRequest>,
     pub calls: Vec<String>,
     /// Run Weft's shared verifier with request-time operation/resource facts.
@@ -496,6 +502,21 @@ async fn serve_call(
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
         .expect("registered hosted method");
+    if matches!(
+        method.rsplit('/').next(),
+        Some("CommitImportJob" | "CancelOperation" | "ObserveOperations")
+    ) {
+        import_operations::serve(
+            &method,
+            &mut send,
+            &mut recv,
+            &mut request,
+            &fixture,
+            server_key,
+        )
+        .await;
+        return;
+    }
     if fixture
         .captured
         .lock()
@@ -562,6 +583,9 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
                         "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v1alpha2.IntegrationService/ImportSource".into(),
+                        "/heddle.api.v1alpha2.IntegrationService/CommitImportJob".into(),
+                        "/heddle.api.v1alpha2.OperationService/CancelOperation".into(),
+                        "/heddle.api.v1alpha2.OperationService/ObserveOperations".into(),
                         "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
                         "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
