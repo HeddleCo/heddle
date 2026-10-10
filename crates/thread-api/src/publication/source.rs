@@ -327,6 +327,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             body: Some(publish_content_client_frame::Body::Open(
                 PublishContentOpen {
                     native_authority: native_authority.cloned(),
+                    git_acceptance: None,
                     thread: Some(self.reference.clone()),
                     revision: Some(RevisionRef {
                         spool: self.reference.spool.clone(),

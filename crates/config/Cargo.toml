@@ -32,6 +32,8 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 [features]
 default = ["local-repository"]
 local-repository = ["dep:repo"]
+# Synthetic gateway integration transport; absent from production clients.
+gateway-fixture = []
 telemetry = [
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",

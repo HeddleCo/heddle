@@ -1,0 +1,363 @@
+{
+  "baseline_files": {
+    "README.md": "d09f6e7ce550f4843387177bd1609ee1fe11c7914a961e171b8679077af6bdd6",
+    "app.js": "ba4f5ca3a0dc172dacb42877135cced4d0e155ceb538f1e933f0be0837e27cc3",
+    "index.html": "1688e7df42b1f576c2a41463dd2349d7ff87048bd72c75a52cfa8ab19f546fe7",
+    "package.json": "31247194bae4fc21a01057a2e7363602190118aaa20b0769d38bfdfc294e4cdf",
+    "styles.css": "0bd74c48e45e724db1362fde73d9ef4c66964a15ee94e70f8d6cbc4cdd8c527c",
+    "tests/baseline.test.js": "a2e6bfe6d9ff5d227bb622ceb6004dbf9d254e960554f88b0a9b0b9cb534d6f9"
+  },
+  "checks": {
+    "test_clone_two_commits_push_fresh_clone_fetch_pull_and_restart": {
+      "accepted": {
+        "heads": [
+          "512990E83F9F3F1F2DAFE7441E41DE0BDFC2C31C380222D190B897816517868B"
+        ],
+        "receipts": [
+          {
+            "actor": "synthetic-writer",
+            "command_id": "9406543b-0b22-443f-ba3d-46cee354acdf",
+            "native_state": [
+              81,
+              41,
+              144,
+              232,
+              63,
+              159,
+              63,
+              31,
+              45,
+              175,
+              231,
+              68,
+              30,
+              65,
+              222,
+              11,
+              223,
+              194,
+              195,
+              28,
+              56,
+              2,
+              34,
+              209,
+              144,
+              184,
+              151,
+              129,
+              101,
+              23,
+              134,
+              139
+            ],
+            "new_git": "d96d6c63ddbefd6fd61e92cfaac8354b216ed47d",
+            "old_git": "60f705874cb5733fcf463f574c0879c96021011d",
+            "operations": [
+              [
+                156,
+                88,
+                34,
+                163,
+                19,
+                91,
+                207,
+                62,
+                185,
+                131,
+                76,
+                222,
+                200,
+                43,
+                144,
+                52,
+                133,
+                5,
+                184,
+                73,
+                157,
+                110,
+                25,
+                14,
+                191,
+                88,
+                183,
+                171,
+                5,
+                233,
+                247,
+                191
+              ],
+              [
+                125,
+                166,
+                178,
+                106,
+                14,
+                214,
+                23,
+                193,
+                242,
+                46,
+                255,
+                193,
+                154,
+                87,
+                224,
+                26,
+                182,
+                90,
+                245,
+                206,
+                53,
+                130,
+                106,
+                148,
+                76,
+                24,
+                4,
+                125,
+                237,
+                48,
+                252,
+                54
+              ]
+            ],
+            "thread": "main"
+          }
+        ],
+        "source_operations": [
+          {
+            "operation": "7DA6B26A0ED617C1F22EFFC19A57E01AB65AF5CE35826A944C18047DED30FC36",
+            "revision": "512990E83F9F3F1F2DAFE7441E41DE0BDFC2C31C380222D190B897816517868B",
+            "signature_bytes": 64
+          },
+          {
+            "operation": "9210568A5E73A3BAEF81FDA0A22824D9790A735DA756B2D329D63E117BE26403",
+            "revision": "7F0BBC6A709BE759C2A31C58329E1F396339BB510875DB738D59D5EB7C164D88",
+            "signature_bytes": 64
+          },
+          {
+            "operation": "9C5822A3135BCF3EB9834CDEC82B90348505B8499D6E190EBF58B7AB05E9F7BF",
+            "revision": "6F3C10480A6139C0691016DC862D601544B3194AC8E67012DFF058E6AE39CC22",
+            "signature_bytes": 64
+          }
+        ]
+      },
+      "commit_bytes_preserved": true,
+      "exact_git_tip": "d96d6c63ddbefd6fd61e92cfaac8354b216ed47d",
+      "full_history": [
+        "60f705874cb5733fcf463f574c0879c96021011d",
+        "9fc47c72e50c1afd5a680ccaeeef5492a26662a7",
+        "d96d6c63ddbefd6fd61e92cfaac8354b216ed47d"
+      ],
+      "native_fixture": {
+        "base": "hs-fw5vrtkgkfknkgn33hc357gz75hkketh11txpwwdb7aypz0p9p40",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "quarantine_discarded": true,
+      "restart_persisted": true,
+      "second_client_fetch_pull": true,
+      "successful_post_replay_idempotent": true
+    },
+    "test_durable_acceptance_publication_failure_retry_recovers_without_duplicates": {
+      "accepted": {
+        "heads": [
+          "95E1E7D2DDE5D59A51F37A7E61ADB7C1DC169FCE24A3435D746556A7B2A7E33D"
+        ],
+        "receipts": [
+          {
+            "actor": "synthetic-writer",
+            "command_id": "6f5fa8a2-ce1c-d92d-ba07-a280f1b234cc",
+            "native_state": [
+              149,
+              225,
+              231,
+              210,
+              221,
+              229,
+              213,
+              154,
+              81,
+              243,
+              122,
+              126,
+              97,
+              173,
+              183,
+              193,
+              220,
+              22,
+              159,
+              206,
+              36,
+              163,
+              67,
+              93,
+              116,
+              101,
+              86,
+              167,
+              178,
+              167,
+              227,
+              61
+            ],
+            "new_git": "2af5a7ef3dc90d8fa57c4ae94263498cb933ee86",
+            "old_git": "1d5fa8267c63f4ba24a99f326730e745225bb8ed",
+            "operations": [
+              [
+                174,
+                114,
+                45,
+                255,
+                43,
+                139,
+                170,
+                48,
+                40,
+                232,
+                253,
+                122,
+                63,
+                87,
+                101,
+                66,
+                179,
+                235,
+                23,
+                41,
+                227,
+                107,
+                17,
+                252,
+                186,
+                78,
+                109,
+                249,
+                78,
+                172,
+                213,
+                239
+              ]
+            ],
+            "thread": "main"
+          }
+        ],
+        "source_operations": [
+          {
+            "operation": "2718C5BAEDDAB5CEABCFF1D37D1A6750AA9616084887F25AE6027F7F72A46F85",
+            "revision": "1ED3A15592466AEDC5C9C6ADD987E5ED3E52DCC6726708B0EE090B4E4A029854",
+            "signature_bytes": 64
+          },
+          {
+            "operation": "AE722DFF2B8BAA3028E8FD7A3F576542B3EB1729E36B11FCBA4E6DF94EACD5EF",
+            "revision": "95E1E7D2DDE5D59A51F37A7E61ADB7C1DC169FCE24A3435D746556A7B2A7E33D",
+            "signature_bytes": 64
+          }
+        ]
+      },
+      "duplicated_history": false,
+      "exact_git_tip": "2af5a7ef3dc90d8fa57c4ae94263498cb933ee86",
+      "full_history": [
+        "1d5fa8267c63f4ba24a99f326730e745225bb8ed",
+        "2af5a7ef3dc90d8fa57c4ae94263498cb933ee86"
+      ],
+      "http_failure_after_durable_acceptance": true,
+      "native_fixture": {
+        "base": "hs-3v9t2ncj8snevhe9rtpxk1z5xmz55q66e9kghc7e145mwjg2k1a0",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "quarantine_discarded": true,
+      "reads_denied_until_publication": true,
+      "recovery_survived_restart": true,
+      "retry_discovery_recovered": true,
+      "retry_reported_up_to_date": true
+    },
+    "test_force_delete_create_and_multiref_are_server_refused": {
+      "native_fixture": {
+        "base": "hs-2tzdcf0fvhw6zgbf686cffk3vxvte7rwz4jgd0pq2e5c6cp8wyhg",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "rejected_shapes": [
+        "force",
+        "delete",
+        "create",
+        "multiref"
+      ]
+    },
+    "test_malformed_pack_is_refused_without_native_acceptance_or_quarantine": {
+      "malformed_pack_denied": true,
+      "native_acceptance_unchanged": true,
+      "native_fixture": {
+        "base": "hs-d56f44dja560mqaxz8bg81ffgydp3dpd9pamncz5smtp1cf6pwag",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "quarantine_discarded": true
+    },
+    "test_reader_cannot_push_or_substitute_for_writer_or_service": {
+      "native_fixture": {
+        "base": "hs-4r91nt86nxz122hs0zjfmts9t77m11mzfp6e211djwprgvfme40g",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "reader_and_writer_and_service_independent": true
+    },
+    "test_reader_writer_and_service_revocation_rechecked_for_each_request": {
+      "native_fixture": {
+        "base": "hs-fbj5zwqr98dxb5742ne5571dkgayrap7ma2kq5dthc5q4x2h4n20",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "rechecked_revocations": [
+        "reader",
+        "writer",
+        "service"
+      ]
+    },
+    "test_stale_concurrent_client_and_prepared_receive_are_refused": {
+      "native_fixture": {
+        "base": "hs-y61mhkx4tbcsb3z6pt7myytned0rtp7f9j3614cn41emg1h4szb0",
+        "threads": [
+          "demo/open-filter",
+          "demo/priority-sort"
+        ]
+      },
+      "prepared_stale_receive_denied": true,
+      "stale_tip": "041eda2a3a5e01eca351d5bad9cd72bf9117ab16",
+      "winner": "07ff33c8198ef3c0935a7dd58aa2487c09a32a0f"
+    }
+  },
+  "elapsed_seconds": 17.419,
+  "fixture": "genuine native init and signed main capture via gateway_agent_demo prepare, isolated identity",
+  "fixture_binary_sha256": "e7033e0647fcff69487cee3c04504d5c15ff28ef428fac2eb0a346e97f999dd0",
+  "git_version": "git version 2.52.0",
+  "host_binary_sha256": "b23f7285d09280be33c78369c6d51fe1e38f7ee2c5040f055a4f2f6692edc3f1",
+  "limitations": [
+    "Explicit synthetic local writer only; not hosted writer authority.",
+    "Single existing main branch and fast-forward history only.",
+    "Local fault-injection marker exercises publication crash/retry; no distributed or deployment claim."
+  ],
+  "recorded_at_utc": "2026-10-10T03:41:49.963381+00:00",
+  "scope": "quiescent-synthetic-local; loopback smart HTTP; no live account, remote, or deployment",
+  "status": "passed",
+  "test_script": "prototypes/git-gateway/test_window.py",
+  "test_script_sha256": "ddcdae34557298e4c98faa916bc64a94a3ce74892341c77fe5299be83cfdeb73",
+  "tests": 7
+}

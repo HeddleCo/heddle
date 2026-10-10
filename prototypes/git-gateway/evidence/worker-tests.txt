@@ -1,0 +1,14 @@
+✔ official binding read surface resolves exact commit and disposes capability (2.634458ms)
+✔ front door authorizes pinned catalog before read; strips untrusted identity headers (29.05525ms)
+✔ denial avoids catalog and native source calls (0.324208ms)
+✔ receive-pack and arbitrary routes never reach bindings (0.290959ms)
+✔ missing integration and oversized actual body fail closed (0.794416ms)
+✔ oversized catalog blob disposed and refused (0.259542ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 104.413125

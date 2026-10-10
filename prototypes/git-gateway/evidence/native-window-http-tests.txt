@@ -1,0 +1,19 @@
+LOCAL SYNTHETIC NATIVE GIT WINDOW: REAL CLIENT VERIFICATION
+
+Invocation: GATEWAY_WINDOW_PORT=18780 GATEWAY_WINDOW_BASELINE=<public-six-file-baseline> GATEWAY_WINDOW_EVIDENCE=<new-evidence-directory> python3 prototypes/git-gateway/test_window.py -v
+Host SHA256: b23f7285d09280be33c78369c6d51fe1e38f7ee2c5040f055a4f2f6692edc3f1
+Git: git version 2.52.0
+Scope: fresh native init + signed capture, isolated local identities, loopback port 18780; no account or deployment.
+
+test_clone_two_commits_push_fresh_clone_fetch_pull_and_restart (__main__.NativeWindowHttpTests.test_clone_two_commits_push_fresh_clone_fetch_pull_and_restart) ... ok
+test_durable_acceptance_publication_failure_retry_recovers_without_duplicates (__main__.NativeWindowHttpTests.test_durable_acceptance_publication_failure_retry_recovers_without_duplicates) ... ok
+test_force_delete_create_and_multiref_are_server_refused (__main__.NativeWindowHttpTests.test_force_delete_create_and_multiref_are_server_refused) ... ok
+test_malformed_pack_is_refused_without_native_acceptance_or_quarantine (__main__.NativeWindowHttpTests.test_malformed_pack_is_refused_without_native_acceptance_or_quarantine) ... ok
+test_reader_cannot_push_or_substitute_for_writer_or_service (__main__.NativeWindowHttpTests.test_reader_cannot_push_or_substitute_for_writer_or_service) ... ok
+test_reader_writer_and_service_revocation_rechecked_for_each_request (__main__.NativeWindowHttpTests.test_reader_writer_and_service_revocation_rechecked_for_each_request) ... ok
+test_stale_concurrent_client_and_prepared_receive_are_refused (__main__.NativeWindowHttpTests.test_stale_concurrent_client_and_prepared_receive_are_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 17.419s
+
+OK

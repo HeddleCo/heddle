@@ -381,6 +381,7 @@ impl DeviceRpc {
                             ));
                         }
                         Ok(PublicationReceipt {
+                            git_acceptance: None,
                             native_authority: opening.native_authority.clone(),
                             client_operation_id: command_id,
                             destination: opening.destination.clone(),
@@ -414,6 +415,7 @@ impl DeviceRpc {
             }
             let policy_version = check_policy(&admitted, &replica, &opening)?;
             let receipt = PublicationReceipt {
+                git_acceptance: None,
                 native_authority: opening.native_authority.clone(),
                 client_operation_id: command_id,
                 destination: opening.destination.clone(),

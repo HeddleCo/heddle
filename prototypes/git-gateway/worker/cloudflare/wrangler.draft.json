@@ -1,0 +1,66 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "heddle-git-gateway-test-20261001-01a0efd3",
+  "main": "index.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "heddle-git-test-20261001-01a0efd3"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NATIVE_BUNDLES",
+      "bucket_name": "heddle-git-native-test-20261001-01a0efd3"
+    }
+  ],
+  "containers": [
+    {
+      "name": "heddle-git-native-test-20261001-01a0efd3",
+      "class_name": "NativeGatewayContainer",
+      "scheduling_policy": "default",
+      "image": "./BLOCKED-runtime-not-approved.Dockerfile",
+      "image_build_context": "../../../..",
+      "instance_type": "basic",
+      "max_instances": 1,
+      "ssh": {
+        "enabled": false
+      },
+      "observability": {
+        "enabled": false
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "NATIVE_CONTAINER",
+        "class_name": "NativeGatewayContainer"
+      }
+    ]
+  },
+  "exports": {
+    "NativeGatewayContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    "CATALOG_REPO": "native-view-01a0efd3"
+  },
+  "observability": {
+    "enabled": false
+  },
+  "dev": {
+    "enable_containers": false
+  },
+  "secrets": {
+    "required": [
+      "GATEWAY_SERVICE_CREDENTIAL"
+    ]
+  },
+  "keep_names": true
+}

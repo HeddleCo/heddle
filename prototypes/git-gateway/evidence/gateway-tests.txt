@@ -1,0 +1,14 @@
+test_clone_fetch_contents_fsck_and_catalog_separation (test_gateway.GatewayTests.test_clone_fetch_contents_fsck_and_catalog_separation) ... ok
+test_concurrent_publication_and_lost_ack_recovery (test_gateway.GatewayTests.test_concurrent_publication_and_lost_ack_recovery) ... ok
+test_denied_and_revoked_request_does_not_materialize (test_gateway.GatewayTests.test_denied_and_revoked_request_does_not_materialize) ... ok
+test_deterministic_projection_and_native_threads (test_gateway.GatewayTests.test_deterministic_projection_and_native_threads) ... ok
+test_manifest_validation (test_gateway.GatewayTests.test_manifest_validation) ... ok
+test_missing_corrupt_source_and_stale_manifest (test_gateway.GatewayTests.test_missing_corrupt_source_and_stale_manifest) ... ok
+test_ordered_merge_parents_and_hidden_objects (test_gateway.GatewayTests.test_ordered_merge_parents_and_hidden_objects) ... ok
+test_write_paths_and_noncanonical_routes_rejected (test_gateway.GatewayTests.test_write_paths_and_noncanonical_routes_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 8.903s
+
+OK
+EVIDENCE clone/fetch/fsck: {"base": {"manifest": {"git_oid": "17c7f4ab3683f78ff1d9e10efe186b2383c9db00", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-ykgxzy3vx8sdvjtmf9a6730569zsdsccknrf0jp6jwbc46ytw0gg", "thread": "main"}, "pin": "501ddf7b9ad6bd2112e798094e9c56646f19f622"}, "merged": {"manifest": {"git_oid": "794fc88b67da6d6cac063b49603b3c6c6e0e24cc", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-edjpxk68k7axbd7dabxys0pb0k8fhp4cgx89b77d1hn0yg18txkg", "thread": "main"}, "pin": "77f14c3c2b201a8358aa3423cf86e5f60505cc0f"}, "ordered": {"manifest": {"git_oid": "6d0c0b349e2d3da6eb6c0b01cde88920b22588ae", "mode": "history", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-rfanjpy58pmrn22dryha81dxy42qc3tpvagdjdt7vadrmrb5yr50", "thread": "main"}, "pin": "6f0af3a299557a2318e9011185004dfda80297d5"}}

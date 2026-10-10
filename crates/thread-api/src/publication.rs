@@ -8,6 +8,10 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::{Remote, contract::*, rpc, transport};
 
 mod batching;
+#[cfg(feature = "source-transfer")]
+mod git;
+#[cfg(feature = "source-transfer")]
+pub use git::{GitHistoryUpload, git_originals_digest};
 
 #[cfg(feature = "source-transfer")]
 mod acceptance;
@@ -173,6 +177,9 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
         };
+        if open.git_acceptance.is_some() {
+            return Err(Error::Invalid("Git acceptance requires the complete-history publication API"));
+        }
         crate::hybrid::publish_open(open).map_err(Error::Invalid)?;
         if open.protocol.is_some() {
             api::import_authority::require_hybrid_peer(self.description.protocol.as_ref())
@@ -620,6 +627,7 @@ mod tests {
                                     .expect("inventory");
                             }
                             let mut receipt = PublicationReceipt {
+                                git_acceptance: None,
                                 native_authority: None,
                                 client_operation_id: opening.client_operation_id.clone(),
                                 destination: open.destination.clone(),
@@ -1026,6 +1034,7 @@ mod tests {
             panic!("opening")
         };
         let receipt = PublicationReceipt {
+            git_acceptance: None,
             native_authority: None,
             client_operation_id: opening.client_operation_id.clone(),
             destination: open.destination.clone(),

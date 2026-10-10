@@ -1,0 +1,7 @@
+test_deadline_stops_child (test_process_bounds.ProcessBoundsTests.test_deadline_stops_child) ... ok
+test_output_file_cannot_exceed_limit (test_process_bounds.ProcessBoundsTests.test_output_file_cannot_exceed_limit) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.236s
+
+OK

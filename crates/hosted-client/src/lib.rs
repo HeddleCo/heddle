@@ -9,6 +9,10 @@ pub mod attachments;
 pub mod attribution;
 pub mod client;
 #[cfg(feature = "client")]
+pub mod gateway;
+#[cfg(feature = "client")]
+pub mod git_transport;
+#[cfg(feature = "client")]
 pub mod hosted_runtime;
 #[cfg(feature = "client")]
 pub mod network;

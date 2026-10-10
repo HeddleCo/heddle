@@ -1,0 +1,9 @@
+{
+  "name": "heddle-git-view-prototype",
+  "main": "index.mjs",
+  "compatibility_date": "2026-10-01",
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "replace-with-approved-namespace" }],
+  "vars": { "CATALOG_REPO": "replace-with-approved-catalog", "PUBLISHED_CATALOG_PINS": "[]" }
+  // AUTH + GATEWAY service bindings require real independently authorized adapters.
+  // No deployment, resource creation, token creation or remote dev is part of this prototype.
+}

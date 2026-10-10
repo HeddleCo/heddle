@@ -1,0 +1,10 @@
+test_documented_read_url_raw_response_and_closed_handle (test_artifacts.ArtifactsContractTests.test_documented_read_url_raw_response_and_closed_handle) ... ok
+test_missing_malformed_oversized_encoded_responses (test_artifacts.ArtifactsContractTests.test_missing_malformed_oversized_encoded_responses) ... ok
+test_redirect_and_configuration_injection_refused (test_artifacts.ArtifactsContractTests.test_redirect_and_configuration_injection_refused) ... ok
+test_shared_contract (test_artifacts.ArtifactsContractTests.test_shared_contract) ... ok
+test_unpublished_pin_no_io_and_allowlist_is_immutable (test_artifacts.ArtifactsContractTests.test_unpublished_pin_no_io_and_allowlist_is_immutable) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+OK

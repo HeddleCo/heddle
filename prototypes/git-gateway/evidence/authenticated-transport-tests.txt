@@ -1,0 +1,33 @@
+test_authority_expiry_scope_and_malformed_credentials (test_authenticated_transport.AuthenticatedTransportTests.test_authority_expiry_scope_and_malformed_credentials) ... ok
+test_https_native_transport_bearer_git_clone_and_revocation (test_authenticated_transport.AuthenticatedTransportTests.test_https_native_transport_bearer_git_clone_and_revocation) ... ok
+test_transport_rejects_bad_origin_and_bad_response (test_authenticated_transport.AuthenticatedTransportTests.test_transport_rejects_bad_origin_and_bad_response) ... ok
+test_bad_digest_and_missing_source (test_native_bundle.BundleTests.test_bad_digest_and_missing_source) ... ok
+test_cold_clone_fetch_after_native_origin_removed (test_native_bundle.BundleTests.test_cold_clone_fetch_after_native_origin_removed) ... ok
+test_unsafe_archive_entries (test_native_bundle.BundleTests.test_unsafe_archive_entries) ... ok
+test_artifacts_adapter_substitutes_for_catalog_in_real_git_clone_LOCAL_FIXTURES (test_gateway.GatewayTests.test_artifacts_adapter_substitutes_for_catalog_in_real_git_clone_LOCAL_FIXTURES) ... ok
+test_clone_fetch_contents_fsck_and_catalog_separation (test_gateway.GatewayTests.test_clone_fetch_contents_fsck_and_catalog_separation) ... ok
+test_concurrent_publication_and_lost_ack_recovery (test_gateway.GatewayTests.test_concurrent_publication_and_lost_ack_recovery) ... ok
+test_denied_and_revoked_request_does_not_materialize (test_gateway.GatewayTests.test_denied_and_revoked_request_does_not_materialize) ... ok
+test_deterministic_projection_and_native_threads (test_gateway.GatewayTests.test_deterministic_projection_and_native_threads) ... ok
+test_fixture_server_rejects_remote_origin_and_proxy_wiring (test_gateway.GatewayTests.test_fixture_server_rejects_remote_origin_and_proxy_wiring) ... ok
+test_manifest_validation (test_gateway.GatewayTests.test_manifest_validation) ... ok
+test_missing_corrupt_source_and_stale_manifest (test_gateway.GatewayTests.test_missing_corrupt_source_and_stale_manifest) ... ok
+test_native_symlinks_refused_before_copy (test_gateway.GatewayTests.test_native_symlinks_refused_before_copy) ... ok
+test_ordered_merge_parents_and_hidden_objects (test_gateway.GatewayTests.test_ordered_merge_parents_and_hidden_objects) ... ok
+test_process_environment_and_cgi_headers_cannot_redirect_git (test_gateway.GatewayTests.test_process_environment_and_cgi_headers_cannot_redirect_git) ... ok
+test_projection_does_not_need_git_or_worktree_caches (test_gateway.GatewayTests.test_projection_does_not_need_git_or_worktree_caches) ... ok
+test_publication_advance_during_resolution_cannot_switch_pinned_manifest (test_gateway.GatewayTests.test_publication_advance_during_resolution_cannot_switch_pinned_manifest) ... ok
+test_write_paths_and_noncanonical_routes_rejected (test_gateway.GatewayTests.test_write_paths_and_noncanonical_routes_rejected) ... ok
+test_documented_read_url_raw_response_and_closed_handle (test_artifacts.ArtifactsContractTests.test_documented_read_url_raw_response_and_closed_handle) ... ok
+test_missing_malformed_oversized_encoded_responses (test_artifacts.ArtifactsContractTests.test_missing_malformed_oversized_encoded_responses) ... ok
+test_redirect_and_configuration_injection_refused (test_artifacts.ArtifactsContractTests.test_redirect_and_configuration_injection_refused) ... ok
+test_shared_contract (test_artifacts.ArtifactsContractTests.test_shared_contract) ... ok
+test_unpublished_pin_no_io_and_allowlist_is_immutable (test_artifacts.ArtifactsContractTests.test_unpublished_pin_no_io_and_allowlist_is_immutable) ... ok
+test_deadline_stops_child (test_process_bounds.ProcessBoundsTests.test_deadline_stops_child) ... ok
+test_output_file_cannot_exceed_limit (test_process_bounds.ProcessBoundsTests.test_output_file_cannot_exceed_limit) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 20.083s
+
+OK
+EVIDENCE clone/fetch/fsck: {"base": {"manifest": {"git_oid": "a7961ca918322f7c218bec547f6d5a576661b6c2", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-tz0fdbehxvsj1zqv6qbykbm66f51347xsq459ghjkbkahrbwsvb0", "thread": "main"}, "pin": "1a2bf8ac83f493c2aba8c336715654e28865bc7b"}, "merged": {"manifest": {"git_oid": "81b5faf0333265f78669acca28dcd75c145edd93", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-whaktxn43dvse8kqpveagk6ya23sn2wmnh9g5ytavcrey1f2cgyg", "thread": "main"}, "pin": "846b5ca7ce60596c0c41c350e11b1b0749028d9b"}, "ordered": {"manifest": {"git_oid": "8c4d78f56411db35a1847dfe5aba258747c6b1b6", "mode": "history", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-sdmacdpf57cfkmy744zr82a7rqwkt6gayddyz54vyqcqr6w9cpmg", "thread": "main"}, "pin": "af5f05d6ac0a419c30733406fef7c0329677793e"}}

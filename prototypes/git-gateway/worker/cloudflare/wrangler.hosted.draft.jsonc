@@ -1,0 +1,27 @@
+{
+  // Review-only. All three source activation/native-network gates remain false.
+  // The image contains no identities or source content. No deployment is authorized.
+  "name": "heddle-git-hosted-review-only",
+  "main": "hosted-deploy.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": { "bindings": [
+    { "name": "NATIVE_PUBLICATIONS", "class_name": "HostedPublication" },
+    { "name": "NATIVE_CONTAINER", "class_name": "HostedNativeGateway" }
+  ] },
+  "migrations": [{ "tag": "hosted-publication-v1", "new_sqlite_classes": ["HostedPublication", "HostedNativeGateway"] }],
+  "containers": [{ "name": "heddle-hosted-native-review-only", "class_name": "HostedNativeGateway",
+    "scheduling_policy": "default", "image": "./Dockerfile.hosted", "image_build_context": "../../../../..",
+    "instance_type": "basic", "max_instances": 1, "ssh": { "enabled": false }, "observability": { "enabled": false } }],
+  "r2_buckets": [{ "binding": "NATIVE_SOURCE", "bucket_name": "replace-with-approved-existing-native-bucket" }],
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "replace-with-approved-existing-metadata-namespace" }],
+  "vars": { "HOSTED_REPOSITORIES": "{}", "HOSTED_NATIVE_CONFIG": "{}" },
+  "secrets": { "required": ["NATIVE_SERVICE_AUTHORIZATION", "GATEWAY_HOSTED_BISCUIT", "GATEWAY_HOSTED_SIGNER_PEM",
+    "GATEWAY_HOSTED_SOURCE_AUTHOR_JSON", "GATEWAY_ARTIFACTS_CREDENTIAL"] },
+  "dev": { "enable_containers": false },
+  "observability": { "enabled": false },
+  "keep_names": true
+  // Optional GATEWAY_HOSTED_MINT_ATTACHMENT_JSON is existing verified authority material.
+  // All configured credentials are operator supplied. No setup script creates them.
+}

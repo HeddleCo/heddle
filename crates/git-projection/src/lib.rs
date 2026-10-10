@@ -6,6 +6,11 @@
 
 pub mod credential;
 pub mod facet_gate;
+pub mod gateway_received;
+pub mod gateway_view;
+pub mod gateway_write;
+#[cfg(feature = "gateway-publication")]
+pub mod gateway_publication;
 pub mod git_core;
 pub mod git_export;
 pub mod git_frontier;

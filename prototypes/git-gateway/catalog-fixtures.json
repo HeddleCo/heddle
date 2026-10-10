@@ -1,0 +1,15 @@
+{
+  "description": "Synthetic documented-response fixture data; never captured from a live account. Binding: Blob|null. REST file: HTTP 200 raw application/octet-stream bytes.",
+  "pin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "valid": "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":1,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+  "invalid": [
+    "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":1,\"source\":\"../escape\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":9007199254740992,\"repository\":\"synthetic-demo\",\"schema\":1,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":true,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"extra\":1,\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":1,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"imported\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":1,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"git_oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"mode\":\"snapshot\",\"policy_epoch\":1,\"repository\":\"synthetic-demo\",\"schema\":0,\"schema\":1,\"source\":\"native-demo\",\"state\":\"hs-0000000000000000000000000000000000000000000000000000\",\"thread\":\"main\"}\n",
+    "{\"schema\": 1, \"repository\": \"synthetic-demo\", \"source\": \"native-demo\", \"thread\": \"main\", \"state\": \"hs-0000000000000000000000000000000000000000000000000000\", \"git_oid\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"mode\": \"snapshot\", \"policy_epoch\": 1}",
+    "[]\n"
+  ]
+}
