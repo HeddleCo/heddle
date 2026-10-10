@@ -14,6 +14,7 @@ path = "src/lib.rs"
 name = "heddle_git_projection"
 
 [dependencies]
+heddle-git-serialize.workspace = true
 objects.workspace = true
 refs.workspace = true
 # `default-features = false` so this crate's `zstd` feature controls the
