@@ -178,7 +178,14 @@ pub async fn serve(
                     .collect::<Vec<_>>()
             };
             assert!(records.len() <= 1);
+            let mut sequence = 1;
             for mut frame in snapshot_frames(server_key) {
+                if records.is_empty() && matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
+                {
+                    continue;
+                }
+                frame.sequence = sequence;
+                sequence += 1;
                 let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
                     .then(|| {
                         records
