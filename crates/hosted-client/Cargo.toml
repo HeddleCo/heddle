@@ -76,6 +76,8 @@ tempfile.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
+# Explicit loopback TLS mapping for the synthetic gateway integration only.
+gateway-fixture = ["client", "config/gateway-fixture"]
 # Native analysis production is optional; transport-only clients omit parsers.
 semantic = ["repo/tree-sitter-symbols"]
 # The hosted surface: native Iroh transport, credentials, identity, and the
@@ -125,3 +127,8 @@ telemetry = [
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
 ]
+
+[[example]]
+name = "git_transport_session"
+path = "examples/git_transport_session.rs"
+required-features = ["client"]

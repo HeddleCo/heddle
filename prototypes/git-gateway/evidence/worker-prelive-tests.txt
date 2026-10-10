@@ -1,0 +1,21 @@
+✔ official binding read surface resolves exact commit and disposes capability (3.629125ms)
+✔ front door authorizes pinned catalog before read; strips untrusted identity headers (25.92775ms)
+✔ denial avoids catalog and native source calls (0.262625ms)
+✔ receive-pack and arbitrary routes never reach bindings (0.261792ms)
+✔ missing integration and oversized actual body fail closed (0.922125ms)
+✔ oversized catalog blob disposed and refused (0.255417ms)
+✔ shared canonical contract rejects malformed, duplicate, ambiguous and unsafe manifests (0.737792ms)
+✔ unpublished or non-commit pins cannot trigger a binding call (0.167667ms)
+✔ missing file, errors and malformed documented Blob responses fail closed and dispose (0.22625ms)
+✔ configured publication snapshot cannot be broadened through the original array (0.137417ms)
+✔ Worker refuses compressed bodies and unpublished views even when AUTH returns success (0.418458ms)
+✔ documented R2 get response contract; pinned key and bytes (4.8895ms)
+✔ R2 missing, oversized, corrupt and inconsistent responses refused (1.899666ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 109.627375

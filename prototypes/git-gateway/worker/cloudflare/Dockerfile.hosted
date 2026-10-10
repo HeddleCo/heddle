@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Build context is the parent workspace containing exact heddle/ and api/ sources.
+# Dockerfile.hosted.dockerignore excludes all local secrets, logs, binaries and stores.
+FROM rust:1.98.0-trixie AS build
+WORKDIR /build/heddle
+COPY heddle/Cargo.toml heddle/Cargo.lock heddle/rust-toolchain.toml ./
+COPY heddle/crates/ crates/
+COPY heddle/docs/ docs/
+COPY api/ /build/api/
+RUN cargo build --locked --release -p heddle-git-projection --features gateway-publication --example gateway_host
+
+FROM debian:trixie-slim AS runtime
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates git libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x "$(git --exec-path)/git-http-backend" \
+    && mkdir -p /app && chmod 0555 /app
+COPY --chmod=0444 heddle/LICENSE /app/LICENSE
+COPY --from=build --chmod=0555 /build/heddle/target/release/examples/gateway_host /usr/local/bin/gateway_host
+COPY --chmod=0555 heddle/prototypes/git-gateway/worker/cloudflare/hosted-start.sh /app/hosted-start.sh
+ENV HOME=/nonexistent TMPDIR=/tmp
+WORKDIR /app
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/app/hosted-start.sh"]

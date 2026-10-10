@@ -24,6 +24,7 @@ pub mod delegation;
 pub mod edge;
 pub mod envelope;
 pub mod facts;
+pub mod git_transport;
 pub mod inspection;
 pub mod key_delegation;
 pub mod resource;

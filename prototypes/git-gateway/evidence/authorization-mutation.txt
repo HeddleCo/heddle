@@ -1,0 +1,16 @@
+test_denied_and_revoked_request_does_not_materialize (test_gateway.GatewayTests.test_denied_and_revoked_request_does_not_materialize) ... FAIL
+
+======================================================================
+FAIL: test_denied_and_revoked_request_does_not_materialize (test_gateway.GatewayTests.test_denied_and_revoked_request_does_not_materialize)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<historical-workspace>/heddle-current/prototypes/git-gateway/test_gateway.py", line 116, in test_denied_and_revoked_request_does_not_materialize
+    self.assertEqual(status, 403)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+AssertionError: 200 != 403
+
+----------------------------------------------------------------------
+Ran 1 test in 2.415s
+
+FAILED (failures=1)
+EXPECTED RED: disabling authorization made a denied HTTP request return 200; guard test detected it.

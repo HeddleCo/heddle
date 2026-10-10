@@ -35,6 +35,9 @@ pub struct ClientConfig {
     pub tls_domain_name: Option<String>,
     /// Optional PEM CA certificate bundle for server verification.
     pub tls_ca_certificate_pem: Option<String>,
+    /// Explicit loopback route for the synthetic native-fixture.example authority.
+    #[cfg(feature = "gateway-fixture")]
+    pub gateway_fixture_address: Option<SocketAddr>,
     /// Skip TLS certificate verification (insecure).
     pub tls_skip_verify: bool,
     /// Explicitly allow cleartext (non-TLS) connections to non-loopback hosts.
@@ -83,6 +86,8 @@ impl ClientConfig {
             tls_enabled: false,
             tls_domain_name: None,
             tls_ca_certificate_pem: None,
+            #[cfg(feature = "gateway-fixture")]
+            gateway_fixture_address: None,
             tls_skip_verify: false,
             allow_insecure: false,
             timeout_secs: 30,
@@ -154,6 +159,13 @@ impl ClientConfig {
     pub fn with_tls_ca_certificate_pem(mut self, pem: impl Into<String>) -> Self {
         self.tls_enabled = true;
         self.tls_ca_certificate_pem = Some(pem.into());
+        self
+    }
+
+    /// Route the synthetic native authority through a checked loopback TLS socket.
+    #[cfg(feature = "gateway-fixture")]
+    pub fn with_gateway_fixture_address(mut self, address: SocketAddr) -> Self {
+        self.gateway_fixture_address = Some(address);
         self
     }
 

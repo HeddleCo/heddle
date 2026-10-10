@@ -1006,17 +1006,22 @@ fn validate_edge_attenuation_block(block: &BlockBuilder, index: usize) -> Result
 pub(crate) fn reject_reserved_request_facts(biscuit: &Biscuit) -> Result<(), BiscuitError> {
     for index in 0..biscuit.block_count() {
         let block = parse_block(biscuit, index)?;
-        let asserts_reserved = block.facts.iter().any(|fact| {
-            fact.predicate.name == crate::edge::EDGE_REQUEST_PREDICATE
-                || fact.predicate.name == crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
-        }) || block.rules.iter().any(|rule| {
-            rule.head.name == crate::edge::EDGE_REQUEST_PREDICATE
-                || rule.head.name == crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
-        });
-        if asserts_reserved {
+        let reserved = block
+            .facts
+            .iter()
+            .map(|fact| fact.predicate.name.as_str())
+            .chain(block.rules.iter().map(|rule| rule.head.name.as_str()))
+            .find(|name| {
+                matches!(
+                    *name,
+                    crate::edge::EDGE_REQUEST_PREDICATE
+                        | crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
+                        | crate::git_transport::GIT_REQUEST_PREDICATE
+                )
+            });
+        if let Some(predicate) = reserved {
             return Err(BiscuitError::Invalid(format!(
-                "block {index} asserts the reserved request predicate {}",
-                crate::edge::EDGE_REQUEST_PREDICATE
+                "block {index} asserts the reserved request predicate {predicate}"
             )));
         }
     }

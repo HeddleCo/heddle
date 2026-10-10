@@ -140,7 +140,7 @@ pub fn write_tag_object(
 /// Assemble the commit content bytes from already-resolved OIDs. Pure (no repo,
 /// no mapping) so the byte layout — header order, actor lines, header folding,
 /// verbatim message — is unit-testable in isolation (§1/§2/§5/§6).
-fn build_commit_content(
+pub fn build_commit_content(
     state: &State,
     tree_oid: &ObjectId,
     parent_oids: &[ObjectId],

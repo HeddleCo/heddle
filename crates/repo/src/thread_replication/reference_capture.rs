@@ -270,6 +270,40 @@ impl ThreadReplica {
     pub fn prepare_capture(&self, repo: &Repository, state: &State) -> Result<Capture> {
         self.prepare_source_result(repo, state, Vec::new())
     }
+    /// Preserve exact parent reference descriptors while an atomic local capture
+    /// batch is still uncommitted. Only this State's same-Thread parents contribute.
+    /// The caller must publish these prepared originals together, in parent order.
+    pub fn prepare_capture_with_prepared(
+        &self,
+        repo: &Repository,
+        state: &State,
+        prepared: &[ThreadOperation],
+    ) -> Result<Capture> {
+        if prepared.len() > 128 {
+            return Err(err("prepared capture batch limit"));
+        }
+        let genesis = self.genesis()?;
+        let mut roots = Vec::new();
+        for operation in prepared {
+            if operation.thread != self.thread {
+                return Err(err("prepared capture crosses Thread"));
+            }
+            let parent = operation
+                .source_state()?
+                .ok_or_else(|| err("prepared capture missing State"))?;
+            if state.parents.contains(&parent.id())
+                && let Some(proof) = operation.reference_proof(&genesis)?
+            {
+                roots.push(capture::closure(
+                    &Source(repo.store()),
+                    proof.descriptor,
+                    &proof.scope,
+                    proof.state,
+                )?);
+            }
+        }
+        self.prepare_source_result(repo, state, roots)
+    }
     /// Integration inherits the exact selected source operation and every exact
     /// target frontier, not either Thread's latest mutable checkout.
     pub fn prepare_integration(

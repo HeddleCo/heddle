@@ -1,0 +1,18 @@
+# Dockerfile-specific context allowlist. No local config or native demo stores.
+**
+!LICENSE
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!crates/**
+!docs/
+!docs/**
+**/.git
+**/.heddle
+**/target
+**/__pycache__
+**/.env*
+**/*.pem
+**/*.key
+**/identity.toml

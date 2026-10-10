@@ -1,0 +1,30 @@
+test_bad_digest_and_missing_source (test_native_bundle.BundleTests.test_bad_digest_and_missing_source) ... ok
+test_cold_clone_fetch_after_native_origin_removed (test_native_bundle.BundleTests.test_cold_clone_fetch_after_native_origin_removed) ... ok
+test_unsafe_archive_entries (test_native_bundle.BundleTests.test_unsafe_archive_entries) ... ok
+test_artifacts_adapter_substitutes_for_catalog_in_real_git_clone_LOCAL_FIXTURES (test_gateway.GatewayTests.test_artifacts_adapter_substitutes_for_catalog_in_real_git_clone_LOCAL_FIXTURES) ... ok
+test_clone_fetch_contents_fsck_and_catalog_separation (test_gateway.GatewayTests.test_clone_fetch_contents_fsck_and_catalog_separation) ... ok
+test_concurrent_publication_and_lost_ack_recovery (test_gateway.GatewayTests.test_concurrent_publication_and_lost_ack_recovery) ... ok
+test_denied_and_revoked_request_does_not_materialize (test_gateway.GatewayTests.test_denied_and_revoked_request_does_not_materialize) ... ok
+test_deterministic_projection_and_native_threads (test_gateway.GatewayTests.test_deterministic_projection_and_native_threads) ... ok
+test_fixture_server_rejects_remote_origin_and_proxy_wiring (test_gateway.GatewayTests.test_fixture_server_rejects_remote_origin_and_proxy_wiring) ... ok
+test_manifest_validation (test_gateway.GatewayTests.test_manifest_validation) ... ok
+test_missing_corrupt_source_and_stale_manifest (test_gateway.GatewayTests.test_missing_corrupt_source_and_stale_manifest) ... ok
+test_native_symlinks_refused_before_copy (test_gateway.GatewayTests.test_native_symlinks_refused_before_copy) ... ok
+test_ordered_merge_parents_and_hidden_objects (test_gateway.GatewayTests.test_ordered_merge_parents_and_hidden_objects) ... ok
+test_process_environment_and_cgi_headers_cannot_redirect_git (test_gateway.GatewayTests.test_process_environment_and_cgi_headers_cannot_redirect_git) ... ok
+test_projection_does_not_need_git_or_worktree_caches (test_gateway.GatewayTests.test_projection_does_not_need_git_or_worktree_caches) ... ok
+test_publication_advance_during_resolution_cannot_switch_pinned_manifest (test_gateway.GatewayTests.test_publication_advance_during_resolution_cannot_switch_pinned_manifest) ... ok
+test_write_paths_and_noncanonical_routes_rejected (test_gateway.GatewayTests.test_write_paths_and_noncanonical_routes_rejected) ... ok
+test_documented_read_url_raw_response_and_closed_handle (test_artifacts.ArtifactsContractTests.test_documented_read_url_raw_response_and_closed_handle) ... ok
+test_missing_malformed_oversized_encoded_responses (test_artifacts.ArtifactsContractTests.test_missing_malformed_oversized_encoded_responses) ... ok
+test_redirect_and_configuration_injection_refused (test_artifacts.ArtifactsContractTests.test_redirect_and_configuration_injection_refused) ... ok
+test_shared_contract (test_artifacts.ArtifactsContractTests.test_shared_contract) ... ok
+test_unpublished_pin_no_io_and_allowlist_is_immutable (test_artifacts.ArtifactsContractTests.test_unpublished_pin_no_io_and_allowlist_is_immutable) ... ok
+test_deadline_stops_child (test_process_bounds.ProcessBoundsTests.test_deadline_stops_child) ... ok
+test_output_file_cannot_exceed_limit (test_process_bounds.ProcessBoundsTests.test_output_file_cannot_exceed_limit) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 18.842s
+
+OK
+EVIDENCE clone/fetch/fsck: {"base": {"manifest": {"git_oid": "93950f5a7387a95fb98fa432002eeadafe89b852", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-9jtkgajqp5gazyjes4ptszrkbrtm2s5bnc3prngrjd1h6ncnrh8g", "thread": "main"}, "pin": "99d5e15121e5c7f687005fdc002fd9b4512eda48"}, "merged": {"manifest": {"git_oid": "3fe4ae80bef9ac71f259379a889c04a9be63c3fb", "mode": "snapshot", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-awx8k4gb8rh2vb7y7s366j21kt57cnxrbpnaj0d9jknqdpzzz9m0", "thread": "main"}, "pin": "e62c2c46fc3768afbaa735c9dafad22f75d4e3c4"}, "ordered": {"manifest": {"git_oid": "63b517d25e11dd40097860680da3ffcff11249dc", "mode": "history", "policy_epoch": 1, "repository": "synthetic-demo", "schema": 1, "source": "native-demo", "state": "hs-gnkcczkx3xhty0e8qbmg3avbt66592t33c341qjeanbyx019pfq0", "thread": "main"}, "pin": "c727f8953d8b8be0819c7745d4946c0791e7ce23"}}

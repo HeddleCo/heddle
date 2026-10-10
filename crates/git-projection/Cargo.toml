@@ -14,6 +14,7 @@ path = "src/lib.rs"
 name = "heddle_git_projection"
 
 [dependencies]
+crypto.workspace = true
 objects.workspace = true
 refs.workspace = true
 # `default-features = false` so this crate's `zstd` feature controls the
@@ -22,6 +23,9 @@ repo = { workspace = true, features = ["git-overlay"] }
 ingest.workspace = true
 heddle-perf-contract.workspace = true
 wire.workspace = true
+thread-api = { workspace = true, optional = true, features = ["source-transfer"] }
+api = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 
 serde.workspace = true
 serde_json.workspace = true
@@ -34,8 +38,20 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+hosted-client = { workspace = true, features = ["client"] }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.30.0" }
+base64.workspace = true
 serial_test.workspace = true
 chrono.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+# Native gateway example: no Python or additional production-library surface.
+httparse = "1"
+libc.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+tar = "0.4"
 # Test-only: the in-memory object backend never ships in the library.
 objects = { workspace = true, features = ["memory-backend"] }
 
@@ -45,4 +61,7 @@ objects = { workspace = true, features = ["memory-backend"] }
 # stay valid without dead-code warnings in non-overlay contexts.
 default = ["git-overlay", "zstd"]
 git-overlay = []
+gateway-publication = ["dep:thread-api", "dep:api", "dep:prost"]
+# Explicit loopback TLS trust for the black-box synthetic receiver harness only.
+gateway-fixture = ["gateway-publication", "hosted-client/gateway-fixture"]
 zstd = ["objects/zstd", "repo/zstd", "ingest/zstd", "wire/zstd"]

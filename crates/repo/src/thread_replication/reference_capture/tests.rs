@@ -805,3 +805,93 @@ fn original_source_operation_retains_local_privacy_before_publication() {
         "retry must reuse signed privacy, not today's mutable sidecars"
     );
 }
+
+#[test]
+fn uncommitted_capture_batch_preserves_reference_rename_then_line_edit() {
+    use super::super::source_publication::{Command, PreparedPublication};
+    use objects::object::{OperationId, thread_replication::AuthoredCapture};
+    let (_directory, repo, replica, base, target) = fixture();
+    let first = state(&repo, base.id(), "renamed.rs", "one\ntwo\nthree\n");
+    let second = state(&repo, first.id(), "renamed.rs", "zero\none\ntwo\nthree\n");
+    let signer = repo
+        .native_original_owner_signer(&replica)
+        .expect("existing owner");
+    let publisher = signer.public_key().try_into().expect("key");
+    let first_op = ThreadOperation {
+        version: 1,
+        thread: replica.thread,
+        parents: BTreeSet::new(),
+        publisher,
+        body: ThreadOperationBody::Capture(AuthoredCapture::local(
+            replica
+                .prepare_capture(&repo, &first)
+                .expect("first preparation"),
+        )),
+    };
+    let second_op = ThreadOperation {
+        version: 1,
+        thread: replica.thread,
+        parents: BTreeSet::from([first_op.id().expect("first ID")]),
+        publisher,
+        body: ThreadOperationBody::Capture(AuthoredCapture::local(
+            replica
+                .prepare_capture_with_prepared(&repo, &second, std::slice::from_ref(&first_op))
+                .expect("prepare across uncommitted rename"),
+        )),
+    };
+    assert!(
+        replica
+            .source_operation_page(first.id(), None, 1)
+            .expect("first not published")
+            .is_empty()
+    );
+    let proof = second_op
+        .reference_proof(&replica.genesis().expect("genesis"))
+        .expect("proof")
+        .expect("tracked source");
+    let closure = capture::closure(
+        &Source(repo.store()),
+        proof.descriptor,
+        &proof.scope,
+        proof.state,
+    )
+    .expect("exact prepared reference closure");
+    let resolution = &closure.targets[&target.target];
+    assert_eq!(closure.files[&resolution.core.file].path, "renamed.rs");
+    assert_eq!(resolution.status, ResolutionStatus::Resolved);
+    assert!(
+        matches!(resolution.selector, SourceSelector::Lines { range } if range.start == 2 && range.end == 3)
+    );
+    let originals = [
+        SignedOperation::sign(&first_op, &signer).expect("first signed"),
+        SignedOperation::sign(&second_op, &signer).expect("second signed"),
+    ];
+    let guards = [(replica.clone(), replica.generation().expect("generation"))];
+    replica
+        .publish_prepared_source(
+            PreparedPublication {
+                operations: &originals,
+                authority_admissions: &Default::default(),
+                revision: second.id(),
+                guards: &guards,
+            },
+            repo.store(),
+            Command {
+                namespace: "local batch fixture",
+                id: OperationId::new(),
+                method: "LocalGitPush",
+                request_hash: [23; 32],
+            },
+            |_, _| Ok(()),
+            || Ok(vec![]),
+        )
+        .expect("atomic source publication preserves native references");
+    let resolved = replica
+        .resolve_source_target(&repo, &target, second.id())
+        .expect("resolve after publication")
+        .expect("native reference preserved");
+    assert_eq!(resolved.file.path, "renamed.rs");
+    assert!(
+        matches!(resolved.target.selector, SourceSelector::Lines { range } if range.start == 2 && range.end == 3)
+    );
+}

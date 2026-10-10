@@ -118,6 +118,12 @@ impl VerifiedEndpointDescriptor {
         self
     }
     pub(super) fn http(&self, config: &ClientConfig) -> BootstrapHttp {
+        #[cfg(feature = "gateway-fixture")]
+        if self.2.as_ref().is_some_and(|http| {
+            http.config.gateway_fixture_address != config.gateway_fixture_address
+        }) {
+            return BootstrapHttp::new(config);
+        }
         match &self.2 {
             Some(http)
                 if http.config.tls_ca_certificate_pem == config.tls_ca_certificate_pem
@@ -317,6 +323,8 @@ impl BootstrapHttp {
     ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
         let config = &self.config;
         let mut request_url = reqwest::Url::parse(url).map_err(HostedError::transport)?;
+        #[cfg(feature = "gateway-fixture")]
+        let fixture_address = gateway_fixture_address(&request_url, config)?;
         let pool = self
             .client
             .get_or_try_init(|| async {
@@ -333,7 +341,26 @@ impl BootstrapHttp {
                             "TLS CA certificate bundle contains no certificates".to_string(),
                         ));
                     }
-                    builder = builder.tls_certs_merge(certificates);
+                    #[cfg(feature = "gateway-fixture")]
+                    {
+                        builder = if fixture_address.is_some() {
+                            builder.tls_certs_only(certificates)
+                        } else {
+                            builder.tls_certs_merge(certificates)
+                        };
+                    }
+                    #[cfg(not(feature = "gateway-fixture"))]
+                    {
+                        builder = builder.tls_certs_merge(certificates);
+                    }
+                }
+                #[cfg(feature = "gateway-fixture")]
+                if let Some(address) = fixture_address {
+                    // Keep HTTPS identity, SNI and Host canonical. Reqwest retains
+                    // this explicit socket port when the URL has no port.
+                    builder = builder
+                        .no_proxy()
+                        .resolve("native-fixture.example", address);
                 }
                 let target = bootstrap_target(url, config.tls_domain_name.as_deref()).await?;
                 if let Some((server_name, addresses)) = &target.resolution {
@@ -363,6 +390,38 @@ impl BootstrapHttp {
         };
         Ok((pool.client.clone(), request_url, host_header))
     }
+}
+
+#[cfg(feature = "gateway-fixture")]
+fn gateway_fixture_address(
+    url: &reqwest::Url,
+    config: &ClientConfig,
+) -> Result<Option<SocketAddr>> {
+    let Some(address) = config.gateway_fixture_address else {
+        return Ok(None);
+    };
+    if !address.ip().is_loopback()
+        || address.port() == 0
+        || url.scheme() != "https"
+        || url.host_str() != Some("native-fixture.example")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || config
+            .tls_ca_certificate_pem
+            .as_ref()
+            .is_none_or(|pem| pem.is_empty())
+        || config.tls_domain_name.is_some()
+        || config.tls_skip_verify
+        || config.allow_insecure
+    {
+        return Err(HostedError::InvalidDescriptor(
+            "gateway fixture requires its canonical HTTPS authority, explicit loopback socket, and supplied CA-only TLS trust".into(),
+        ));
+    }
+    Ok(Some(address))
 }
 
 pub(super) async fn bounded_response_body(
@@ -535,5 +594,161 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("certificate"));
+    }
+
+    #[cfg(feature = "gateway-fixture")]
+    mod gateway_fixture {
+        use std::collections::{HashMap, VecDeque};
+
+        use super::*;
+        use crate::hosted_runtime::hosted::test_https::{TestHttpsServer, TestResponse};
+
+        const AUTHORITY: &str = "https://native-fixture.example";
+
+        fn fixture_config(server: &TestHttpsServer) -> ClientConfig {
+            ClientConfig::default()
+                .with_tls_ca_certificate_pem(server.certificate_pem())
+                .with_gateway_fixture_address(
+                    server
+                        .authority()
+                        .strip_prefix("https://")
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                )
+                .with_timeout(2)
+        }
+
+        #[tokio::test]
+        async fn gateway_fixture_preserves_canonical_authority_over_authenticated_loopback() {
+            let _process_env_guard = crate::test_process_env::shared().await;
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let paths = [
+                "/.well-known/heddle/iroh-endpoint",
+                "/.well-known/heddle/hosted-witnesses",
+            ];
+            let server = TestHttpsServer::start_with_names(
+                paths
+                    .iter()
+                    .map(|path| {
+                        (
+                            path.to_string(),
+                            VecDeque::from([TestResponse::json(b"authenticated fixture".to_vec())]),
+                        )
+                    })
+                    .collect(),
+                vec!["native-fixture.example".into()],
+            );
+            let http = BootstrapHttp::new(&fixture_config(&server));
+            api::import_authority::canonical_https(AUTHORITY, true).unwrap();
+            for path in paths {
+                let expected = format!("{AUTHORITY}{path}");
+                let (client, url, host) = http.client(&expected).await.unwrap();
+                assert_eq!(
+                    url.as_str(),
+                    expected,
+                    "transport must not rewrite trust identity"
+                );
+                assert!(
+                    host.is_none(),
+                    "TLS SNI and HTTP Host retain the canonical authority"
+                );
+                assert_eq!(
+                    client
+                        .get(url)
+                        .send()
+                        .await
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    b"authenticated fixture",
+                );
+            }
+            assert_eq!(server.requests(), paths);
+            assert!(http.client("https://other.example/metadata").await.is_err());
+            assert_eq!(
+                server.requests(),
+                paths,
+                "pooled fixture clients cannot cross origins"
+            );
+        }
+
+        #[tokio::test]
+        async fn gateway_fixture_rejects_other_origins_routes_and_insecure_configuration() {
+            let _process_env_guard = crate::test_process_env::shared().await;
+            let config = ClientConfig::default()
+                .with_gateway_fixture_address("127.0.0.1:8421".parse().unwrap())
+                .with_tls_ca_certificate_pem("invalid test CA; no network may occur");
+            for url in [
+                "http://native-fixture.example/metadata",
+                "https://other.example/metadata",
+                "https://127.0.0.1/metadata",
+                "https://native-fixture.example:8421/metadata",
+                "https://user@native-fixture.example/metadata",
+                "https://native-fixture.example/metadata?query=1",
+                "https://native-fixture.example/metadata#fragment",
+            ] {
+                assert!(
+                    super::super::gateway_fixture_address(&url.parse().unwrap(), &config).is_err(),
+                    "{url}"
+                );
+            }
+            let mut no_ca = config.clone();
+            no_ca.tls_ca_certificate_pem = None;
+            for invalid in [
+                no_ca,
+                config
+                    .clone()
+                    .with_gateway_fixture_address("203.0.113.1:8421".parse().unwrap()),
+                config
+                    .clone()
+                    .with_gateway_fixture_address("127.0.0.1:0".parse().unwrap()),
+                config.clone().with_tls(true),
+                config.clone().with_tls_domain_name("other.example"),
+                config.clone().with_allow_insecure(true),
+            ] {
+                let error = BootstrapHttp::new(&invalid)
+                    .client(&format!("{AUTHORITY}/metadata"))
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("gateway fixture requires"));
+            }
+        }
+
+        #[tokio::test]
+        async fn gateway_fixture_verifies_both_ca_and_logical_hostname() {
+            let _process_env_guard = crate::test_process_env::shared().await;
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let server = TestHttpsServer::start_with_names(
+                HashMap::new(),
+                vec!["native-fixture.example".into()],
+            );
+            let unrelated =
+                rcgen::generate_simple_self_signed(vec!["native-fixture.example".into()]).unwrap();
+            let wrong_ca =
+                fixture_config(&server).with_tls_ca_certificate_pem(unrelated.cert.pem());
+            let (client, url, _) = BootstrapHttp::new(&wrong_ca)
+                .client(&format!("{AUTHORITY}/metadata"))
+                .await
+                .unwrap();
+            assert!(
+                client.get(url).send().await.is_err(),
+                "an unrelated CA cannot authenticate the route"
+            );
+            assert!(server.requests().is_empty());
+
+            let wrong_name = TestHttpsServer::start(HashMap::new());
+            let (client, url, _) = BootstrapHttp::new(&fixture_config(&wrong_name))
+                .client(&format!("{AUTHORITY}/metadata"))
+                .await
+                .unwrap();
+            assert!(
+                client.get(url).send().await.is_err(),
+                "the loopback certificate must cover the logical authority"
+            );
+            assert!(wrong_name.requests().is_empty());
+        }
     }
 }

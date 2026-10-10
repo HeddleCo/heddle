@@ -155,6 +155,14 @@ pub fn transfer_ready(ready: &TransferReady) -> Result<(), Rejection> {
     )
 }
 pub fn publish_open(open: &PublishContentOpen) -> Result<(), Rejection> {
+    if open.git_acceptance.is_some()
+        && open
+            .protocol
+            .as_ref()
+            .is_none_or(|p| p.protocol_version != 2 || p.mandatory_features != [1, 2])
+    {
+        return Err("atomic Git acceptance requires mandatory feature 2");
+    }
     carrier(
         open.protocol.as_ref(),
         open.import_authority.as_ref(),
@@ -200,6 +208,27 @@ mod tests {
     }
     fn protocol() -> Option<ProtocolCompatibility> {
         Some(ProtocolCompatibility::default())
+    }
+
+    #[test]
+    fn git_acceptance_cannot_be_silently_ignored_by_an_older_protocol() {
+        let mut open = PublishContentOpen {
+            git_acceptance: Some(crate::contract::GitPushAcceptance::default()),
+            ..Default::default()
+        };
+        assert!(publish_open(&open).is_err());
+        for features in [vec![], vec![1], vec![2], vec![2, 1], vec![1, 2, 2]] {
+            open.protocol = Some(ProtocolCompatibility {
+                protocol_version: 2,
+                mandatory_features: features,
+            });
+            assert!(publish_open(&open).is_err());
+        }
+        open.protocol = Some(ProtocolCompatibility {
+            protocol_version: 2,
+            mandatory_features: vec![1, 2],
+        });
+        publish_open(&open).expect("explicit new receiver contract");
     }
 
     #[test]

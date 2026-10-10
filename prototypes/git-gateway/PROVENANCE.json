@@ -1,0 +1,67 @@
+{
+  "official_heddle_url": "https://github.com/HeddleCo/heddle",
+  "heddle_base": "49cdd66aea09d53c6c02e8266cee2f727d078937",
+  "heddle_version": "0.29.0",
+  "native_repository_format": 6,
+  "refreshed_utc": "2026-10-10",
+  "cargo_lock_sha256": "641e1df998b74b1076a3c3bd54547e6b6b0171d45b13904d02e59b45b107c250",
+  "dependencies": [
+    {
+      "name": "heddle-api",
+      "version": "0.31.0-alpha.45",
+      "source": "git+https://github.com/HeddleCo/api?rev=a1a4b6e34fc0737bc0cad3d388cc4a2e3fe28dae#a1a4b6e34fc0737bc0cad3d388cc4a2e3fe28dae"
+    },
+    {
+      "name": "noq",
+      "version": "1.3.0",
+      "source": "git+https://github.com/HeddleCo/noq?rev=3249892a8be4d67a10c78ce1f2e3c8b741f016de#3249892a8be4d67a10c78ce1f2e3c8b741f016de"
+    },
+    {
+      "name": "sley",
+      "version": "0.12.1",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "ebaed808c2a5fef1903907cd0b9b9a5d445cd9ed7b408e0cacac8bc49672c4f1"
+    }
+  ],
+  "tools": {
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "git": "git version 2.52.0",
+    "python": "Python 3.12.14",
+    "node": "v24.19.0",
+    "wrangler_schema": "4.146.0"
+  },
+  "live_integrations_tested": [],
+  "historical_handoff": {
+    "official_heddle_url": "https://github.com/HeddleCo/heddle",
+    "heddle_base": "ecf70cc15c9f7ffc620345ea0a8d8c007ab2eb7c",
+    "inspected_existing_local_heddle": "706ba68d5e082be09f4a860ead0ff20a706f06cd",
+    "inspected_local_weft_docs_revision": "3383ffab85826f5d9046c7c120d14b661a6babd5",
+    "cargo_lock_sha256": "acd37f984631675cbc29832bcf0b9f8a308203f3317527bbf773c49728a5853a",
+    "dependencies": [
+      {
+        "name": "heddle-api",
+        "version": "0.31.0-alpha.13",
+        "source": "git+https://github.com/HeddleCo/api.git?rev=dc636bb5019f0cbd01e9cf5935be5fde22fa8461#dc636bb5019f0cbd01e9cf5935be5fde22fa8461"
+      },
+      {
+        "name": "noq",
+        "version": "1.3.0",
+        "source": "git+https://github.com/HeddleCo/noq?rev=3249892a8be4d67a10c78ce1f2e3c8b741f016de#3249892a8be4d67a10c78ce1f2e3c8b741f016de"
+      },
+      {
+        "name": "sley",
+        "version": "0.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "checksum": "0d4216f24d4237a399ecb1f10293f9f7ecefa64bacf448cdb9d06fa34c0333c8"
+      }
+    ],
+    "tools": {
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "git": "git version 2.56.0",
+      "python": "Python 3.14.8",
+      "node": "v26.7.0"
+    },
+    "live_integrations_tested": []
+  },
+  "scope": "Local code and synthetic proof only; no new hosted source authority, provisioning, deployment, source publication or competition submission."
+}

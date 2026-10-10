@@ -63,9 +63,15 @@ pub(super) struct TestHttpsServer {
 
 impl TestHttpsServer {
     pub(super) fn start(routes: HashMap<String, VecDeque<TestResponse>>) -> Self {
+        Self::start_with_names(routes, vec!["127.0.0.1".to_string()])
+    }
+
+    pub(super) fn start_with_names(
+        routes: HashMap<String, VecDeque<TestResponse>>,
+        names: Vec<String>,
+    ) -> Self {
         let CertifiedKey { cert, signing_key } =
-            generate_simple_self_signed(vec!["127.0.0.1".to_string()])
-                .expect("generate test TLS certificate");
+            generate_simple_self_signed(names).expect("generate test TLS certificate");
         let certificate_pem = cert.pem();
         let private_key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));

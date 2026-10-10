@@ -1,0 +1,22 @@
+{
+  "name": "heddle-git-cloudflare-draft",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs",
+    "check": "node --check policy.mjs && node --check composition.mjs && node --check controller-runtime.mjs && node --check controller.mjs && node --check index.mjs",
+    "bundle": "node build.mjs",
+    "bundle:hosted": "node build-hosted.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "wrangler": "4.146.0"
+  }
+}

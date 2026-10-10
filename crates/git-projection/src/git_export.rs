@@ -1700,7 +1700,7 @@ fn reachable_states(
     Ok(states)
 }
 
-fn state_to_signature(state: &objects::object::State) -> Signature {
+pub(crate) fn state_to_signature(state: &objects::object::State) -> Signature {
     let seconds = state.created_at.timestamp();
     let principal = &state.attribution.principal;
     let mut raw = Vec::new();
