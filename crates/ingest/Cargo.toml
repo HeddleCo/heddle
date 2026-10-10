@@ -32,7 +32,7 @@ rusqlite.workspace = true
 # immediately-ready, and `pollster` is not a Tokio runtime, so blocking
 # on them is safe even when `import_git_into` is called from inside the
 # CLI's Tokio runtime (a nested `tokio::Runtime::block_on` would panic).
-pollster = "0.4"
+pollster = "1"
 rmp-serde.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
