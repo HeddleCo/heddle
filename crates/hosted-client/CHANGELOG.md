@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.29.0...heddle-hosted-client-v0.30.0) - 2026-10-10
+
+### Added
+
+- *(cli)* add heddle import cancel ([#2056](https://github.com/HeddleCo/heddle/pull/2056))
+
+### Other
+
+- *(clone)* cut sequential hosted round trips ([#2053](https://github.com/HeddleCo/heddle/pull/2053))
+
 ## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.28.14...heddle-hosted-client-v0.29.0) - 2026-10-09
 
 ### Fixed

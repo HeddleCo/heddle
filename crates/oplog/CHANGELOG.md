@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-oplog-v0.29.0...heddle-oplog-v0.30.0) - 2026-10-10
+
+### Other
+
+- *(deps)* wave 1 — opentelemetry 0.33, tokio-tungstenite 0.30, jsonschema 0.58, base64 0.23, pollster 1, ntest/serial_test ([#2059](https://github.com/HeddleCo/heddle/pull/2059))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-oplog-v0.15.0...heddle-oplog-v0.15.1) - 2026-08-27
 
 ### Fixed

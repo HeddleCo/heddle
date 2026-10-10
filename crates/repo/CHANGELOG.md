@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.29.0...heddle-repo-v0.30.0) - 2026-10-10
+
+### Changed
+
+- **Breaking:** the public API exposes `sley` types (`sley::Repository`, `sley::ObjectId`, `sley::IndexStatProbe`) and `sley` moved 0.12.1 -> 0.13.0 ([#2060](https://github.com/HeddleCo/heddle/pull/2060)); consumers must use `sley` 0.13.
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.28.14...heddle-repo-v0.29.0) - 2026-10-09
 
 ### Other
