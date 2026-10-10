@@ -21,6 +21,10 @@ Already checked out the repository?
 Want the server to fetch it, without a local checkout?
   heddle import url https://github.com/acme/widget.git --to <handle>/widget
 
+Manage a hosted import:
+  heddle import status <operation> --to <handle>/widget
+  heddle import cancel <operation> --to <handle>/widget
+
 Use \"heddle init\" to start a repository or keep working in Git mode.
 Use \"heddle clone\" to download an existing hosted Heddle repository.
 ")]
@@ -48,6 +52,26 @@ pub enum ImportCommands {
     /// Retry a failed durable import operation.
     #[cfg(feature = "client")]
     Retry(ImportOperationArgs),
+
+    /// Request cancellation of a hosted import operation.
+    ///
+    /// Uses the same operation/job record ID as status and retry, and your
+    /// normal hosted credentials. The server decides whether cancellation is
+    /// supported and permitted. Acknowledgement is not terminal cancellation
+    /// or rollback; use `heddle import status` to observe the outcome.
+    /// Completed, failed, or canceled operations succeed without a cancel request.
+    /// With `--output json`, emits `import_cancel` with status `requested` or
+    /// `already_terminal` and the observed state. Errors use the stderr envelope.
+    #[cfg(feature = "client")]
+    #[command(after_help = "Exit codes:
+  0   Cancellation requested or operation already terminal.
+  64  Invalid arguments.
+  74  IO failure.
+  75  Transient failure; safe to retry.
+  76  Server refused cancellation or rejected the request.
+  77  Caller is not authorized.
+  78  Missing configuration or operation (including another account's operation).")]
+    Cancel(ImportOperationArgs),
 }
 
 #[cfg(feature = "client")]
@@ -69,7 +93,7 @@ pub struct ImportUrlArgs {
 #[cfg(feature = "client")]
 #[derive(Args, Clone, Debug)]
 pub struct ImportOperationArgs {
-    /// Durable operation-record ID returned by import URL or retry.
+    /// Operation/job record ID returned by import URL or retry (not a client --op-id).
     #[arg(value_name = "OPERATION")]
     pub operation: String,
 

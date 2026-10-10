@@ -4,7 +4,8 @@
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha2 as contract;
 use heddle_cli_contract::cli::commands::wire::remote::{
-    ImportOperationOutput, ImportReportOutput, ImportRetryOutput, SkippedImportRefOutput,
+    ImportCancelOutput, ImportOperationOutput, ImportReportOutput, ImportRetryOutput,
+    SkippedImportRefOutput,
 };
 use hosted_client::hosted_runtime::{
     auth::resolve_server,
@@ -209,6 +210,84 @@ pub async fn cmd_import_retry(cli: &Cli, args: ImportOperationArgs) -> Result<()
     }
 }
 
+pub async fn cmd_import_cancel(cli: &Cli, args: ImportOperationArgs) -> Result<()> {
+    let (server, destination) = import_destination(&args.to, args.server.as_deref())?;
+    let config = UserConfig::load_default()?;
+    let session = HostedSession::build(
+        &config,
+        Some(server.clone()),
+        HostedAuthMode::CredentialFallback,
+    )?;
+    let client = session.connect(&server).await?;
+    let result = async {
+        let original = client
+            .observe_import_operation(&destination, &args.operation, false, |_| Ok(()))
+            .await
+            .context("observe import operation before cancellation")?;
+        let terminal = is_terminal(original.state);
+        let client_operation_id = if terminal {
+            None
+        } else {
+            Some(
+                client
+                    .cancel_import_operation(&original, cli.operation_id_wire())
+                    .await
+                    .context("request hosted import cancellation")?,
+            )
+        };
+        Ok::<_, anyhow::Error>(ImportCancelOutput {
+            output_kind: "import_cancel",
+            action: "cancel",
+            status: if terminal {
+                "already_terminal"
+            } else {
+                "requested"
+            },
+            state: operation_state(original.state),
+            success: true,
+            destination,
+            operation_id: args.operation,
+            client_operation_id,
+        })
+    }
+    .await;
+    client.close().await;
+    let output = result?;
+    if should_output_json(cli, None) {
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["import", "cancel"]),
+        )
+    } else {
+        if output.status == "already_terminal" {
+            println!(
+                "{} import operation {} is already {} on {}",
+                style::ok_marker(),
+                style::bold(&output.operation_id),
+                output.state,
+                style::dim(&server)
+            );
+        } else {
+            println!(
+                "{} cancellation requested for import operation {} on {}",
+                style::ok_marker(),
+                style::bold(&output.operation_id),
+                style::dim(&server)
+            );
+        }
+        let mut next = format!(
+            "heddle import status {} --to {}",
+            output.operation_id, args.to
+        );
+        if let Some(server) = args.server {
+            next.push_str(&format!(" --server {server}"));
+        }
+        super::super::action_line::print_next(&next);
+        Ok(())
+    }
+}
+
 fn import_destination(value: &str, server: Option<&str>) -> Result<(String, String)> {
     if value.starts_with("https://") {
         if server.is_some() {
@@ -309,6 +388,15 @@ impl CompactProjection for ImportOperationOutput {
                 );
             }
         }
+        output.operation_id = Some(self.operation_id.clone());
+        output
+    }
+}
+
+impl CompactProjection for ImportCancelOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut output = CompactOutput::new(self.output_kind);
+        output.status = Some(self.status.to_string());
         output.operation_id = Some(self.operation_id.clone());
         output
     }
