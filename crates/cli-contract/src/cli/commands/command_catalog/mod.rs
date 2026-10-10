@@ -1267,6 +1267,40 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
+    entry(
+        &[IMPORT_VERB, "cancel"],
+        feature_gated(
+            exits(
+                surface(
+                    json_discriminators(
+                        documented_schemas(
+                            compact_json(CommandContract {
+                                network_io: true,
+                                ..user_scoped(MUTATION_BASE)
+                            }),
+                            &["import cancel"],
+                        ),
+                        &[json_discriminator(
+                            Some("import cancel"),
+                            "output_kind",
+                            "import_cancel",
+                        )],
+                    ),
+                    "source_authority",
+                ),
+                &[
+                    (0, "cancellation requested or operation already terminal"),
+                    (64, "invalid arguments"),
+                    (74, "IO failure"),
+                    (75, "transient failure; safe to retry"),
+                    (76, "cancellation refused or request rejected"),
+                    (77, "not authorized"),
+                    (78, "configuration or operation missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
     entry(&["ci"], feature_gated(surface(GROUP, "automation"), "ci")),
     entry(
         &["ci", "run"],
@@ -4886,6 +4920,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ImportCommands::Status(_) => vec![IMPORT_VERB, "status"],
             #[cfg(feature = "client")]
             ImportCommands::Retry(_) => vec![IMPORT_VERB, "retry"],
+            #[cfg(feature = "client")]
+            ImportCommands::Cancel(_) => vec![IMPORT_VERB, "cancel"],
         },
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],

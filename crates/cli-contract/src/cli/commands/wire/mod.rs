@@ -71,8 +71,8 @@ pub use ready::{
     ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary, ready_blocked_by_missing_intent,
 };
 pub use remote::{
-    AdoptOutput, CloneOutput, ImportOperationOutput, ImportRetryOutput, PullOutput, PushOutput,
-    PushReplicationOutcome, RemoteMutationOutput,
+    AdoptOutput, CloneOutput, ImportCancelOutput, ImportOperationOutput, ImportRetryOutput,
+    PullOutput, PushOutput, PushReplicationOutcome, RemoteMutationOutput,
 };
 pub use thread::{
     ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,

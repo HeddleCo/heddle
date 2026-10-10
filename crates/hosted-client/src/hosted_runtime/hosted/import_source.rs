@@ -329,6 +329,39 @@ impl HostedClient {
             .await
     }
 
+    /// Request cancellation against the exact observed operation version.
+    /// The applied receipt acknowledges the request, not worker completion.
+    pub async fn cancel_import_operation(
+        &self,
+        original: &contract::OperationRecord,
+        caller_operation_id: impl Into<String>,
+    ) -> Result<String, ProtocolError> {
+        const METHOD: &str = "/heddle.api.v1alpha2.OperationService/CancelOperation";
+        let operation_id = ClientOperationId::caller_or_fresh(METHOD, caller_operation_id);
+        let operation = original.r#ref.clone().ok_or_else(|| {
+            ProtocolError::InvalidState("import operation reference is absent".into())
+        })?;
+        let remote = self.native().await.map_err(protocol_error)?;
+        let response: contract::MutationResponse = self
+            .call_unary(
+                METHOD,
+                &contract::CancelOperationRequest {
+                    client_operation_id: operation_id.to_wire(),
+                    operation: Some(operation),
+                    expected_version: original.version.clone(),
+                },
+            )
+            .await
+            .map_err(super::helpers::hosted_to_protocol_error)?;
+        super::user::require_applied_receipt(
+            response.receipt,
+            operation_id.as_str(),
+            &remote.description.endpoint,
+            "import cancellation request",
+        )?;
+        Ok(operation_id.to_wire())
+    }
+
     /// Submit the API's explicit retry against the exact observed version.
     pub async fn retry_import_source(
         &self,

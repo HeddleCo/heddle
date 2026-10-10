@@ -49,6 +49,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["import", "retry"],
         &["import", "retry", "operation-1", "--to", "acme/widget"],
     ),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "cancel"],
+        &["import", "cancel", "operation-1", "--to", "acme/widget"],
+    ),
     #[cfg(feature = "ci")]
     sample(&["ci", "run"], &["ci", "run", "--local"]),
     sample(
@@ -1163,6 +1168,7 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "diff".to_string(),
         "discuss new".to_string(),
         "discuss reply".to_string(),
+        "import cancel".to_string(),
         "import local".to_string(),
         "import retry".to_string(),
         "import status".to_string(),
@@ -1908,6 +1914,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "import url",
             "import status",
             "import retry",
+            "import cancel",
             "agent capture",
             "agent ready",
             "agent task create",
@@ -2343,7 +2350,7 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
                 .options
                 .iter()
                 .any(|option| option.long.as_deref() == Some("json")),
-            "legacy --json should not be included in command options for {}",
+            "commands use --output: {}",
             command.path.join(" ")
         );
     }
