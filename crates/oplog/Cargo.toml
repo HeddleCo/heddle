@@ -21,7 +21,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 criterion = "0.8"
-pollster = "0.4"
+pollster = "1"
 sha2.workspace = true
 tempfile.workspace = true
 
