@@ -1,0 +1,20 @@
+[package]
+name = "heddle-git-serialize"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Engine-free, byte-exact Git serialization and async native object reconstruction."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+heddle-object-model.workspace = true
+sley-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

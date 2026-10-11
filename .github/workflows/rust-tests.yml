@@ -103,6 +103,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: bash scripts/check-hosted-leaf-consumer.sh
 
+      - name: Engine-free Git reconstruction contract
+        if: github.event_name == 'pull_request'
+        run: |
+          export HEDDLE_HOME=$(mktemp -d)
+          python3 scripts/check-git-serialize-dependencies.py
+          cargo test --locked -p heddle-git-serialize
+
       - name: Build (workspace, all targets)
         if: github.event_name == 'pull_request'
         run: cargo build --locked --workspace --all-targets

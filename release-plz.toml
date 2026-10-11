@@ -37,6 +37,10 @@ name = "heddle-object-model"
 release = true
 
 [[package]]
+name = "heddle-git-serialize"
+release = true
+
+[[package]]
 name = "heddle-fs-prims"
 release = true
 
