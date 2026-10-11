@@ -5,11 +5,12 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use heddle_git_serialize::{
-    NativeObjectId, ObjectFormat, ObjectId, ObjectReader, ObjectSink, ReconstructionLimits,
-    reconstruct_closure,
+    GitObjectKind, NativeObjectId, ObjectFormat, ObjectId, ObjectReader, ObjectSink,
+    ReconstructionLimits, reconstruct_closure,
 };
 use heddle_object_model::object::{
     Blob, ContentHash, EntryType, State, StateId, Tree, TreeEntry, parse_git_tree,
@@ -21,6 +22,7 @@ use heddle_object_model::object::{
 
 #[derive(Default)]
 struct NativeStore {
+    reads: AtomicUsize,
     states: BTreeMap<StateId, State>,
     trees: BTreeMap<ContentHash, Tree>,
     blobs: BTreeMap<ContentHash, Blob>,
@@ -29,12 +31,15 @@ struct NativeStore {
 impl ObjectReader for NativeStore {
     type Error = &'static str;
     async fn read_state(&self, id: StateId, _max_bytes: usize) -> Result<State, Self::Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.states.get(&id).cloned().ok_or("missing state")
     }
     async fn read_tree(&self, id: ContentHash, _max_bytes: usize) -> Result<Tree, Self::Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.trees.get(&id).cloned().ok_or("missing tree")
     }
     async fn read_blob(&self, id: ContentHash, _max_bytes: usize) -> Result<Blob, Self::Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.blobs.get(&id).cloned().ok_or("missing blob")
     }
 }
@@ -49,7 +54,8 @@ impl ObjectSink for Verifier {
     type Error = &'static str;
     async fn write_object(
         &mut self,
-        kind: &'static str,
+        _native: NativeObjectId,
+        kind: GitObjectKind,
         id: ObjectId,
         content: &[u8],
     ) -> Result<(), Self::Error> {
@@ -57,7 +63,7 @@ impl ObjectSink for Verifier {
             .expected
             .get(&id)
             .expect("reconstructed original object ID");
-        assert_eq!(kind, *expected_kind);
+        assert_eq!(kind.as_str(), *expected_kind);
         assert_eq!(content, expected_body, "byte difference for {kind} {id}");
         *self.seen.entry(id).or_default() += 1;
         Ok(())
@@ -323,6 +329,7 @@ fn import_native(
 fn assert_corpus(dir: &Path, format: ObjectFormat) {
     let (store, mut verifier, roots) = import_native(dir, format);
     for (state, original) in roots {
+        verifier.seen.clear();
         let future = reconstruct_closure(
             &store,
             &mut verifier,
@@ -334,14 +341,17 @@ fn assert_corpus(dir: &Path, format: ObjectFormat) {
         assert_send(&future);
         let reconstructed = pollster::block_on(future).expect("reconstruct closure");
         assert_eq!(reconstructed, original);
+        assert!(
+            verifier.seen.values().all(|count| *count == 1),
+            "each distinct object emitted once per reconstruction"
+        );
     }
     assert_eq!(
         verifier.seen.len(),
         verifier.expected.len(),
         "every original commit/tree/blob was verified"
     );
-    // The diamond merge shares its base; the bounded walk emits it repeatedly.
-    assert!(verifier.seen.values().any(|count| *count > 1));
+    assert!(verifier.seen.values().all(|count| *count == 1));
 }
 
 #[test]
@@ -406,4 +416,176 @@ fn signed_fixture_bytes_and_ids() {
         );
     }
     assert_eq!(verifier.seen.len(), verifier.expected.len());
+}
+
+#[test]
+fn canonical_tree_slash_order_matches_git_mktree() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let dir = tempfile::tempdir().expect("git repo");
+        git(
+            dir.path(),
+            &["init", "-q", &format!("--object-format={}", format.name())],
+            None,
+        );
+        let blob = Blob::from_slice(b"file");
+        let blob_oid = write_object(dir.path(), "blob", blob.content(), format);
+        let empty = Tree::new();
+        let tree_oid = write_object(dir.path(), "tree", b"", format);
+        let native = Tree::from_entries(vec![
+            TreeEntry::directory("a", empty.hash()).expect("directory"),
+            TreeEntry::file("a.txt", blob.hash(), false).expect("file"),
+            TreeEntry::file("a-b", blob.hash(), false).expect("file"),
+        ]);
+        let input = format!(
+            "040000 tree {tree_oid}\ta\n100644 blob {blob_oid}\ta.txt\n100644 blob {blob_oid}\ta-b\n"
+        );
+        let expected = git(dir.path(), &["mktree"], Some(input.as_bytes()));
+        let body = heddle_git_serialize::serialize_tree(&native, format, |entry| {
+            Ok(if entry.is_tree() { tree_oid } else { blob_oid })
+        })
+        .expect("canonical tree");
+        let actual =
+            heddle_git_serialize::object_id(format, GitObjectKind::Tree, &body).expect("tree id");
+        assert_eq!(
+            actual.to_string(),
+            String::from_utf8(expected).expect("hex").trim()
+        );
+    }
+}
+
+#[derive(Default)]
+struct CountingSink {
+    reuse: bool,
+    count: usize,
+    table: std::collections::HashMap<NativeObjectId, ObjectId>,
+}
+
+impl ObjectSink for CountingSink {
+    type Error = &'static str;
+    fn resolved(&self, native: NativeObjectId) -> Option<ObjectId> {
+        self.reuse
+            .then(|| self.table.get(&native).copied())
+            .flatten()
+    }
+    async fn write_object(
+        &mut self,
+        native: NativeObjectId,
+        _: GitObjectKind,
+        id: ObjectId,
+        _: &[u8],
+    ) -> Result<(), Self::Error> {
+        assert!(
+            self.table.insert(native, id).is_none(),
+            "one emission per native object"
+        );
+        self.count += 1;
+        Ok(())
+    }
+}
+
+fn shared_history(commits: usize, files: usize) -> (NativeStore, StateId) {
+    use heddle_object_model::object::{Attribution, Principal};
+    let mut store = NativeStore::default();
+    let entries = (0..files)
+        .map(|n| {
+            let blob = Blob::from_slice(format!("content {n}").as_bytes());
+            let entry = TreeEntry::file(format!("file-{n:05}"), blob.hash(), false).expect("file");
+            store.blobs.insert(blob.hash(), blob);
+            entry
+        })
+        .collect();
+    let tree = Tree::from_entries(entries);
+    let tree_hash = tree.hash();
+    store.trees.insert(tree_hash, tree);
+    let mut parents = Vec::new();
+    for n in 0..commits {
+        let state = State::new_snapshot(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("A", "a@x")),
+        )
+        .with_raw_message(format!("commit {n}\n"));
+        parents = vec![state.id()];
+        store.states.insert(state.id(), state);
+    }
+    (store, parents[0])
+}
+
+#[test]
+fn two_commits_sharing_tree_read_and_emit_distinct_objects_once() {
+    let (store, root) = shared_history(2, 2);
+    let mut sink = CountingSink::default();
+    let actual = pollster::block_on(reconstruct_closure(
+        &store,
+        &mut sink,
+        NativeObjectId::Commit(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_objects: 5,
+            ..Default::default()
+        },
+    ))
+    .expect("shared tree");
+    assert_eq!(sink.count, 5); // two commits, one tree, two blobs
+    assert_eq!(store.reads.load(Ordering::Relaxed), 5);
+    sink.reuse = true;
+    // A caller table skips the entire closure, even with no traversal budget.
+    let again = pollster::block_on(reconstruct_closure(
+        &store,
+        &mut sink,
+        NativeObjectId::Commit(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_depth: 0,
+            max_pending_links: 0,
+            max_object_bytes: 0,
+            max_total_bytes: 0,
+            max_objects: 1,
+        },
+    ))
+    .expect("sink cache hit");
+    assert_eq!(again, actual);
+    assert_eq!(sink.count, 5);
+    assert_eq!(store.reads.load(Ordering::Relaxed), 5);
+}
+
+#[test]
+fn large_shared_history_has_linear_reads_and_emissions() {
+    let (store, root) = shared_history(5_000, 2_000);
+    let mut sink = CountingSink::default();
+    pollster::block_on(reconstruct_closure(
+        &store,
+        &mut sink,
+        NativeObjectId::Commit(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_objects: 7_001,
+            max_depth: 5_001,
+            max_pending_links: 12_000,
+            max_object_bytes: 1024 * 1024,
+            max_total_bytes: 2 * 1024 * 1024,
+        },
+    ))
+    .expect("large shared history fits distinct-object limits");
+    assert_eq!(sink.count, 7_001);
+    assert_eq!(store.reads.load(Ordering::Relaxed), 7_001);
+}
+
+#[tokio::test]
+async fn reconstruction_future_spawns_on_tokio() {
+    let (store, root) = shared_history(2, 2);
+    let id = tokio::spawn(async move {
+        reconstruct_closure(
+            &store,
+            &mut CountingSink::default(),
+            NativeObjectId::Commit(root),
+            ObjectFormat::Sha1,
+            ReconstructionLimits::default(),
+        )
+        .await
+    })
+    .await
+    .expect("spawned reconstruction")
+    .expect("closure");
+    assert_eq!(id.format(), ObjectFormat::Sha1);
 }

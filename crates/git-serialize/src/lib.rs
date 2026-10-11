@@ -33,10 +33,34 @@ pub fn serialize_blob(blob: &Blob) -> &[u8] {
     blob.content()
 }
 
+/// Git object types supported by native reconstruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitObjectKind {
+    Blob,
+    Tree,
+    Commit,
+}
+
+impl GitObjectKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Tree => "tree",
+            Self::Commit => "commit",
+        }
+    }
+}
+
+impl std::fmt::Display for GitObjectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Hash unframed content with Git's `<kind> <len>\0` header.
-pub fn object_id(format: ObjectFormat, kind: &str, content: &[u8]) -> Result<ObjectId> {
+pub fn object_id(format: ObjectFormat, kind: GitObjectKind, content: &[u8]) -> Result<ObjectId> {
     let mut digest = sley_core::StreamingDigest::new(format);
-    digest.update(kind.as_bytes());
+    digest.update(kind.as_str().as_bytes());
     digest.update(b" ");
     digest.update(content.len().to_string().as_bytes());
     digest.update(&[0]);

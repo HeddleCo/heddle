@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.30.1]
+## [Unreleased]
 
 - Pure, byte-exact commit and tree serializers, zero-copy blob passthrough and
   Git object hashing for SHA-1 and SHA-256.

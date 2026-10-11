@@ -21,12 +21,18 @@ to verify the graph.
   verifier, object database or streaming pack writer. Both SHA-1 and SHA-256
   are supported.
 
-The closure walk is iterative. It stores bounded dependency/resolved IDs, reads
-non-leaf objects twice, and emits each object before continuing. It has no
-closure-wide cache; shared subgraphs can be emitted repeatedly. Readers must
-enforce the decoded object memory limit and provide stable, content-addressed
-reads; sinks must consume/persist bytes before returning. The caller owns access,
-redaction and transactions. An error or cancellation may leave a partial output.
+The closure walk is iterative. It reads and emits each distinct native object
+once per reconstruction. A native-to-Git memo (including active objects) is
+bounded by `max_objects`; `ObjectSink::resolved` can reuse the caller's own
+object table before reading or descending. `write_object` receives the native
+ID for recording that binding. Retained native objects are bounded by
+`max_depth` and `max_object_bytes`, and dependency/resolved IDs by
+`max_pending_links`. `max_total_bytes` bounds cumulative serialized content;
+tree sizes and conservative commit bounds are reserved before descending or
+allocating output. Readers must enforce decoded object memory limits before
+allocation and provide stable, content-addressed reads; sinks must consume or
+persist bytes before returning. The caller owns access, redaction and
+transactions. An error or cancellation may leave a partial output.
 Lossy imports and spoollinks fail closed in closure reconstruction. Native
 states without captured raw messages produce empty message bodies; projection
 message/footer policy belongs to the caller.

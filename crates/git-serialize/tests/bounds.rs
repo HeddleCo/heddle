@@ -5,9 +5,9 @@ use std::{
 };
 
 use heddle_git_serialize::{
-    NativeObjectId, ObjectFormat, ObjectId, ObjectReader, ObjectSink, ReconstructionError,
-    ReconstructionLimits, object_id, reconstruct_closure, serialize_blob, serialize_commit,
-    serialize_tree,
+    GitObjectKind, NativeObjectId, ObjectFormat, ObjectId, ObjectReader, ObjectSink,
+    ReconstructionError, ReconstructionLimits, object_id, reconstruct_closure, serialize_blob,
+    serialize_commit, serialize_tree,
 };
 use heddle_object_model::object::{
     Attribution, Blob, ContentHash, Principal, RawGitMode, SpoolId, State, StateId, Tree,
@@ -54,7 +54,8 @@ impl ObjectSink for Discard {
     type Error = &'static str;
     async fn write_object(
         &mut self,
-        _: &'static str,
+        _: NativeObjectId,
+        _: GitObjectKind,
         _: ObjectId,
         _: &[u8],
     ) -> Result<(), Self::Error> {
@@ -66,7 +67,8 @@ impl ObjectSink for Discard {
 fn deep(depth: usize) -> (Reader, ContentHash, ObjectId) {
     let blob = Blob::from_slice(b"leaf");
     let mut native = blob.hash();
-    let mut git = object_id(ObjectFormat::Sha1, "blob", blob.content()).expect("blob id");
+    let mut git =
+        object_id(ObjectFormat::Sha1, GitObjectKind::Blob, blob.content()).expect("blob id");
     let mut trees = BTreeMap::new();
     for level in 0..depth {
         let entry = if level == 0 {
@@ -83,7 +85,7 @@ fn deep(depth: usize) -> (Reader, ContentHash, ObjectId) {
             b"40000 child\0".to_vec()
         };
         body.extend_from_slice(git.as_bytes());
-        git = object_id(ObjectFormat::Sha1, "tree", &body).expect("tree id");
+        git = object_id(ObjectFormat::Sha1, GitObjectKind::Tree, &body).expect("tree id");
         native = tree.hash();
         trees.insert(native, tree);
     }
@@ -123,8 +125,8 @@ fn deep_tree_on_two_mib_stack() {
             assert_eq!(sink.count, 12_001);
             assert_eq!(
                 reader.reads.load(Ordering::Relaxed),
-                24_001,
-                "two reads per tree, one per blob"
+                12_001,
+                "one read per distinct object"
             );
         })
         .expect("2 MiB stack thread")
@@ -138,7 +140,8 @@ fn wide_tree_streams_shared_blobs_on_two_mib_stack() {
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
             let blob = Blob::from_slice(b"shared");
-            let blob_id = object_id(ObjectFormat::Sha1, "blob", blob.content()).expect("blob oid");
+            let blob_id = object_id(ObjectFormat::Sha1, GitObjectKind::Blob, blob.content())
+                .expect("blob oid");
             let mut expected_body = Vec::new();
             let entries = (0..20_000)
                 .map(|n| {
@@ -167,10 +170,11 @@ fn wide_tree_streams_shared_blobs_on_two_mib_stack() {
             .expect("wide closure");
             assert_eq!(
                 actual,
-                object_id(ObjectFormat::Sha1, "tree", &expected_body).expect("expected wide oid")
+                object_id(ObjectFormat::Sha1, GitObjectKind::Tree, &expected_body)
+                    .expect("expected wide oid")
             );
-            assert_eq!(sink.count, 20_001);
-            assert_eq!(reader.reads.load(Ordering::Relaxed), 20_002);
+            assert_eq!(sink.count, 2);
+            assert_eq!(reader.reads.load(Ordering::Relaxed), 2);
         })
         .expect("thread")
         .join()
@@ -242,7 +246,8 @@ fn reader_and_sink_errors_propagate() {
         type Error = &'static str;
         async fn write_object(
             &mut self,
-            _: &'static str,
+            _: NativeObjectId,
+            _: GitObjectKind,
             _: ObjectId,
             _: &[u8],
         ) -> Result<(), Self::Error> {
@@ -299,7 +304,7 @@ fn hosted_seed_is_not_a_git_parent_and_lossy_imports_fail_closed() {
     let root = state.id();
     let expected = object_id(
         ObjectFormat::Sha1,
-        "commit",
+        GitObjectKind::Commit,
         &serialize_commit(&state, &ObjectId::empty_tree(ObjectFormat::Sha1), &[]).expect("commit"),
     )
     .expect("commit oid");
@@ -403,5 +408,130 @@ fn spoollinks_and_oversized_outputs_fail_closed() {
         result,
         Err(ReconstructionError::LimitExceeded("object bytes"))
     ));
-    assert_eq!(sink.count, 100, "only the small child blobs were emitted");
+    assert_eq!(sink.count, 0, "oversized tree rejected before descent");
+}
+
+#[test]
+fn total_bytes_reserved_before_descent_and_reader_allocation() {
+    let (reader, root, _) = deep(1);
+    let mut sink = Discard::default();
+    // Tree content is 33 bytes and the blob content is four bytes.
+    let result = pollster::block_on(reconstruct_closure(
+        &reader,
+        &mut sink,
+        NativeObjectId::Tree(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_total_bytes: 32,
+            ..Default::default()
+        },
+    ));
+    assert!(matches!(
+        result,
+        Err(ReconstructionError::LimitExceeded("total bytes"))
+    ));
+    assert_eq!(reader.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(sink.count, 0);
+    let result = pollster::block_on(reconstruct_closure(
+        &reader,
+        &mut sink,
+        NativeObjectId::Tree(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_total_bytes: 36,
+            ..Default::default()
+        },
+    ));
+    assert!(matches!(
+        result,
+        Err(ReconstructionError::Reader("reader byte limit"))
+    ));
+    assert_eq!(sink.count, 0);
+    pollster::block_on(reconstruct_closure(
+        &reader,
+        &mut sink,
+        NativeObjectId::Tree(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_total_bytes: 37,
+            ..Default::default()
+        },
+    ))
+    .expect("exact total byte budget");
+    assert_eq!(sink.count, 2);
+}
+
+#[test]
+fn sink_cached_children_skip_reads_and_are_memo_bounded() {
+    struct Cached {
+        id: ObjectId,
+        count: usize,
+    }
+    impl ObjectSink for Cached {
+        type Error = &'static str;
+        fn resolved(&self, native: NativeObjectId) -> Option<ObjectId> {
+            matches!(native, NativeObjectId::Blob(_)).then_some(self.id)
+        }
+        async fn write_object(
+            &mut self,
+            _: NativeObjectId,
+            _: GitObjectKind,
+            _: ObjectId,
+            _: &[u8],
+        ) -> Result<(), Self::Error> {
+            self.count += 1;
+            Ok(())
+        }
+    }
+    let (reader, root, expected) = deep(1);
+    let mut sink = Cached {
+        id: object_id(
+            ObjectFormat::Sha1,
+            GitObjectKind::Blob,
+            reader.blob.content(),
+        )
+        .expect("blob"),
+        count: 0,
+    };
+    let result = pollster::block_on(reconstruct_closure(
+        &reader,
+        &mut sink,
+        NativeObjectId::Tree(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_objects: 1,
+            ..Default::default()
+        },
+    ));
+    assert!(matches!(
+        result,
+        Err(ReconstructionError::LimitExceeded("objects"))
+    ));
+    assert_eq!(sink.count, 0);
+    reader.reads.store(0, Ordering::Relaxed);
+    let actual = pollster::block_on(reconstruct_closure(
+        &reader,
+        &mut sink,
+        NativeObjectId::Tree(root),
+        ObjectFormat::Sha1,
+        ReconstructionLimits {
+            max_objects: 2,
+            ..Default::default()
+        },
+    ))
+    .expect("cached child");
+    assert_eq!(actual, expected);
+    assert_eq!(reader.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(sink.count, 1);
+    sink.id = ObjectId::null(ObjectFormat::Sha256);
+    assert!(matches!(
+        pollster::block_on(reconstruct_closure(
+            &reader,
+            &mut sink,
+            NativeObjectId::Tree(root),
+            ObjectFormat::Sha1,
+            ReconstructionLimits::default()
+        )),
+        Err(ReconstructionError::Serialize(_))
+    ));
 }

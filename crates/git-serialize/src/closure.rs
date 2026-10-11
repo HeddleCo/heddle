@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::future::Future;
+use std::{collections::HashMap, future::Future};
 
 use heddle_object_model::object::{
     Blob, ContentHash, State, StateId, Tree, TreeEntryTarget,
     thread_replication::initial_base::synthetic_initial_base,
 };
 
-use crate::{ObjectFormat, ObjectId, SerializeError, object_id, serialize_commit, serialize_tree};
+use crate::{
+    GitObjectKind, ObjectFormat, ObjectId, SerializeError, object_id, serialize_commit,
+    serialize_tree,
+};
 
 /// A native object to reconstruct; Gitlinks are external references, not roots.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeObjectId {
     Commit(StateId),
     Tree(ContentHash),
@@ -20,9 +23,8 @@ pub enum NativeObjectId {
 ///
 /// Reads must be stable for the duration of reconstruction, return the requested
 /// content-addressed object, and enforce `max_bytes` on the decoded object's
-/// memory before allocating it. The traversal retains no returned native object
-/// across child reads. Non-leaf objects are read twice, once for dependencies
-/// and once for serialization, to avoid keeping native objects on the walk stack.
+/// memory before allocating it.
+/// Each distinct object is read once and retained until its children resolve.
 /// The caller owns authorization, redaction policy and missing-object errors.
 pub trait ObjectReader {
     type Error;
@@ -48,27 +50,36 @@ pub trait ObjectReader {
 
 /// Stream reconstructed content to a pack writer, verifier or object database.
 ///
-/// Children arrive before their containing tree/commit. Shared objects may be
-/// emitted more than once; use the Git ID for idempotence. The sink must consume
-/// or persist each object before returning to keep memory bounded. An error or
+/// Children arrive before their containing tree/commit, once per native ID.
+/// The sink must consume or persist each object before returning to keep memory bounded. An error or
 /// cancellation can leave a partial closure; the caller owns transactionality.
 pub trait ObjectSink {
     type Error;
 
+    /// Return an already reconstructed ID from the caller's object table.
+    /// The binding must be exact, authorized, and in the requested Git format.
+    /// A hit skips this object and its entire dependency closure.
+    fn resolved(&self, _id: NativeObjectId) -> Option<ObjectId> {
+        None
+    }
+
     fn write_object(
         &mut self,
-        kind: &'static str,
+        native: NativeObjectId,
+        kind: GitObjectKind,
         id: ObjectId,
         content: &[u8],
     ) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send;
 }
 
-/// Hard traversal limits. No cache grows with the total closure size.
+/// Hard traversal limits, checked before reads and output allocation.
 ///
-/// Memory is bounded by `max_depth` fixed-size frames, `max_pending_links`
-/// dependency IDs plus resolved IDs, and one reader object plus its serialized
-/// content (each limited by `max_object_bytes`). Tree sorting uses scratch
-/// proportional to that one tree. Reader and sink allocations are their contracts.
+/// The native-to-Git memo (including active objects) has at most `max_objects`
+/// entries. At most `max_depth` native objects are retained, each reader-bounded
+/// by `max_object_bytes`; dependency/resolved IDs have `max_pending_links` slots.
+/// `max_total_bytes` bounds total serialized output, reserving tree/commit
+/// output before descending. Commit reservations use a conservative upper bound.
+/// Reader and sink allocations remain their contracts.
 #[derive(Clone, Copy, Debug)]
 pub struct ReconstructionLimits {
     pub max_depth: usize,
@@ -76,8 +87,10 @@ pub struct ReconstructionLimits {
     /// Reader memory limit and serialized output limit. Commit admission uses
     /// a conservative upper bound including identity/header formatting.
     pub max_object_bytes: usize,
-    /// Includes repeated shared subgraphs; also bounds work on invalid cycles.
+    /// Distinct native objects, including memo entries and sink cache hits.
     pub max_objects: usize,
+    /// Total serialized content bytes, excluding Git framing.
+    pub max_total_bytes: usize,
 }
 
 impl Default for ReconstructionLimits {
@@ -87,6 +100,7 @@ impl Default for ReconstructionLimits {
             max_pending_links: 1_000_000,
             max_object_bytes: 64 * 1024 * 1024,
             max_objects: 10_000_000,
+            max_total_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -103,8 +117,16 @@ pub enum ReconstructionError<R, W> {
     LimitExceeded(&'static str),
 }
 
+enum NativeObject {
+    Commit(Box<State>),
+    Tree(Tree),
+    Blob(Blob),
+}
+
 struct Frame {
     id: NativeObjectId,
+    object: NativeObject,
+    byte_bound: usize,
     dependencies: Vec<NativeObjectId>,
     resolved: Vec<ObjectId>,
 }
@@ -112,13 +134,13 @@ struct Frame {
 /// Rebuild a tree/blob closure or a commit's full history closure without an engine.
 ///
 /// The walk is iterative, including commit parents. It never follows gitlinks,
-/// never retains all emitted bytes or a closure-wide visited set, and fails on
+/// memoizes native IDs without retaining emitted bytes, and fails on
 /// lossy commits and spoollinks rather than claiming exact reconstruction.
 /// Native states without a raw message serialize an empty Git message; use the
 /// pure serializer when a caller supplies different parent or message policy.
 /// The deterministic hosted seed is omitted from parent lists, as in local
 /// projection: it represents initialization and has no Git commit.
-pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
+pub async fn reconstruct_closure<R: ObjectReader + Sync, W: ObjectSink + Send>(
     reader: &R,
     sink: &mut W,
     root: NativeObjectId,
@@ -133,23 +155,49 @@ pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
     }
     let mut stack: Vec<Frame> = Vec::new();
     let mut pending_links = 0usize;
-    let mut visited = 0usize;
+    let mut memo: HashMap<NativeObjectId, Option<ObjectId>> = HashMap::new();
+    let mut total_bytes = 0usize;
     let mut next = Some(root);
 
     loop {
         if let Some(id) = next.take() {
+            if let Some(cached) = memo.get(&id) {
+                let oid = cached
+                    .ok_or_else(|| SerializeError::InvalidObject("native object cycle".into()))?;
+                if let Some(parent) = stack.last_mut() {
+                    parent.resolved.push(oid);
+                    continue;
+                }
+                return Ok(oid);
+            }
+            if memo.len() >= limits.max_objects {
+                return Err(ReconstructionError::LimitExceeded("objects"));
+            }
+            if let Some(oid) = sink.resolved(id) {
+                if oid.format() != format {
+                    return Err(SerializeError::InvalidObject(
+                        "sink resolved ID uses a different Git object format".into(),
+                    )
+                    .into());
+                }
+                memo.insert(id, Some(oid));
+                if let Some(parent) = stack.last_mut() {
+                    parent.resolved.push(oid);
+                    continue;
+                }
+                return Ok(oid);
+            }
             if stack.len() >= limits.max_depth {
                 return Err(ReconstructionError::LimitExceeded("depth"));
             }
-            if visited >= limits.max_objects {
-                return Err(ReconstructionError::LimitExceeded("objects"));
-            }
-            visited += 1;
+            memo.insert(id, None);
+            let remaining_bytes = limits.max_total_bytes.saturating_sub(total_bytes);
+            let read_limit = limits.max_object_bytes.min(remaining_bytes);
             let available = limits.max_pending_links.saturating_sub(pending_links);
-            let dependencies = match id {
+            let (object, dependencies, byte_bound) = match id {
                 NativeObjectId::Commit(id) => {
                     let state = reader
-                        .read_state(id, limits.max_object_bytes)
+                        .read_state(id, read_limit)
                         .await
                         .map_err(ReconstructionError::Reader)?;
                     if state.git_lossy {
@@ -161,13 +209,15 @@ pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
                     if parents.clone().count().saturating_add(1) > available {
                         return Err(ReconstructionError::LimitExceeded("pending links"));
                     }
-                    std::iter::once(NativeObjectId::Tree(state.tree))
+                    let dependencies: Vec<_> = std::iter::once(NativeObjectId::Tree(state.tree))
                         .chain(parents.map(NativeObjectId::Commit))
-                        .collect()
+                        .collect();
+                    let bytes = commit_byte_bound(&state, format, dependencies.len() - 1);
+                    (NativeObject::Commit(Box::new(state)), dependencies, bytes)
                 }
                 NativeObjectId::Tree(id) => {
                     let tree = reader
-                        .read_tree(id, limits.max_object_bytes)
+                        .read_tree(id, read_limit)
                         .await
                         .map_err(ReconstructionError::Reader)?;
                     if tree.entries().len() > available {
@@ -192,13 +242,30 @@ pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
                             }
                         }
                     }
-                    dependencies
+                    let bytes = tree_byte_bound(&tree, format);
+                    (NativeObject::Tree(tree), dependencies, bytes)
                 }
-                NativeObjectId::Blob(_) => Vec::new(),
+                NativeObjectId::Blob(id) => {
+                    let blob = reader
+                        .read_blob(id, read_limit)
+                        .await
+                        .map_err(ReconstructionError::Reader)?;
+                    let bytes = blob.size();
+                    (NativeObject::Blob(blob), Vec::new(), bytes)
+                }
             };
+            if byte_bound > limits.max_object_bytes {
+                return Err(ReconstructionError::LimitExceeded("object bytes"));
+            }
+            if byte_bound > remaining_bytes {
+                return Err(ReconstructionError::LimitExceeded("total bytes"));
+            }
+            total_bytes += byte_bound;
             pending_links += dependencies.len();
             stack.push(Frame {
                 id,
+                object,
+                byte_bound,
                 resolved: Vec::with_capacity(dependencies.len()),
                 dependencies,
             });
@@ -215,56 +282,21 @@ pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
             return Err(SerializeError::InvalidObject("empty reconstruction stack".into()).into());
         };
         pending_links -= frame.dependencies.len();
-        let (kind, body) = match frame.id {
-            NativeObjectId::Blob(id) => {
-                let blob = reader
-                    .read_blob(id, limits.max_object_bytes)
-                    .await
-                    .map_err(ReconstructionError::Reader)?;
-                ("blob", blob.into_content())
-            }
-            NativeObjectId::Commit(id) => {
-                let state = reader
-                    .read_state(id, limits.max_object_bytes)
-                    .await
-                    .map_err(ReconstructionError::Reader)?;
+        let (kind, body) = match frame.object {
+            NativeObject::Blob(blob) => (GitObjectKind::Blob, blob.into_content()),
+            NativeObject::Commit(state) => {
                 let Some(tree) = frame.resolved.first() else {
                     return Err(SerializeError::InvalidObject(
                         "commit has no resolved tree".into(),
                     )
                     .into());
                 };
-                if commit_byte_bound(&state, format, frame.resolved.len() - 1)
-                    > limits.max_object_bytes
-                {
-                    return Err(ReconstructionError::LimitExceeded("object bytes"));
-                }
                 (
-                    "commit",
-                    serialize_commit(&state, tree, &frame.resolved[1..])?,
+                    GitObjectKind::Commit,
+                    serialize_commit(state.as_ref(), tree, &frame.resolved[1..])?,
                 )
             }
-            NativeObjectId::Tree(id) => {
-                let tree = reader
-                    .read_tree(id, limits.max_object_bytes)
-                    .await
-                    .map_err(ReconstructionError::Reader)?;
-                // Check the complete output size before allocating its body.
-                let mut digits = Vec::new();
-                let mut bytes = 0usize;
-                for entry in tree.entries() {
-                    if let Some(mode) = entry.git_mode() {
-                        digits.clear();
-                        mode.write_digits(&mut digits);
-                        bytes = bytes
-                            .saturating_add(digits.len())
-                            .saturating_add(entry.name().len())
-                            .saturating_add(2 + format.raw_len());
-                    }
-                }
-                if bytes > limits.max_object_bytes {
-                    return Err(ReconstructionError::LimitExceeded("object bytes"));
-                }
+            NativeObject::Tree(tree) => {
                 // Dependency order is native name order. Resolve by that order,
                 // while the serializer owns the independently preserved Git order.
                 let mut resolved = frame.resolved.iter();
@@ -287,16 +319,22 @@ pub async fn reconstruct_closure<R: ObjectReader, W: ObjectSink>(
                         SerializeError::InvalidObject("tree dependency disappeared".into())
                     })
                 })?;
-                ("tree", body)
+                (GitObjectKind::Tree, body)
             }
         };
         if body.len() > limits.max_object_bytes {
             return Err(ReconstructionError::LimitExceeded("object bytes"));
         }
         let oid = object_id(format, kind, &body)?;
-        sink.write_object(kind, oid, &body)
+        let unused_bytes = frame
+            .byte_bound
+            .checked_sub(body.len())
+            .ok_or(ReconstructionError::LimitExceeded("total bytes"))?;
+        total_bytes -= unused_bytes;
+        sink.write_object(frame.id, kind, oid, &body)
             .await
             .map_err(ReconstructionError::Sink)?;
+        memo.insert(frame.id, Some(oid));
         if let Some(parent) = stack.last_mut() {
             parent.resolved.push(oid);
         } else {
@@ -326,4 +364,19 @@ fn commit_byte_bound(state: &State, format: ObjectFormat, parents: usize) -> usi
             .saturating_add(2);
     }
     bytes
+}
+
+fn tree_byte_bound(tree: &Tree, format: ObjectFormat) -> usize {
+    let mut digits = Vec::new();
+    tree.entries().iter().fold(0usize, |bytes, entry| {
+        let Some(mode) = entry.git_mode() else {
+            return bytes;
+        };
+        digits.clear();
+        mode.write_digits(&mut digits);
+        bytes
+            .saturating_add(digits.len())
+            .saturating_add(entry.name().len())
+            .saturating_add(2 + format.raw_len())
+    })
 }
