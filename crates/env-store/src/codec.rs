@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+#[path = "codec_golden_tests.rs"]
+mod golden_tests;
+
 use crate::{
     error::{EnvStoreError, Result},
     ids::{

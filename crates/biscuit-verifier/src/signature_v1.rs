@@ -177,6 +177,28 @@ mod tests {
     }
 
     #[test]
+    fn rustcrypto_sealed_biscuit_golden_vector() {
+        let root = key(0x61);
+        let next = key(0x62);
+        let sealed = build_root_with_key_pair(
+            Biscuit::builder().fact("golden(true)").expect("fact"),
+            &root,
+            &next,
+        )
+        .expect("build")
+        .seal()
+        .expect("seal");
+        let bytes = sealed.to_vec().expect("sealed bytes");
+        let old_bytes = include_bytes!("../tests/fixtures/sealed-biscuit-v1.bin");
+        assert_eq!(bytes, old_bytes, "sealed Biscuit bytes must not change");
+        let verified = verify(old_bytes, root.public()).expect("verify old sealed token");
+        assert!(matches!(
+            verified.seal(),
+            Err(biscuit_auth::error::Token::AlreadySealed)
+        ));
+    }
+
+    #[test]
     fn appends_to_v1_root_stay_v1() {
         let root = key(2);
         let token = build_root(Biscuit::builder(), &root).expect("v1 root");

@@ -37,6 +37,9 @@ const OTHER_SPOOL: [u8; 16] = [0x23; 16];
 const PATH: [&str; 2] = ["acme", "verifier"];
 const PAYLOAD: &[u8] = b"canonical purge payload v2";
 
+#[path = "digest_golden_tests.rs"]
+mod digest_golden_tests;
+
 #[path = "creation_tests.rs"]
 mod creation_tests;
 
