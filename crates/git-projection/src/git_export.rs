@@ -6,15 +6,14 @@ use std::collections::HashSet;
 use objects::{
     error::HeddleError,
     object::{
-        AnnotatedTag, AudienceTier, ContentHash, FacetKind, MarkerName, State, StateId, ThreadName,
-        TreeEntry, TreeEntryTarget, visible,
+        AnnotatedTag, AudienceTier, ContentHash, FacetKind, MarkerName, Principal, State, StateId,
+        ThreadName, TreeEntry, TreeEntryTarget, visible,
     },
     store::ObjectStore,
 };
 use repo::Repository as HeddleRepository;
 use sley::{
-    BString, CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository, Signature,
+    GitObjectType, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
 use tracing::debug;
 
@@ -202,25 +201,31 @@ fn write_state_object(
         mapped_git_parents(state, mapping)?
     };
 
-    let sig = if principal_lacks_identity(&state.attribution.principal) {
+    let identity_principal;
+    let principal = if principal_lacks_identity(&state.attribution.principal) {
         let Some(identity) = options.identity else {
             return Err(GitProjectionError::Git(
                 "refusing to write a Git commit without an accountable identity; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
         };
-        identity.to_signature(state.created_at.timestamp())
+        identity_principal = Principal::new(&identity.name, &identity.email);
+        &identity_principal
     } else {
-        state_to_signature(state)
+        &state.attribution.principal
     };
-    let commit = CommitObject {
-        tree: git_tree_oid,
-        parents: parent_oids,
-        author: sig.to_ident_bytes(),
-        committer: sig.to_ident_bytes(),
-        encoding: None,
-        message: message.into_bytes(),
+    let metadata = heddle_git_serialize::CommitMetadata {
+        author: principal,
+        author_seconds: state.created_at.timestamp(),
+        author_tz_offset: 0,
+        committer: principal,
+        committer_seconds: state.created_at.timestamp(),
+        committer_tz_offset: 0,
+        extra_headers: &[],
+        message: message.as_bytes(),
     };
-    repo.write_raw_object(GitObjectType::Commit, commit.write())
+    let content = heddle_git_serialize::serialize_commit(metadata, &git_tree_oid, &parent_oids)
+        .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+    repo.write_raw_object(GitObjectType::Commit, content)
         .map_err(git_err)
 }
 
@@ -229,7 +234,7 @@ fn write_state_object(
 /// A tree imported from a non-canonical Git tree (odd or zero-padded modes, or
 /// entries out of Git's order) records that layout, and is written back as
 /// the exact source bytes so its id, and every id above it, is unchanged.
-/// Every other tree goes through Git's canonical tree writer, as before.
+/// Native trees use canonical Git order and modes through the same serializer.
 pub fn export_tree(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
@@ -237,43 +242,32 @@ pub fn export_tree(
 ) -> GitProjectionResult<ObjectId> {
     let tree = heddle_repo.require_tree(tree_hash)?;
 
-    if tree.has_git_layout() {
-        let mut body = Vec::new();
-        for entry in tree.git_ordered_entries() {
-            let Some((_, id)) = export_entry(heddle_repo, repo, entry)? else {
-                continue;
-            };
-            let Some(mode) = entry.git_mode() else {
-                continue;
-            };
-            mode.write_digits(&mut body);
-            body.push(b' ');
-            body.extend_from_slice(entry.name().as_bytes());
-            body.push(0);
-            body.extend_from_slice(id.as_bytes());
-        }
-        return repo
-            .write_raw_object(GitObjectType::Tree, body)
-            .map_err(git_err);
-    }
-
-    let empty_tree = ObjectId::empty_tree(repo.object_format());
-    let mut editor = repo.edit_tree(&empty_tree).map_err(git_err)?;
+    let mut ids = std::collections::BTreeMap::new();
     for entry in tree.entries() {
-        if let Some((kind, id)) = export_entry(heddle_repo, repo, entry)? {
-            editor.upsert(entry.name(), kind, id);
+        if let Some(id) = export_entry(heddle_repo, repo, entry)? {
+            ids.insert(entry.name(), id);
         }
     }
-    repo.write_tree(editor).map_err(git_err)
+    let body = heddle_git_serialize::serialize_tree(&tree, repo.object_format(), |entry| {
+        ids.get(entry.name()).copied().ok_or_else(|| {
+            heddle_git_serialize::SerializeError::InvalidObject(format!(
+                "missing exported tree entry '{}'",
+                entry.name()
+            ))
+        })
+    })
+    .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+    repo.write_raw_object(GitObjectType::Tree, body)
+        .map_err(git_err)
 }
 
-/// Write one entry's object to Git and return its canonical kind and id, or
+/// Write one entry's object to Git and return its id, or
 /// `None` for an entry Git cannot represent.
 fn export_entry(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
     entry: &TreeEntry,
-) -> GitProjectionResult<Option<(EntryKind, ObjectId)>> {
+) -> GitProjectionResult<Option<ObjectId>> {
     let write_blob_entry = |hash: &ContentHash| -> GitProjectionResult<ObjectId> {
         // Redaction safety: if the blob carries an active redaction
         // record, export the stub instead of the bytes. This is the
@@ -295,20 +289,15 @@ fn export_entry(
         }
 
         let blob = heddle_repo.require_blob(hash)?;
-        repo.write_blob(blob.content()).map_err(git_err)
+        repo.write_blob(heddle_git_serialize::serialize_blob(&blob))
+            .map_err(git_err)
     };
     let exported = match entry.target() {
-        TreeEntryTarget::Tree { hash } => (EntryKind::Tree, export_tree(heddle_repo, repo, hash)?),
-        TreeEntryTarget::Blob { hash, executable } => {
-            let kind = if *executable {
-                EntryKind::BlobExecutable
-            } else {
-                EntryKind::Blob
-            };
-            (kind, write_blob_entry(hash)?)
+        TreeEntryTarget::Tree { hash } => export_tree(heddle_repo, repo, hash)?,
+        TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+            write_blob_entry(hash)?
         }
-        TreeEntryTarget::Symlink { hash } => (EntryKind::Symlink, write_blob_entry(hash)?),
-        TreeEntryTarget::Gitlink { target } => (EntryKind::Commit, *target),
+        TreeEntryTarget::Gitlink { target } => *target,
         // A native child-spool edge points at a spool-id + state-id, NOT a
         // git commit OID, so it has no valid git submodule (mode 160000)
         // representation. Emitting a `Commit` entry here would fabricate a
@@ -1698,24 +1687,6 @@ fn reachable_states(
         }
     }
     Ok(states)
-}
-
-fn state_to_signature(state: &objects::object::State) -> Signature {
-    let seconds = state.created_at.timestamp();
-    let principal = &state.attribution.principal;
-    let mut raw = Vec::new();
-    raw.extend_from_slice(&principal.name);
-    raw.extend_from_slice(b" <");
-    raw.extend_from_slice(&principal.email);
-    raw.extend_from_slice(b"> ");
-    raw.extend_from_slice(seconds.to_string().as_bytes());
-    raw.extend_from_slice(b" +0000");
-    Signature {
-        name: BString::new(principal.name.clone()),
-        email: BString::new(principal.email.clone()),
-        time: sley::GitTime::new(seconds, 0),
-        raw,
-    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reuse the engine-free `heddle-git-serialize` commit and tree serializers for
+  local Git reconstruction and export (#2064).
+
 ## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.29.0...heddle-git-projection-v0.30.0) - 2026-10-10
 
 ### Other

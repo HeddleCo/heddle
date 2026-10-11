@@ -32,6 +32,11 @@ jobs:
       - name: Verify publish inventory and dependency order
         working-directory: .
         run: scripts/check-publish-pipeline.sh
+      - name: Engine-free Git reconstruction dependency proof
+        working-directory: .
+        run: |
+          python3 scripts/check-git-serialize-dependencies.py
+          python3 scripts/check-git-serialize-dependencies.py --all-features
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
       - name: Prove raw Biscuit parsers are banned

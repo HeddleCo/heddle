@@ -24,6 +24,7 @@ members = [
     "crates/format",
     "crates/fs-prims",
     "crates/git-projection",
+    "crates/git-serialize",
     "crates/object-model",
     "crates/objects",
     "crates/oplog",
@@ -184,6 +185,7 @@ heddle-cli-contract = { path = "crates/cli-contract", version = "0.30.0", defaul
 heddle-cli-render = { path = "crates/cli-render", version = "0.30.0", default-features = false }
 heddle-format = { path = "crates/format", version = "0.30.0" }
 heddle-fs-prims = { path = "crates/fs-prims", version = "0.30.0" }
+heddle-git-serialize = { path = "crates/git-serialize", version = "0.30.0" }
 heddle-git-projection = { path = "crates/git-projection", version = "0.30.0", default-features = false }
 heddle-object-model = { path = "crates/object-model", version = "0.30.0" }
 heddle-pack = { path = "crates/pack", version = "0.30.0", default-features = false }

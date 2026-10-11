@@ -86,6 +86,7 @@ env:
     heddleco-capability-verifier
     heddle-format
     heddle-object-model
+    heddle-git-serialize
     heddle-fs-prims
     heddle-pack
     heddle-perf-contract
