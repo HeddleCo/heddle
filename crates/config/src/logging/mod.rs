@@ -60,6 +60,9 @@ pub enum LogFormat {
 #[derive(Debug, Clone)]
 pub struct LoggingConfig {
     pub format: LogFormat,
+    /// Suppress Iroh's transport diagnostics on a machine-output stream.
+    /// Heddle's user warnings and trace export keep their normal behavior.
+    pub quiet_iroh: bool,
     /// Filter level used when `RUST_LOG` is unset. Foreground CLI commands
     /// default this to `Warn`; `-v` raises to Info, `-vv` to Debug, `-vvv`
     /// to Trace; `--quiet` lowers to Error. `RUST_LOG` always overrides.
@@ -118,6 +121,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             format: LogFormat::Text,
+            quiet_iroh: false,
             default_level: Level::WARN,
             include_location: false,
             include_thread_ids: false,
@@ -288,8 +292,13 @@ fn signal_endpoint(base: Option<&str>, signal_path: &str) -> Option<String> {
 /// }
 /// ```
 pub fn init_logging(config: LoggingConfig) -> LoggingGuard {
-    let env_filter = EnvFilter::try_from_default_env()
+    let mut env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level_to_filter(config.default_level)));
+    if config.quiet_iroh
+        && let Ok(directive) = "iroh=off".parse()
+    {
+        env_filter = env_filter.add_directive(directive);
+    }
     let span_events = if config.log_spans {
         FmtSpan::FULL
     } else {

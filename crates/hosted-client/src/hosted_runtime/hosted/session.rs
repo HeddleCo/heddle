@@ -173,6 +173,28 @@ impl HostedSession {
         Ok(client)
     }
 
+    async fn connect_direct(&self, server: &str) -> Result<HostedClient, ProtocolError> {
+        // Local binding needs only TLS policy. Routing and authenticated RPCs
+        // still wait for the verified descriptor and the Iroh handshake.
+        let (descriptor, endpoint) = tokio::join!(
+            self.discover_endpoint(server),
+            weft_client::HostedClient::bind_endpoint(self.config.tls_ca_certificate_pem.as_deref()),
+        );
+        let endpoint = endpoint.map_err(|error| ProtocolError::Remote(error.to_string()))?;
+        let descriptor = match descriptor {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.close()).await;
+                return Err(ProtocolError::Remote(error.to_string()));
+            }
+        };
+        let client = HostedClient::connect_weft_on_endpoint(&descriptor, &self.config, endpoint)
+            .await
+            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
+        self.rotated(client).await
+    }
+
     pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         #[cfg(unix)]
         match HostedClient::connect_via_netd(server, &self.config, None, &self.http).await {
@@ -189,14 +211,7 @@ impl HostedSession {
                 );
             }
         }
-        let descriptor = self
-            .discover_endpoint(server)
-            .await
-            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let client = HostedClient::connect_with_config(&descriptor, &self.config)
-            .await
-            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        self.rotated(client).await
+        self.connect_direct(server).await
     }
 
     /// Connect for outbound calls only, on an ephemeral endpoint node id.
@@ -220,14 +235,7 @@ impl HostedSession {
                 );
             }
         }
-        let descriptor = self
-            .discover_endpoint(server)
-            .await
-            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
-            .await
-            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        self.rotated(client).await
+        self.connect_direct(server).await
     }
 }
 

@@ -177,8 +177,12 @@ mod fixture {
         assert_eq!(records[0]["output_kind"], "clone_connection");
         assert_eq!(records[0]["status"], "connected");
 
-        let error: Value = serde_json::from_slice(&output.stderr)
-            .expect("mid-clone disconnect must emit a structured JSON error");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+            panic!(
+                "mid-clone disconnect must emit a structured JSON error: {error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
         assert_eq!(error["exit_code"], output.status.code().unwrap());
         assert!(
             error["error"]

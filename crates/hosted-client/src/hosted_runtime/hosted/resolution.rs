@@ -36,6 +36,8 @@ pub(super) struct Entries {
     generation: u64,
     pub spools: HashMap<String, SpoolRef>,
     pub threads: HashMap<(String, String), ThreadRef>,
+    pub spool_requests: HashMap<String, Arc<tokio::sync::OnceCell<SpoolRef>>>,
+    pub thread_requests: HashMap<(String, String), Arc<tokio::sync::OnceCell<ThreadRef>>>,
 }
 
 impl ResolutionCache {
@@ -45,6 +47,8 @@ impl ResolutionCache {
         if entries.generation != generation {
             entries.spools.clear();
             entries.threads.clear();
+            entries.spool_requests.clear();
+            entries.thread_requests.clear();
             entries.generation = generation;
         }
         entries
@@ -68,10 +72,8 @@ impl ResolutionCache {
     /// Whether a call resolves names or carries a cached identity: a cached
     /// address, or a cached Spool id (Thread refs always embed their Spool
     /// id). Judged when the call is sent, because that is when the cache was
-    /// consulted. The lock is held for the whole of a first resolution,
-    /// including endpoint discovery on the same task, so a contended lock
-    /// cannot be inspected: report it as used, which only costs one extra
-    /// resolution.
+    /// consulted. A briefly contended entries lock is conservatively counted
+    /// as used; per-name cells coalesce requests without holding that lock.
     fn call_uses_resolutions(&self, method: &'static MethodDescriptor, request: &[u8]) -> bool {
         if method.path == rpc::WorkspaceServiceResolveResources::METHOD.path {
             return true;

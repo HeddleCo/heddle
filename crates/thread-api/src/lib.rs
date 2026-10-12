@@ -77,6 +77,18 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
             .await
             .map_err(ClientError::Transport)?;
         let description: DescribeEndpointResponse = prost::Message::decode(bytes.as_slice())?;
+        Self::from_description(transport, endpoint_key, kind, description)
+    }
+
+    /// Reuse an authenticated description retained by the application. The
+    /// application owns its validity window; identity and package checks apply
+    /// exactly as they do to a fresh DescribeEndpoint response.
+    pub fn from_description(
+        transport: T,
+        endpoint_key: [u8; 32],
+        kind: EndpointKind,
+        description: DescribeEndpointResponse,
+    ) -> Result<Self, ClientError<Error>> {
         if description
             .endpoint
             .as_ref()

@@ -44,6 +44,10 @@ pub struct PublicationCapture {
     pub cancel_requests: Vec<v2::CancelOperationRequest>,
     pub import_requests: Vec<v2::ImportSourceRequest>,
     pub calls: Vec<String>,
+    pub rpc_delay: std::time::Duration,
+    pub block_fetch: Option<Arc<tokio::sync::Notify>>,
+    pub clone_setup_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub clone_setup_requests: usize,
     /// Run Weft's shared verifier with request-time operation/resource facts.
     pub enforce_scope: bool,
     pub revision: Option<v2::RevisionRef>,
@@ -410,6 +414,24 @@ async fn serve_call(
         .expect("capture calls")
         .calls
         .push(method.clone());
+    let (delay, setup) = {
+        let mut capture = fixture.captured.lock().expect("clone setup");
+        let setup = if capture.clone_setup_requests < 3
+            && (method.ends_with("/ObserveThreads") || method.ends_with("/ObserveCollaboration"))
+        {
+            capture.clone_setup_requests += 1;
+            capture.clone_setup_barrier.clone()
+        } else {
+            None
+        };
+        (capture.rpc_delay, setup)
+    };
+    if let Some(barrier) = setup {
+        barrier.wait().await;
+    }
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     let failed_stage = fixture
         .captured
         .lock()
@@ -459,7 +481,7 @@ async fn serve_call(
                 .iter()
                 .filter(|annotation| **annotation)
                 .count()
-                >= 2)
+                >= 1)
             .then(|| capture.clone_metadata_obstruction.clone())
             .flatten()
     };
@@ -2023,6 +2045,15 @@ async fn serve_fetch(
     fixture: Fixture,
     server_key: Vec<u8>,
 ) {
+    let gate = fixture
+        .captured
+        .lock()
+        .expect("fetch gate")
+        .block_fetch
+        .clone();
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
     let opening: v2::FetchClientFrame = read_message(&mut recv, &mut buffered).await;
     let Some(v2::fetch_client_frame::Body::Open(open)) = opening.body else {
         panic!("native fetch must start with Open");

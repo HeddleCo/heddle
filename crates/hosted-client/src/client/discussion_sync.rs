@@ -765,6 +765,29 @@ async fn pull_discussions_filtered(
         .list_discussion_operations(repo_path)
         .await
         .context("observe native discussion operations")?;
+    Box::pin(pull_discussions_with_operations(
+        repo,
+        client,
+        repo_path,
+        against,
+        thread_filter,
+        signed,
+        None,
+    ))
+    .await
+}
+
+/// Apply the originals observed during clone setup after source installation.
+/// Retained listings detect missing originals without repeating the observation.
+pub async fn pull_discussions_with_operations(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    against: Option<StateId>,
+    thread_filter: Option<(&str, &str)>,
+    signed: Vec<SignedRecord>,
+    listed: Option<Vec<HostedDiscussion>>,
+) -> Result<usize> {
     if !signed.is_empty() {
         let store =
             CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
@@ -883,12 +906,16 @@ async fn pull_discussions_filtered(
         save_mirror(repo.heddle_dir(), &mirror)?;
         return Ok(changed.len());
     }
-    let Some((_head_state, hosted)) =
-        listed_hosted_discussions(repo, client, repo_path, against, thread_filter).await?
-    else {
-        // weft#638: a repo with no HEAD cannot resolve a state to list against
-        // unless the caller passed the pulled/cloned tip.
-        return Ok(0);
+    let hosted = match listed {
+        Some(hosted) => hosted,
+        None => {
+            let Some((_, hosted)) =
+                listed_hosted_discussions(repo, client, repo_path, against, thread_filter).await?
+            else {
+                return Ok(0);
+            };
+            hosted
+        }
     };
     if hosted.is_empty() {
         return Ok(0);

@@ -249,8 +249,8 @@ pub use repository::{
     WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
     compute_rewrite_pct, discover_heddle_root, discover_repository_config,
     ensure_repository_trusted, find_merge_base, is_heddle_repository_root, is_major_rewrite,
-    is_synthetic_root, merge_context_blobs, open_git_repository_at_root,
-    query_history_from_source, read_ignore_file, set_safe_repositories,
+    is_synthetic_root, merge_context_blobs, open_git_repository_at_root, query_history_from_source,
+    read_ignore_file, set_safe_repositories,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{

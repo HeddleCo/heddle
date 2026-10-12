@@ -184,10 +184,57 @@ impl HostedClient {
                 ..Default::default()
             })
             .await?;
+        Self::context_listing(events, prefix, tag_filter, false)
+    }
+
+    /// Clone retains a single history-inclusive context listing and its originals.
+    pub async fn list_context_with_operations(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<
+        (
+            Vec<api::heddle::api::v1alpha2::SignedRecord>,
+            Vec<(Option<ContextTarget>, Annotation)>,
+        ),
+        ProtocolError,
+    > {
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let events = self
+            .observe_collaboration_events(ObserveCollaborationRequest {
+                spool: Some(spool),
+                include_history: true,
+                include_operations: true,
+                annotations: Some(AnnotationQuery::default()),
+                ..Default::default()
+            })
+            .await?;
+        let originals = events
+            .iter()
+            .filter_map(|event| match event {
+                collaboration_event::Payload::Operation(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect();
+        Ok((originals, Self::context_listing(events, None, None, true)?))
+    }
+
+    fn context_listing(
+        events: Vec<collaboration_event::Payload>,
+        prefix: Option<&str>,
+        tag_filter: Option<&str>,
+        include_history: bool,
+    ) -> Result<Vec<(Option<ContextTarget>, Annotation)>, ProtocolError> {
         let native = native_context_operations(&events)?;
         if !native.is_empty() {
+            let mut histories = std::collections::BTreeMap::<_, Vec<_>>::new();
             let mut latest = std::collections::BTreeMap::new();
             for (operation_id, context) in native {
+                if include_history {
+                    histories
+                        .entry(context.id)
+                        .or_default()
+                        .push(native_revision(operation_id, &context)?);
+                }
                 latest
                     .entry(context.id)
                     .and_modify(|current: &mut (ContentHash, NativeContextRevision)| {
@@ -199,7 +246,11 @@ impl HostedClient {
             }
             let mut annotations = Vec::new();
             for (operation_id, context) in latest.into_values() {
-                let annotation = native_annotation(operation_id, &context)?;
+                let mut annotation = native_annotation(operation_id, &context)?;
+                if let Some(mut revisions) = histories.remove(&context.id) {
+                    revisions.sort_by_key(|revision| revision.created_at);
+                    annotation.revisions = revisions;
+                }
                 if let Some(tag) = tag_filter
                     && !annotation
                         .revisions

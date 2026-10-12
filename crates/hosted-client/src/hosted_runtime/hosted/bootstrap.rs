@@ -100,7 +100,14 @@ impl DescriptorKeyring {
             &signed.signature,
         )
         .map_err(|_| HostedError::InvalidDescriptorSignature)?;
-        Ok(VerifiedEndpointDescriptor(descriptor.clone(), None, None))
+        Ok(VerifiedEndpointDescriptor(
+            descriptor.clone(),
+            None,
+            None,
+            descriptor
+                .expires_at_unix_millis
+                .min(key.not_after_unix_millis),
+        ))
     }
 }
 
@@ -110,6 +117,7 @@ pub struct VerifiedEndpointDescriptor(
     EndpointDescriptor,
     Option<super::descriptor_trust::HostedRootSelection>,
     Option<BootstrapHttp>,
+    i64,
 );
 
 impl VerifiedEndpointDescriptor {
@@ -174,6 +182,10 @@ impl VerifiedEndpointDescriptor {
             .collect()
     }
 
+    pub(super) fn valid_until_unix_millis(&self) -> i64 {
+        self.3
+    }
+
     pub fn document(&self) -> &EndpointDescriptor {
         &self.0
     }
@@ -192,7 +204,14 @@ impl VerifiedEndpointDescriptor {
             return Err(HostedError::DescriptorOutsideValidityWindow);
         }
         validate_descriptor(&endpoint.endpoint_descriptor, now_unix_millis)?;
-        Ok(Self(endpoint.endpoint_descriptor.clone(), None, None))
+        Ok(Self(
+            endpoint.endpoint_descriptor.clone(),
+            None,
+            None,
+            endpoint
+                .not_after_unix_millis
+                .min(endpoint.endpoint_descriptor.expires_at_unix_millis),
+        ))
     }
 }
 
