@@ -15,11 +15,9 @@ use std::{
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty},
     nofollow::{NoFollowDirectories, create_replacing_leaf, open_existing_nofollow},
-    object::{Blob, ContentHash, StateId, Tree, TreeEntryTarget},
+    object::{ContentHash, StateId, Tree, TreeEntryTarget},
     store::ObjectStore,
-    util::gitlink_placeholder_bytes,
 };
-use sley::ObjectId as GitObjectId;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
@@ -158,43 +156,39 @@ pub(crate) enum WorktreeWriteOp {
         path: PathBuf,
         hash: ContentHash,
     },
-    GitlinkPlaceholder {
+    Gitlink {
         path: PathBuf,
-        target: GitObjectId,
     },
 }
 
 impl WorktreeWriteOp {
     pub(crate) fn path(&self) -> &Path {
         match self {
-            Self::Blob { path, .. }
-            | Self::Symlink { path, .. }
-            | Self::GitlinkPlaceholder { path, .. } => path,
+            Self::Blob { path, .. } | Self::Symlink { path, .. } | Self::Gitlink { path, .. } => {
+                path
+            }
         }
     }
 
-    pub(crate) fn hash(&self) -> ContentHash {
+    pub(crate) fn hash(&self) -> Option<ContentHash> {
         match self {
-            Self::Blob { hash, .. } | Self::Symlink { hash, .. } => *hash,
-            Self::GitlinkPlaceholder { target, .. } => {
-                Blob::new(gitlink_placeholder_bytes(target)).hash()
-            }
+            Self::Blob { hash, .. } | Self::Symlink { hash, .. } => Some(*hash),
+            Self::Gitlink { .. } => None,
         }
     }
 
     pub(crate) fn executable(&self) -> bool {
         match self {
             Self::Blob { executable, .. } => *executable,
-            Self::Symlink { .. } | Self::GitlinkPlaceholder { .. } => false,
+            Self::Symlink { .. } | Self::Gitlink { .. } => false,
         }
     }
 
-    pub(crate) fn index_kind(&self) -> crate::worktree_index::IndexEntryKind {
+    pub(crate) fn index_kind(&self) -> Option<crate::worktree_index::IndexEntryKind> {
         match self {
-            Self::Blob { .. } | Self::GitlinkPlaceholder { .. } => {
-                crate::worktree_index::IndexEntryKind::File
-            }
-            Self::Symlink { .. } => crate::worktree_index::IndexEntryKind::Symlink,
+            Self::Blob { .. } => Some(crate::worktree_index::IndexEntryKind::File),
+            Self::Symlink { .. } => Some(crate::worktree_index::IndexEntryKind::Symlink),
+            Self::Gitlink { .. } => None,
         }
     }
 }
@@ -209,10 +203,10 @@ impl WorktreeWriteOp {
 /// the next N materializations of that state across N worktrees all
 /// hit the fast path.
 ///
-/// This is the proactive twin of the lazy promotion that already
-/// fires inside `materialize_blob`. Lazy is correct on its own; warm
-/// is a latency optimization for the "I'm about to materialize this
-/// state to N worktrees" case (e.g. `heddle delegate`).
+/// This is the proactive twin of the lazy promotion that fires inside
+/// `materialize_blob` on reflink-capable filesystems. Lazy is correct on
+/// its own; warm is a latency optimization for the "I'm about to materialize
+/// this state to N worktrees" case (e.g. `heddle delegate`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WarmCanonicalStoreStats {
     /// Blobs we wrote to the canonical loose-uncompressed path
@@ -651,12 +645,9 @@ impl Repository {
                 plan.leaves
                     .push(WorktreeWriteOp::Symlink { path, hash: *hash });
             }
-            TreeEntryTarget::Gitlink { target } => {
+            TreeEntryTarget::Gitlink { .. } => {
                 plan.file_count += 1;
-                plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
-                    path,
-                    target: *target,
-                });
+                plan.leaves.push(WorktreeWriteOp::Gitlink { path });
             }
             // Native child-spool edge: not materialized to the worktree
             // in this phase, so it contributes no write op.
@@ -678,7 +669,7 @@ impl Repository {
     /// symlink below it (heddle#2017; see [`objects::nofollow`]).
     ///
     /// Parents are verified or created no-follow first, replacing any symlink
-    /// in the way with a real directory. Files and gitlink placeholders are
+    /// in the way with a real directory. Files are
     /// then written in parallel with `O_EXCL | O_NOFOLLOW`. Symlink leaves go
     /// last and one at a time, each after a fresh parent check: they are the
     /// only writes in a batch that could turn a verified directory into a
@@ -697,14 +688,21 @@ impl Repository {
         let requested_threads = requested_materialization_threads();
         let worker_count = materialization_worker_count(writes.len(), requested_threads);
 
-        // No probe — the per-blob path tries `clonefile`/FICLONE
-        // first and flips a batch-wide flag on the first
-        // `EXDEV`/`EOPNOTSUPP`/`ENOSYS` verdict, so the rest of the
-        // batch falls straight through to `fs::copy` without paying
-        // the syscall tax. The cost of one failed reflink call on a
-        // non-CoW filesystem is one syscall; it's not worth a
-        // dedicated probe.
+        // Check before promoting pack blobs: an unsupported filesystem would
+        // otherwise write loose mirrors just to discover it cannot clone them.
+        // Probe in an owned scratch directory, never at a tracked path.
         let context = MaterializationContext::new();
+        if writes
+            .iter()
+            .any(|write| matches!(write, WorktreeWriteOp::Blob { .. }))
+        {
+            let scratch = self.heddle_dir().join("tmp");
+            fs::create_dir_all(&scratch)?;
+            let probe = tempfile::tempdir_in(scratch)?;
+            if !objects::fs_clone::filesystem_supports_reflink(probe.path()) {
+                context.disable_reflinks();
+            }
+        }
 
         // Drive the repository's live progress handle: one `inc` per
         // materialized write op. On the common null handle this is a relaxed
@@ -719,21 +717,26 @@ impl Repository {
         let result = if worker_count <= 1 {
             let mut seeded = Vec::with_capacity(writes.len() + symlinks.len());
             for write in writes {
-                seeded.push(self.materialize_write_op(root, write, &context)?);
+                seeded.extend(self.materialize_write_op(root, write, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
         } else {
-            let chunk_size = writes.len().div_ceil(worker_count);
+            let next = std::sync::atomic::AtomicUsize::new(0);
             let seeded = thread::scope(|scope| -> Result<Vec<SeededWorktreeEntry>> {
                 let mut workers = Vec::new();
                 let context = &context;
-                for chunk in writes.chunks(chunk_size) {
+                for _ in 0..worker_count {
                     let progress = progress.clone();
+                    let writes = &writes;
+                    let next = &next;
                     workers.push(scope.spawn(move || -> Result<Vec<SeededWorktreeEntry>> {
-                        let mut seeded = Vec::with_capacity(chunk.len());
-                        for write in chunk {
-                            seeded.push(self.materialize_write_op(root, write, context)?);
+                        let mut seeded = Vec::new();
+                        // Files vary widely in size. Take the next leaf when a
+                        // worker finishes rather than leaving one large chunk
+                        // on the critical path after the others become idle.
+                        while let Some(write) = writes.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            seeded.extend(self.materialize_write_op(root, write, context)?);
                             progress.inc(1);
                         }
                         Ok(seeded)
@@ -754,7 +757,7 @@ impl Repository {
         };
         let result = result.and_then(|(worker_count, mut seeded)| {
             for write in symlinks {
-                seeded.push(self.materialize_write_op(root, write, &context)?);
+                seeded.extend(self.materialize_write_op(root, write, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
@@ -779,13 +782,25 @@ impl Repository {
         root: &Path,
         write: &WorktreeWriteOp,
         context: &MaterializationContext,
-    ) -> Result<SeededWorktreeEntry> {
+    ) -> Result<Option<SeededWorktreeEntry>> {
         match write {
             WorktreeWriteOp::Blob {
                 path,
                 hash,
                 executable,
             } => {
+                if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+                    fs::remove_dir(path).map_err(|error| {
+                        if is_directory_not_empty(&error) {
+                            HeddleError::Config(format!(
+                                "cannot replace populated directory {} with a file; move its contents before retrying",
+                                path.display()
+                            ))
+                        } else {
+                            HeddleError::Io(enrich_fs_error(path, "removing", error))
+                        }
+                    })?;
+                }
                 self.materialize_blob(path, hash, *executable, context)?;
             }
             WorktreeWriteOp::Symlink { path, hash } => {
@@ -819,29 +834,30 @@ impl Repository {
                     let _ = (blob, path, root);
                 }
             }
-            WorktreeWriteOp::GitlinkPlaceholder { path, target } => {
-                remove_materialized_leaf(path)?;
-                create_replacing_leaf(path)?
-                    .write_all(&gitlink_placeholder_bytes(target))
-                    .map_err(|err| HeddleError::Io(enrich_fs_error(path, "writing", err)))?;
+            WorktreeWriteOp::Gitlink { path, .. } => {
+                // A gitlink is an opaque directory leaf, never a blob. Preserve
+                // an initialized submodule when its recorded target changes.
+                if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
+                    remove_materialized_leaf(path)?;
+                }
+                NoFollowDirectories::new(root).ensure(path)?;
+                return Ok(None);
             }
         }
 
         let metadata = fs::symlink_metadata(write.path())?;
-        let entry = build_cached_entry(
-            write.hash(),
-            &metadata,
-            write.executable(),
-            write.index_kind(),
-        )
-        .ok_or_else(|| {
-            HeddleError::Config(format!(
-                "seed materialized worktree entry for {}",
-                write.path().display()
-            ))
-        })?;
+        let (Some(hash), Some(kind)) = (write.hash(), write.index_kind()) else {
+            return Ok(None);
+        };
+        let entry =
+            build_cached_entry(hash, &metadata, write.executable(), kind).ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "seed materialized worktree entry for {}",
+                    write.path().display()
+                ))
+            })?;
 
-        Ok(SeededWorktreeEntry {
+        Ok(Some(SeededWorktreeEntry {
             key: cache_key(
                 write
                     .path()
@@ -849,7 +865,7 @@ impl Repository {
                     .unwrap_or(write.path()),
             ),
             entry,
-        })
+        }))
     }
 
     /// Materialize a single blob into the worktree.
@@ -865,7 +881,8 @@ impl Repository {
     ///      any shared-inode hazard.
     ///   2. Lazy promotion + retry. If the canonical loose blob
     ///      isn't on disk (e.g. post-`pack_objects + prune_loose`),
-    ///      promote it once and retry the reflink.
+    ///      promote it once and retry the reflink when the destination
+    ///      filesystem supports reflinks.
     ///   3. `fs::write` of the decompressed blob bytes. Used when the
     ///      filesystem doesn't support reflinks at all
     ///      (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`), in which case we flip a
@@ -2215,13 +2232,12 @@ mod tests {
     /// After `pack_objects + prune_loose_objects`, every blob is
     /// pack-only. The lazy-promotion path inside `materialize_blob`
     /// must (a) succeed without errors, (b) read back the canonical
-    /// bytes in both worktrees, and (c) leave a real loose
-    /// uncompressed mirror on disk under
-    /// `.heddle/objects/blobs/<2-char>/<rest>` so subsequent
-    /// reflinks have something to clone from.
+    /// bytes in both worktrees, and (c) promote a loose mirror only
+    /// when the destination filesystem can reflink it. Both paths
+    /// must isolate worktree edits from sibling files and the store.
     #[test]
     #[cfg(unix)]
-    fn lazy_promotion_after_pack_and_prune_restores_loose_mirror() {
+    fn packed_materialization_promotes_only_for_reflinks_and_isolates_edits() {
         let temp_dir = TempDir::new().unwrap();
         let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
@@ -2264,12 +2280,24 @@ mod tests {
         assert_eq!(std::fs::read(&worktree_a).unwrap(), blob.content());
         assert_eq!(std::fs::read(&worktree_b).unwrap(), blob.content());
 
-        // (c) the loose-uncompressed mirror exists.
-        let loose = repo
-            .store()
-            .loose_blob_path(&hash)
-            .expect("after lazy promotion the canonical loose path must exist");
-        assert_eq!(std::fs::read(&loose).unwrap(), blob.content());
+        // (c) promotion pays off only when the mirror can be reflinked.
+        let loose = repo.store().loose_blob_path(&hash);
+        if filesystem_supports_reflink(temp_dir.path()) {
+            let loose = loose.expect("reflink materialization must promote a loose mirror");
+            assert_eq!(std::fs::read(loose).unwrap(), blob.content());
+        } else {
+            assert!(
+                loose.is_none(),
+                "copy fallback must not write a redundant mirror"
+            );
+        }
+
+        std::fs::write(&worktree_a, b"edited in the first worktree").unwrap();
+        assert_eq!(std::fs::read(&worktree_b).unwrap(), blob.content());
+        assert_eq!(
+            repo.store().get_blob(&hash).unwrap().unwrap().content(),
+            blob.content()
+        );
     }
 
     /// Proactive warm: walk a state's tree, promote every reachable

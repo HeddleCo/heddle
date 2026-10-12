@@ -629,29 +629,10 @@ impl FsStore {
         &self,
         src_pack_path: &std::path::Path,
         src_index_path: &std::path::Path,
+        pack_name: &str,
     ) -> Result<()> {
-        use std::io::Read;
-
         let packs = packs_dir(&self.root);
         crate::fs_atomic::create_dir_all_durable(&packs)?;
-
-        // Stream-hash the pack file to derive its name. 64 KiB chunks
-        // keep the hasher's working set tiny.
-        let mut hasher = blake3::Hasher::new();
-        let mut file = fs::File::open(src_pack_path)?;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        drop(file);
-        // Native digest for potential callers; hex String only for the journal
-        // path/name boundary (filenames + intent JSON).
-        let pack_hash = hasher.finalize();
-        let pack_name = pack_hash.to_hex().to_string();
 
         // L8 A+: durable staging + intent journal, then pack/index publish.
         // Recovery on reload finishes or aborts incomplete installs.
@@ -660,7 +641,7 @@ impl FsStore {
             &packs,
             src_pack_path,
             src_index_path,
-            &pack_name,
+            pack_name,
         )?;
 
         self.clear_recent_object_caches();

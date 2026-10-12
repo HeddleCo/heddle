@@ -1514,17 +1514,27 @@ impl HostedClient {
         snapshot: Option<&[ThreadOverview]>,
     ) -> Result<PullComplete, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
-        let resolved = self.resolve_thread_ref(repo_path, remote_thread).await?;
         let observed;
+        let resolved;
         let overviews = match snapshot {
-            Some(overviews) => overviews,
+            // Clone's complete listing already selected the name and stable
+            // identity. Fetch that identity without another name lookup.
+            Some(overviews) => {
+                resolved = None;
+                overviews
+            }
             None => {
-                observed = self.observe_thread_overviews(repo_path).await?;
+                let (threads, reference) = tokio::try_join!(
+                    Box::pin(self.observe_thread_overviews(repo_path)),
+                    Box::pin(self.resolve_thread_ref(repo_path, remote_thread)),
+                )?;
+                observed = threads;
+                resolved = Some(reference);
                 &observed
             }
         };
         let overview = overviews.iter().find(|overview| {
-                overview.name == remote_thread && overview.r#ref.as_ref() == Some(&resolved)
+                overview.name == remote_thread && resolved.as_ref().is_none_or(|resolved| overview.r#ref.as_ref() == Some(resolved))
             })
             .ok_or_else(|| {
                 ProtocolError::InvalidState(format!(
@@ -1535,6 +1545,21 @@ impl HostedClient {
             .r#ref
             .clone()
             .ok_or_else(|| ProtocolError::InvalidState("observed Thread has no identity".into()))?;
+        if reference.spool.as_ref() != Some(&spool)
+            || reference.id.as_ref().is_none_or(|id| id.value.len() != 32)
+        {
+            return Err(ProtocolError::InvalidState(
+                "observed Thread has an inconsistent identity".into(),
+            ));
+        }
+        // Reuse the selected stable identity for post-install collaboration
+        // and metadata reads on this command's shared connection.
+        if let Some(cache) = &self.resolutions {
+            cache.entries().await.threads.insert(
+                (spool.id.clone(), remote_thread.to_owned()),
+                reference.clone(),
+            );
+        }
         // Source packs carry signed ancestry metadata but only the selected
         // State's content. Hydrate replay trees through the fork base before
         // pull advances the checkout; ready must not discover missing trees

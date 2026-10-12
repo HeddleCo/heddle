@@ -101,6 +101,7 @@ enum HostedRoute {
     Netd {
         proxy_endpoint: Endpoint,
         weft_endpoint_id: EndpointId,
+        descriptor: Option<Box<(super::VerifiedEndpointDescriptor, ClientConfig)>>,
     },
 }
 
@@ -177,37 +178,43 @@ impl HostedConnection {
         }
         let ensured =
             hosted_bridge::ensure_via_netd(&socket_path, server, config.allow_insecure).await?;
-        verify_netd_weft_identity(server, config, descriptor, http, ensured.weft_endpoint_id)
-            .await?;
-
-        let proxy_endpoint = Endpoint::builder(presets::Minimal)
-            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .map_err(HostedError::transport)?
-            .bind()
-            .await
-            .map_err(HostedError::transport)?;
         let provider_transport = ProviderWebSocketTransport::new(config.clone());
-        let endpoint_builder = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .map_err(HostedError::transport);
-        let endpoint_result = match endpoint_builder {
-            Ok(builder) => builder
-                .add_custom_transport(Arc::new(provider_transport.clone()))
-                .bind()
-                .await
-                .map_err(HostedError::transport),
-            Err(error) => Err(error),
-        };
-        let endpoint = match endpoint_result {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                close_endpoint(&proxy_endpoint).await;
-                return Err(error);
+        // Binding local adapters needs no remote data. Verify the Weft key
+        // concurrently, then permit bytes onto the authenticated bridge.
+        let (verified, proxy, endpoint) = tokio::join!(
+            verify_netd_weft_identity(server, config, descriptor, http, ensured.weft_endpoint_id),
+            async {
+                Endpoint::builder(presets::Minimal)
+                    .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+                    .relay_mode(RelayMode::Disabled)
+                    .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                    .map_err(HostedError::transport)?
+                    .bind()
+                    .await
+                    .map_err(HostedError::transport)
+            },
+            async {
+                Endpoint::builder(presets::Minimal)
+                    .relay_mode(RelayMode::Disabled)
+                    .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                    .map_err(HostedError::transport)?
+                    .add_custom_transport(Arc::new(provider_transport.clone()))
+                    .bind()
+                    .await
+                    .map_err(HostedError::transport)
+            },
+        );
+        if verified.is_err() || proxy.is_err() || endpoint.is_err() {
+            if let Ok(proxy) = &proxy {
+                close_endpoint(proxy).await;
             }
-        };
+            if let Ok(endpoint) = &endpoint {
+                close_endpoint(endpoint).await;
+            }
+        }
+        let verified = verified?;
+        let proxy_endpoint = proxy?;
+        let endpoint = endpoint?;
         let proxy_address = proxy_endpoint.addr();
         let proxy_task_endpoint = proxy_endpoint.clone();
         let proxy_socket = socket_path.clone();
@@ -254,9 +261,22 @@ impl HostedConnection {
             route: HostedRoute::Netd {
                 proxy_endpoint,
                 weft_endpoint_id: ensured.weft_endpoint_id,
+                descriptor: verified.map(|descriptor| Box::new((descriptor, config.clone()))),
             },
             reused_warm: ensured.reused,
         })))
+    }
+
+    pub(super) fn verified_descriptor(
+        &self,
+    ) -> Option<(&super::VerifiedEndpointDescriptor, &ClientConfig)> {
+        match &self.route {
+            HostedRoute::Direct => None,
+            #[cfg(unix)]
+            HostedRoute::Netd { descriptor, .. } => {
+                descriptor.as_ref().map(|cached| (&cached.0, &cached.1))
+            }
+        }
     }
 
     /// Key that v2 Discover must prove on this route.
@@ -376,24 +396,21 @@ async fn verify_netd_weft_identity(
     descriptor: Option<&super::VerifiedEndpointDescriptor>,
     http: &super::BootstrapHttp,
     netd_weft: EndpointId,
-) -> Result<()> {
+) -> Result<Option<super::VerifiedEndpointDescriptor>> {
     let verified = match descriptor {
-        Some(descriptor) => descriptor.endpoint_addr()?.id,
+        Some(descriptor) => descriptor.clone(),
         None if super::resolver::configures_endpoint_trust(config) => {
             super::resolver::resolve_and_verify_netd_endpoint(server, config, http, netd_weft)
                 .await?
-                .endpoint_addr()?
-                .id
         }
-        None => return Ok(()),
+        None => return Ok(None),
     };
-    if verified != netd_weft {
+    if verified.endpoint_addr()?.id != netd_weft {
         return Err(HostedError::DescriptorTrust(
-            "netd Weft identity does not match the caller's verified endpoint descriptor"
-                .to_string(),
+            "netd Weft identity does not match the caller's verified endpoint descriptor".into(),
         ));
     }
-    Ok(())
+    Ok(Some(verified))
 }
 
 #[cfg(unix)]

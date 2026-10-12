@@ -122,13 +122,30 @@ impl HostedClient {
         let Some(cache) = &self.resolutions else {
             return self.resolve_spool_remote(address).await;
         };
-        // Held across the request so concurrent handles resolve a name once.
+        let request = {
+            let mut entries = cache.entries().await;
+            if let Some(spool) = entries.spools.get(address) {
+                return Ok(spool.clone());
+            }
+            entries
+                .spool_requests
+                .entry(address.to_owned())
+                .or_default()
+                .clone()
+        };
+        let spool = request
+            .get_or_try_init(|| self.resolve_spool_remote(address))
+            .await?
+            .clone();
         let mut entries = cache.entries().await;
-        if let Some(spool) = entries.spools.get(address) {
-            return Ok(spool.clone());
+        // Do not repopulate a generation invalidated while the RPC ran.
+        if entries
+            .spool_requests
+            .get(address)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &request))
+        {
+            entries.spools.insert(address.to_owned(), spool.clone());
         }
-        let spool = self.resolve_spool_remote(address).await?;
-        entries.spools.insert(address.to_owned(), spool.clone());
         Ok(spool)
     }
 
@@ -178,12 +195,29 @@ impl HostedClient {
             return self.resolve_thread_remote(spool, name_or_id).await;
         };
         let key = (spool.id.clone(), name_or_id.to_owned());
+        let request = {
+            let mut entries = cache.entries().await;
+            if let Some(thread) = entries.threads.get(&key) {
+                return Ok(thread.clone());
+            }
+            entries
+                .thread_requests
+                .entry(key.clone())
+                .or_default()
+                .clone()
+        };
+        let reference = request
+            .get_or_try_init(|| self.resolve_thread_remote(spool, name_or_id))
+            .await?
+            .clone();
         let mut entries = cache.entries().await;
-        if let Some(thread) = entries.threads.get(&key) {
-            return Ok(thread.clone());
+        if entries
+            .thread_requests
+            .get(&key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &request))
+        {
+            entries.threads.insert(key, reference.clone());
         }
-        let reference = self.resolve_thread_remote(spool, name_or_id).await?;
-        entries.threads.insert(key, reference.clone());
         Ok(reference)
     }
 

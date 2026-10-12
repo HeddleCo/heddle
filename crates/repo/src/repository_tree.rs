@@ -11,7 +11,6 @@ use std::{
 use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::{ObjectStore, TreeWrite},
-    util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -1217,35 +1216,6 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             return Ok(());
         }
 
-        if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target) {
-            let read_start = Instant::now();
-            let (blob, hash) = read_blob_with_hash(entry.path, entry.metadata.len())?;
-            let read_elapsed = read_start.elapsed().as_millis();
-            if blob.content() == gitlink_placeholder_bytes(&target) {
-                self.record_revalidation_file(&entry, hash, state)?;
-                state.profile.file_count += 1;
-                state.profile.blob_prep_ms += read_elapsed;
-                state
-                    .entries
-                    .push(TreeEntry::gitlink(entry.name.to_string(), target)?);
-                return Ok(());
-            }
-
-            let enqueue_start = Instant::now();
-            self.enqueue_blob(blob, hash)?;
-            let enqueue_elapsed = enqueue_start.elapsed().as_millis();
-            state.profile.file_count += 1;
-            state.profile.blob_prep_ms += read_elapsed;
-            state.profile.blob_write_ms += enqueue_elapsed;
-            self.record_revalidation_file(&entry, hash, state)?;
-            state.entries.push(TreeEntry::file(
-                entry.name.to_string(),
-                hash,
-                entry.executable,
-            )?);
-            return Ok(());
-        }
-
         // Stat-cache fast path: when this build is on behalf of a
         // capture against a previously-materialised thread, reuse the
         // recorded hash if the file's stat fields haven't shifted
@@ -1319,6 +1289,15 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state
             .entries
             .push(TreeEntry::symlink(entry.name.to_string(), hash)?);
+        Ok(())
+    }
+
+    fn visit_gitlink(
+        &mut self,
+        tree_entry: &TreeEntry,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        state.entries.push(tree_entry.clone());
         Ok(())
     }
 

@@ -353,11 +353,14 @@ async fn async_main() -> Result<()> {
     // surface stays quiet. Long-running daemons keep the historical INFO
     // default since their stderr is the operator's audit log.
     let base_logging = LoggingConfig::from_user_and_env(Some(&user_config));
-    let logging = if is_daemon_invocation(&cli.command) {
+    let mut logging = if is_daemon_invocation(&cli.command) {
         base_logging.with_verbosity(cli.verbose.max(1), cli.quiet)
     } else {
         base_logging.with_verbosity(cli.verbose, cli.quiet)
     };
+    // Transport shutdown noise must not corrupt JSON errors. Heddle's user
+    // warnings still explain skipped paths, and trace export stays enabled.
+    logging.quiet_iroh = explicit_json_requested(&cli) && !is_daemon_invocation(&cli.command);
     let telemetry = init_logging(logging);
     let logging_init_ms = logging_start.elapsed().as_millis();
     let command_trace = CommandTrace::start(&command_name, total_start);

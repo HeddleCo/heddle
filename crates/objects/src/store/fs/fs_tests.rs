@@ -622,6 +622,32 @@ fn install_pack_refreshes_a_state_the_store_already_holds() {
 }
 
 #[test]
+fn streaming_install_refreshes_native_pack_baseline_before_shadowing_states() {
+    let (temp, publisher) = create_test_store();
+    let receiver = FsStore::new(publisher.root());
+    let original = state_chain(1, "native baseline").remove(0);
+    let refreshed = original.clone().with_git_lossy(true);
+    let (pack, index) = state_pack([&original]);
+    publisher
+        .install_pack(&pack, &index)
+        .expect("sibling publishes original");
+    let (pack, index) = state_pack([&refreshed]);
+    let pack_path = temp.path().join("incoming.pack");
+    let index_path = temp.path().join("incoming.idx");
+    std::fs::write(&pack_path, pack).expect("pack");
+    std::fs::write(&index_path, index).expect("index");
+    receiver
+        .install_pack_streaming(&pack_path, &index_path)
+        .expect("refresh stale baseline");
+    assert_eq!(
+        FsStore::new(publisher.root())
+            .get_state(&original.id())
+            .expect("read State"),
+        Some(refreshed)
+    );
+}
+
+#[test]
 fn interrupted_clone_discards_only_short_pack_and_accepts_remote_repair() {
     let (_temp, store) = create_test_store();
     let blob = Blob::from("authoritative remote clone payload");
@@ -2094,5 +2120,85 @@ fn store_open_keeps_expired_scratch_while_an_owner_is_alive() {
     assert!(
         !live.exists(),
         "expired scratch is reclaimed after the owner exits"
+    );
+}
+
+#[test]
+#[ignore = "manual streaming installation profile"]
+fn streaming_install_timing_fixture() {
+    let count = std::env::var("HEDDLE_INSTALL_BENCH_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(52_515);
+    let states = state_chain(count, "streaming profile");
+    let (pack, index) = state_pack(&states);
+    let (temp, store) = create_test_store();
+    let staged_pack = temp.path().join("source.pack");
+    let staged_index = temp.path().join("source.idx");
+    std::fs::write(&staged_pack, pack).expect("stage pack");
+    std::fs::write(&staged_index, index).expect("stage index");
+    let started = std::time::Instant::now();
+    let inventory = store
+        .install_pack_streaming(&staged_pack, &staged_index)
+        .expect("install");
+    println!(
+        "streaming install timing: objects={} wall_ms={}",
+        inventory.ids().count(),
+        started.elapsed().as_millis()
+    );
+    assert_eq!(inventory.ids().count(), count);
+    assert_eq!(loose_state_count(&store), 0);
+}
+
+/// A filesystem-operation budget, independent of scheduling and wall time.
+/// Trace the isolated fixture rather than the test runner's parallel activity.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires strace; run explicitly with clone performance evidence"]
+fn streaming_install_syscall_budget() {
+    let trace = tempfile::NamedTempFile::new().expect("syscall summary");
+    let output = std::process::Command::new("strace")
+        .args(["-f", "-c", "-o"])
+        .arg(trace.path())
+        .arg(std::env::current_exe().expect("test executable"))
+        .args([
+            "store::fs::fs_tests::streaming_install_timing_fixture",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("HEDDLE_INSTALL_BENCH_STATES", "2048")
+        .output()
+        .expect("strace must be installed for this Linux performance contract");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = std::fs::read_to_string(trace.path()).expect("syscall counts");
+    let calls = |name: &str| {
+        summary
+            .lines()
+            .find_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                (fields.last() == Some(&name))
+                    .then(|| fields[3].parse::<usize>().expect("call count"))
+            })
+            .expect("counted syscall")
+    };
+    let directories = calls("getdents64");
+    let total = calls("total");
+    println!(
+        "streaming install syscall budget: states=2048 getdents64={directories} total={total}"
+    );
+    // The pack baseline is scanned per installation, never per State. A
+    // single loose-presence stat per State is allowed; repeated rescans are not.
+    assert!(
+        directories <= 64,
+        "directory-read budget exceeded: {summary}"
+    );
+    assert!(
+        total <= 2 * 2048 + 10_000,
+        "syscall budget exceeded: {summary}"
     );
 }

@@ -140,7 +140,18 @@ fn refresh_tracked_directory(
                     ctx.index
                         .insert_gitlink(child_key.clone(), target.to_string());
                 }
-                false
+                match fs::symlink_metadata(ctx.repo.root().join(&child_rel_path)) {
+                    Ok(metadata) if metadata.is_dir() => true,
+                    Ok(_) => {
+                        ctx.status.modified.push(child_rel_path.clone());
+                        false
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ctx.status.deleted.push(child_rel_path.clone());
+                        false
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             // Native child-spool edge: not materialized to the worktree in
             // this phase, so it never makes the tracked tree dirty.

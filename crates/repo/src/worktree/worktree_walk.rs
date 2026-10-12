@@ -111,6 +111,13 @@ pub(crate) trait WorktreeWalkPolicy {
         state: &mut Self::DirectoryState,
     ) -> Result<()>;
 
+    /// A tracked gitlink directory is opaque; never descend into its checkout.
+    fn visit_gitlink(
+        &mut self,
+        tree_entry: &TreeEntry,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()>;
+
     fn visit_directory_output(
         &mut self,
         entry: WalkEntry<'_>,
@@ -286,6 +293,13 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                     &mut state,
                 ),
                 ListedDirEntryKind::Directory => {
+                    if let Some(tree_entry) =
+                        tree_entry.filter(|entry| entry.gitlink_target().is_some())
+                    {
+                        policy.visit_gitlink(tree_entry, &mut state)?;
+                        pop_key_component(&mut entry_key, location.key);
+                        continue;
+                    }
                     let child_rel_path = directory.rel_path.join(name);
                     let subtree = tree_entry
                         .filter(|entry| entry.is_tree())

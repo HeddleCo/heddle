@@ -82,6 +82,7 @@ pub(crate) struct ContextFixture {
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
     pub fail_history: Arc<std::sync::atomic::AtomicBool>,
+    pub history_failure_barrier: Option<Arc<tokio::sync::Barrier>>,
     /// When true, PutContext returns Dedup Conflict for the create nonce.
     pub put_conflict: bool,
     pub put_requests: Arc<Mutex<usize>>,
@@ -2273,6 +2274,10 @@ async fn serve_observe_collaboration(
             .lock()
             .expect("history requests")
             .extend(body.contexts.iter().map(|reference| reference.id.clone()));
+        if let Some(barrier) = &context.history_failure_barrier {
+            // The timeout is only a watchdog for a serial implementation.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait()).await;
+        }
         let failure = CallFailure {
             code: CallFailureCode::Unavailable as i32,
             message: "injected context history failure".into(),

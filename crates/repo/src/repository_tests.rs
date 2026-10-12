@@ -869,7 +869,7 @@ fn supplied_tree_snapshot_batches_new_blobs_into_a_pack() {
 }
 
 #[test]
-fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
+fn snapshot_preserves_unchanged_materialized_gitlink_directory() {
     let (temp_dir, repo) = create_test_repo();
     let target = gitlink_target_for_tests();
     let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).unwrap()]);
@@ -885,9 +885,12 @@ fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
 
     repo.materialize_computed_tree(&tree, temp_dir.path())
         .unwrap();
+    assert!(temp_dir.path().join("vendor").is_dir());
     assert_eq!(
-        fs::read(temp_dir.path().join("vendor")).unwrap(),
-        gitlink_placeholder_bytes(&target)
+        fs::read_dir(temp_dir.path().join("vendor"))
+            .unwrap()
+            .count(),
+        0
     );
 
     let recaptured = repo
@@ -904,7 +907,7 @@ fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
 }
 
 #[test]
-fn snapshot_captures_edited_gitlink_placeholder_as_blob() {
+fn snapshot_captures_file_replacing_gitlink_as_blob() {
     let (temp_dir, repo) = create_test_repo();
     let target = gitlink_target_for_tests();
     let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).unwrap()]);
@@ -918,6 +921,7 @@ fn snapshot_captures_edited_gitlink_placeholder_as_blob() {
     repo.materialize_computed_tree(&tree, temp_dir.path())
         .unwrap();
 
+    fs::remove_dir(temp_dir.path().join("vendor")).unwrap();
     fs::write(temp_dir.path().join("vendor"), "this is a real file now").unwrap();
 
     let recaptured = repo
@@ -1008,9 +1012,73 @@ fn compare_worktree_cached_treats_materialized_gitlink_as_clean_leaf() {
         repo.cached_gitlinks_for_tree(&tree),
         Some(vec![("vendor".to_string(), target.to_string())])
     );
+    assert!(temp_dir.path().join("vendor").is_dir());
     assert_eq!(
-        fs::read(temp_dir.path().join("vendor")).expect("gitlink placeholder"),
-        gitlink_placeholder_bytes(&target)
+        fs::read_dir(temp_dir.path().join("vendor"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn populated_gitlink_directory_is_clean_and_missing_gitlink_is_deleted() {
+    let (temp, repo) = create_test_repo();
+    let target = gitlink_target_for_tests();
+    let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).expect("gitlink")]);
+    repo.materialize_computed_tree(&tree, temp.path())
+        .expect("checkout");
+    fs::write(temp.path().join("vendor/untracked"), b"submodule contents").expect("populate");
+    let status = repo
+        .compare_worktree_cached(&tree)
+        .expect("populated status");
+    assert!(
+        status.modified.is_empty() && status.added.is_empty() && status.deleted.is_empty(),
+        "{status:?}"
+    );
+    fs::remove_dir_all(temp.path().join("vendor")).expect("remove submodule");
+    let status = repo.compare_worktree_cached(&tree).expect("missing status");
+    assert_eq!(status.deleted, vec!["vendor".to_string()]);
+    assert!(
+        status.modified.is_empty() && status.added.is_empty(),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn replacing_populated_gitlink_with_blob_refuses_without_eisdir_or_data_loss() {
+    let (temp, repo) = create_test_repo();
+    let tree = Tree::from_entries(vec![
+        TreeEntry::gitlink("vendor", gitlink_target_for_tests()).expect("gitlink"),
+    ]);
+    repo.materialize_computed_tree(&tree, temp.path())
+        .expect("checkout");
+    let child = temp.path().join("vendor/untracked");
+    fs::write(&child, b"submodule contents").expect("populate");
+    let blob = repo
+        .store()
+        .put_blob(&Blob::from_slice(b"replacement"))
+        .expect("blob");
+    let file = Tree::from_entries(vec![TreeEntry::file("vendor", blob, false).expect("file")]);
+    let error = repo
+        .materialize_computed_tree(&file, temp.path())
+        .expect_err("preserve populated directory");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot replace populated directory"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&child).expect("retained contents"),
+        b"submodule contents"
+    );
+    fs::remove_file(child).expect("move contents out");
+    repo.materialize_computed_tree(&file, temp.path())
+        .expect("retry after emptying");
+    assert_eq!(
+        fs::read(temp.path().join("vendor")).expect("replacement"),
+        b"replacement"
     );
 }
 

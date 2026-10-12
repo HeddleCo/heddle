@@ -221,6 +221,9 @@ fn scan_directory(
 
         match entry.kind {
             crate::worktree_walk::ListedDirEntryKind::Directory => {
+                if tree_entry.is_some_and(|entry| entry.entry_type() == EntryType::Gitlink) {
+                    continue;
+                }
                 ctx.index.remove(&child_key);
                 let child_tree = match tree_entry {
                     Some(tree_entry) if tree_entry.entry_type() == EntryType::Tree => {

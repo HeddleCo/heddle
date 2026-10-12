@@ -112,16 +112,23 @@ async fn resolve_automatic_descriptor_trust(
         }));
     }
 
-    let document =
-        match fetch_descriptor_key_document(&descriptor_key_url(canonical_server), http).await {
-            Err(HostedError::DescriptorTrustUnavailable) => {
-                return Err(HostedError::DescriptorTrust(format!(
-                    "server does not publish descriptor trust; configure both values or upgrade \
+    // A first connection needs both HTTPS documents. Fetch them over the same
+    // HTTP pool concurrently; verify the live set only after selecting its root.
+    let key_url = descriptor_key_url(canonical_server);
+    let set_url = descriptor_url(canonical_server);
+    let (document, set) = tokio::join!(
+        fetch_descriptor_key_document(&key_url, http),
+        fetch_ephemeral_descriptor_set(&set_url, http),
+    );
+    let document = match document {
+        Err(HostedError::DescriptorTrustUnavailable) => {
+            return Err(HostedError::DescriptorTrust(format!(
+                "server does not publish descriptor trust; configure both values or upgrade \
                      the server (canonical server: {canonical_server})"
-                )));
-            }
-            result => result?,
-        };
+            )));
+        }
+        result => result?,
+    };
     if document.version != 1 {
         return Err(HostedError::InvalidDescriptor(format!(
             "unsupported descriptor trust document version {}",
@@ -130,9 +137,9 @@ async fn resolve_automatic_descriptor_trust(
     }
     let public_key = validate_descriptor_pair(&document.key_id, &document.public_key)
         .map_err(|error| HostedError::InvalidDescriptor(error.to_string()))?;
-    let verified =
-        verify_live_set_against_root(canonical_server, &public_key, config, http, endpoint_id)
-            .await?;
+    let set = set?;
+    let verified = verify_live_set(&set, &public_key, config, endpoint_id)?;
+    cache_set(canonical_server, &public_key, config, &set);
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {
@@ -158,9 +165,41 @@ async fn verify_live_set_against_root(
     http: &super::bootstrap::BootstrapHttp,
     endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
+    let cache = super::endpoint_cache::path(canonical_server, root_public_key, config, "set");
+    if let Ok(bytes) = std::fs::read(cache)
+        && let Ok(set) = serde_json::from_slice(&bytes)
+        && let Ok(verified) = verify_live_set(&set, root_public_key, config, endpoint_id)
+    {
+        return Ok(verified);
+    }
     let set = fetch_ephemeral_descriptor_set(&descriptor_url(canonical_server), http).await?;
+    let verified = verify_live_set(&set, root_public_key, config, endpoint_id)?;
+    cache_set(canonical_server, root_public_key, config, &set);
+    Ok(verified)
+}
+
+fn cache_set(
+    authority: &str,
+    root: &[u8; 32],
+    config: &ClientConfig,
+    set: &api::descriptor_trust::EndpointDescriptorSetDocument,
+) {
+    if let Ok(bytes) = serde_json::to_vec(set) {
+        super::endpoint_cache::save(
+            &super::endpoint_cache::path(authority, root, config, "set"),
+            &bytes,
+        );
+    }
+}
+
+fn verify_live_set(
+    set: &api::descriptor_trust::EndpointDescriptorSetDocument,
+    root_public_key: &[u8; 32],
+    config: &ClientConfig,
+    endpoint_id: Option<iroh::EndpointId>,
+) -> Result<VerifiedEndpointDescriptor> {
     let now = now_unix_millis()?;
-    let (trusted, rejects) = trusted_live_entries(&set, root_public_key, now);
+    let (trusted, rejects) = trusted_live_entries(set, root_public_key, now);
     fail_if_none_trusted(&trusted, &rejects)?;
     if let Some(endpoint_id) = endpoint_id {
         let selected = trusted
