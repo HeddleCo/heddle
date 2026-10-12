@@ -35,15 +35,15 @@ prost = "0.14"
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Browser bindings and the browser clock backend must not enter native hosts.
 biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro", "wasm"] }
-# biscuit-auth links its token builder even for verification-only consumers.
-# Enabling its transitive entropy backend makes that pure code linkable in a
-# browser Worker; this crate never calls a randomness API.
+# Feature enabler only: biscuit-auth 6 requires getrandom 0.2 but its wasm
+# feature omits js: https://docs.rs/crate/biscuit-auth/6.0.0/source/Cargo.toml
+# Remove when upstream enables its WASM entropy backend; see docs/rustcrypto-dependencies.md.
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = "=0.2.127"
 js-sys = "=0.3.104"
