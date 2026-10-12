@@ -52,7 +52,7 @@ keywords = ["vcs", "version-control", "ai", "git"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
-aes-gcm = { version = "0.10", features = ["zeroize"] }
+aes-gcm = { version = "0.11", features = ["zeroize"] }
 anyhow = "1"
 api = { package = "heddle-api", git = "https://github.com/HeddleCo/api", rev = "a1a4b6e34fc0737bc0cad3d388cc4a2e3fe28dae", version = "=0.31.0-alpha.45" }
 async-trait = "0.1"
@@ -165,7 +165,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2"
 wait-timeout = "0.2"
 webpki-roots = "1.0"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 windows-sys = "0.61"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 zstd = "0.13"

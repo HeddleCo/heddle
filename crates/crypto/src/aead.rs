@@ -315,6 +315,10 @@ pub fn unwrap_dek(
 }
 
 #[cfg(test)]
+#[path = "aead_golden_tests.rs"]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

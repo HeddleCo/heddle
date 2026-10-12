@@ -29,8 +29,9 @@ uuid = { version = "1", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 biscuit-auth = { workspace = true, features = ["wasm"] }
 chrono = { workspace = true, features = ["wasmbind"] }
-# Biscuit's wasm feature supplies bindings but does not select its entropy
-# backend. This leaf must build without a sibling enabling getrandom's JS path.
+# Feature enabler only: biscuit-auth 6 requires getrandom 0.2 but its wasm
+# feature omits js: https://docs.rs/crate/biscuit-auth/6.0.0/source/Cargo.toml
+# Remove when upstream enables its WASM entropy backend; see docs/rustcrypto-dependencies.md.
 getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
