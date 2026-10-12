@@ -168,6 +168,7 @@ fn published_ancestry(
 
 #[derive(Clone)]
 struct Fixture {
+    invite: bool,
     spool: uuid::Uuid,
     thread_name: String,
     thread_id: Vec<u8>,
@@ -180,6 +181,9 @@ struct Fixture {
 
 impl Fixture {
     fn owner(&self) -> v2::OwnerState {
+        if !self.invite {
+            return self.owner.clone();
+        }
         let enrolled = self
             .captured
             .lock()
@@ -268,7 +272,8 @@ pub async fn start(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
-    let (client, task, captured, _, _, _) = start_inner(spool, thread_name, thread_id, false).await;
+    let (client, task, captured, _, _, _) =
+        start_inner(spool, thread_name, thread_id, false, false).await;
     (client, task, captured)
 }
 
@@ -284,7 +289,22 @@ pub async fn start_routed(
     iroh::SecretKey,
     Arc<https::TestHttpsServer>,
 ) {
-    start_inner(spool, thread_name, thread_id, true).await
+    start_inner(spool, thread_name, thread_id, true, false).await
+}
+
+pub async fn start_routed_invite(
+    spool: uuid::Uuid,
+    thread_name: impl Into<String>,
+    thread_id: [u8; 32],
+) -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<PublicationCapture>>,
+    iroh::EndpointAddr,
+    iroh::SecretKey,
+    Arc<https::TestHttpsServer>,
+) {
+    start_inner(spool, thread_name, thread_id, true, true).await
 }
 
 async fn start_inner(
@@ -292,6 +312,7 @@ async fn start_inner(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
     routed: bool,
+    invite: bool,
 ) -> (
     HostedClient,
     JoinHandle<()>,
@@ -350,6 +371,7 @@ async fn start_inner(
         }
     }));
     let fixture = Fixture {
+        invite,
         spool,
         thread_name: thread_name.into(),
         thread_id: thread_id.to_vec(),
@@ -627,16 +649,13 @@ async fn serve_call(
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => match method.as_str() {
             "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" => {
-                let response = v2::DescribeEndpointResponse {
+                let mut response = v2::DescribeEndpointResponse {
                     endpoint: Some(v2::EndpointRef {
                         kind: v2::EndpointKind::Weft as i32,
                         public_key: server_key,
                     }),
                     supported_packages: vec!["heddle.api.v1alpha2".into()],
                     implemented_methods: vec![
-                        "/heddle.api.v1alpha2.IdentityService/ResolveSignupInvitation".into(),
-                        "/heddle.api.v1alpha2.IdentityService/ProvisionAccount".into(),
-                        "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership".into(),
                         "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v1alpha2.SpoolService/ObserveSpool".into(),
                         "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
@@ -672,6 +691,13 @@ async fn serve_call(
                     ],
                     ..Default::default()
                 };
+                if fixture.invite {
+                    response.implemented_methods.extend([
+                        "/heddle.api.v1alpha2.IdentityService/ResolveSignupInvitation".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ProvisionAccount".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership".into(),
+                    ]);
+                }
                 write_unary(&mut send, &response).await;
             }
             "/heddle.api.v1alpha2.IdentityService/ResolveSignupInvitation" => {

@@ -252,32 +252,58 @@ fn finish_invite_create(
     claim_state.record_account_email(account_email);
     let signer = Ed25519Signer::from_pem(&minted.private_key_pem)
         .context("loading the agent proof key for the claimable owner root")?;
-    if let Some(ownership) = response.ownership {
-        let signed = ownership.root.context("provisioned owner root missing")?;
+    let now = chrono::Utc::now().timestamp();
+    let ownership = if let Some(ownership) = response.ownership {
+        let signed = ownership
+            .root
+            .as_ref()
+            .context("provisioned owner root missing")?;
         if !ownership.accepted_transitions.is_empty()
             || !signed
                 .root
                 .as_ref()
                 .is_some_and(|root| root.claimable_deferred_human)
-            || repo::seq0_authority_public_key(&signed)? != signer.public_key()
+            || repo::seq0_authority_public_key(signed)? != signer.public_key()
         {
             bail!("unclaimed account ownership is not the proved agent's claimable root");
         }
         if let Some(previous) = super::owner_root::load_recorded_root(&claim_state)?
-            && previous != signed
+            && previous != *signed
         {
             bail!("provisioned owner root differs from the locally recorded original");
         }
         use prost::Message;
         claim_state.record_claimable_owner_root(signer.public_key(), &signed.encode_to_vec());
+        ownership
     } else {
-        super::owner_root::mint_and_record_claimable_root(
-            &mut claim_state,
-            &signer,
-            chrono::Utc::now().timestamp(),
-        )?;
-    }
+        let signed =
+            super::owner_root::mint_and_record_claimable_root(&mut claim_state, &signer, now)?;
+        let binding =
+            repo::sign_agent_claim_binding(&signer, &signed, &uuid::Uuid::now_v7().to_string())?;
+        v2::OwnerState {
+            owner: Some(v2::PrincipalRef {
+                id: account_id.clone(),
+            }),
+            root: Some(signed),
+            version: binding.root_state_hash.clone(),
+            binding: Some(binding),
+            ..Default::default()
+        }
+    };
     identity_state::store(&claim_state)?;
+    // Enrollment admits the client's original root and links the same node /
+    // credential key that created the account. Capture uses the device path.
+    repo::device_authority::publish(
+        &repo::identity::heddle_home_dir(),
+        &repo::device_authority::DeviceAuthority {
+            owner: ownership,
+            mint_roots: Vec::new(),
+            revoked_ids: Vec::new(),
+            revoked_mint_roots: Vec::new(),
+            revoked_publishers: Vec::new(),
+        },
+        now,
+    )?;
     store_agent_credential(server, minted)?;
     Ok(AuthLoginOutcome::AgentAccountCreated(AgentAccountCreated {
         account_id: account_id.clone(),
@@ -439,18 +465,27 @@ struct AgentRoot {
 }
 
 fn store_agent_credential(server: &str, minted: AgentRoot) -> Result<()> {
-    config::credentials::store_server_credential(
-        server,
-        config::credentials::ServerCredential {
-            mint_root_attachment: minted.mint_root_attachment,
-            token: minted.token,
-            subject: minted.subject,
-            device_id: None,
-            credential_id: minted.credential_id,
-            private_key_pem: Some(minted.private_key_pem),
-            expires_at: Some(minted.expires_at.to_rfc3339()),
-        },
-    )
+    let home = repo::identity::heddle_home_dir();
+    if home.join("state/device-rpc/authority.bin").try_exists()? {
+        let now = chrono::Utc::now().timestamp();
+        let authority = repo::device_authority::load(&home, now)?;
+        authority.verify_mint_root(&minted.public_key, now)?;
+        // Enrollment and renewal use the same admitted node key, including
+        // after logout removed its device signing alias.
+        repo::identity::link_device_key(&minted.public_key, &minted.private_key_pem, server)
+            .context("record enrolled agent signing identity")?;
+    }
+    let credential = config::credentials::ServerCredential {
+        mint_root_attachment: minted.mint_root_attachment,
+        token: minted.token,
+        subject: minted.subject,
+        device_id: None,
+        credential_id: minted.credential_id,
+        private_key_pem: Some(minted.private_key_pem),
+        expires_at: Some(minted.expires_at.to_rfc3339()),
+    };
+    super::source_author::retain_stored(server, &credential)?;
+    config::credentials::store_server_credential(server, credential)
 }
 
 fn mint_agent_credential_for_server(server: &str) -> Result<AgentRoot> {

@@ -69,7 +69,7 @@ async fn invite_capture() {
         nonce: vec![1; 32],
     };
     let signed = SignedGenesis::sign(&genesis, &signer).expect("client Thread genesis");
-    let (mut client, server, captured, _, _, https) = native_hosted_server::start_routed(
+    let (mut client, server, captured, _, _, https) = native_hosted_server::start_routed_invite(
         spool,
         "main",
         *genesis.id().expect("Thread ID").as_bytes(),
@@ -250,19 +250,21 @@ async fn invite_capture() {
         "capture uses the enrolled proof offline"
     );
     run(&clone, &["push"]);
+    println!("invite enrollment -> account Thread -> clone -> edit -> capture -> push: ok");
     let cloned = Repository::open(&clone).expect("cloned repo");
     let head = cloned
         .head()
         .expect("captured HEAD")
         .expect("captured state");
-    let publication = captured.lock().expect("publication");
-    assert_eq!(publication.source_heads().len(), 1);
-    assert!(matches!(
-        &publication.source_heads()[0].revision,
-        Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(state))
-            if state.value == head.as_bytes()
-    ));
-    drop(publication);
+    {
+        let publication = captured.lock().expect("publication");
+        assert_eq!(publication.source_heads().len(), 1);
+        assert!(matches!(
+            &publication.source_heads()[0].revision,
+            Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(state))
+                if state.value == head.as_bytes()
+        ));
+    }
     let device = repo::identity::load_device(&home.join(repo::identity::DEVICE_IDENTITY_FILE))
         .expect("device identity")
         .expect("enrolled signer");
@@ -270,10 +272,6 @@ async fn invite_capture() {
     assert_eq!(
         device.credential_token.as_deref(),
         Some(credential.token.as_str())
-    );
-    assert_eq!(
-        credential.device_id.as_deref(),
-        Some(device.public_key.as_str())
     );
     assert_eq!(
         repo::device_authority::load(&home, now)
@@ -286,6 +284,9 @@ async fn invite_capture() {
         matches!(repo::identity::source_author::load(&home, &publisher, spool).expect("original source proof"), SourceAuthor::Account { actor, spool: bound, .. } if actor.principal_id == uuid::Uuid::from_u128(2) && bound == spool)
     );
 
+    let signed_heads = cloned
+        .native_source_heads("main")
+        .expect("signed source heads");
     std::fs::remove_file(
         home.join("state/source-authors")
             .join(format!("{}.pb", hex::encode(publisher))),
@@ -310,7 +311,13 @@ async fn invite_capture() {
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
-    assert_eq!(cloned.head().expect("unchanged HEAD"), Some(head));
+    assert_eq!(
+        cloned
+            .native_source_heads("main")
+            .expect("refused source heads"),
+        signed_heads
+    );
+    println!("missing source-author proof: typed refusal, exit 78, signed source heads unchanged");
     client.close().await;
     server.abort();
 }

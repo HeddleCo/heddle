@@ -415,6 +415,52 @@ fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
     );
 }
 
+#[tokio::test]
+async fn remint_restores_the_enrolled_signer_and_source_proof() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
+    let _home = IsolatedHome::new();
+    let server = "api.enrolled-remint.test";
+    let account = "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28";
+    finish_invite_create_from_response(
+        server,
+        provision_response_for_test(account, "invite-test", ""),
+    )
+    .expect("enroll account");
+    let original = credentials::get_server_credential(server)
+        .expect("credential")
+        .expect("enrolled");
+    let signer = Ed25519Signer::from_pem(original.private_key_pem.as_deref().expect("PEM"))
+        .expect("original signer");
+    let home = repo::identity::heddle_home_dir();
+    assert!(repo::identity::unlink_device_key(server).expect("remove device alias"));
+    std::fs::remove_file(
+        home.join("state/source-authors")
+            .join(format!("{}.pb", hex::encode(signer.public_key()))),
+    )
+    .expect("remove original proof");
+    let (mut client, task, _, _) = start_recording_client().await;
+    remint_with_client_for_test(server, &mut client)
+        .await
+        .expect("renew enrollment");
+    client.close().await;
+    task.await.expect("recording server");
+    let device = repo::identity::load_device(&repo::identity::device_identity_path())
+        .expect("load device")
+        .expect("restored signer");
+    assert_eq!(device.public_key, hex::encode(signer.public_key()));
+    let renewed = credentials::get_server_credential(server)
+        .expect("credential")
+        .expect("renewed");
+    assert_eq!(
+        device.credential_token.as_deref(),
+        Some(renewed.token.as_str())
+    );
+    assert_ne!(renewed.token, original.token);
+    assert!(
+        matches!(repo::identity::source_author::load(&home, &signer.public_key().try_into().expect("publisher"), uuid::Uuid::now_v7()).expect("restored source proof"), objects::object::thread_replication::SourceAuthor::Account { actor, .. } if actor.principal_id.to_string() == account)
+    );
+}
+
 #[test]
 fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() {
     let _process_env_guard = crate::test_process_env::exclusive_blocking();
@@ -451,13 +497,33 @@ fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() 
     });
     std::fs::remove_file(identity_state::state_path())
         .expect("simulate only local claim-state loss");
+    let home = repo::identity::heddle_home_dir();
+    let capture_paths = [
+        repo::identity::device_identity_path(),
+        home.join("state/device-rpc/authority.bin"),
+        home.join("state/source-authors")
+            .join(format!("{}.pb", hex::encode(signer.public_key()))),
+    ];
+    for path in &capture_paths {
+        std::fs::remove_file(path).expect("simulate lost enrollment artifacts");
+    }
     finish_invite_create_from_response(server, response.clone())
         .expect("reuse recovers hosted original proof");
     let recovered = identity_state::load().expect("state").expect("recovered");
     assert_eq!(
         super::owner_root::load_recorded_root(&recovered).expect("root"),
+        Some(root.clone())
+    );
+    assert_eq!(
+        repo::device_authority::load(&home, chrono::Utc::now().timestamp())
+            .expect("restored account authority")
+            .owner
+            .root,
         Some(root)
     );
+    let capture_bytes = capture_paths
+        .each_ref()
+        .map(|path| std::fs::read(path).expect("restored capture authority"));
     let persisted = std::fs::read(identity_state::state_path()).expect("persisted state");
     response.ownership.as_mut().expect("ownership").version[0] ^= 1;
     finish_invite_create_from_response(server, response)
@@ -467,4 +533,10 @@ fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() 
         persisted,
         "failed proof cannot replace the recovered original"
     );
+    for (path, original) in capture_paths.iter().zip(capture_bytes) {
+        assert_eq!(
+            std::fs::read(path).expect("unchanged capture authority"),
+            original
+        );
+    }
 }
