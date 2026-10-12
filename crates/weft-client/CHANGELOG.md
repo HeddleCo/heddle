@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1](https://github.com/HeddleCo/heddle/compare/weft-client-v0.30.0...weft-client-v0.30.1) - 2026-10-12
+
+### Other
+
+- Speed up hosted clone and check out gitlinks as directories ([#2067](https://github.com/HeddleCo/heddle/pull/2067))
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/weft-client-v0.28.13...weft-client-v0.28.14) - 2026-10-08
 
 ### Other

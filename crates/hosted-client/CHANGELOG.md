@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.30.0...heddle-hosted-client-v0.30.1) - 2026-10-12
+
+### Other
+
+- Fix capture authority for invite-enrolled accounts ([#2070](https://github.com/HeddleCo/heddle/pull/2070))
+- Speed up hosted clone and check out gitlinks as directories ([#2067](https://github.com/HeddleCo/heddle/pull/2067))
+
 ## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.29.0...heddle-hosted-client-v0.30.0) - 2026-10-10
 
 ### Added

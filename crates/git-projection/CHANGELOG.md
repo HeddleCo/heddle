@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.30.0...heddle-git-projection-v0.30.1) - 2026-10-12
+
+### Added
+
+- *(git)* add engine-free Git reconstruction API ([#2064](https://github.com/HeddleCo/heddle/pull/2064)) ([#2065](https://github.com/HeddleCo/heddle/pull/2065))
+
 ### Added
 
 - Reuse the engine-free `heddle-git-serialize` commit and tree serializers for
