@@ -622,6 +622,32 @@ fn install_pack_refreshes_a_state_the_store_already_holds() {
 }
 
 #[test]
+fn streaming_install_refreshes_native_pack_baseline_before_shadowing_states() {
+    let (temp, publisher) = create_test_store();
+    let receiver = FsStore::new(publisher.root());
+    let original = state_chain(1, "native baseline").remove(0);
+    let refreshed = original.clone().with_git_lossy(true);
+    let (pack, index) = state_pack([&original]);
+    publisher
+        .install_pack(&pack, &index)
+        .expect("sibling publishes original");
+    let (pack, index) = state_pack([&refreshed]);
+    let pack_path = temp.path().join("incoming.pack");
+    let index_path = temp.path().join("incoming.idx");
+    std::fs::write(&pack_path, pack).expect("pack");
+    std::fs::write(&index_path, index).expect("index");
+    receiver
+        .install_pack_streaming(&pack_path, &index_path)
+        .expect("refresh stale baseline");
+    assert_eq!(
+        FsStore::new(publisher.root())
+            .get_state(&original.id())
+            .expect("read State"),
+        Some(refreshed)
+    );
+}
+
+#[test]
 fn interrupted_clone_discards_only_short_pack_and_accepts_remote_repair() {
     let (_temp, store) = create_test_store();
     let blob = Blob::from("authoritative remote clone payload");
@@ -2095,4 +2121,31 @@ fn store_open_keeps_expired_scratch_while_an_owner_is_alive() {
         !live.exists(),
         "expired scratch is reclaimed after the owner exits"
     );
+}
+
+#[test]
+#[ignore = "manual streaming installation profile"]
+fn streaming_install_timing_fixture() {
+    let count = std::env::var("HEDDLE_INSTALL_BENCH_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(52_515);
+    let states = state_chain(count, "streaming profile");
+    let (pack, index) = state_pack(&states);
+    let (temp, store) = create_test_store();
+    let staged_pack = temp.path().join("source.pack");
+    let staged_index = temp.path().join("source.idx");
+    std::fs::write(&staged_pack, pack).expect("stage pack");
+    std::fs::write(&staged_index, index).expect("stage index");
+    let started = std::time::Instant::now();
+    let inventory = store
+        .install_pack_streaming(&staged_pack, &staged_index)
+        .expect("install");
+    println!(
+        "streaming install timing: objects={} wall_ms={}",
+        inventory.ids().count(),
+        started.elapsed().as_millis()
+    );
+    assert_eq!(inventory.ids().count(), count);
+    assert_eq!(loose_state_count(&store), 0);
 }

@@ -48,6 +48,10 @@ impl Fixture {
     }
 
     async fn uninstalled() -> Self {
+        Self::uninstalled_with_payload(0).await
+    }
+
+    async fn uninstalled_with_payload(files: usize) -> Self {
         let temp = TempDir::new().expect("fixture");
         let source = temp.path().join("source");
         let source_home = temp.path().join("source-home");
@@ -57,6 +61,13 @@ impl Fixture {
         std::fs::write(source.join("story.txt"), "source only\n").expect("source file");
         std::fs::write(source.join("example.py"), "def amount():\n    return 42\n")
             .expect("symbol fixture");
+        for file in 0..files {
+            let mut bytes = vec![0; 160 * 1024];
+            let mut seed = blake3::Hasher::new();
+            seed.update(&file.to_le_bytes());
+            seed.finalize_xof().fill(&mut bytes);
+            std::fs::write(source.join(format!("payload-{file}")), bytes).expect("benchmark file");
+        }
         heddle_env(&["capture", "-m", "source seed"], Some(&source), &envs)
             .expect("source capture");
         let repo = Repository::open(&source).expect("source repo");
@@ -3429,6 +3440,8 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
     };
     let label = if recovery {
         format!("clone recovery {labelled_stage} sync failed")
+    } else if stage == "disconnect" {
+        format!("clone setup {labelled_stage} sync failed")
     } else {
         format!("post-install {labelled_stage} sync failed")
     };
@@ -3537,7 +3550,7 @@ fn fresh_clone_rpc_and_https_budget() {
         fixture.assert_identity();
         assert_eq!(
             (resolve, threads, https),
-            (2, 1, 1),
+            (1, 1, 1),
             "clone round-trip budget: {calls:?}"
         );
         fixture.close().await;
@@ -3678,4 +3691,121 @@ fn fresh_clone_labels_metadata_failure_and_retains_intent() {
 #[test]
 fn clone_recovery_labels_metadata_failure_and_retains_intent() {
     on_large_stack(|| assert_clone_metadata_failure(true));
+}
+
+#[test]
+fn clone_setup_observations_overlap_thread_discovery() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture
+            .captured
+            .lock()
+            .expect("setup barrier")
+            .clone_setup_barrier = Some(std::sync::Arc::new(tokio::sync::Barrier::new(3)));
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("clone path"),
+            ],
+        );
+        assert_eq!(
+            fixture
+                .captured
+                .lock()
+                .expect("setup requests")
+                .clone_setup_requests,
+            3
+        );
+        fixture.assert_identity();
+        fixture.close().await;
+    });
+}
+
+/// Run with HEDDLE_CLONE_BASELINE_BINARY to compare the same source over the
+/// same fixture transport. HEDDLE_CLONE_BENCH_FILES selects 160 KiB blobs;
+/// HEDDLE_CLONE_BENCH_LATENCY_MS injects a delay before each RPC response.
+#[test]
+#[ignore = "manual clone timing and syscall profile"]
+fn clone_timing_fixture() {
+    on_large_stack(|| async {
+        let files = std::env::var("HEDDLE_CLONE_BENCH_FILES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(242);
+        let fixture = Fixture::uninstalled_with_payload(files).await;
+        let delay = std::env::var("HEDDLE_CLONE_BENCH_LATENCY_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        fixture.captured.lock().expect("latency").rpc_delay =
+            std::time::Duration::from_millis(delay);
+        let mut binaries = Vec::new();
+        if let Some(baseline) = std::env::var_os("HEDDLE_CLONE_BASELINE_BINARY") {
+            binaries.push(("before", PathBuf::from(baseline)));
+        }
+        binaries.push(("after", PathBuf::from(env!("CARGO_BIN_EXE_heddle"))));
+        for (label, binary) in binaries {
+            let destination = fixture._temp.path().join(label);
+            let home = fixture._temp.path().join(format!("{label}-home"));
+            std::fs::create_dir(&home).expect("fresh benchmark home");
+            native_hosted_server::enroll_device(fixture.spool, &home);
+            for entry in std::fs::read_dir(&fixture.home).expect("fixture identity") {
+                let entry = entry.expect("identity file");
+                if entry.file_type().expect("identity type").is_file() {
+                    std::fs::copy(entry.path(), home.join(entry.file_name()))
+                        .expect("copy fixture identity");
+                }
+            }
+            let started = std::time::Instant::now();
+            let mut command = Command::new(binary);
+            command
+                .args([
+                    "--output",
+                    "json",
+                    "clone",
+                    &fixture.remote(),
+                    destination.to_str().expect("destination"),
+                ])
+                .env("HEDDLE_HOME", &home)
+                .env("HEDDLE_FSMONITOR", "off")
+                .env("HEDDLE_PRINCIPAL_NAME", "Clone benchmark")
+                .env("HEDDLE_PRINCIPAL_EMAIL", "benchmark@example.com")
+                .env("HTTPS_PROXY", &fixture.https.proxy_uri)
+                .env("HEDDLE_REMOTE_TLS_CA_CERT", &fixture.ca)
+                .env("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "clone-test-key")
+                .env(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    &fixture.root_key,
+                )
+                .env("HEDDLE_CREDENTIAL", &fixture.credential);
+            let output = command.output().expect("clone process");
+            assert!(
+                output.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let wall_ms = started.elapsed().as_millis();
+            for file in 0..files {
+                let path = format!("payload-{file}");
+                assert_eq!(
+                    std::fs::read(destination.join(&path)).expect("checked out payload"),
+                    std::fs::read(fixture.source.join(path)).expect("source payload")
+                );
+            }
+            let repo = Repository::open(&destination).expect("cloned repository");
+            let source = Repository::open(&fixture.source).expect("source");
+            assert_eq!(
+                repo.head().expect("HEAD"),
+                source.head().expect("source HEAD")
+            );
+            println!(
+                "clone timing: {label} files={files} bytes={} rpc_delay_ms={delay} wall_ms={}",
+                files * 160 * 1024,
+                wall_ms
+            );
+        }
+        fixture.close().await;
+    });
 }

@@ -306,21 +306,6 @@ impl HostedClient {
         Self::connect_preferred(descriptor, config).await
     }
 
-    /// Connect for outbound calls only, on an ephemeral endpoint node id
-    /// that does not contend with the box network daemon for the device
-    /// node id. Used by `heddle claim`, whose inbound claim serving is the
-    /// daemon's job while this client only makes authenticated weft calls
-    /// (BeginWebAuthnRegistration, BootstrapOwnerRoot, RegisterPublicKey).
-    ///
-    /// `weft_client::HostedClient` always binds an ephemeral node id, so this
-    /// shares the v2 discovery path with [`Self::connect_with_config`].
-    pub(crate) async fn connect_outbound_with_config(
-        descriptor: &VerifiedEndpointDescriptor,
-        config: &ClientConfig,
-    ) -> Result<Self> {
-        Self::connect_preferred(descriptor, config).await
-    }
-
     async fn connect_preferred(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,

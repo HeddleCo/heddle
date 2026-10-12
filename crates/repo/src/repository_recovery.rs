@@ -156,12 +156,7 @@ fn worktree_matches_write(write: &WorktreeWriteOp) -> Result<bool> {
             let target = fs::read_link(path)?;
             Ok(Blob::new(symlink_target_bytes(&target)).hash() == *hash)
         }
-        WorktreeWriteOp::GitlinkPlaceholder { path, .. } => {
-            if !metadata.file_type().is_file() {
-                return Ok(false);
-            }
-            Ok(Blob::new(fs::read(path)?).hash() == write.hash())
-        }
+        WorktreeWriteOp::Gitlink { .. } => Ok(metadata.file_type().is_dir()),
     }
 }
 

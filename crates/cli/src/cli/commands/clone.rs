@@ -1755,8 +1755,13 @@ async fn clone_network_connected(
     };
     let mut advertised = None;
     let mut selected_track = None;
-    let (mut result, local_repo) = client
-        .clone_pull_with_depth_and_materialization(
+    // These spool-scoped observations do not depend on the selected State.
+    // Start them alongside thread discovery and Fetch, retaining originals
+    // until source installation succeeds. Handles share one connection/cache.
+    let mut discussion_client = client.clone();
+    let mut context_client = client.clone();
+    let (source, discussion_operations, context_operations) = tokio::join!(
+        Box::pin(client.clone_pull_with_depth_and_materialization(
             repo_path,
             thread.as_deref(),
             depth,
@@ -1791,8 +1796,24 @@ async fn clone_network_connected(
                 advertised = Some(refs.clone());
                 Ok(repo)
             },
-        )
-        .await?;
+        )),
+        Box::pin(discussion_client.list_discussion_operations(repo_path)),
+        Box::pin(context_client.list_context_operations(repo_path)),
+    );
+    let (mut result, local_repo) = source.map_err(|error| {
+        let mut error = anyhow::Error::from(error);
+        if let Err(discussions) = &discussion_operations {
+            error = error.context(format!(
+                "clone setup discussion sync failed; clone intent retained: {discussions}"
+            ));
+        }
+        if let Err(context) = &context_operations {
+            error = error.context(format!(
+                "clone setup context sync failed; clone intent retained: {context}"
+            ));
+        }
+        error
+    })?;
     let advertised = advertised.context("clone response is missing its refs")?;
     let remote_refs = advertised.refs;
     let track_name = selected_track.context("hosted clone did not select a thread")?;
@@ -1854,18 +1875,29 @@ async fn clone_network_connected(
         let mut discussion_client = client.clone();
         let mut context_client = client.clone();
         let (discussions, context) = tokio::join!(
-            hosted_client::client::discussion_sync::pull_discussions(
-                &local_repo,
-                &mut discussion_client,
-                repo_path,
-                Some(final_state),
-            ),
-            hosted_client::client::context_sync::pull_context(
-                &local_repo,
-                &mut context_client,
-                repo_path,
-                Some(final_state),
-            ),
+            Box::pin(async {
+                let originals = discussion_operations?;
+                hosted_client::client::discussion_sync::pull_discussions_with_operations(
+                    &local_repo,
+                    &mut discussion_client,
+                    repo_path,
+                    Some(final_state),
+                    None,
+                    originals,
+                )
+                .await
+            }),
+            Box::pin(async {
+                let originals = context_operations?;
+                hosted_client::client::context_sync::pull_context_with_operations(
+                    &local_repo,
+                    &mut context_client,
+                    repo_path,
+                    Some(final_state),
+                    originals,
+                )
+                .await
+            }),
         );
         let discussions = discussions.context(
             "post-install discussion sync failed; source installed; clone intent retained",

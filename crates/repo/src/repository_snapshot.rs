@@ -1009,21 +1009,13 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
-        tree_entry: Option<&TreeEntry>,
+        _tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
         let hash = match self.cached_hash(&entry) {
             Some(hash) => hash,
             None => read_file_hash(entry.path, entry.metadata.len())?,
         };
-        if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target)
-            && Blob::new(objects::util::gitlink_placeholder_bytes(&target)).hash() == hash
-        {
-            state
-                .entries
-                .push(TreeEntry::gitlink(entry.name.to_string(), target)?);
-            return Ok(());
-        }
         state.entries.push(TreeEntry::file(
             entry.name.to_string(),
             hash,
@@ -1049,6 +1041,15 @@ impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
         state
             .entries
             .push(TreeEntry::symlink(entry.name.to_string(), hash)?);
+        Ok(())
+    }
+
+    fn visit_gitlink(
+        &mut self,
+        tree_entry: &TreeEntry,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        state.entries.push(tree_entry.clone());
         Ok(())
     }
 

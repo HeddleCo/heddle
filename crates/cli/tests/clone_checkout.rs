@@ -297,3 +297,87 @@ fn clone_native_does_not_copy_source_dirt() {
         "clone must not report uncaptured source dirt: {status}"
     );
 }
+
+#[test]
+fn gitlink_clone_matches_git_checkout_and_source_tree() {
+    let temp = TempDir::new().expect("fixture");
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).expect("source directory");
+    let git = |cwd: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("run Git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("Git output")
+            .trim()
+            .to_owned()
+    };
+    git(&source, &["init", "-b", "main"]);
+    std::fs::write(source.join("README"), b"gitlink fixture\n").expect("tracked file");
+    git(&source, &["add", "README"]);
+    git(&source, &["commit", "-m", "base"]);
+    let target = git(&source, &["rev-parse", "HEAD"]);
+    for path in ["vendor", "nested/module"] {
+        git(
+            &source,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{target},{path}"),
+            ],
+        );
+    }
+    git(&source, &["commit", "-m", "gitlinks"]);
+    let expected = git(&source, &["rev-parse", "HEAD^{tree}"]);
+    let control = temp.path().join("git-clone");
+    git(
+        temp.path(),
+        &[
+            "clone",
+            source.to_str().expect("source path"),
+            control.to_str().expect("control path"),
+        ],
+    );
+    let cloned = temp.path().join("heddle-clone");
+    heddle(
+        &[
+            "--output",
+            "json",
+            "clone",
+            "--source",
+            "git",
+            source.to_str().expect("source path"),
+            cloned.to_str().expect("clone path"),
+        ],
+        temp.path(),
+    );
+    for path in ["vendor", "nested/module"] {
+        assert!(
+            cloned.join(path).is_dir(),
+            "gitlink {path} must be a directory"
+        );
+        assert_eq!(
+            std::fs::read_dir(cloned.join(path))
+                .expect("gitlink directory")
+                .count(),
+            0
+        );
+        assert!(control.join(path).is_dir());
+    }
+    git(&cloned, &["add", "-A"]);
+    assert_eq!(git(&cloned, &["write-tree"]), expected);
+    assert_eq!(git(&control, &["write-tree"]), expected);
+}

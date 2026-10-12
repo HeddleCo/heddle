@@ -1279,10 +1279,7 @@ fn stat_cache_no_op(repo: &Repository, manifest: &ThreadManifest, root: &Path) -
 
 #[cfg(test)]
 mod tests {
-    use objects::{
-        object::{Blob, TreeEntry},
-        util::gitlink_placeholder_bytes,
-    };
+    use objects::object::{Blob, TreeEntry};
     use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
     use tempfile::TempDir;
 
@@ -1329,10 +1326,8 @@ mod tests {
         let dest = repo_dir.path().join("thread-out");
         repo.materialize_thread("main", &dest, &AudienceTier::Internal)
             .unwrap();
-        assert_eq!(
-            fs::read(dest.join("vendor")).unwrap(),
-            gitlink_placeholder_bytes(&target)
-        );
+        assert!(dest.join("vendor").is_dir());
+        assert_eq!(fs::read_dir(dest.join("vendor")).unwrap().count(), 0);
 
         fs::write(dest.join("note.txt"), b"after\n").unwrap();
         let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();

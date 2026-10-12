@@ -861,6 +861,35 @@ pub async fn pull_context(
     let Some(head_id) = context_sync_state(repo, against)? else {
         return Ok(0);
     };
+    if repo
+        .store()
+        .get_state(&head_id)
+        .context("load head state")?
+        .is_none()
+    {
+        return Ok(0);
+    }
+    let originals = client
+        .list_context_operations(repo_path)
+        .await
+        .context("observe native context operations")?;
+    Box::pin(pull_context_with_operations(
+        repo, client, repo_path, against, originals,
+    ))
+    .await
+}
+
+/// Apply setup's observed originals once the selected State is installed.
+pub async fn pull_context_with_operations(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    against: Option<StateId>,
+    originals: Vec<SignedRecord>,
+) -> Result<usize> {
+    let Some(head_id) = context_sync_state(repo, against)? else {
+        return Ok(0);
+    };
     let Some(head_state) = repo
         .store()
         .get_state(&head_id)
@@ -878,10 +907,7 @@ pub async fn pull_context(
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let mut mirror = load_mirror(&heddle_dir)?;
     let mut changed = 0usize;
-    let originals = client
-        .list_context_operations(repo_path)
-        .await
-        .context("observe native context operations")?;
+
     for signed in originals {
         let verified = thread_api::collaboration::verify(&signed)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;

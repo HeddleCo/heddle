@@ -765,6 +765,27 @@ async fn pull_discussions_filtered(
         .list_discussion_operations(repo_path)
         .await
         .context("observe native discussion operations")?;
+    Box::pin(pull_discussions_with_operations(
+        repo,
+        client,
+        repo_path,
+        against,
+        thread_filter,
+        signed,
+    ))
+    .await
+}
+
+/// Apply the originals observed during clone setup after source installation.
+/// Empty snapshots still check the projected view for missing originals.
+pub async fn pull_discussions_with_operations(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    against: Option<StateId>,
+    thread_filter: Option<(&str, &str)>,
+    signed: Vec<SignedRecord>,
+) -> Result<usize> {
     if !signed.is_empty() {
         let store =
             CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;

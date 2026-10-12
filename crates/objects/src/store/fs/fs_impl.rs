@@ -99,17 +99,9 @@ fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
 }
 
 fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
-    let tree = codec::decode_tree_serialized_with_key(data, hash, None)?;
-    let tree = validate_loaded_tree(tree)?;
-    let found = tree.hash();
-    if found != hash {
-        return Err(HeddleError::Corruption {
-            expected: hash,
-            found,
-        });
-    }
-
-    Ok(tree)
+    // The codec validates entries and the reconstructed address for every
+    // supported body. Revalidating and hashing the same tree adds no evidence.
+    codec::decode_tree_serialized_with_key(data, hash, None)
 }
 
 fn validate_annotated_tag(data: &[u8], hash: ContentHash) -> Result<AnnotatedTag> {
@@ -225,16 +217,6 @@ fn append_unique_states(
 }
 
 impl FsStore {
-    /// Whether this store already holds `id` loose, packed or in its recent
-    /// cache. Unlike [`ObjectStore::has_state`] this never consults the
-    /// external source: a packed copy already shadows that source.
-    fn holds_state(&self, id: &StateId) -> Result<bool> {
-        if self.try_has_state_once(id)? {
-            return Ok(true);
-        }
-        Ok(self.reload_packs_if_stale()? && self.try_has_state_once(id)?)
-    }
-
     /// The incoming pack's States that need a loose copy: those the store
     /// already holds. Call this before the pack itself is installed.
     ///
@@ -251,10 +233,13 @@ impl FsStore {
         reader: &crate::store::pack::PackReader,
         ids: &[PackObjectId],
     ) -> Result<Vec<(StateId, Vec<u8>)>> {
+        // Compare against one native pack snapshot for this bulk install,
+        // rather than rediscovering the same pack directories for each miss.
+        self.reload_packs_if_stale()?;
         let mut held = HashSet::new();
         for id in ids {
             if let PackObjectId::StateId(state) = id
-                && self.holds_state(state)?
+                && self.try_has_state_once(state)?
             {
                 held.insert(*state);
             }
@@ -2260,13 +2245,17 @@ impl ObjectStore for FsStore {
             crate::store::pack::PackInventory::copy_from_index(index_path, &self.root.join("tmp"))?;
         // Mirrors and attachments are also staged on disk. Validate every
         // object before publishing either immutable files or derived metadata.
+        // Hosted installation holds the repository mutation lock. Refresh
+        // the native pack baseline once, not once per incoming ancestor State.
+        self.reload_packs_if_stale()?;
         let mut metadata = tempfile::NamedTempFile::new_in(scratch)?;
+        let pack_name;
         {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path, scratch)?;
             let mut writer = BufWriter::new(metadata.as_file_mut());
             visit_validated_pack(self, &reader, |id, kind, data| {
                 let retain = match id {
-                    PackObjectId::StateId(state) => self.holds_state(&state)?,
+                    PackObjectId::StateId(state) => self.try_has_state_once(&state)?,
                     _ => kind == ObjectType::StateAttachment,
                 };
                 if retain {
@@ -2279,8 +2268,11 @@ impl ObjectStore for FsStore {
                 Ok(())
             })?;
             writer.flush()?;
+            // Hash the mapped bytes already opened and validated above rather
+            // than reopening and streaming the pack from disk a second time.
+            pack_name = reader.representation_hash().to_hex();
         }
-        self.install_pack_files_streaming(pack_path, index_path)?;
+        self.install_pack_files_streaming(pack_path, index_path, &pack_name)?;
         if metadata.as_file().metadata()?.len() == 0 {
             return Ok(inventory);
         }

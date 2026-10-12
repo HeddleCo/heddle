@@ -193,7 +193,9 @@ impl HostedSession {
             .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let client = HostedClient::connect_with_config(&descriptor, &self.config)
+        // The warm bridge was already attempted above. Dial the verified
+        // endpoint directly rather than repeating bridge setup and discovery.
+        let client = HostedClient::connect_weft(&descriptor, &self.config)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         self.rotated(client).await
@@ -224,7 +226,9 @@ impl HostedSession {
             .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
-        let client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
+        // The warm bridge was already attempted above. Dial the verified
+        // endpoint directly rather than repeating bridge setup and discovery.
+        let client = HostedClient::connect_weft(&descriptor, &self.config)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         self.rotated(client).await

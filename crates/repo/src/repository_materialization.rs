@@ -15,11 +15,9 @@ use std::{
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty},
     nofollow::{NoFollowDirectories, create_replacing_leaf, open_existing_nofollow},
-    object::{Blob, ContentHash, StateId, Tree, TreeEntryTarget},
+    object::{ContentHash, StateId, Tree, TreeEntryTarget},
     store::ObjectStore,
-    util::gitlink_placeholder_bytes,
 };
-use sley::ObjectId as GitObjectId;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
@@ -158,42 +156,37 @@ pub(crate) enum WorktreeWriteOp {
         path: PathBuf,
         hash: ContentHash,
     },
-    GitlinkPlaceholder {
+    Gitlink {
         path: PathBuf,
-        target: GitObjectId,
     },
 }
 
 impl WorktreeWriteOp {
     pub(crate) fn path(&self) -> &Path {
         match self {
-            Self::Blob { path, .. }
-            | Self::Symlink { path, .. }
-            | Self::GitlinkPlaceholder { path, .. } => path,
+            Self::Blob { path, .. } | Self::Symlink { path, .. } | Self::Gitlink { path, .. } => {
+                path
+            }
         }
     }
 
-    pub(crate) fn hash(&self) -> ContentHash {
+    pub(crate) fn hash(&self) -> Option<ContentHash> {
         match self {
-            Self::Blob { hash, .. } | Self::Symlink { hash, .. } => *hash,
-            Self::GitlinkPlaceholder { target, .. } => {
-                Blob::new(gitlink_placeholder_bytes(target)).hash()
-            }
+            Self::Blob { hash, .. } | Self::Symlink { hash, .. } => Some(*hash),
+            Self::Gitlink { .. } => None,
         }
     }
 
     pub(crate) fn executable(&self) -> bool {
         match self {
             Self::Blob { executable, .. } => *executable,
-            Self::Symlink { .. } | Self::GitlinkPlaceholder { .. } => false,
+            Self::Symlink { .. } | Self::Gitlink { .. } => false,
         }
     }
 
     pub(crate) fn index_kind(&self) -> crate::worktree_index::IndexEntryKind {
         match self {
-            Self::Blob { .. } | Self::GitlinkPlaceholder { .. } => {
-                crate::worktree_index::IndexEntryKind::File
-            }
+            Self::Blob { .. } | Self::Gitlink { .. } => crate::worktree_index::IndexEntryKind::File,
             Self::Symlink { .. } => crate::worktree_index::IndexEntryKind::Symlink,
         }
     }
@@ -651,12 +644,9 @@ impl Repository {
                 plan.leaves
                     .push(WorktreeWriteOp::Symlink { path, hash: *hash });
             }
-            TreeEntryTarget::Gitlink { target } => {
+            TreeEntryTarget::Gitlink { .. } => {
                 plan.file_count += 1;
-                plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
-                    path,
-                    target: *target,
-                });
+                plan.leaves.push(WorktreeWriteOp::Gitlink { path });
             }
             // Native child-spool edge: not materialized to the worktree
             // in this phase, so it contributes no write op.
@@ -678,7 +668,7 @@ impl Repository {
     /// symlink below it (heddle#2017; see [`objects::nofollow`]).
     ///
     /// Parents are verified or created no-follow first, replacing any symlink
-    /// in the way with a real directory. Files and gitlink placeholders are
+    /// in the way with a real directory. Files are
     /// then written in parallel with `O_EXCL | O_NOFOLLOW`. Symlink leaves go
     /// last and one at a time, each after a fresh parent check: they are the
     /// only writes in a batch that could turn a verified directory into a
@@ -697,14 +687,19 @@ impl Repository {
         let requested_threads = requested_materialization_threads();
         let worker_count = materialization_worker_count(writes.len(), requested_threads);
 
-        // No probe — the per-blob path tries `clonefile`/FICLONE
-        // first and flips a batch-wide flag on the first
-        // `EXDEV`/`EOPNOTSUPP`/`ENOSYS` verdict, so the rest of the
-        // batch falls straight through to `fs::copy` without paying
-        // the syscall tax. The cost of one failed reflink call on a
-        // non-CoW filesystem is one syscall; it's not worth a
-        // dedicated probe.
+        // Check before promoting pack blobs: an unsupported filesystem would
+        // otherwise write loose mirrors just to discover it cannot clone them.
+        // Probe in an owned scratch directory, never at a tracked path.
         let context = MaterializationContext::new();
+        if writes
+            .iter()
+            .any(|write| matches!(write, WorktreeWriteOp::Blob { .. }))
+        {
+            let probe = tempfile::tempdir_in(root)?;
+            if !objects::fs_clone::filesystem_supports_reflink(probe.path()) {
+                context.disable_reflinks();
+            }
+        }
 
         // Drive the repository's live progress handle: one `inc` per
         // materialized write op. On the common null handle this is a relaxed
@@ -719,21 +714,26 @@ impl Repository {
         let result = if worker_count <= 1 {
             let mut seeded = Vec::with_capacity(writes.len() + symlinks.len());
             for write in writes {
-                seeded.push(self.materialize_write_op(root, write, &context)?);
+                seeded.extend(self.materialize_write_op(root, write, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
         } else {
-            let chunk_size = writes.len().div_ceil(worker_count);
+            let next = std::sync::atomic::AtomicUsize::new(0);
             let seeded = thread::scope(|scope| -> Result<Vec<SeededWorktreeEntry>> {
                 let mut workers = Vec::new();
                 let context = &context;
-                for chunk in writes.chunks(chunk_size) {
+                for _ in 0..worker_count {
                     let progress = progress.clone();
+                    let writes = &writes;
+                    let next = &next;
                     workers.push(scope.spawn(move || -> Result<Vec<SeededWorktreeEntry>> {
-                        let mut seeded = Vec::with_capacity(chunk.len());
-                        for write in chunk {
-                            seeded.push(self.materialize_write_op(root, write, context)?);
+                        let mut seeded = Vec::new();
+                        // Files vary widely in size. Take the next leaf when a
+                        // worker finishes rather than leaving one large chunk
+                        // on the critical path after the others become idle.
+                        while let Some(write) = writes.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            seeded.extend(self.materialize_write_op(root, write, context)?);
                             progress.inc(1);
                         }
                         Ok(seeded)
@@ -754,7 +754,7 @@ impl Repository {
         };
         let result = result.and_then(|(worker_count, mut seeded)| {
             for write in symlinks {
-                seeded.push(self.materialize_write_op(root, write, &context)?);
+                seeded.extend(self.materialize_write_op(root, write, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
@@ -779,7 +779,7 @@ impl Repository {
         root: &Path,
         write: &WorktreeWriteOp,
         context: &MaterializationContext,
-    ) -> Result<SeededWorktreeEntry> {
+    ) -> Result<Option<SeededWorktreeEntry>> {
         match write {
             WorktreeWriteOp::Blob {
                 path,
@@ -819,29 +819,30 @@ impl Repository {
                     let _ = (blob, path, root);
                 }
             }
-            WorktreeWriteOp::GitlinkPlaceholder { path, target } => {
-                remove_materialized_leaf(path)?;
-                create_replacing_leaf(path)?
-                    .write_all(&gitlink_placeholder_bytes(target))
-                    .map_err(|err| HeddleError::Io(enrich_fs_error(path, "writing", err)))?;
+            WorktreeWriteOp::Gitlink { path, .. } => {
+                // A gitlink is an opaque directory leaf, never a blob. Preserve
+                // an initialized submodule when its recorded target changes.
+                if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_dir()) {
+                    remove_materialized_leaf(path)?;
+                }
+                NoFollowDirectories::new(root).ensure(path)?;
+                return Ok(None);
             }
         }
 
         let metadata = fs::symlink_metadata(write.path())?;
-        let entry = build_cached_entry(
-            write.hash(),
-            &metadata,
-            write.executable(),
-            write.index_kind(),
-        )
-        .ok_or_else(|| {
-            HeddleError::Config(format!(
-                "seed materialized worktree entry for {}",
-                write.path().display()
-            ))
-        })?;
+        let Some(hash) = write.hash() else {
+            return Ok(None);
+        };
+        let entry = build_cached_entry(hash, &metadata, write.executable(), write.index_kind())
+            .ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "seed materialized worktree entry for {}",
+                    write.path().display()
+                ))
+            })?;
 
-        Ok(SeededWorktreeEntry {
+        Ok(Some(SeededWorktreeEntry {
             key: cache_key(
                 write
                     .path()
@@ -849,7 +850,7 @@ impl Repository {
                     .unwrap_or(write.path()),
             ),
             entry,
-        })
+        }))
     }
 
     /// Materialize a single blob into the worktree.

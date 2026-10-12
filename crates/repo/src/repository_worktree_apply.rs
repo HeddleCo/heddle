@@ -443,13 +443,10 @@ impl Repository {
                 self.plan_tree_apply_recursive(rel_path, None, Some(&subtree), plan)?;
             }
             EntryType::Gitlink => {
-                if let Some(target) = entry.gitlink_target() {
-                    plan.stats.changed_count += 1;
-                    plan.writes.push(WorktreeWriteOp::GitlinkPlaceholder {
-                        path: self.root().join(rel_path),
-                        target,
-                    });
-                }
+                plan.stats.changed_count += 1;
+                plan.writes.push(WorktreeWriteOp::Gitlink {
+                    path: self.root().join(rel_path),
+                });
             }
             // Native child-spool edge: not materialized to the worktree in
             // this phase, so it plans no filesystem write.
@@ -576,13 +573,9 @@ impl Repository {
             }
 
             plan.stats.changed_count += 1;
-            plan.removals.push(self.root().join(rel_path));
-            if let Some(target) = to_entry.gitlink_target() {
-                plan.writes.push(WorktreeWriteOp::GitlinkPlaceholder {
-                    path: self.root().join(rel_path),
-                    target,
-                });
-            }
+            plan.writes.push(WorktreeWriteOp::Gitlink {
+                path: self.root().join(rel_path),
+            });
             return Ok(());
         }
 
@@ -763,13 +756,10 @@ impl Repository {
                 .unwrap_or(write.path());
             let key = cache_key(rel_path);
             index.remove_path_and_descendants(&key);
-            if let Ok(metadata) = fs::symlink_metadata(write.path())
-                && let Some(cached) = build_cached_entry(
-                    write.hash(),
-                    &metadata,
-                    write.executable(),
-                    write.index_kind(),
-                )
+            if let Some(hash) = write.hash()
+                && let Ok(metadata) = fs::symlink_metadata(write.path())
+                && let Some(cached) =
+                    build_cached_entry(hash, &metadata, write.executable(), write.index_kind())
             {
                 index.insert(key, cached);
             }
@@ -1148,22 +1138,21 @@ fn remove_tracked_descendants_inner(
             // Native child-spool edge: never materialized to the worktree in
             // this phase, so there is no descendant file to remove.
             EntryType::Spoollink => {}
-            EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
-                match fs::symlink_metadata(&child) {
-                    Ok(_) => {
-                        fs::remove_file(&child)
-                            .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(HeddleError::Io(enrich_fs_error(
-                            &child,
-                            "inspecting",
-                            error,
-                        )));
-                    }
+            EntryType::Gitlink => remove_existing_path(&child)?,
+            EntryType::Blob | EntryType::Symlink => match fs::symlink_metadata(&child) {
+                Ok(_) => {
+                    fs::remove_file(&child)
+                        .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
                 }
-            }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(HeddleError::Io(enrich_fs_error(
+                        &child,
+                        "inspecting",
+                        error,
+                    )));
+                }
+            },
             EntryType::Tree => {
                 let metadata = match fs::symlink_metadata(&child) {
                     Ok(m) => m,
@@ -1238,6 +1227,58 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let repo = crate::init_test_repository(temp_dir.path()).unwrap();
         (temp_dir, repo)
+    }
+
+    #[test]
+    fn gitlink_directory_can_change_target_become_a_file_and_be_removed() {
+        use objects::object::{Blob, TreeEntry};
+        use sley::{ObjectFormat, ObjectId};
+        let (temp, repo) = create_repo();
+        let first = ObjectId::from_hex(
+            ObjectFormat::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("target");
+        let second = ObjectId::from_hex(
+            ObjectFormat::Sha1,
+            "2222222222222222222222222222222222222222",
+        )
+        .expect("target");
+        let initial =
+            Tree::from_entries(vec![TreeEntry::gitlink("vendor", first).expect("gitlink")]);
+        let changed =
+            Tree::from_entries(vec![TreeEntry::gitlink("vendor", second).expect("gitlink")]);
+        let blob = repo
+            .store()
+            .put_blob(&Blob::from("regular file"))
+            .expect("blob");
+        let file = Tree::from_entries(vec![TreeEntry::file("vendor", blob, false).expect("file")]);
+        repo.materialize_computed_tree(&initial, temp.path())
+            .expect("checkout");
+        for (from, to) in [
+            (&initial, &changed),
+            (&changed, &file),
+            (&file, &initial),
+            (&initial, &Tree::new()),
+        ] {
+            let plan = repo
+                .plan_worktree_apply(
+                    Some(from),
+                    to,
+                    temp.path(),
+                    true,
+                    WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+                )
+                .expect("plan");
+            repo.execute_worktree_apply(&plan, to, temp.path())
+                .expect("apply");
+            let status = repo.compare_worktree_cached(to).expect("status");
+            assert!(
+                status.modified.is_empty() && status.added.is_empty() && status.deleted.is_empty(),
+                "{status:?}"
+            );
+        }
+        assert!(!temp.path().join("vendor").exists());
     }
 
     #[test]

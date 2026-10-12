@@ -28,6 +28,18 @@ const DESCRIPTOR_PATH: &str = "/.well-known/heddle/iroh-endpoint";
 const NOW_SKEW_BEFORE: i64 = 1_000;
 const NOW_SKEW_AFTER: i64 = 60_000;
 
+fn assert_requests(server: &TestHttpsServer, expected: &[&str]) {
+    // Independent bootstrap reads may reach the peer in either order.
+    let mut actual = server.requests();
+    let mut expected = expected
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 #[tokio::test]
 async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
     let _process_env_guard = crate::test_process_env::exclusive().await;
@@ -46,7 +58,7 @@ async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
         let pin = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin.key_id, "first-key");
         assert_eq!(pin.public_key, hex::encode(root.public_key()));
-        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
 
         resolve_and_verify_endpoint_descriptor(
             server.authority(),
@@ -55,10 +67,7 @@ async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
         )
         .await
         .unwrap();
-        assert_eq!(
-            server.requests(),
-            [KEY_PATH, DESCRIPTOR_PATH, DESCRIPTOR_PATH]
-        );
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH, DESCRIPTOR_PATH]);
         let pin_again = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin_again.public_key, pin.public_key);
     })
@@ -162,7 +171,7 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
                 load_automatic_pin(server.authority()).unwrap().is_none(),
                 "{name} wrote a pin"
             );
-            assert_eq!(server.requests(), [KEY_PATH], "{name}");
+            assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
         })
         .await;
     }
@@ -182,7 +191,7 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
             .is_err()
         );
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
-        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
 }
@@ -474,7 +483,7 @@ async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
         );
         assert!(!super::descriptor_trust_path().exists());
         assert!(!config::credentials::credentials_path().exists());
-        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
 
@@ -493,7 +502,7 @@ async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
         let pin = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin.key_id, "dial-key");
         assert!(!config::credentials::credentials_path().exists());
-        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
 }
@@ -521,7 +530,7 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
         )
         .await
         .unwrap();
-        assert_eq!(server.requests(), [DESCRIPTOR_PATH]);
+        assert_requests(&server, &[DESCRIPTOR_PATH]);
         assert!(!super::descriptor_trust_path().exists());
     })
     .await;
@@ -572,7 +581,7 @@ async fn missing_iroh_endpoint_is_named_and_never_downgrades() {
             "missing endpoint must be explicit, got: {error}"
         );
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
-        assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
 }

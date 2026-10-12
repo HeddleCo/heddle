@@ -1563,7 +1563,7 @@ impl HostedClient {
 
     /// Return the verified transport originals used by native replication.
     /// Projection-only discussion records are intentionally excluded.
-    pub(crate) async fn list_discussion_operations(
+    pub async fn list_discussion_operations(
         &mut self,
         repo_path: &str,
     ) -> Result<Vec<contract::SignedRecord>, ProtocolError> {
@@ -1574,7 +1574,7 @@ impl HostedClient {
         Ok(operations)
     }
 
-    pub(crate) async fn list_context_operations(
+    pub async fn list_context_operations(
         &mut self,
         repo_path: &str,
     ) -> Result<Vec<contract::SignedRecord>, ProtocolError> {

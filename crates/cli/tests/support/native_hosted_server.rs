@@ -44,6 +44,9 @@ pub struct PublicationCapture {
     pub cancel_requests: Vec<v2::CancelOperationRequest>,
     pub import_requests: Vec<v2::ImportSourceRequest>,
     pub calls: Vec<String>,
+    pub rpc_delay: std::time::Duration,
+    pub clone_setup_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub clone_setup_requests: usize,
     /// Run Weft's shared verifier with request-time operation/resource facts.
     pub enforce_scope: bool,
     pub revision: Option<v2::RevisionRef>,
@@ -410,6 +413,24 @@ async fn serve_call(
         .expect("capture calls")
         .calls
         .push(method.clone());
+    let (delay, setup) = {
+        let mut capture = fixture.captured.lock().expect("clone setup");
+        let setup = if capture.clone_setup_requests < 3
+            && (method.ends_with("/ObserveThreads") || method.ends_with("/ObserveCollaboration"))
+        {
+            capture.clone_setup_requests += 1;
+            capture.clone_setup_barrier.clone()
+        } else {
+            None
+        };
+        (capture.rpc_delay, setup)
+    };
+    if let Some(barrier) = setup {
+        barrier.wait().await;
+    }
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     let failed_stage = fixture
         .captured
         .lock()
