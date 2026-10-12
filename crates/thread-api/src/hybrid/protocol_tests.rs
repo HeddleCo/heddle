@@ -15,29 +15,6 @@ use crate::{Remote, contract::*, rpc, transport::Error};
 
 struct Empty;
 #[test]
-fn sync_call_context_and_openings_share_the_disabled_cutover_switch() {
-    let call_protocol = |method: &api::v2::MethodDescriptor| {
-        super::call_protocol(method.path, !method.mandatory_features.is_empty())
-    };
-    assert_eq!(super::sync_protocol(), None);
-    assert_eq!(call_protocol(rpc::SyncServiceFetch::METHOD), None);
-    assert_eq!(
-        super::call_protocol(rpc::SyncServiceFetch::METHOD.path, true),
-        None,
-        "API metadata alone cannot activate the coordinated Sync cutover"
-    );
-    assert_eq!(call_protocol(rpc::SyncServicePublishContent::METHOD), None);
-    assert_eq!(call_protocol(rpc::SyncServiceReplicateThread::METHOD), None);
-    assert_eq!(
-        call_protocol(rpc::IntegrationServicePrepareImportJob::METHOD),
-        Some(super::protocol())
-    );
-    assert_eq!(
-        call_protocol(rpc::EndpointServiceDescribeEndpoint::METHOD),
-        None
-    );
-}
-#[test]
 fn a_complete_public_bundle_has_a_capable_transport_control() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../tests/fixtures/hybrid-alpha33.json"))

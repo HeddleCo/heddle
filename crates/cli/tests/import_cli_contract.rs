@@ -285,8 +285,8 @@ fn retired_import_surfaces_are_not_registered() {
 
 #[cfg(feature = "client")]
 #[tokio::test]
-async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
-    use hosted_client::hosted_runtime::hosted::{ImportSourceRefError, ImportSourceRefs};
+async fn hosted_import_job_requirement_and_large_discovery_send_no_import_request() {
+    use hosted_client::hosted_runtime::hosted::ImportSourceRefs;
 
     let temp = tempfile::tempdir().expect("source");
     let path = temp.path();
@@ -319,8 +319,8 @@ async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
         "{error}"
     );
     assert!(captured.lock().expect("capture").import_requests.is_empty());
-    // 3 branches + 4094 tags = 4097, one past the 4096 bound; the annotated
-    // tag's peeled line counts once. One `update-ref` writes them all.
+    // 3 branches + 4094 tags exceed the old 4096 ceiling. Annotated tags
+    // count once; discovery still grants no authority to send an import.
     let head = String::from_utf8(git(path, &["rev-parse", "HEAD"])).expect("HEAD oid");
     let commands = (1..4094)
         .map(|index| format!("create refs/tags/tag-{index} {}\n", head.trim()))
@@ -338,51 +338,26 @@ async fn hosted_import_job_requirement_and_ref_bound_send_no_import_request() {
     .expect("write tags");
     assert!(update.wait().expect("update-ref").success());
     let calls_before = captured.lock().expect("capture").calls.len();
-    let error = ImportSourceRefs::discover(url)
+    let refs = ImportSourceRefs::discover(url)
         .await
-        .expect_err("ref admission bound");
-    assert!(matches!(
-        error,
-        ImportSourceRefError::TooManyRefs {
-            branches: 3,
-            tags: 4094,
-            total: 4097
-        }
-    ));
-    assert_eq!(
-        captured.lock().expect("capture").calls.len(),
-        calls_before,
-        "no hosted request before ref admission"
-    );
-    let refused = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .env("PATH", "")
-        .env("HEDDLE_HOME", path)
-        .args([
-            "--output",
-            "json",
-            "import",
-            "url",
+        .expect("4097 advertised refs");
+    assert_eq!(refs.branches().count(), 3);
+    let error = client
+        .import_source(
+            &spool.to_string(),
             url,
-            "--to",
-            "acme/repo",
-            "--server",
-            "localhost:1",
-        ])
-        .output()
-        .expect("CLI admission without a Git executable");
-    assert_eq!(refused.status.code(), Some(76));
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&refused.stderr).expect("typed ref-limit error");
-    assert_eq!(envelope["kind"], "import_source_ref_limit");
-    assert_eq!(envelope["branches"], 3);
-    assert_eq!(envelope["tags"], 4094);
-    assert_eq!(envelope["total_refs"], 4097);
-    assert_eq!(envelope["max_refs"], 4096);
-    let stderr = String::from_utf8_lossy(&refused.stderr);
+            &refs,
+            uuid::Uuid::now_v7().to_string(),
+        )
+        .await
+        .expect_err("large discovery still requires an explicit job");
     assert!(
-        stderr.contains("3 branches and 4094 tags (4097 refs); maximum is 4096"),
-        "{stderr}"
+        error
+            .to_string()
+            .contains("ImportSource requires CommitImportJob"),
+        "{error}"
     );
+    assert!(captured.lock().expect("capture").import_requests.is_empty());
     assert_eq!(captured.lock().expect("capture").calls.len(), calls_before);
     client.close().await;
     server.await.expect("server");

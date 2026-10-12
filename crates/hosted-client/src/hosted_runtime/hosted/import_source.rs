@@ -9,6 +9,7 @@ use wire::ProtocolError;
 
 use super::{HostedClient, operation_id::ClientOperationId};
 
+mod discovery;
 mod job;
 pub use job::{ImportConfiguration, ImportJobState, PreparedImportJob, ResolvedImportSource};
 
@@ -700,21 +701,24 @@ mod tests {
                 matches!(ImportSourceRefs::from_names([ref_name.into()]), Err(ImportSourceRefError::InvalidBranch { ref_name: rejected, .. }) if rejected == ref_name)
             );
         }
-        assert_eq!(MAX_IMPORT_REFS, 4096);
+        assert_eq!(MAX_IMPORT_REFS, 1_048_576);
         let names = std::iter::once("refs/heads/main".into())
             .chain((0..MAX_IMPORT_REFS).map(|index| format!("refs/tags/{index}")));
-        let error = ImportSourceRefs::from_names(names).expect_err("4097 refs");
+        let error = ImportSourceRefs::from_names(names).expect_err("one past the API ceiling");
         assert!(matches!(
             error,
             ImportSourceRefError::TooManyRefs {
                 branches: 1,
-                tags: 4096,
-                total: 4097
-            }
+                tags,
+                total
+            } if tags == MAX_IMPORT_REFS && total == MAX_IMPORT_REFS + 1
         ));
         assert_eq!(
             error.to_string(),
-            "source has 1 branches and 4096 tags (4097 refs); maximum is 4096"
+            format!(
+                "source has 1 branches and {MAX_IMPORT_REFS} tags ({} refs); maximum is {MAX_IMPORT_REFS}",
+                MAX_IMPORT_REFS + 1
+            )
         );
         assert!(
             ImportSourceRefs::from_names(

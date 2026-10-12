@@ -3,7 +3,14 @@
 use api::{heddle::api::v1alpha2 as wire, hybrid_codec::Reject, import_authority as authority};
 use prost::Message;
 
-use super::super::{HostedClient, HostedError, Result};
+use super::{
+    super::{HostedClient, HostedError, Result},
+    discovery::ImportDiscovery,
+};
+
+/// Decoded native bytes were observed at approximately 27x Git storage; round
+/// up for headroom. The forecast is always capped by the advertised host maximum.
+const DECODED_SIZE_FORECAST_MULTIPLIER: u128 = 32;
 
 /// Authenticated destination-writer discovery. Options are exact advertised
 /// octets; the host rechecks support and budgets when preparing the job.
@@ -27,9 +34,10 @@ impl ImportConfiguration {
     }
 
     /// Plan independently signed sibling jobs in this destination. Discovery
-    /// estimates Git storage, so allow twice that size for converted results.
-    /// Ref counts weight the allocation; they are not branch size estimates.
-    /// Every job gets a positive total bounded only by the current host maximum.
+    /// estimates Git storage. A 32x decoded-size forecast allows headroom over
+    /// the observed 27x expansion, capped by the advertised host maximum.
+    /// Branch counts cannot predict shared history: each sibling gets the full
+    /// forecast as its exact signed budget. Unknown sizes use the host maximum.
     pub fn sibling_scopes(
         &self,
         source: &ResolvedImportSource,
@@ -50,7 +58,11 @@ impl ImportConfiguration {
         let per_job = limits.max_branches.min(limits.max_operations) as usize;
         let estimate = match source.source.size_estimate_state {
             0 => None,
-            1 => Some(u128::from(source.source.git_size_kib) * 1024 * 2),
+            // Providers can report zero for small repositories, so zero does
+            // not establish a usable size estimate.
+            1 => (source.source.git_size_kib > 0).then(|| {
+                u128::from(source.source.git_size_kib) * 1024 * DECODED_SIZE_FORECAST_MULTIPLIER
+            }),
             _ => return Err(Reject::Canonical.into()),
         };
         selected
@@ -61,8 +73,7 @@ impl ImportConfiguration {
                 scope.branches = branches.to_vec();
                 scope.max_operations = branches.len() as u32;
                 scope.max_result_bytes = estimate.map_or(limits.max_result_bytes, |bytes| {
-                    let allocated = (bytes * branches.len() as u128).div_ceil(count as u128);
-                    allocated.max(1).min(u128::from(limits.max_result_bytes)) as u64
+                    bytes.min(u128::from(limits.max_result_bytes)) as u64
                 });
                 authority::validate_discovered_import_scope(&scope, &source.source)?;
                 Ok(scope)
@@ -205,7 +216,10 @@ impl HostedClient {
             selected.connection.as_ref().map(|_| "github"),
         )?;
         if request.encoded_len() > authority::MAX_BUNDLE_BYTES
-            || request.page.as_ref().is_some_and(|page| page.size > 512)
+            || request
+                .page
+                .as_ref()
+                .is_some_and(|page| page.size as usize > authority::MAX_IMPORT_SOURCE_REF_PAGE)
         {
             return Err(Reject::Bounds.into());
         }
@@ -217,6 +231,38 @@ impl HostedClient {
             )
             .await?;
         resolved_source(request, &response)
+    }
+
+    /// Cursor continuity is verified by the authenticated resolver. Start from
+    /// the first page and discard each advertisement after bounded validation.
+    async fn discover_import_source(
+        &self,
+        source: &ResolvedImportSource,
+        selected: &[wire::ImportBranchLimitV1],
+        mode: authority::DiscoverySelectionMode,
+    ) -> Result<(wire::ProviderRepository, authority::DiscoveryDigest)> {
+        let mut request = source.request.clone();
+        request.include_refs = true;
+        request.page = Some(wire::PageRequest {
+            size: authority::MAX_IMPORT_SOURCE_REF_PAGE as u32,
+            after_page: Vec::new(),
+        });
+        let options = authority::DiscoveryOptions {
+            include_pull_request_refs: request.include_pull_request_refs,
+        };
+        let first = self.resolve_import_source(&request).await?;
+        let mut discovery =
+            ImportDiscovery::new(&first.source, &source.source, selected, options, mode)?;
+        let mut next = discovery.push_page(&first.source)?;
+        while !next.is_empty() {
+            request.page.as_mut().ok_or(Reject::Canonical)?.after_page = next;
+            let page = self.resolve_import_source(&request).await?;
+            next = discovery.push_page(&page.source)?;
+            if !next.is_empty() && request.page.as_ref().is_some_and(|p| p.after_page == next) {
+                return Err(Reject::Canonical.into());
+            }
+        }
+        discovery.finish()
     }
 
     pub async fn get_import_job_state(
@@ -301,20 +347,26 @@ impl HostedClient {
         }
         authority::initial_operation_id(&request.retry_lineage_id, false)?;
         let proposed = request.proposed_scope.as_ref().ok_or(Reject::Canonical)?;
-        validate_source_selection(request, source)?;
+        validate_source_identity(request, source)?;
+        let (current_source, discovery) = self
+            .discover_import_source(
+                source,
+                &proposed.branches,
+                authority::DiscoverySelectionMode::Prepare,
+            )
+            .await?;
         // Empty explicitly asks Prepare for the current opaque CAS token.
         // Source format/custody are checked before RPC; the complete prepared
         // scope is checked against the issued token before it reaches signing.
         if !proposed.destination_version.is_empty() {
-            authority::prepare_import_source_scope(
+            authority::prepare_import_source_scope_with_discovery(
                 request,
-                &source.source,
+                &current_source,
                 source.source.connection.as_ref().map(|_| source.provider),
                 &configuration.response,
                 &proposed.destination_version,
+                &discovery,
             )?;
-        } else {
-            authority::validate_discovered_import_scope(proposed, &source.source)?;
         }
         let response: wire::PrepareImportJobResponse = self
             .call_unary(
@@ -328,12 +380,13 @@ impl HostedClient {
             .as_ref()
             .and_then(|p| p.scope.as_ref())
             .ok_or(Reject::Canonical)?;
-        authority::prepare_import_source_scope(
+        authority::prepare_import_source_scope_with_discovery(
             request,
-            &source.source,
+            &current_source,
             source.source.connection.as_ref().map(|_| source.provider),
             &configuration.response,
             &returned.destination_version,
+            &discovery,
         )?;
         Ok(PreparedImportJob {
             destination: destination.clone(),
@@ -355,8 +408,22 @@ impl HostedClient {
     ) -> Result<wire::MutationResponse> {
         let mut current = prepared.clone();
         current.configuration = self.get_import_configuration(&prepared.destination).await?;
-        current.source = self.resolve_import_source(&prepared.source.request).await?;
-        validate_commit(&current, request, resolved_provider, expected)?;
+        let signed = request
+            .proof
+            .as_ref()
+            .and_then(|p| p.delegations.first())
+            .and_then(|d| d.body.as_ref())
+            .and_then(|b| b.scope.as_ref())
+            .ok_or(Reject::Canonical)?;
+        let (source, discovery) = self
+            .discover_import_source(
+                &prepared.source,
+                &signed.branches,
+                authority::DiscoverySelectionMode::Commit,
+            )
+            .await?;
+        current.source.source = source;
+        validate_commit(&current, request, resolved_provider, expected, &discovery)?;
         let response: wire::MutationResponse = self
             .call_unary(
                 "/heddle.api.v1alpha2.IntegrationService/CommitImportJob",
@@ -441,7 +508,7 @@ fn resolved_source(
     })
 }
 
-fn validate_source_selection(
+fn validate_source_identity(
     request: &wire::PrepareImportJobRequest,
     source: &ResolvedImportSource,
 ) -> Result<()> {
@@ -458,34 +525,6 @@ fn validate_source_selection(
         return Err(Reject::SourceSelection.into());
     }
     authority::validate_repository_hash_algorithm(&source.source, true)?;
-    if !source.request.include_refs {
-        return Err(Reject::SourceSelection.into());
-    }
-    // Known selected OIDs need only their page. Missing refs require complete
-    // coverage; unknown OIDs require complete discovery.
-    let complete = source
-        .request
-        .page
-        .as_ref()
-        .is_none_or(|p| p.after_page.is_empty())
-        && source.source.refs_status.as_ref().is_some_and(|s| {
-            s.section == "provider_refs"
-                && s.coverage == wire::Coverage::Complete as i32
-                && s.page
-                    .as_ref()
-                    .is_some_and(|p| p.exhausted && p.next_page.is_empty())
-        });
-    if !complete
-        && !scope.branches.iter().all(|branch| {
-            source
-                .source
-                .refs
-                .iter()
-                .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
-        })
-    {
-        return Err(Reject::SourceSelection.into());
-    }
     Ok(())
 }
 
@@ -494,6 +533,7 @@ fn validate_commit(
     request: &wire::CommitImportJobRequest,
     resolved_provider: &str,
     expected: &authority::ImportOwnerExpectation<'_>,
+    discovery: &authority::DiscoveryDigest,
 ) -> Result<()> {
     if request.destination.as_ref() != Some(&prepared.destination) {
         return Err(Reject::StaleContext.into());
@@ -501,11 +541,12 @@ fn validate_commit(
     if resolved_provider != prepared.source.provider {
         return Err(Reject::SourceSelection.into());
     }
-    authority::validate_commit_request(
+    authority::validate_commit_request_with_discovery(
         request,
         resolved_provider,
         &prepared.source.source,
         &prepared.configuration.response,
+        discovery,
     )?;
     prepared.preflight(request.proof.as_ref().ok_or(Reject::Canonical)?, expected)
 }
@@ -773,6 +814,28 @@ mod tests {
             response: wire("wire_vectors", "import_configuration"),
         }
     }
+    fn validate_commit_fixture(
+        prepared: &PreparedImportJob,
+        request: &wire::CommitImportJobRequest,
+        provider: &str,
+        expected: &authority::ImportOwnerExpectation<'_>,
+    ) -> Result<()> {
+        let scope = request
+            .proof
+            .as_ref()
+            .and_then(|p| p.delegations.first())
+            .and_then(|d| d.body.as_ref())
+            .and_then(|b| b.scope.as_ref())
+            .ok_or(Reject::Canonical)?;
+        let discovery = authority::discover_repository(
+            &prepared.source.source,
+            &scope.branches,
+            authority::DiscoveryOptions::default(),
+            authority::DiscoverySelectionMode::Commit,
+        )?;
+        validate_commit(prepared, request, provider, expected, &discovery)
+    }
+
     fn source(name: &str) -> ResolvedImportSource {
         let mut source: wire::ProviderRepository = wire("wire_vectors", name);
         source.refs_status = Some(wire::SectionStatus {
@@ -812,16 +875,16 @@ mod tests {
             resolved_source(&request, &response).expect("authenticated public discovery");
         assert_eq!(resolved.provider(), "public-git");
         let prepare: wire::PrepareImportJobRequest = wire("wire_vectors", "prepare_public_sha256");
-        validate_source_selection(&prepare, &resolved).expect("independent SHA-256 format");
+        validate_source_identity(&prepare, &resolved).expect("independent SHA-256 format");
         let unknown = wire("wire_vectors", "resolve_unknown_response");
         let unknown = resolved_source(&request, &unknown).expect("unknown is valid discovery");
         assert!(matches!(
-            validate_source_selection(&prepare, &unknown),
+            validate_source_identity(&prepare, &unknown),
             Err(super::super::super::HostedError::Hybrid(Reject::Version))
         ));
         let mut changed = resolved.clone();
         changed.source.connection = source("source_connected").source.connection;
-        assert!(validate_source_selection(&prepare, &changed).is_err());
+        assert!(validate_source_identity(&prepare, &changed).is_err());
         let mut partial = resolved.clone();
         partial
             .source
@@ -832,8 +895,15 @@ mod tests {
             .as_mut()
             .expect("page")
             .exhausted = false;
-        assert!(validate_source_selection(&prepare, &partial).is_err());
-        validate_source_selection(&prepare, &resolved).expect("unchanged complete discovery");
+        validate_source_identity(&prepare, &partial)
+            .expect("identity is independent of page coverage");
+        validate_source_identity(&prepare, &resolved).expect("unchanged complete discovery");
+        let mut metadata_only = resolved.clone();
+        metadata_only.request.include_refs = false;
+        metadata_only.source.refs.clear();
+        metadata_only.source.refs_status = None;
+        validate_source_identity(&prepare, &metadata_only)
+            .expect("metadata-only resolution can precede paged discovery");
     }
 
     #[test]
@@ -863,95 +933,6 @@ mod tests {
                 _ => assert!(result.is_err(), "malformed metadata: {row}"),
             }
         }
-    }
-
-    #[test]
-    fn selected_refs_can_prepare_from_one_page_without_inventing_missing_oids() {
-        let mut request: wire::PrepareImportJobRequest =
-            wire("wire_vectors", "prepare_public_sha256");
-        let mut discovered = source("source_sha256_known");
-        request
-            .proposed_scope
-            .as_mut()
-            .expect("scope")
-            .branches
-            .retain(|branch| {
-                discovered
-                    .source
-                    .refs
-                    .iter()
-                    .any(|r| r.name == branch.ref_name && !r.head_oid.is_empty())
-            });
-        assert!(
-            !request
-                .proposed_scope
-                .as_ref()
-                .expect("scope")
-                .branches
-                .is_empty()
-        );
-        for branch in &mut request.proposed_scope.as_mut().expect("scope").branches {
-            let known = discovered
-                .source
-                .refs
-                .iter()
-                .find(|r| r.name == branch.ref_name)
-                .expect("selected known ref");
-            branch.ref_mode = 1;
-            branch.ref_disclosure = 0;
-            branch.pinned_commit_oid = hex::decode(&known.head_oid).expect("known OID");
-            assert!(!branch.pinned_commit_oid.is_empty());
-        }
-        let status = discovered.source.refs_status.as_mut().expect("page status");
-        status.page.as_mut().expect("page").exhausted = false;
-        authority::validate_discovered_import_scope(
-            request.proposed_scope.as_ref().expect("scope"),
-            &discovered.source,
-        )
-        .expect("every discovered selected OID remains exactly pinned");
-        validate_source_selection(&request, &discovered)
-            .expect("selected refs and their OIDs are already on this page");
-
-        let mut unknown = request.clone();
-        let branch = unknown
-            .proposed_scope
-            .as_mut()
-            .expect("scope")
-            .branches
-            .first_mut()
-            .expect("branch");
-        discovered.source.refs.retain(|r| r.name != branch.ref_name);
-        branch.ref_mode = 2;
-        branch.pinned_commit_oid.clear();
-        branch.ref_disclosure = 1;
-        assert!(
-            validate_source_selection(&unknown, &discovered).is_err(),
-            "an omitted ref is not evidence that its OID is unavailable"
-        );
-        discovered
-            .source
-            .refs_status
-            .as_mut()
-            .expect("status")
-            .page
-            .as_mut()
-            .expect("page")
-            .exhausted = true;
-        validate_source_selection(&unknown, &discovered)
-            .expect("complete coverage can establish an unavailable OID");
-        authority::validate_discovered_import_scope(
-            unknown.proposed_scope.as_ref().expect("scope"),
-            &discovered.source,
-        )
-        .expect("observe mode only when the complete discovery has no OID");
-        discovered.request.page = Some(wire::PageRequest {
-            size: 512,
-            after_page: b"later-page".to_vec(),
-        });
-        assert!(
-            validate_source_selection(&unknown, &discovered).is_err(),
-            "the final page does not establish absence from earlier pages"
-        );
     }
 
     #[test]
@@ -991,13 +972,13 @@ mod tests {
                 );
                 let request = wire("wire_vectors", row["request"].as_str().expect("request"));
                 assert!(
-                    validate_commit(&current, &request, "github", expected).is_err(),
+                    validate_commit_fixture(&current, &request, "github", expected).is_err(),
                     "{row}"
                 );
             }
             let current = prepared("commit_preparation");
             let control = wire("wire_vectors", "commit_request");
-            validate_commit(&current, &control, "github", expected)
+            validate_commit_fixture(&current, &control, "github", expected)
                 .expect("unchanged current source and support");
         });
     }
@@ -1072,7 +1053,7 @@ mod tests {
         let control: wire::CommitImportJobRequest = wire("wire_vectors", "commit_request");
         let prepared = prepared("commit_preparation");
         with_context(1100, |expected| {
-            validate_commit(&prepared, &control, "github", expected)
+            validate_commit_fixture(&prepared, &control, "github", expected)
                 .expect("signed initial Commit");
             for row in fixture()["submission_vectors"]["commit_negatives"]
                 .as_array()
@@ -1080,19 +1061,21 @@ mod tests {
             {
                 let request = wire("wire_vectors", row["request"].as_str().expect("request"));
                 assert!(
-                    validate_commit(&prepared, &request, "github", expected).is_err(),
+                    validate_commit_fixture(&prepared, &request, "github", expected).is_err(),
                     "{row}"
                 );
             }
             let mut multiple = control.clone();
             let proof = multiple.proof.as_mut().expect("proof");
             proof.delegations.push(proof.delegations[0].clone());
-            assert!(validate_commit(&prepared, &multiple, "github", expected).is_err());
+            assert!(validate_commit_fixture(&prepared, &multiple, "github", expected).is_err());
             let mut unsigned = control.clone();
             unsigned.proof.as_mut().expect("proof").delegations[0].delegating_signature = None;
-            assert!(validate_commit(&prepared, &unsigned, "github", expected).is_err());
-            assert!(validate_commit(&prepared, &control, "another-provider", expected).is_err());
-            validate_commit(&prepared, &control, "github", expected)
+            assert!(validate_commit_fixture(&prepared, &unsigned, "github", expected).is_err());
+            assert!(
+                validate_commit_fixture(&prepared, &control, "another-provider", expected).is_err()
+            );
+            validate_commit_fixture(&prepared, &control, "github", expected)
                 .expect("unchanged signed control");
         });
     }
@@ -1230,15 +1213,51 @@ mod tests {
         with_context(1100, |expected| {
             for jobs in [[&a, &b], [&b, &a]] {
                 for (prepared, request) in jobs {
-                    validate_commit(prepared, request, "github", expected)
+                    validate_commit_fixture(prepared, request, "github", expected)
                         .expect("each disjoint signed job can activate in either order");
                 }
             }
-            assert!(validate_commit(&a.0, &b.1, "github", expected).is_err());
-            assert!(validate_commit(&b.0, &a.1, "github", expected).is_err());
+            assert!(validate_commit_fixture(&a.0, &b.1, "github", expected).is_err());
+            assert!(validate_commit_fixture(&b.0, &a.1, "github", expected).is_err());
         });
         assert_eq!(a.0.response, retained_a);
         assert_eq!(b.0.response, retained_b);
+    }
+
+    #[test]
+    fn import_budget_covers_decoded_forecast_without_exceeding_host_maximum() {
+        let mut configuration = configuration();
+        let host_maximum = 16 * 1024 * 1024 * 1024;
+        configuration
+            .response
+            .limits
+            .as_mut()
+            .expect("limits")
+            .max_result_bytes = host_maximum;
+        let mut source = source("source_connected");
+        let scope: wire::ImportPermissionScopeV1 = wire("wire_vectors", "scope");
+        source.source.size_estimate_state = 1;
+        source.source.git_size_kib = 400 * 1024;
+        let git_bytes = source.source.git_size_kib * 1024;
+        for job in configuration
+            .sibling_scopes(&source, &scope)
+            .expect("forecast")
+        {
+            assert!(
+                job.max_result_bytes >= git_bytes * 27,
+                "decoded native bytes fit"
+            );
+            assert_eq!(job.max_result_bytes, git_bytes * 32);
+            assert!(job.max_result_bytes <= host_maximum);
+        }
+        source.source.git_size_kib = 1024 * 1024;
+        assert!(
+            configuration
+                .sibling_scopes(&source, &scope)
+                .expect("host cap")
+                .iter()
+                .all(|s| s.max_result_bytes == host_maximum)
+        );
     }
 
     #[test]
@@ -1270,7 +1289,7 @@ mod tests {
         assert_eq!(jobs.iter().map(|s| s.branches.len()).sum::<usize>(), 512);
         assert!(
             jobs.iter()
-                .all(|s| s.max_operations == 256 && s.max_result_bytes == 300 * 1024 * 1024)
+                .all(|s| s.max_operations == 256 && s.max_result_bytes == 300 * 1024 * 1024 * 32)
         );
         assert!(jobs[0].branches.last().expect("last").ref_name < jobs[1].branches[0].ref_name);
         assert!(
@@ -1291,9 +1310,9 @@ mod tests {
         assert!(
             configuration
                 .sibling_scopes(&source, &scope)
-                .expect("empty estimate")
+                .expect("zero estimate uses host maximum")
                 .iter()
-                .all(|s| s.max_result_bytes == 1)
+                .all(|s| s.max_result_bytes == 123)
         );
         source.source.size_estimate_state = 0;
         assert!(

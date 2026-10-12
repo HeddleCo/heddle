@@ -3,14 +3,6 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-api_rev=$(python3 - "$repo_root/Cargo.toml" <<'PY'
-import sys
-import tomllib
-
-with open(sys.argv[1], 'rb') as manifest:
-    print(tomllib.load(manifest)['workspace']['dependencies']['api']['rev'])
-PY
-)
 consumer_dir=$(mktemp -d)
 trap 'rm -rf "$consumer_dir"' EXIT
 mkdir -p "$consumer_dir/src"
@@ -28,9 +20,6 @@ config = { package = "heddle-config", path = "$repo_root/crates/config", default
 crypto = { package = "heddle-crypto", path = "$repo_root/crates/crypto", features = ["owner-root"] }
 objects = { package = "heddle-objects", path = "$repo_root/crates/objects", features = ["async-source"] }
 semantic = { package = "heddle-semantic", path = "$repo_root/crates/semantic" }
-
-[patch.crates-io]
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "$api_rev" }
 EOF
 
 cat > "$consumer_dir/src/lib.rs" <<'EOF'

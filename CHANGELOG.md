@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.31.0: adopt heddle-api 0.31.0-alpha.46 (#2066). Hosted import validates discovery in 512-ref pages up to the API's 1,048,576-ref ceiling, rejects absent selections before Prepare, and preserves deleted frozen pins at Commit. Signed result budgets use a 32x decoded-size forecast capped by the host maximum. Per-call protocol field 11 and the public `thread_api::hybrid::call_protocol` helper are removed; endpoint negotiation still gates mandatory features.
+
 - Release 0.29.0 (MINOR: breaking public API on 0.x). Native Fetch bounds source memory (#2045): `SourceBudget.max_objects` is removed, `PackReader::open` takes a scratch root, and `PackInventory` returns. Also: reserve `.git`/`.heddle` path aliases (#2033), symlink checkout (#2039), `-0000` timezone (#2041), refuse untrusted nested repositories and fix nested paths (#2037, #2043), iroh clone sync (#2044), fail on unavailable historical trees and blobs (#2046), adopt sley 0.12.1 (#2047), and CI/test fixes (#2036, #2049).
 
 - Release 0.28.11: HYBRID Part 8 adopts api alpha.37 writer authority and foreign closures (#1988); Part 9 pins the receiver owner and adopts api alpha.39 (invitations by handle, notification inheritance, role approval groups, SuggestPrincipals, and invite codes) (#1989); Part 10 stops Fetch at verified foreign endpoints and fixes false rollback reports from receiver clock sampling (#1990). CI moves to Blacksmith (#1986, #1987).
