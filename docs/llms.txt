@@ -29,6 +29,7 @@ This index covers Heddle's top-level reference docs. Start an agent at `heddle h
 - [HYBRID Part 2 core interfaces](hybrid-part2-needs.md): Part 2 is PR #1963.
 - [Local metadata storage](local-metadata.md): Heddle's v2 mutable Thread and Run state shares metadata.sqlite3 under the
 - [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...
+- [RustCrypto dependency tracking](rustcrypto-dependencies.md): Heddle uses AES-GCM 0.11, X25519 Dalek 3 with static secrets, SHA-2 0.11,
 - [CLI trace export](telemetry.md): Heddle can export command traces to an OpenTelemetry collector. The default
 - [Original-author admission receipts](thread-authority-admission.md): heddle-thread-authority-admission-v3 covers an original operation or dual-signed
 - [heddle undo](undo.md): A safety net for the operations a daily user is most likely to want to roll back.

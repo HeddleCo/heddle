@@ -1,0 +1,18 @@
+{
+  "genesis_digest": "920f3be0359a464699a802f1c2840b27d771dfc0485ce428fd113e8ddc069992",
+  "heddle-owner-capability-v1": "a9e7f23992c31dd90596033bad1290032476364e6649110222effabfb19290e6",
+  "heddle-owner-capability-v3": "9149baf55cb606c205bfcecedec98621b46d622588227fca2207cb79b319c81a",
+  "heddle-owner-key-binding-v1": "954e9058c15eee33a795ae0d0a6589a9ca74684da65e6e0d1ce46baef86b36eb",
+  "heddle-owner-key-transition-v1": "47ef7fbd15f320fa6a562a0beb638112afdf6b85e2847810eb500df0e1479a17",
+  "heddle-owner-root-v1": "5d4bef611d45e559de16de1d0b3ad8b676f1d9277c648cc6177735f035cd1458",
+  "heddle-purge-operation-v2": "27b60c81a1b7fc5a0589c05f15b0f19b1754211f43ea86de3753dcf6c19021c5",
+  "heddle-resource-transfer-acceptance-v1": "ab1004bee7dde2e20564d8c0ac8c3205d6835e11cfc30b88e730cb0c0270edc9",
+  "heddle-resource-transfer-audit-v1": "15b3d672c2921f05f6536941fb48f7806ca1314650fd16e07d338037d8639bde",
+  "heddle-resource-transfer-handoff-v1": "a3987986df0d6790eaff8722756adbb454460fb40aba921f6923fa57475a41fc",
+  "key_id": "de40eb24dcef362ea3181183cec6c95b257cd52eb1afc4e51d1d0929e3309b3b",
+  "passkey_client_data_hash": "10976a1eb4f5e9c9a26a4ae827ee44eaabca44476c45363437d07c32718e5c3d",
+  "passkey_rp_id_hash": "ae468a52cd503cd4bc580b5fa5c5f62b50622d76b6b0d57365bcc439bfeaf315",
+  "payload_sha256": "2c5a7b8055dd1f6f4fe2b44541c17303743b56c4ed52c7c01a3c937cb2f1b06a",
+  "policy_signature_digest": "1e63242755841c3ffbe021392a0fadb40f81eca926a0b1ad8e43c4100d8e15e1",
+  "policy_state_hash": "33cb23f6fe67075c1d900e1fa57d6648d964895ec0795843171c41ac35c291b2"
+}
