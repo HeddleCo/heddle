@@ -202,10 +202,10 @@ impl WorktreeWriteOp {
 /// the next N materializations of that state across N worktrees all
 /// hit the fast path.
 ///
-/// This is the proactive twin of the lazy promotion that already
-/// fires inside `materialize_blob`. Lazy is correct on its own; warm
-/// is a latency optimization for the "I'm about to materialize this
-/// state to N worktrees" case (e.g. `heddle delegate`).
+/// This is the proactive twin of the lazy promotion that fires inside
+/// `materialize_blob` on reflink-capable filesystems. Lazy is correct on
+/// its own; warm is a latency optimization for the "I'm about to materialize
+/// this state to N worktrees" case (e.g. `heddle delegate`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WarmCanonicalStoreStats {
     /// Blobs we wrote to the canonical loose-uncompressed path
@@ -866,7 +866,8 @@ impl Repository {
     ///      any shared-inode hazard.
     ///   2. Lazy promotion + retry. If the canonical loose blob
     ///      isn't on disk (e.g. post-`pack_objects + prune_loose`),
-    ///      promote it once and retry the reflink.
+    ///      promote it once and retry the reflink when the destination
+    ///      filesystem supports reflinks.
     ///   3. `fs::write` of the decompressed blob bytes. Used when the
     ///      filesystem doesn't support reflinks at all
     ///      (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`), in which case we flip a
@@ -2216,13 +2217,12 @@ mod tests {
     /// After `pack_objects + prune_loose_objects`, every blob is
     /// pack-only. The lazy-promotion path inside `materialize_blob`
     /// must (a) succeed without errors, (b) read back the canonical
-    /// bytes in both worktrees, and (c) leave a real loose
-    /// uncompressed mirror on disk under
-    /// `.heddle/objects/blobs/<2-char>/<rest>` so subsequent
-    /// reflinks have something to clone from.
+    /// bytes in both worktrees, and (c) promote a loose mirror only
+    /// when the destination filesystem can reflink it. Both paths
+    /// must isolate worktree edits from sibling files and the store.
     #[test]
     #[cfg(unix)]
-    fn lazy_promotion_after_pack_and_prune_restores_loose_mirror() {
+    fn packed_materialization_promotes_only_for_reflinks_and_isolates_edits() {
         let temp_dir = TempDir::new().unwrap();
         let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
@@ -2265,12 +2265,24 @@ mod tests {
         assert_eq!(std::fs::read(&worktree_a).unwrap(), blob.content());
         assert_eq!(std::fs::read(&worktree_b).unwrap(), blob.content());
 
-        // (c) the loose-uncompressed mirror exists.
-        let loose = repo
-            .store()
-            .loose_blob_path(&hash)
-            .expect("after lazy promotion the canonical loose path must exist");
-        assert_eq!(std::fs::read(&loose).unwrap(), blob.content());
+        // (c) promotion pays off only when the mirror can be reflinked.
+        let loose = repo.store().loose_blob_path(&hash);
+        if filesystem_supports_reflink(temp_dir.path()) {
+            let loose = loose.expect("reflink materialization must promote a loose mirror");
+            assert_eq!(std::fs::read(loose).unwrap(), blob.content());
+        } else {
+            assert!(
+                loose.is_none(),
+                "copy fallback must not write a redundant mirror"
+            );
+        }
+
+        std::fs::write(&worktree_a, b"edited in the first worktree").unwrap();
+        assert_eq!(std::fs::read(&worktree_b).unwrap(), blob.content());
+        assert_eq!(
+            repo.store().get_blob(&hash).unwrap().unwrap().content(),
+            blob.content()
+        );
     }
 
     /// Proactive warm: walk a state's tree, promote every reachable
