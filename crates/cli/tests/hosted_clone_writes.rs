@@ -3447,8 +3447,13 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
         format!("clone setup {labelled_stage} sync failed")
     };
     if !recovery && stage == "disconnect" {
+        // A concurrent RPC can observe transport loss before the application
+        // close reason arrives. The recorded injection and stopped-call checks
+        // below establish the cause independently of which RPC wins the race.
         assert!(
-            error.contains("clone setup") && error.contains("injected disconnect"),
+            error.contains("clone setup")
+                && error.contains("transport failure")
+                && (error.contains("injected disconnect") || error.contains("connection lost")),
             "connection-wide setup failure: {error}"
         );
     } else {
