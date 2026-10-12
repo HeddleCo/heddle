@@ -75,6 +75,7 @@ async fn invite_capture() {
         *genesis.id().expect("Thread ID").as_bytes(),
     )
     .await;
+    captured.lock().expect("bootstrap ordering").bootstrap_home = Some(home.clone());
     let ca = temp.path().join("ca.pem");
     std::fs::write(&ca, &https.certificate_pem).expect("test CA");
     let root = Ed25519Signer::from_seed(&[7; 32]).expect("descriptor root");
@@ -156,6 +157,154 @@ async fn invite_capture() {
             .agent_public_key,
         publisher
     );
+
+    // A new server/account must not consume an invite or replace any part of
+    // this home, even if only one of its enrollment pins survives.
+    let (second_client, second_server, second_capture, _, _, second_https) =
+        native_hosted_server::start_routed_invite(spool, "main", [3; 32]).await;
+    std::fs::write(&ca, &second_https.certificate_pem).expect("second server CA");
+    second_capture
+        .lock()
+        .expect("second account")
+        .invite_account = Some(uuid::Uuid::from_u128(3));
+    let enrollment_paths = [
+        home.join("agent-claim.toml"),
+        home.join("state/device-rpc/authority.bin"),
+        home.join("device-identity.toml"),
+    ];
+    let originals = enrollment_paths
+        .each_ref()
+        .map(|path| std::fs::read(path).expect("enrolled state"));
+    let credentials_path = home.join("credentials.toml");
+    let original_credentials = std::fs::read(&credentials_path).expect("credentials");
+    let node_path = home.join("agent-node-identity.toml");
+    let original_node = std::fs::read(&node_path).expect("node identity");
+    for retained in [None, Some(0), Some(1), Some(2)] {
+        if retained.is_some() && node_path.exists() {
+            std::fs::remove_file(&node_path).expect("remove node identity");
+        }
+        for (index, path) in enrollment_paths.iter().enumerate() {
+            if retained.is_none() || retained == Some(index) {
+                objects::fs_atomic::write_file_atomic_secret(path, &originals[index])
+                    .expect("restore enrollment pin");
+            } else if path.exists() {
+                std::fs::remove_file(path).expect("remove other enrollment pin");
+            }
+        }
+        let before = enrollment_paths
+            .each_ref()
+            .map(|path| std::fs::read(path).ok());
+        let calls = second_capture.lock().expect("server calls").calls.clone();
+        let https_requests = second_https
+            .requests
+            .lock()
+            .expect("HTTPS requests")
+            .clone();
+        let node_before = std::fs::read(&node_path).ok();
+        let refused = output_at(
+            temp.path(),
+            &[
+                "auth",
+                "login",
+                "--server",
+                &second_https.authority,
+                "--invite",
+                "second-account-invite",
+            ],
+        );
+        let fake_server = second_capture.lock().expect("unclaimed invite");
+        assert!(
+            fake_server.claimed_invites.is_empty(),
+            "invite was consumed"
+        );
+        assert_eq!(
+            fake_server.calls, calls,
+            "refusal must precede every server call"
+        );
+        drop(fake_server);
+        assert_eq!(
+            *second_https.requests.lock().expect("HTTPS requests"),
+            https_requests
+        );
+        assert_eq!(
+            std::fs::read(&node_path).ok(),
+            node_before,
+            "refusal must not create a node key"
+        );
+        assert_eq!(
+            std::fs::read(&credentials_path).expect("credentials"),
+            original_credentials
+        );
+        assert_eq!(
+            enrollment_paths
+                .each_ref()
+                .map(|path| std::fs::read(path).ok()),
+            before
+        );
+        assert_eq!(
+            refused.status.code(),
+            Some(78),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("auth_invite_home_already_enrolled")
+        );
+    }
+    // Server refusal of owner bootstrap must leave all account artifacts absent.
+    for path in enrollment_paths.iter().chain([&credentials_path]) {
+        if path.exists() {
+            std::fs::remove_file(path).expect("clear enrollment for bootstrap refusal");
+        }
+    }
+    objects::fs_atomic::write_file_atomic_secret(&node_path, &original_node).expect("restore node");
+    {
+        let mut captured = second_capture.lock().expect("reject bootstrap");
+        captured.bootstrap_home = Some(home.clone());
+        captured.reject_bootstrap = true;
+    }
+    let refused = output_at(
+        temp.path(),
+        &[
+            "auth",
+            "login",
+            "--server",
+            &second_https.authority,
+            "--invite",
+            "bootstrap-refused-invite",
+        ],
+    );
+    assert!(
+        !refused.status.success(),
+        "bootstrap refusal must fail login"
+    );
+    assert!(
+        second_capture
+            .lock()
+            .expect("provisioned")
+            .claimed_invites
+            .contains(&b"bootstrap-refused-invite".to_vec())
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("owner bootstrap did not apply"));
+    for path in enrollment_paths.iter().chain([&credentials_path]) {
+        assert!(
+            !path.exists(),
+            "{} was published after refused bootstrap",
+            path.display()
+        );
+    }
+    objects::fs_atomic::write_file_atomic_secret(&credentials_path, &original_credentials)
+        .expect("restore credentials");
+    for (path, bytes) in enrollment_paths.iter().zip(&originals) {
+        objects::fs_atomic::write_file_atomic_secret(path, bytes).expect("restore enrollment");
+    }
+    second_client.close().await;
+    second_server.abort();
+    std::fs::write(&ca, &https.certificate_pem).expect("restore first server CA");
+    println!(
+        "second-account invite: unclaimed, no server calls, credentials and prior pins unchanged"
+    );
+    println!("refused BootstrapOwnership: no local authority, credential or claim state published");
 
     // Create the server's source in a separate home. This setup must never
     // supply the missing enrollment artifacts to the home under test.

@@ -41,6 +41,10 @@ const PUBLICATION_METADATA_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, Default)]
 pub struct PublicationCapture {
     pub provision_requests: Vec<v2::ProvisionAccountRequest>,
+    pub claimed_invites: Vec<Vec<u8>>,
+    pub invite_account: Option<uuid::Uuid>,
+    pub bootstrap_home: Option<std::path::PathBuf>,
+    pub reject_bootstrap: bool,
     pub account_owner: Option<v2::OwnerState>,
     pub import_jobs: Vec<ImportJob>,
     pub cancel_requests: Vec<v2::CancelOperationRequest>,
@@ -720,12 +724,14 @@ async fn serve_call(
                 .expect("provision request");
                 let signer = Ed25519Signer::from_seed(&[71; 32]).expect("fixture client key");
                 assert_eq!(body.agent_public_key, signer.public_key());
-                fixture
-                    .captured
-                    .lock()
-                    .expect("provision requests")
-                    .provision_requests
-                    .push(body.clone());
+                let account = {
+                    let mut captured = fixture.captured.lock().expect("provision requests");
+                    captured
+                        .claimed_invites
+                        .push(body.invitation_secret.clone());
+                    captured.provision_requests.push(body.clone());
+                    captured.invite_account.unwrap_or(uuid::Uuid::from_u128(2))
+                };
                 write_unary(
                     &mut send,
                     &v2::ProvisionAccountResponse {
@@ -737,8 +743,8 @@ async fn serve_call(
                             ..Default::default()
                         }),
                         principal: Some(v2::PrincipalRecord {
-                            id: uuid::Uuid::from_u128(2).to_string(),
-                            account_id: uuid::Uuid::from_u128(2).to_string(),
+                            id: account.to_string(),
+                            account_id: account.to_string(),
                             display_name: "invite-test".into(),
                             rooting_tier: v2::RootingTier::AgentRooted as i32,
                             ..Default::default()
@@ -785,6 +791,26 @@ async fn serve_call(
                         .body,
                 )
                 .expect("bootstrap request");
+                let reject = {
+                    let captured = fixture.captured.lock().expect("bootstrap admission");
+                    if let Some(home) = &captured.bootstrap_home {
+                        for path in [
+                            "state/device-rpc/authority.bin",
+                            "agent-claim.toml",
+                            "credentials.toml",
+                        ] {
+                            assert!(
+                                !home.join(path).exists(),
+                                "{path} was written before server admission"
+                            );
+                        }
+                    }
+                    captured.reject_bootstrap
+                };
+                if reject {
+                    write_unary(&mut send, &v2::MutationResponse::default()).await;
+                    return;
+                }
                 let owner = v2::OwnerState {
                     owner: body.owner,
                     root: body.root,

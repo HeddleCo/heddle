@@ -462,6 +462,39 @@ async fn remint_restores_the_enrolled_signer_and_source_proof() {
 }
 
 #[test]
+fn invite_authority_persistence_failure_preserves_prior_claim_and_credentials() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
+    let _home = IsolatedHome::new();
+    let server = "api.invite-conflict.test";
+    finish_invite_create_from_response(
+        server,
+        provision_response_for_test(&uuid::Uuid::from_u128(1).to_string(), "first", ""),
+    )
+    .expect("first enrollment");
+    let paths = [
+        identity_state::state_path(),
+        credentials::credentials_path(),
+        repo::identity::heddle_home_dir().join("state/device-rpc/authority.bin"),
+        repo::identity::device_identity_path(),
+    ];
+    let before = paths
+        .each_ref()
+        .map(|path| std::fs::read(path).expect("prior state"));
+    // Exercise persistence's own refusal, independent of the earlier preflight.
+    finish_invite_create_from_response(
+        server,
+        provision_response_for_test(&uuid::Uuid::from_u128(2).to_string(), "second", ""),
+    )
+    .expect_err("authority publication must refuse a different account");
+    assert_eq!(
+        paths
+            .each_ref()
+            .map(|path| std::fs::read(path).expect("preserved state")),
+        before
+    );
+}
+
+#[test]
 fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() {
     let _process_env_guard = crate::test_process_env::exclusive_blocking();
     use api::heddle::api::v1alpha2 as v2;
