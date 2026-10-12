@@ -250,7 +250,7 @@ fn native_transport_requires_explicit_arm_and_negotiation() {
 }
 
 #[tokio::test]
-async fn native_start_thread_binding_requires_protocol_before_request_proof() {
+async fn native_start_thread_binding_is_checked_before_request_proof() {
     use api::v2::client::Rpc;
 
     use crate::{credentials::Credentials, rpc, transport::Authorize};
@@ -271,7 +271,7 @@ async fn native_start_thread_binding_requires_protocol_before_request_proof() {
         )
         .await
         .expect("complete creator-bound request");
-    assert_eq!(context.protocol, Some(super::protocol()));
+    assert_eq!(context.client_operation_id, request.client_operation_id);
     request.creator_authority.push(0);
     assert!(
         Credentials::Public
@@ -291,7 +291,7 @@ async fn native_start_thread_binding_requires_protocol_before_request_proof() {
         )
         .await
         .expect("nearby exact-envelope control");
-    assert_eq!(context.protocol, Some(super::protocol()));
+    assert_eq!(context.client_operation_id, request.client_operation_id);
 }
 
 #[test]

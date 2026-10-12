@@ -41,7 +41,7 @@ pub const MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES: u64 = 2048;
 
 /// Aggregate response bytes one discovery may read.
 ///
-/// One maximal record per admissible ref (8 MiB at 4096 refs). Every admissible
+/// One maximal record per admissible ref (2 GiB at the API safety ceiling). Every admissible
 /// advertisement at realistic ref-name lengths is well under this, and so is
 /// one whose every ref name is 1 KiB with every tag annotated; it caps what a
 /// peer can make the client buffer when it pads records up to
@@ -436,7 +436,10 @@ mod tests {
     }
 
     fn many_short_refs() -> AdvertisedRefs {
-        Box::new((0..100_000).map(|index| (format!("refs/heads/branch-{index}"), false)))
+        Box::new(
+            (0..MAX_SOURCE_ADVERTISEMENT_RECORDS + 1)
+                .map(|index| (format!("refs/heads/branch-{index}"), false)),
+        )
     }
 
     fn one_huge_ref() -> AdvertisedRefs {
@@ -453,27 +456,36 @@ mod tests {
         Box::new((0..100_000).map(|index| (format!("refs/heads/{index:0>1900}"), false)))
     }
 
-    #[test]
-    fn hundred_thousand_refs_stop_at_the_record_bound() {
-        for protocol_v2 in [false, true] {
-            let server = StubServer::new(protocol_v2, many_short_refs);
-            let over = over_budget(&server);
-            assert_eq!(
-                over.bound,
-                RefAdvertisementBound::Records,
-                "v2={protocol_v2}"
-            );
-            assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_RECORDS);
-            assert_eq!(over.records_read, MAX_SOURCE_ADVERTISEMENT_RECORDS + 1);
-            // The whole advertisement is ~6.5 MB; the client stopped within one
-            // segment of the record that crossed the bound.
-            let per_record = 4 + OID.len() as u64 + " refs/heads/branch-99999\n".len() as u64;
-            assert!(
-                server.pulled() <= (MAX_SOURCE_ADVERTISEMENT_RECORDS + 1) * per_record + 1024,
-                "v2={protocol_v2}: pulled {} bytes",
-                server.pulled()
-            );
+    fn metered_body(server: &StubServer, meter: Meter) -> MeteredBody {
+        let response = server
+            .post(URL, "application/x-git-upload-pack-request", &[], &[])
+            .expect("response");
+        MeteredBody {
+            inner: response.body,
+            meter: Arc::new(Mutex::new(meter)),
+            framing: PktFraming::default(),
         }
+    }
+
+    #[test]
+    fn advertisement_stops_at_the_record_bound() {
+        let server = StubServer::new(true, many_short_refs);
+        let mut body = metered_body(
+            &server,
+            Meter {
+                records: MAX_SOURCE_ADVERTISEMENT_RECORDS - 1,
+                ..Default::default()
+            },
+        );
+        let error = io::copy(&mut body, &mut io::sink()).expect_err("record ceiling");
+        let over = error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<RefAdvertisementOverBudget>())
+            .expect("typed limit");
+        assert_eq!(over.bound, RefAdvertisementBound::Records);
+        assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_RECORDS);
+        assert_eq!(over.records_read, MAX_SOURCE_ADVERTISEMENT_RECORDS + 1);
+        assert!(server.pulled() < 1024);
     }
 
     #[test]
@@ -497,19 +509,25 @@ mod tests {
 
     #[test]
     fn padded_refs_stop_at_the_byte_budget() {
-        for protocol_v2 in [false, true] {
-            let server = StubServer::new(protocol_v2, many_padded_refs);
-            let over = over_budget(&server);
-            assert_eq!(
-                over.bound,
-                RefAdvertisementBound::TotalBytes,
-                "v2={protocol_v2}"
-            );
-            assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_BYTES);
-            assert_eq!(over.bytes_read, MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
-            assert!(over.records_read < MAX_SOURCE_ADVERTISEMENT_RECORDS);
-            assert_eq!(server.pulled(), MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
-        }
+        let server = StubServer::new(true, many_padded_refs);
+        let initial_bytes = MAX_SOURCE_ADVERTISEMENT_BYTES - SEGMENT as u64;
+        let mut body = metered_body(
+            &server,
+            Meter {
+                bytes: initial_bytes,
+                ..Default::default()
+            },
+        );
+        let error = io::copy(&mut body, &mut io::sink()).expect_err("byte ceiling");
+        let over = error
+            .get_ref()
+            .and_then(|e| e.downcast_ref::<RefAdvertisementOverBudget>())
+            .expect("typed limit");
+        assert_eq!(over.bound, RefAdvertisementBound::TotalBytes);
+        assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_BYTES);
+        assert_eq!(over.bytes_read, MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
+        assert!(over.records_read < MAX_SOURCE_ADVERTISEMENT_RECORDS);
+        assert_eq!(server.pulled(), SEGMENT as u64 + 1);
     }
 
     fn ordinary_source() -> AdvertisedRefs {
@@ -548,12 +566,12 @@ mod tests {
         }
     }
 
-    /// The largest admissible source — [`MAX_IMPORT_REFS`] refs, every tag
+    /// A source above the old 4096-ref cap, every tag
     /// annotated so a v0 advertisement carries a peeled line for each, every
     /// name just under heddle-api's 1 KiB ref-name bound — plus review refs the
     /// import filters out, still fits every bound.
-    fn largest_admissible_source() -> AdvertisedRefs {
-        const HALF: usize = MAX_IMPORT_REFS / 2;
+    fn wide_source() -> AdvertisedRefs {
+        const HALF: usize = 8192 / 2;
         let pad = "p".repeat(1000);
         let branches = (0..HALF).map(move |index| (format!("refs/heads/{pad}-{index}"), false));
         let pad = "p".repeat(1000);
@@ -563,11 +581,11 @@ mod tests {
     }
 
     #[test]
-    fn largest_admissible_source_fits_the_budget() {
+    fn advertisement_above_4096_fits_the_budget() {
         for protocol_v2 in [false, true] {
-            let server = StubServer::new(protocol_v2, largest_admissible_source);
+            let server = StubServer::new(protocol_v2, wide_source);
             let refs = discover_git_source_refs_with_client(URL, Some(&server)).expect("discovery");
-            assert_eq!(refs.len(), MAX_IMPORT_REFS, "v2={protocol_v2}");
+            assert_eq!(refs.len(), 8192, "v2={protocol_v2}");
             assert!(
                 server.pulled() < MAX_SOURCE_ADVERTISEMENT_BYTES,
                 "v2={protocol_v2}: pulled {} bytes",
@@ -578,8 +596,8 @@ mod tests {
 
     #[test]
     fn budget_scales_with_the_import_ref_bound() {
-        assert_eq!(MAX_IMPORT_REFS, 4096);
-        assert_eq!(MAX_SOURCE_ADVERTISEMENT_RECORDS, 8256);
-        assert_eq!(MAX_SOURCE_ADVERTISEMENT_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_IMPORT_REFS, 1_048_576);
+        assert_eq!(MAX_SOURCE_ADVERTISEMENT_RECORDS, 2 * 1_048_576 + 64);
+        assert_eq!(MAX_SOURCE_ADVERTISEMENT_BYTES, 2 * 1024 * 1024 * 1024);
     }
 }

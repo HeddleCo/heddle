@@ -453,16 +453,21 @@ def main():
     if any(m[1].startswith('@api/') for m in part8):
         metadata = json.loads(subprocess.check_output(
             ['cargo', 'metadata', '--offline', '--locked', '--format-version', '1'], cwd=source))
-        package = next(p for p in metadata['packages'] if p['name'] == 'heddle-api' and p['source'] and p['source'].startswith('git+'))
+        package = next(p for p in metadata['packages'] if p['name'] == 'heddle-api' and p['source'])
         api_source = args.output.resolve() / 'api-source'
         assert not api_source.exists(), 'Use a fresh output directory for isolated API mutations'
         shutil.copytree(Path(package['manifest_path']).parent, api_source,
                         ignore=shutil.ignore_patterns('.git', 'target', 'node_modules'))
         manifest = source / 'Cargo.toml'
         contents = manifest.read_text()
-        pattern = r'git = "https://github.com/HeddleCo/api", rev = "[0-9a-f]{40}", version = "(=[^"]+)"'
-        contents, count = re.subn(pattern, lambda m: 'path = "' + str(api_source) + '", version = "' + m[1] + '"', contents)
-        assert count == 2, 'Both API entries must relocate together'
+        pattern = r'(?m)^api = \{ package = "heddle-api", version = "(=[^"]+)" \}$'
+        match = re.search(pattern, contents)
+        assert match, 'The workspace API must use the published exact pin'
+        requirement = match[1]
+        contents, count = re.subn(pattern, lambda m: 'api = { package = "heddle-api", path = "' + str(api_source) + '", version = "' + m[1] + '" }', contents)
+        assert count == 1, 'The workspace API entry must relocate exactly once'
+        assert '[patch.crates-io]\n' in contents, 'The workspace patch table must exist'
+        contents = contents.replace('[patch.crates-io]\n', '[patch.crates-io]\nheddle-api = { path = "' + str(api_source) + '", version = "' + requirement + '" }\n', 1)
         manifest.write_text(contents)
         subprocess.run(['cargo', 'update', '--offline', '-p', 'heddle-api'], cwd=source, check=True)
     for name, file, mutate, crate, test in part8:

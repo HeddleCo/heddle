@@ -1017,6 +1017,33 @@ mod tests {
 
     use super::{RecoveryAdvice, classify_error};
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn import_ref_limit_reports_the_api_ceiling_for_humans_and_agents() {
+        use hosted_client::hosted_runtime::hosted::{ImportSourceRefError, ImportSourceRefs};
+        use objects::object::thread_replication::git_import_graph::MAX_IMPORT_REFS;
+
+        let error = ImportSourceRefs::from_names(
+            std::iter::once("refs/heads/main".into())
+                .chain((0..MAX_IMPORT_REFS).map(|i| format!("refs/tags/{i}"))),
+        )
+        .expect_err("one ref above the API ceiling");
+        assert!(matches!(error, ImportSourceRefError::TooManyRefs { .. }));
+        let classified = classify_error(&anyhow!(error));
+        assert_eq!(classified.kind, "import_source_ref_limit");
+        assert_eq!(classified.extra_json_fields["max_refs"], 1_048_576);
+        assert_eq!(
+            classified.extra_json_fields["total_refs"],
+            MAX_IMPORT_REFS + 1
+        );
+        assert!(
+            classified
+                .human_error
+                .expect("human error")
+                .contains("maximum is 1048576")
+        );
+    }
+
     #[test]
     fn recovery_advice_with_invalid_actions_falls_back_to_contract_catalog() {
         let err = anyhow!(RecoveryAdvice::safety_refusal(

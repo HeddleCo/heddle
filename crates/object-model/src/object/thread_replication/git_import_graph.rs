@@ -11,7 +11,7 @@ use crate::{
 
 /// Native refs (branches plus commit tags) one Git import may carry.
 ///
-/// This is `heddle_api::import_authority::MAX_IMPORT_SOURCE_REFS` (4096,
+/// This is `heddle_api::import_authority::MAX_IMPORT_SOURCE_REFS` (1,048,576,
 /// HeddleCo/api#389), the bound on a host's complete discovery and weft's
 /// retained-ref cap, so the converter and the import authority cannot drift.
 pub const MAX_IMPORT_REFS: usize = api::import_authority::MAX_IMPORT_SOURCE_REFS;
@@ -508,31 +508,31 @@ mod tests {
         };
         let mut refs = vec![ImportRefIdentity {
             raw_name: b"HEAD".to_vec(),
-            raw_target: GitRefTarget::Symbolic(b"refs/heads/b-00000".to_vec()),
+            raw_target: GitRefTarget::Symbolic(b"refs/heads/b-0000000".to_vec()),
             peeled_commit: None,
         }];
         refs.extend(
             (0..native)
                 .step_by(2)
-                .map(|i| direct(format!("refs/heads/b-{i:05}"))),
+                .map(|i| direct(format!("refs/heads/b-{i:07}"))),
         );
         refs.extend(
             (1..native)
                 .step_by(2)
-                .map(|i| direct(format!("refs/tags/t-{i:05}"))),
+                .map(|i| direct(format!("refs/tags/t-{i:07}"))),
         );
         refs
     }
 
     #[test]
-    fn native_ref_bound_admits_4096_and_refuses_4097() {
+    fn native_ref_bound_admits_the_api_ceiling_and_refuses_one_more() {
         // The converter and the import authority share one bound (heddle#2022).
         assert_eq!(
             MAX_IMPORT_REFS,
             api::import_authority::MAX_IMPORT_SOURCE_REFS
         );
-        assert_eq!(MAX_IMPORT_REFS, 4096);
-        for native in [600, MAX_IMPORT_REFS] {
+        assert_eq!(MAX_IMPORT_REFS, 1_048_576);
+        for native in [600, 4097, MAX_IMPORT_REFS] {
             let classified = classify_frozen_import_refs(&frozen_refs_with_native(native))
                 .unwrap_or_else(|error| panic!("{native} native refs: {error}"));
             assert_eq!(classified.native_ref_count as usize, native);
@@ -541,9 +541,9 @@ mod tests {
         let error = classify_frozen_import_refs(&frozen_refs_with_native(MAX_IMPORT_REFS + 1))
             .expect_err("one native ref past the bound");
         assert!(
-            error
-                .to_string()
-                .contains("Git import has more than 4096 native refs"),
+            error.to_string().contains(&format!(
+                "Git import has more than {MAX_IMPORT_REFS} native refs"
+            )),
             "{error}"
         );
     }

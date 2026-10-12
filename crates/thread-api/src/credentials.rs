@@ -116,14 +116,9 @@ impl Authorize for Credentials {
             bearer_grant_envelope: grant_envelope.to_vec(),
             ..Default::default()
         };
-        // Integration import routes advertise this client's semantic support.
-        // Sync remains ungated until the coordinated api#307 cutover.
-        context.protocol = crate::hybrid::call_protocol(
-            method.path,
-            !method.mandatory_features.is_empty()
-                || crate::hybrid::native_start_thread(method.path, body)
-                    .map_err(Error::Protocol)?,
-        );
+        // Validate creator bindings before request signing. Semantic support is
+        // negotiated against the endpoint description, never per call.
+        crate::hybrid::native_start_thread(method.path, body).map_err(Error::Protocol)?;
         #[cfg(any(feature = "native", feature = "root-attachment"))]
         if let Self::OwnedDevice(value) = self {
             context.bearer_authority_key_selector = value.mint_root.clone();

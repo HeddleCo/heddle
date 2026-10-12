@@ -605,5 +605,5 @@ registry failure other than an exact-version E404 fails closed. Manual and
 prerelease dry runs build the package but do not publish it.
 
 Generated `crates/capability-verifier/npm/dist` files are never committed.
-Consumers use the matching `@heddleco/api` alpha.21 message contract and pin
+Consumers use the matching `@heddleco/api` alpha.46 message contract and pin
 the exact package version; see the [binding API](crates/capability-verifier/npm/README.md).
