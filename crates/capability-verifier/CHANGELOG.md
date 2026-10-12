@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.30.0...heddleco-capability-verifier-v0.30.1) - 2026-10-12
+
+### Other
+
+- *(deps)* finish RustCrypto wave 2 with byte-identical proof ([#2068](https://github.com/HeddleCo/heddle/pull/2068))
+
 ## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.29.0...heddleco-capability-verifier-v0.30.0) - 2026-10-10
 
 ### Other
