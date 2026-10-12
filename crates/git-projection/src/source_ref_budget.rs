@@ -12,7 +12,7 @@
 //! response body while Sley reads it. It follows the pkt-line framing byte by
 //! byte and fails the read as soon as the aggregate bytes, the record count, or
 //! one record's length passes its import-scale bound, so the peer can make the
-//! client read and hold at most [`MAX_SOURCE_ADVERTISEMENT_BYTES`].
+//! client read at most one byte past [`MAX_SOURCE_ADVERTISEMENT_BYTES`].
 
 use std::{
     fmt,
@@ -41,13 +41,10 @@ pub const MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES: u64 = 2048;
 
 /// Aggregate response bytes one discovery may read.
 ///
-/// One maximal record per admissible ref (2 GiB at the API safety ceiling). Every admissible
-/// advertisement at realistic ref-name lengths is well under this, and so is
-/// one whose every ref name is 1 KiB with every tag annotated; it caps what a
-/// peer can make the client buffer when it pads records up to
-/// [`MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES`].
-pub const MAX_SOURCE_ADVERTISEMENT_BYTES: u64 =
-    MAX_IMPORT_REFS as u64 * MAX_SOURCE_ADVERTISEMENT_RECORD_BYTES;
+/// Below Sley's 128 MiB v0/v1 and 256 MiB v2 buffering ceilings so an oversized
+/// advertisement fails with the import's typed bound. This independently caps
+/// padded records; the ref count ceiling does not guarantee byte admission.
+pub const MAX_SOURCE_ADVERTISEMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Which advertisement bound a discovery hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,25 +506,19 @@ mod tests {
 
     #[test]
     fn padded_refs_stop_at_the_byte_budget() {
-        let server = StubServer::new(true, many_padded_refs);
-        let initial_bytes = MAX_SOURCE_ADVERTISEMENT_BYTES - SEGMENT as u64;
-        let mut body = metered_body(
-            &server,
-            Meter {
-                bytes: initial_bytes,
-                ..Default::default()
-            },
-        );
-        let error = io::copy(&mut body, &mut io::sink()).expect_err("byte ceiling");
-        let over = error
-            .get_ref()
-            .and_then(|e| e.downcast_ref::<RefAdvertisementOverBudget>())
-            .expect("typed limit");
-        assert_eq!(over.bound, RefAdvertisementBound::TotalBytes);
-        assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_BYTES);
-        assert_eq!(over.bytes_read, MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
-        assert!(over.records_read < MAX_SOURCE_ADVERTISEMENT_RECORDS);
-        assert_eq!(server.pulled(), SEGMENT as u64 + 1);
+        for protocol_v2 in [false, true] {
+            let server = StubServer::new(protocol_v2, many_padded_refs);
+            let over = over_budget(&server);
+            assert_eq!(
+                over.bound,
+                RefAdvertisementBound::TotalBytes,
+                "v2={protocol_v2}"
+            );
+            assert_eq!(over.limit, MAX_SOURCE_ADVERTISEMENT_BYTES);
+            assert_eq!(over.bytes_read, MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
+            assert!(over.records_read < MAX_SOURCE_ADVERTISEMENT_RECORDS);
+            assert_eq!(server.pulled(), MAX_SOURCE_ADVERTISEMENT_BYTES + 1);
+        }
     }
 
     fn ordinary_source() -> AdvertisedRefs {
@@ -595,9 +586,9 @@ mod tests {
     }
 
     #[test]
-    fn budget_scales_with_the_import_ref_bound() {
+    fn budgets_preserve_ref_admission_and_bind_before_sley_buffering() {
         assert_eq!(MAX_IMPORT_REFS, 1_048_576);
         assert_eq!(MAX_SOURCE_ADVERTISEMENT_RECORDS, 2 * 1_048_576 + 64);
-        assert_eq!(MAX_SOURCE_ADVERTISEMENT_BYTES, 2 * 1024 * 1024 * 1024);
+        assert_eq!(MAX_SOURCE_ADVERTISEMENT_BYTES, 64 * 1024 * 1024);
     }
 }

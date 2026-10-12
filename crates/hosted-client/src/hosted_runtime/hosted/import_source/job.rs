@@ -3,8 +3,14 @@
 use api::{heddle::api::v1alpha2 as wire, hybrid_codec::Reject, import_authority as authority};
 use prost::Message;
 
-use super::super::{HostedClient, HostedError, Result};
-use super::discovery::ImportDiscovery;
+use super::{
+    super::{HostedClient, HostedError, Result},
+    discovery::ImportDiscovery,
+};
+
+/// Decoded native bytes were observed at approximately 27x Git storage; round
+/// up for headroom. The forecast is always capped by the advertised host maximum.
+const DECODED_SIZE_FORECAST_MULTIPLIER: u128 = 32;
 
 /// Authenticated destination-writer discovery. Options are exact advertised
 /// octets; the host rechecks support and budgets when preparing the job.
@@ -52,7 +58,11 @@ impl ImportConfiguration {
         let per_job = limits.max_branches.min(limits.max_operations) as usize;
         let estimate = match source.source.size_estimate_state {
             0 => None,
-            1 => Some(u128::from(source.source.git_size_kib) * 1024 * 32),
+            // Providers can report zero for small repositories, so zero does
+            // not establish a usable size estimate.
+            1 => (source.source.git_size_kib > 0).then(|| {
+                u128::from(source.source.git_size_kib) * 1024 * DECODED_SIZE_FORECAST_MULTIPLIER
+            }),
             _ => return Err(Reject::Canonical.into()),
         };
         selected
@@ -63,7 +73,7 @@ impl ImportConfiguration {
                 scope.branches = branches.to_vec();
                 scope.max_operations = branches.len() as u32;
                 scope.max_result_bytes = estimate.map_or(limits.max_result_bytes, |bytes| {
-                    bytes.max(1).min(u128::from(limits.max_result_bytes)) as u64
+                    bytes.min(u128::from(limits.max_result_bytes)) as u64
                 });
                 authority::validate_discovered_import_scope(&scope, &source.source)?;
                 Ok(scope)
@@ -241,7 +251,8 @@ impl HostedClient {
             include_pull_request_refs: request.include_pull_request_refs,
         };
         let first = self.resolve_import_source(&request).await?;
-        let mut discovery = ImportDiscovery::new(&first.source, selected, options, mode)?;
+        let mut discovery =
+            ImportDiscovery::new(&first.source, &source.source, selected, options, mode)?;
         let mut next = discovery.push_page(&first.source)?;
         while !next.is_empty() {
             request.page.as_mut().ok_or(Reject::Canonical)?.after_page = next;
@@ -514,9 +525,6 @@ fn validate_source_identity(
         return Err(Reject::SourceSelection.into());
     }
     authority::validate_repository_hash_algorithm(&source.source, true)?;
-    if !source.request.include_refs {
-        return Err(Reject::SourceSelection.into());
-    }
     Ok(())
 }
 
@@ -890,6 +898,12 @@ mod tests {
         validate_source_identity(&prepare, &partial)
             .expect("identity is independent of page coverage");
         validate_source_identity(&prepare, &resolved).expect("unchanged complete discovery");
+        let mut metadata_only = resolved.clone();
+        metadata_only.request.include_refs = false;
+        metadata_only.source.refs.clear();
+        metadata_only.source.refs_status = None;
+        validate_source_identity(&prepare, &metadata_only)
+            .expect("metadata-only resolution can precede paged discovery");
     }
 
     #[test]
@@ -1296,9 +1310,9 @@ mod tests {
         assert!(
             configuration
                 .sibling_scopes(&source, &scope)
-                .expect("empty estimate")
+                .expect("zero estimate uses host maximum")
                 .iter()
-                .all(|s| s.max_result_bytes == 1)
+                .all(|s| s.max_result_bytes == 123)
         );
         source.source.size_estimate_state = 0;
         assert!(

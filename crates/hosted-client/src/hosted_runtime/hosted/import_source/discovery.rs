@@ -14,10 +14,12 @@ pub(super) struct ImportDiscovery {
 impl ImportDiscovery {
     pub(super) fn new(
         source: &wire::ProviderRepository,
+        expected: &wire::ProviderRepository,
         selected: &[wire::ImportBranchLimitV1],
         options: authority::DiscoveryOptions,
         mode: authority::DiscoverySelectionMode,
     ) -> Result<Self> {
+        validate_source_identity(source, expected)?;
         let validator = authority::DiscoveryValidator::new(source, true, selected, options, mode)?;
         let mut source = source.clone();
         source.refs.clear();
@@ -35,16 +37,10 @@ impl ImportDiscovery {
     }
 
     pub(super) fn push_page(&mut self, source: &wire::ProviderRepository) -> Result<Vec<u8>> {
-        if self.exhausted
-            || source.connection != self.source.connection
-            || source.provider_repository_id != self.source.provider_repository_id
-            || source.clone_url != self.source.clone_url
-            || source.installation_id != self.source.installation_id
-            || source.private != self.source.private
-            || source.hash_algorithm != self.source.hash_algorithm
-        {
+        if self.exhausted {
             return Err(Reject::SourceSelection.into());
         }
+        validate_source_identity(source, &self.source)?;
         let status = source.refs_status.as_ref().ok_or(Reject::SourceSelection)?;
         let page = status.page.as_ref().ok_or(Reject::SourceSelection)?;
         if status.section != "provider_refs"
@@ -87,10 +83,27 @@ impl ImportDiscovery {
     }
 }
 
+fn validate_source_identity(
+    source: &wire::ProviderRepository,
+    expected: &wire::ProviderRepository,
+) -> Result<()> {
+    if source.connection != expected.connection
+        || source.provider_repository_id != expected.provider_repository_id
+        || source.clone_url != expected.clone_url
+        || source.installation_id != expected.installation_id
+        || source.private != expected.private
+        || source.hash_algorithm != expected.hash_algorithm
+    {
+        return Err(Reject::SourceSelection.into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use prost::Message;
+
+    use super::*;
 
     fn scope() -> wire::ImportPermissionScopeV1 {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
@@ -135,6 +148,7 @@ mod tests {
         let source = page(vec![], true);
         let mut discovery = ImportDiscovery::new(
             &source,
+            &source,
             &[],
             authority::DiscoveryOptions::default(),
             authority::DiscoverySelectionMode::Prepare,
@@ -167,6 +181,7 @@ mod tests {
         ] {
             let mut discovery = ImportDiscovery::new(
                 &source,
+                &source,
                 &scope.branches,
                 authority::DiscoveryOptions::default(),
                 mode,
@@ -191,6 +206,7 @@ mod tests {
         let source = page(refs, true);
         let mut discovery = ImportDiscovery::new(
             &source,
+            &source,
             &scope.branches,
             authority::DiscoveryOptions::default(),
             authority::DiscoverySelectionMode::Prepare,
@@ -203,9 +219,51 @@ mod tests {
     }
 
     #[test]
+    fn first_page_is_bound_to_the_original_resolved_source() {
+        let first = page(vec![], true);
+        let mut expected = first.clone();
+        expected.refs_status = None;
+        ImportDiscovery::new(
+            &first,
+            &expected,
+            &[],
+            authority::DiscoveryOptions::default(),
+            authority::DiscoverySelectionMode::Prepare,
+        )
+        .expect("original metadata accepts the matching first page");
+        for field in 0..6 {
+            let mut changed = first.clone();
+            match field {
+                0 => changed.connection = Some(wire::RecordRef::default()),
+                1 => changed.provider_repository_id = "another-repo".into(),
+                2 => changed.clone_url = "https://github.com/example/another.git".into(),
+                3 => changed.installation_id = "another-installation".into(),
+                4 => changed.private = true,
+                _ => changed.hash_algorithm = 2,
+            }
+            assert!(
+                matches!(
+                    ImportDiscovery::new(
+                        &changed,
+                        &expected,
+                        &[],
+                        authority::DiscoveryOptions::default(),
+                        authority::DiscoverySelectionMode::Prepare,
+                    ),
+                    Err(super::super::super::HostedError::Hybrid(
+                        Reject::SourceSelection
+                    ))
+                ),
+                "changed identity field {field}"
+            );
+        }
+    }
+
+    #[test]
     fn incomplete_or_changed_discovery_cannot_finish() {
         let source = page(vec![], true);
         let mut discovery = ImportDiscovery::new(
+            &source,
             &source,
             &[],
             authority::DiscoveryOptions::default(),
@@ -234,6 +292,7 @@ mod tests {
         for include_pull_request_refs in [false, true] {
             let mut discovery = ImportDiscovery::new(
                 &source,
+                &source,
                 &[],
                 authority::DiscoveryOptions {
                     include_pull_request_refs,
@@ -248,6 +307,7 @@ mod tests {
             selected[0].ref_name = "refs/pull/12/head".into();
             assert!(
                 ImportDiscovery::new(
+                    &source,
                     &source,
                     &selected,
                     authority::DiscoveryOptions {
