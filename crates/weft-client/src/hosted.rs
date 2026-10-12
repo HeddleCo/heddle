@@ -54,24 +54,80 @@ impl HostedClient {
         timeout: Duration,
         tls_ca_certificate_pem: Option<&str>,
     ) -> Result<Self> {
+        Self::connect_endpoint_with_description(
+            address,
+            credential,
+            timeout,
+            tls_ca_certificate_pem,
+            None,
+        )
+        .await
+    }
+
+    /// Connect with a description authenticated and retained by the application.
+    /// A mismatched description is discarded and rediscovered on this connection.
+    pub async fn connect_endpoint_with_description(
+        address: EndpointAddr,
+        credential: Credentials,
+        timeout: Duration,
+        tls_ca_certificate_pem: Option<&str>,
+        description: Option<thread_api::contract::DescribeEndpointResponse>,
+    ) -> Result<Self> {
         if timeout.is_zero() {
             bail!("hosted progress timeout must be positive");
         }
-        let relays: Vec<_> = address.relay_urls().cloned().collect();
-        let relay_mode = if relays.is_empty() {
-            RelayMode::Disabled
-        } else {
-            RelayMode::custom(relays)
-        };
-        heddle_perf_contract::record_network_client_initialization();
+        let endpoint = Self::bind_endpoint(tls_ca_certificate_pem).await?;
+        Self::connect_bound_endpoint(
+            endpoint,
+            address,
+            credential,
+            timeout,
+            description,
+            tls_ca_certificate_pem,
+        )
+        .await
+    }
+
+    /// Bind without routing hints so HTTPS trust discovery can run concurrently.
+    /// Only verified relays are installed before connecting.
+    pub async fn bind_endpoint(tls_ca_certificate_pem: Option<&str>) -> Result<Endpoint> {
+        Self::bind_with_relays(RelayMode::Disabled, tls_ca_certificate_pem).await
+    }
+
+    async fn bind_with_relays(
+        relay_mode: RelayMode,
+        tls_ca_certificate_pem: Option<&str>,
+    ) -> Result<Endpoint> {
         let mut builder = Endpoint::builder(presets::Minimal).relay_mode(relay_mode);
         if let Some(pem) = tls_ca_certificate_pem {
             builder = builder.ca_tls_config(crate::relay_tls::ca_tls_config_from_pem(pem)?);
         }
-        let endpoint = builder
-            .bind()
-            .await
-            .context("bind hosted client endpoint")?;
+        builder.bind().await.context("bind hosted client endpoint")
+    }
+
+    /// Finish connecting an independently bound endpoint to a verified address.
+    pub async fn connect_bound_endpoint(
+        mut endpoint: Endpoint,
+        address: EndpointAddr,
+        credential: Credentials,
+        timeout: Duration,
+        description: Option<thread_api::contract::DescribeEndpointResponse>,
+        tls_ca_certificate_pem: Option<&str>,
+    ) -> Result<Self> {
+        if timeout.is_zero() {
+            close_endpoint(&endpoint).await;
+            bail!("hosted progress timeout must be positive");
+        }
+        let relays: Vec<_> = address.relay_urls().cloned().collect();
+        if !relays.is_empty() {
+            // Relay transport configuration depends on the verified addresses.
+            // Do not keep an empty relay actor: it emits shutdown errors on
+            // direct-only connections and contaminates JSON diagnostics.
+            close_endpoint(&endpoint).await;
+            endpoint =
+                Self::bind_with_relays(RelayMode::custom(relays), tls_ca_certificate_pem).await?;
+        }
+        heddle_perf_contract::record_network_client_initialization();
         let connection =
             match tokio::time::timeout(timeout, endpoint.connect(address, api::HOSTED_ALPN_V1))
                 .await
@@ -91,6 +147,26 @@ impl HostedClient {
                 api::framing::MAX_CONTROL_BODY,
                 timeout,
             )?;
+            if let Some(description) = description {
+                // Validate before consuming the transport so a mismatch can
+                // still fall through to discovery over the same connection.
+                let key = connection.remote_id();
+                if description.endpoint.as_ref().is_some_and(|source| {
+                    source.public_key == key.as_bytes() && source.kind == EndpointKind::Weft as i32
+                }) && description
+                    .supported_packages
+                    .iter()
+                    .any(|package| package == "heddle.api.v1alpha2")
+                {
+                    return Remote::from_description(
+                        transport,
+                        *key.as_bytes(),
+                        EndpointKind::Weft,
+                        description,
+                    )
+                    .context("reuse hosted v2 API");
+                }
+            }
             Remote::discover(
                 transport,
                 *connection.remote_id().as_bytes(),

@@ -331,7 +331,7 @@ async fn pinned_session_never_sends_credentials_to_unverified_netd_weft() {
         assert!(!client.reused_warm_connection(), "netd must be bypassed");
         client.close().await;
     }
-    assert_eq!(fixture.weft.authenticated(), 2);
+    assert_eq!(fixture.weft.authenticated(), 1);
     assert!(
         !fixture.automatic_pin_stored(),
         "an explicit pin never falls back to automatic (TOFU) trust"
@@ -355,8 +355,8 @@ async fn pinned_session_reuses_netd_when_it_holds_the_attested_weft() {
         assert!(client.reused_warm_connection(), "outbound={outbound}");
         client.close().await;
     }
-    assert_eq!(fixture.weft.authenticated(), 2);
-    assert_eq!(fixture.https.requests(), [DESCRIPTOR_PATH, DESCRIPTOR_PATH]);
+    assert_eq!(fixture.weft.authenticated(), 1);
+    assert_eq!(fixture.https.requests(), [DESCRIPTOR_PATH]);
     assert!(!fixture.automatic_pin_stored());
     fixture.close().await;
 }
@@ -418,8 +418,8 @@ async fn netd_matching_pin_honours_custom_ca_and_reuses_warm_session() {
         assert!(client.reused_warm_connection());
         client.close().await;
     }
-    assert_eq!(fixture.weft.authenticated(), 2);
-    assert_eq!(fixture.https.requests(), [DESCRIPTOR_PATH, DESCRIPTOR_PATH]);
+    assert_eq!(fixture.weft.authenticated(), 1);
+    assert_eq!(fixture.https.requests(), [DESCRIPTOR_PATH]);
     assert!(!fixture.automatic_pin_stored());
     fixture.close().await;
 }

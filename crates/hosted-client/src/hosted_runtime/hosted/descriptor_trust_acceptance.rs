@@ -67,9 +67,39 @@ async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
         )
         .await
         .unwrap();
-        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH, DESCRIPTOR_PATH]);
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH]);
         let pin_again = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin_again.public_key, pin.public_key);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn expired_cached_set_refetches_and_reverifies() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
+    with_isolated_home_async(|_| async {
+        let root = Ed25519Signer::generate().expect("root");
+        let endpoint = Ed25519Signer::generate().expect("endpoint");
+        let server = server_with_root("cache-root", &root, 2);
+        let config = trusted_config(&server);
+        let http = super::BootstrapHttp::new(&config);
+        resolve_and_verify_endpoint_descriptor(server.authority(), &config, &http)
+            .await
+            .expect("initial set");
+        let now = chrono::Utc::now().timestamp_millis();
+        let expired =
+            attested_entry_window(&root, &endpoint, "expired", "hel", now - 2000, now - 1000);
+        let path = super::endpoint_cache::path(
+            server.authority(),
+            &root.public_key().try_into().expect("root key"),
+            &config,
+            "set",
+        );
+        fs::write(path, set_document(&[expired])).expect("expired signed cache");
+        resolve_and_verify_endpoint_descriptor(server.authority(), &config, &http)
+            .await
+            .expect("refresh expired cache");
+        assert_requests(&server, &[KEY_PATH, DESCRIPTOR_PATH, DESCRIPTOR_PATH]);
     })
     .await;
 }
@@ -268,6 +298,13 @@ async fn ephemeral_rotation_under_the_pinned_root_does_not_change_the_pin() {
         )
         .await
         .unwrap();
+        let cache = super::endpoint_cache::path(
+            server.authority(),
+            &root.public_key().try_into().expect("root key"),
+            &config,
+            "set",
+        );
+        fs::write(cache, b"invalid cached set").expect("invalidate disposable set");
         let before = fs::read(super::descriptor_trust_path()).unwrap();
         resolve_and_verify_endpoint_descriptor(
             server.authority(),
@@ -319,6 +356,13 @@ async fn served_set_cannot_swap_the_pinned_root() {
         )
         .await
         .unwrap();
+        let cache = super::endpoint_cache::path(
+            server.authority(),
+            &root.public_key().try_into().expect("root key"),
+            &config,
+            "set",
+        );
+        fs::write(cache, b"invalid cached set").expect("invalidate disposable set");
         let before = fs::read(super::descriptor_trust_path()).unwrap();
 
         let error = tokio::time::timeout(

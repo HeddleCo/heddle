@@ -1561,6 +1561,16 @@ impl HostedClient {
         Ok(discussions)
     }
 
+    /// Retain the projected listing alongside its originals for clone setup.
+    pub async fn list_discussions_with_operations(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<(Vec<HostedDiscussion>, Vec<contract::SignedRecord>), ProtocolError> {
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        self.observe_discussions(spool, None, Vec::new(), Vec::new(), true)
+            .await
+    }
+
     /// Return the verified transport originals used by native replication.
     /// Projection-only discussion records are intentionally excluded.
     pub async fn list_discussion_operations(

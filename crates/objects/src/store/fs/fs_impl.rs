@@ -2245,8 +2245,8 @@ impl ObjectStore for FsStore {
             crate::store::pack::PackInventory::copy_from_index(index_path, &self.root.join("tmp"))?;
         // Mirrors and attachments are also staged on disk. Validate every
         // object before publishing either immutable files or derived metadata.
-        // Hosted installation holds the repository mutation lock. Refresh
-        // the native pack baseline once, not once per incoming ancestor State.
+        // Refresh the native pack baseline once per install, not once per
+        // incoming ancestor State. Pack publication refreshes it again.
         self.reload_packs_if_stale()?;
         let mut metadata = tempfile::NamedTempFile::new_in(scratch)?;
         let pack_name;

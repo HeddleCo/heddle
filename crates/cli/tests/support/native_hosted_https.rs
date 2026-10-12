@@ -145,6 +145,7 @@ pub struct TestHttpsServer {
     pub certificate_pem: String,
     pub proxy_uri: String,
     pub connections: Arc<AtomicUsize>,
+    pub requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -207,6 +208,7 @@ impl TestHttpsServer {
             certificate_pem,
             proxy_uri: proxy.uri.clone(),
             connections,
+            requests,
             stop,
             thread: Some(thread),
         }

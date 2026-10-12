@@ -45,6 +45,7 @@ pub struct PublicationCapture {
     pub import_requests: Vec<v2::ImportSourceRequest>,
     pub calls: Vec<String>,
     pub rpc_delay: std::time::Duration,
+    pub block_fetch: Option<Arc<tokio::sync::Notify>>,
     pub clone_setup_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub clone_setup_requests: usize,
     /// Run Weft's shared verifier with request-time operation/resource facts.
@@ -480,7 +481,7 @@ async fn serve_call(
                 .iter()
                 .filter(|annotation| **annotation)
                 .count()
-                >= 2)
+                >= 1)
             .then(|| capture.clone_metadata_obstruction.clone())
             .flatten()
     };
@@ -2044,6 +2045,15 @@ async fn serve_fetch(
     fixture: Fixture,
     server_key: Vec<u8>,
 ) {
+    let gate = fixture
+        .captured
+        .lock()
+        .expect("fetch gate")
+        .block_fetch
+        .clone();
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
     let opening: v2::FetchClientFrame = read_message(&mut recv, &mut buffered).await;
     let Some(v2::fetch_client_frame::Body::Open(open)) = opening.body else {
         panic!("native fetch must start with Open");

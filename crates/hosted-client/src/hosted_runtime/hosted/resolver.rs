@@ -137,7 +137,9 @@ async fn resolve_automatic_descriptor_trust(
     }
     let public_key = validate_descriptor_pair(&document.key_id, &document.public_key)
         .map_err(|error| HostedError::InvalidDescriptor(error.to_string()))?;
-    let verified = verify_live_set(&set?, &public_key, config, endpoint_id)?;
+    let set = set?;
+    let verified = verify_live_set(&set, &public_key, config, endpoint_id)?;
+    cache_set(canonical_server, &public_key, config, &set);
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {
@@ -163,8 +165,31 @@ async fn verify_live_set_against_root(
     http: &super::bootstrap::BootstrapHttp,
     endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
+    let cache = super::endpoint_cache::path(canonical_server, root_public_key, config, "set");
+    if let Ok(bytes) = std::fs::read(cache)
+        && let Ok(set) = serde_json::from_slice(&bytes)
+        && let Ok(verified) = verify_live_set(&set, root_public_key, config, endpoint_id)
+    {
+        return Ok(verified);
+    }
     let set = fetch_ephemeral_descriptor_set(&descriptor_url(canonical_server), http).await?;
-    verify_live_set(&set, root_public_key, config, endpoint_id)
+    let verified = verify_live_set(&set, root_public_key, config, endpoint_id)?;
+    cache_set(canonical_server, root_public_key, config, &set);
+    Ok(verified)
+}
+
+fn cache_set(
+    authority: &str,
+    root: &[u8; 32],
+    config: &ClientConfig,
+    set: &api::descriptor_trust::EndpointDescriptorSetDocument,
+) {
+    if let Ok(bytes) = serde_json::to_vec(set) {
+        super::endpoint_cache::save(
+            &super::endpoint_cache::path(authority, root, config, "set"),
+            &bytes,
+        );
+    }
 }
 
 fn verify_live_set(

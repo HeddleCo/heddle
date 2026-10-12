@@ -874,7 +874,7 @@ pub async fn pull_context(
         .await
         .context("observe native context operations")?;
     Box::pin(pull_context_with_operations(
-        repo, client, repo_path, against, originals,
+        repo, client, repo_path, against, originals, None,
     ))
     .await
 }
@@ -886,6 +886,7 @@ pub async fn pull_context_with_operations(
     repo_path: &str,
     against: Option<StateId>,
     originals: Vec<SignedRecord>,
+    listed: Option<Vec<(Option<ContextTarget>, Annotation)>>,
 ) -> Result<usize> {
     let Some(head_id) = context_sync_state(repo, against)? else {
         return Ok(0);
@@ -945,11 +946,39 @@ pub async fn pull_context_with_operations(
     }
     save_mirror(&heddle_dir, &mirror)?;
 
-    let server = list_server_targets(client, repo_path, Some(head_id)).await?;
-    for (target, annotation) in server {
-        let result = pull_one_rpc(
+    let retained_history = listed.is_some();
+    let server = match listed {
+        Some(listed) => listed
+            .into_iter()
+            .map(|(target, annotation)| {
+                (
+                    target.unwrap_or_else(|| ContextTarget::state(head_id)),
+                    annotation,
+                )
+            })
+            .collect(),
+        None => list_server_targets(client, repo_path, Some(head_id)).await?,
+    };
+    // Only network reads overlap; mirror and attachment application stay serial.
+    use futures::{StreamExt, TryStreamExt};
+    let histories = futures::stream::iter(server.into_iter().map(|(target, mut annotation)| {
+        let mut client = client.clone();
+        async move {
+            if !retained_history {
+                let revisions =
+                    fetch_history(&mut client, repo_path, &annotation.annotation_id).await?;
+                if !revisions.is_empty() {
+                    annotation.revisions = revisions;
+                }
+            }
+            Ok::<_, anyhow::Error>((target, annotation))
+        }
+    }))
+    .buffered(8);
+    futures::pin_mut!(histories);
+    while let Some((target, annotation)) = histories.try_next().await? {
+        let result = pull_one_annotation(
             repo,
-            client,
             repo_path,
             &head_state,
             &target,
@@ -957,8 +986,7 @@ pub async fn pull_context_with_operations(
             self_local_attr.as_deref(),
             username.as_deref(),
             &mut mirror,
-        )
-        .await;
+        );
         save_mirror(&heddle_dir, &mirror)?;
         if result
             .with_context(|| format!("hosted context {} sync failed", annotation.annotation_id))?
@@ -976,35 +1004,6 @@ fn context_sync_state(repo: &Repository, against: Option<StateId>) -> Result<Opt
         Some(state) => Ok(Some(state)),
         None => repo.head().context("resolve repository head"),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn pull_one_rpc(
-    repo: &Repository,
-    client: &mut HostedClient,
-    repo_path: &str,
-    head_state: &State,
-    target: &ContextTarget,
-    server: &Annotation,
-    self_local_attr: Option<&str>,
-    username: Option<&str>,
-    mirror: &mut HostedContextMirror,
-) -> Result<bool> {
-    let mut annotation = server.clone();
-    let server_revs = fetch_history(client, repo_path, &server.annotation_id).await?;
-    if !server_revs.is_empty() {
-        annotation.revisions = server_revs;
-    }
-    pull_one_annotation(
-        repo,
-        repo_path,
-        head_state,
-        target,
-        &annotation,
-        self_local_attr,
-        username,
-        mirror,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1655,10 +1654,14 @@ mod tests {
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
 
         let (_temp, repo, annotation) = seed_local_context_annotation("retain this context");
-        let mut second = annotation.clone();
-        second.annotation_id = uuid::Uuid::now_v7().to_string();
-        second.revisions[0].revision_id = uuid::Uuid::now_v7().to_string();
-        second.revisions[0].content = "second context must not be fetched after failure".into();
+        let mut annotations = vec![annotation.clone()];
+        for index in 1..10 {
+            let mut next = annotation.clone();
+            next.annotation_id = uuid::Uuid::now_v7().to_string();
+            next.revisions[0].revision_id = uuid::Uuid::now_v7().to_string();
+            next.revisions[0].content = format!("context {index} stays intact on history failure");
+            annotations.push(next);
+        }
         let state_id = repo.head().expect("head").expect("source state");
         let state = repo
             .store()
@@ -1669,18 +1672,22 @@ mod tests {
             .set_context_blob(
                 None,
                 &ContextTarget::file("lib.rs").expect("target"),
-                &ContextBlob::new(vec![annotation.clone(), second.clone()]),
+                &ContextBlob::new(annotations.clone()),
             )
-            .expect("two contexts");
+            .expect("ten contexts");
         put_context_attachment(&repo, &state, Some(root)).expect("attachment");
-        let (client, server, fixture) = start_with_context(ContextFixture::default()).await;
+        let (client, server, fixture) = start_with_context(ContextFixture {
+            history_failure_barrier: Some(std::sync::Arc::new(tokio::sync::Barrier::new(8))),
+            ..Default::default()
+        })
+        .await;
         let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
         let mut client = client.with_warning_sink(warnings.clone());
         let published = push_context(&repo, &mut client, "acme/widgets", "main")
             .await
             .expect("publish original context");
         assert!(published.complete(), "{published:?}");
-        assert_eq!(published.accepted, 2);
+        assert_eq!(published.accepted, 10);
         fixture.history_requests.lock().expect("requests").clear();
         fixture
             .fail_history
@@ -1702,8 +1709,16 @@ mod tests {
             format!("{error:#}").contains("injected context history failure"),
             "{error:#}"
         );
-        assert_eq!(requests.len(), 1, "stop before the next history RPC");
-        assert!(requests[0] == annotation.annotation_id || requests[0] == second.annotation_id);
+        assert_eq!(
+            requests.len(),
+            8,
+            "overlap one bounded wave and stop before the ninth history RPC"
+        );
+        assert!(requests.iter().all(|id| {
+            annotations
+                .iter()
+                .any(|annotation| &annotation.annotation_id == id)
+        }));
         assert!(
             warnings.warnings().is_empty(),
             "failure must be returned, not skipped"

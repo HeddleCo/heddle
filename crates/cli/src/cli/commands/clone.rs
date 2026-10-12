@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
-#[cfg(feature = "client")]
-use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{ffi::CString, os::unix::ffi::OsStrExt};
 use std::{
@@ -1377,6 +1375,15 @@ fn checkout_clone_thread(
     track_name: &str,
     state_id: &objects::object::StateId,
 ) -> Result<()> {
+    materialize_clone_thread(repo, track_name, state_id)?;
+    publish_attached_clone_thread(repo, track_name, state_id)
+}
+
+fn materialize_clone_thread(
+    repo: &Repository,
+    track_name: &str,
+    state_id: &objects::object::StateId,
+) -> Result<()> {
     let state = repo
         .store()
         .get_state(state_id)?
@@ -1394,7 +1401,7 @@ fn checkout_clone_thread(
             }
         }
     }
-    publish_attached_clone_thread(repo, track_name, state_id)
+    Ok(())
 }
 
 fn publish_attached_clone_thread(
@@ -1760,60 +1767,76 @@ async fn clone_network_connected(
     // until source installation succeeds. Handles share one connection/cache.
     let mut discussion_client = client.clone();
     let mut context_client = client.clone();
-    let (source, discussion_operations, context_operations) = tokio::join!(
-        Box::pin(client.clone_pull_with_depth_and_materialization(
-            repo_path,
-            thread.as_deref(),
-            depth,
-            materialization,
-            |refs| {
-                if refs.refs.is_empty() {
-                    return Err(wire::ProtocolError::InvalidState(
-                        "server does not advertise clone refs".to_string(),
-                    ));
-                }
-                let mut intent = provisional_intent.clone();
-                intent.advertised_head = refs.head_thread.clone();
-                // An advertised-ref semantic refusal (for example an unknown
-                // requested thread) is not a resumable transport interruption:
-                // restore the original destination-cleanup contract until the
-                // validated intent has replaced the provisional one.
-                cleanup.arm();
-                let (_, track_name) = create_hosted_clone_intent_after_thread_select(
-                    local_path,
-                    intent,
-                    refs.refs
-                        .iter()
-                        .filter(|entry| entry.is_user_thread())
-                        .map(|entry| entry.name.as_str()),
+    // Poll setup first when several branches become ready together, so a
+    // collaboration failure wins over source work on a closing connection.
+    let ((discussion_snapshot, context_snapshot), (mut result, local_repo)) =
+        tokio::try_join!(biased;
+            Box::pin(async {
+                tokio::try_join!(
+                    async {
+                        discussion_client
+                            .list_discussions_with_operations(repo_path)
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .context("clone setup discussion sync failed; clone intent retained")
+                    },
+                    async {
+                        context_client
+                            .list_context_with_operations(repo_path)
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .context("clone setup context sync failed; clone intent retained")
+                    },
                 )
-                .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                // Failures after the durable intent are resumable and must remain on disk.
-                cleanup.disarm();
-                durability = Some(CloneDurabilityBatch::begin(local_path));
-                let repo = initialize_hosted_clone_repository(local_path, &refs.refs, &track_name)?;
-                selected_track = Some(track_name);
-                advertised = Some(refs.clone());
-                Ok(repo)
-            },
-        )),
-        Box::pin(discussion_client.list_discussion_operations(repo_path)),
-        Box::pin(context_client.list_context_operations(repo_path)),
-    );
-    let (mut result, local_repo) = source.map_err(|error| {
-        let mut error = anyhow::Error::from(error);
-        if let Err(discussions) = &discussion_operations {
-            error = error.context(format!(
-                "clone setup discussion sync failed; clone intent retained: {discussions}"
-            ));
-        }
-        if let Err(context) = &context_operations {
-            error = error.context(format!(
-                "clone setup context sync failed; clone intent retained: {context}"
-            ));
-        }
-        error
-    })?;
+            }),
+            Box::pin(async {
+                client
+                    .clone_pull_with_depth_and_materialization(
+                        repo_path,
+                        thread.as_deref(),
+                        depth,
+                        materialization,
+                        |refs| {
+                            if refs.refs.is_empty() {
+                                return Err(wire::ProtocolError::InvalidState(
+                                    "server does not advertise clone refs".to_string(),
+                                ));
+                            }
+                            let mut intent = provisional_intent.clone();
+                            intent.advertised_head = refs.head_thread.clone();
+                            // An advertised-ref semantic refusal (for example an unknown
+                            // requested thread) is not a resumable transport interruption:
+                            // restore the original destination-cleanup contract until the
+                            // validated intent has replaced the provisional one.
+                            cleanup.arm();
+                            let (_, track_name) = create_hosted_clone_intent_after_thread_select(
+                                local_path,
+                                intent,
+                                refs.refs
+                                    .iter()
+                                    .filter(|entry| entry.is_user_thread())
+                                    .map(|entry| entry.name.as_str()),
+                            )
+                            .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+                            // Failures after the durable intent are resumable and must remain on disk.
+                            cleanup.disarm();
+                            durability = Some(CloneDurabilityBatch::begin(local_path));
+                            let repo = initialize_hosted_clone_repository(
+                                local_path,
+                                &refs.refs,
+                                &track_name,
+                            )?;
+                            selected_track = Some(track_name);
+                            advertised = Some(refs.clone());
+                            Ok(repo)
+                        },
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
+            }),
+        )
+        .context("clone setup or source fetch failed")?;
+    let local_repo = std::sync::Arc::new(local_repo);
     let advertised = advertised.context("clone response is missing its refs")?;
     let remote_refs = advertised.refs;
     let track_name = selected_track.context("hosted clone did not select a thread")?;
@@ -1869,14 +1892,24 @@ async fn clone_network_connected(
         }
         configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
 
-        // Context needs the installed State; both views must finish before
-        // publishing the checkout or clearing recovery intent. Cloned handles
-        // share the connection, resolution cache, credentials and HTTP pool.
+        // Context and discussions write metadata; checkout writes the worktree.
+        // Join all three before the durability barrier and ref publication.
         let mut discussion_client = client.clone();
         let mut context_client = client.clone();
-        let (discussions, context) = tokio::join!(
+        let checkout_repo = local_repo.clone();
+        let checkout_track = track_name.clone();
+        let checkout = tokio::task::spawn_blocking(move || {
+            if lazy {
+                Ok(())
+            } else if git_overlay_clone {
+                materialize_hosted_git_overlay_checkout(&checkout_repo, &checkout_track)
+            } else {
+                materialize_clone_thread(&checkout_repo, &checkout_track, &final_state)
+            }
+        });
+        let (discussions, context, checkout) = tokio::join!(
             Box::pin(async {
-                let originals = discussion_operations?;
+                let (listed, originals) = discussion_snapshot;
                 hosted_client::client::discussion_sync::pull_discussions_with_operations(
                     &local_repo,
                     &mut discussion_client,
@@ -1884,20 +1917,23 @@ async fn clone_network_connected(
                     Some(final_state),
                     None,
                     originals,
+                    Some(listed),
                 )
                 .await
             }),
             Box::pin(async {
-                let originals = context_operations?;
+                let (originals, listed) = context_snapshot;
                 hosted_client::client::context_sync::pull_context_with_operations(
                     &local_repo,
                     &mut context_client,
                     repo_path,
                     Some(final_state),
                     originals,
+                    Some(listed),
                 )
                 .await
             }),
+            checkout,
         );
         let discussions = discussions.context(
             "post-install discussion sync failed; source installed; clone intent retained",
@@ -1911,6 +1947,10 @@ async fn clone_network_connected(
             (Err(error), _) | (_, Err(error)) => return Err(error),
             _ => {}
         }
+
+        checkout
+            .context("clone checkout worker failed")?
+            .context("failed to materialize hosted clone worktree")?;
 
         // Ordering invariant: the reachable object closure is hash-complete;
         // one whole-filesystem barrier commits all direct clone data; only
@@ -1935,16 +1975,15 @@ async fn clone_network_connected(
         if lazy {
             publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         } else if git_overlay_clone {
-            finish_hosted_git_overlay_checkout(&local_repo, &track_name)
-                .context("failed to finish hosted Git-overlay checkout")?;
+            publish_hosted_git_overlay_checkout(&local_repo, &track_name)
+                .context("failed to attach hosted Git-overlay checkout")?;
             configure_git_overlay_origin_tracking(
                 local_path,
                 &objects::name_encoding::git_name(&track_name),
             )?;
             publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         } else {
-            checkout_clone_thread(&local_repo, &track_name, &final_state)
-                .context("failed to materialize hosted clone worktree")?;
+            publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         }
         persist_hosted_clone_thread_identity(
             &local_repo,
@@ -2731,31 +2770,28 @@ fn persist_advertised_synthetic_refs(
 
 #[cfg(feature = "client")]
 fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result<()> {
+    materialize_hosted_git_overlay_checkout(repo, branch)?;
+    publish_hosted_git_overlay_checkout(repo, branch)
+}
+
+#[cfg(feature = "client")]
+fn materialize_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result<()> {
     Repository::ensure_git_overlay_local_excludes(repo.root())?;
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
-    let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
+    let reference = git_repo
+        .require_reference(&format!("refs/heads/{branch}"))
+        .map_err(anyhow::Error::msg)?;
+    let target = reference
+        .peeled_oid(&git_repo)
+        .map_err(anyhow::Error::msg)?
+        .with_context(|| format!("hosted Git-overlay clone missing refs/heads/{branch}"))?;
     let path_policy = sley_worktree::WorktreePathPolicy::new().reserve_root_name(".heddle");
-    let checkout = sley_worktree::checkout_branch_filtered_with_path_policy(
-        Some(repo.root()),
-        repo.root(),
-        git_repo.git_dir(),
-        git_repo.object_format(),
-        branch,
-        hosted_clone_reflog_committer(),
-        &config,
-        &path_policy,
-    )
-    .map_err(anyhow::Error::msg)?;
-    if checkout.oid.is_null() {
-        let branch_ref = format!("refs/heads/{branch}");
-        anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
-    }
     sley_worktree::reset_index_and_worktree_to_commit_with_path_policy(
         Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),
-        &checkout.oid,
+        &target,
         &path_policy,
     )
     .map_err(anyhow::Error::msg)?;
@@ -2763,12 +2799,9 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
 }
 
 #[cfg(feature = "client")]
-fn hosted_clone_reflog_committer() -> Vec<u8> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format!("Heddle <heddle@local> {seconds} +0000").into_bytes()
+fn publish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result<()> {
+    let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
+    write_git_head_branch(git_repo.git_dir(), branch)
 }
 
 #[cfg(feature = "client")]

@@ -184,10 +184,11 @@ impl WorktreeWriteOp {
         }
     }
 
-    pub(crate) fn index_kind(&self) -> crate::worktree_index::IndexEntryKind {
+    pub(crate) fn index_kind(&self) -> Option<crate::worktree_index::IndexEntryKind> {
         match self {
-            Self::Blob { .. } | Self::Gitlink { .. } => crate::worktree_index::IndexEntryKind::File,
-            Self::Symlink { .. } => crate::worktree_index::IndexEntryKind::Symlink,
+            Self::Blob { .. } => Some(crate::worktree_index::IndexEntryKind::File),
+            Self::Symlink { .. } => Some(crate::worktree_index::IndexEntryKind::Symlink),
+            Self::Gitlink { .. } => None,
         }
     }
 }
@@ -695,7 +696,9 @@ impl Repository {
             .iter()
             .any(|write| matches!(write, WorktreeWriteOp::Blob { .. }))
         {
-            let probe = tempfile::tempdir_in(root)?;
+            let scratch = self.heddle_dir().join("tmp");
+            fs::create_dir_all(&scratch)?;
+            let probe = tempfile::tempdir_in(scratch)?;
             if !objects::fs_clone::filesystem_supports_reflink(probe.path()) {
                 context.disable_reflinks();
             }
@@ -786,6 +789,18 @@ impl Repository {
                 hash,
                 executable,
             } => {
+                if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+                    fs::remove_dir(path).map_err(|error| {
+                        if is_directory_not_empty(&error) {
+                            HeddleError::Config(format!(
+                                "cannot replace populated directory {} with a file; move its contents before retrying",
+                                path.display()
+                            ))
+                        } else {
+                            HeddleError::Io(enrich_fs_error(path, "removing", error))
+                        }
+                    })?;
+                }
                 self.materialize_blob(path, hash, *executable, context)?;
             }
             WorktreeWriteOp::Symlink { path, hash } => {
@@ -831,11 +846,11 @@ impl Repository {
         }
 
         let metadata = fs::symlink_metadata(write.path())?;
-        let Some(hash) = write.hash() else {
+        let (Some(hash), Some(kind)) = (write.hash(), write.index_kind()) else {
             return Ok(None);
         };
-        let entry = build_cached_entry(hash, &metadata, write.executable(), write.index_kind())
-            .ok_or_else(|| {
+        let entry =
+            build_cached_entry(hash, &metadata, write.executable(), kind).ok_or_else(|| {
                 HeddleError::Config(format!(
                     "seed materialized worktree entry for {}",
                     write.path().display()

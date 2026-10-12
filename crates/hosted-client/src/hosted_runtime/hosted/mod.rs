@@ -14,6 +14,7 @@ mod content;
 mod context;
 mod credential;
 pub(crate) mod descriptor_trust;
+mod endpoint_cache;
 mod error;
 mod evidence;
 pub(crate) mod helpers;
@@ -269,12 +270,20 @@ impl HostedClient {
                 // (Remote::discover). Tests that inject a raw Iroh connection
                 // still discover here. Netd routes prove Weft's authenticated
                 // key from Ensure; their Iroh peer is only the local adapter.
+                if let Some((descriptor, config)) = self.connection.verified_descriptor()
+                    && let Some(description) = endpoint_cache::load_description(descriptor, config)
+                {
+                    return Ok::<_, anyhow::Error>(description);
+                }
                 let remote = thread_api::Remote::discover(
                     transport()?,
                     self.connection.discover_endpoint_key(),
                     api::heddle::api::v1alpha2::EndpointKind::Weft,
                 )
                 .await?;
+                if let Some((descriptor, config)) = self.connection.verified_descriptor() {
+                    endpoint_cache::save_description(descriptor, config, &remote.description);
+                }
                 Ok::<_, anyhow::Error>(remote.description)
             })
             .await?
@@ -371,17 +380,32 @@ impl HostedClient {
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
+        let endpoint =
+            weft_client::HostedClient::bind_endpoint(config.tls_ca_certificate_pem.as_deref())
+                .await
+                .map_err(HostedError::transport)?;
+        Self::connect_weft_on_endpoint(descriptor, config, endpoint).await
+    }
+
+    async fn connect_weft_on_endpoint(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+        endpoint: Endpoint,
+    ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         let credential = context.native_credentials()?;
-        let weft = weft_client::HostedClient::connect_endpoint(
+        let weft = weft_client::HostedClient::connect_bound_endpoint(
+            endpoint,
             descriptor.endpoint_addr()?,
             credential,
             context.progress_timeout(),
+            endpoint_cache::load_description(descriptor, config),
             config.tls_ca_certificate_pem.as_deref(),
         )
         .await
         .map_err(HostedError::transport)?;
         let description = weft.remote.description.clone();
+        endpoint_cache::save_description(descriptor, config, &description);
         let (_remote, endpoint, connection) = weft.into_parts();
         Ok(Self {
             connection: HostedConnection::from_discovered(

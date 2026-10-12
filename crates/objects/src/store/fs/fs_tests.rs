@@ -2149,3 +2149,56 @@ fn streaming_install_timing_fixture() {
     assert_eq!(inventory.ids().count(), count);
     assert_eq!(loose_state_count(&store), 0);
 }
+
+/// A filesystem-operation budget, independent of scheduling and wall time.
+/// Trace the isolated fixture rather than the test runner's parallel activity.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires strace; run explicitly with clone performance evidence"]
+fn streaming_install_syscall_budget() {
+    let trace = tempfile::NamedTempFile::new().expect("syscall summary");
+    let output = std::process::Command::new("strace")
+        .args(["-f", "-c", "-o"])
+        .arg(trace.path())
+        .arg(std::env::current_exe().expect("test executable"))
+        .args([
+            "store::fs::fs_tests::streaming_install_timing_fixture",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("HEDDLE_INSTALL_BENCH_STATES", "2048")
+        .output()
+        .expect("strace must be installed for this Linux performance contract");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = std::fs::read_to_string(trace.path()).expect("syscall counts");
+    let calls = |name: &str| {
+        summary
+            .lines()
+            .find_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                (fields.last() == Some(&name))
+                    .then(|| fields[3].parse::<usize>().expect("call count"))
+            })
+            .expect("counted syscall")
+    };
+    let directories = calls("getdents64");
+    let total = calls("total");
+    println!(
+        "streaming install syscall budget: states=2048 getdents64={directories} total={total}"
+    );
+    // The pack baseline is scanned per installation, never per State. A
+    // single loose-presence stat per State is allowed; repeated rescans are not.
+    assert!(
+        directories <= 64,
+        "directory-read budget exceeded: {summary}"
+    );
+    assert!(
+        total <= 2 * 2048 + 10_000,
+        "syscall budget exceeded: {summary}"
+    );
+}

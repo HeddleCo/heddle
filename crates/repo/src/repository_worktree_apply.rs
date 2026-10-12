@@ -756,10 +756,9 @@ impl Repository {
                 .unwrap_or(write.path());
             let key = cache_key(rel_path);
             index.remove_path_and_descendants(&key);
-            if let Some(hash) = write.hash()
+            if let (Some(hash), Some(kind)) = (write.hash(), write.index_kind())
                 && let Ok(metadata) = fs::symlink_metadata(write.path())
-                && let Some(cached) =
-                    build_cached_entry(hash, &metadata, write.executable(), write.index_kind())
+                && let Some(cached) = build_cached_entry(hash, &metadata, write.executable(), kind)
             {
                 index.insert(key, cached);
             }
