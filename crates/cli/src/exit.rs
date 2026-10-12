@@ -105,6 +105,7 @@ impl HeddleExitCode {
             | "repository_not_found"
             | "hosted_tls_trust"
             | "auth_login_invite_required"
+            | "auth_invite_home_already_enrolled"
             // The server has no default web host for the pairing approval
             // page; the caller must name one with `--host`.
             | "auth_login_web_host_required" => Some(Self::Config),
@@ -587,6 +588,7 @@ mod tests {
             ("no_hosted_upstream", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
             ("hosted_tls_trust", HeddleExitCode::Config),
+            ("auth_invite_home_already_enrolled", HeddleExitCode::Config),
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),

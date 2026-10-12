@@ -7,6 +7,7 @@ use api::heddle::api::v1alpha2::{
 };
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
+use objects::{HeddleError, RecoveryDetails};
 use prost::Message;
 
 use super::{
@@ -106,6 +107,7 @@ async fn provision(
     invitation_secret: Vec<u8>,
     operation_id: String,
 ) -> Result<AuthLoginOutcome> {
+    check_invite_home_compatibility(server)?;
     let minted = mint_agent_credential()?;
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
@@ -169,34 +171,92 @@ async fn provision(
     }) {
         bail!("account provisioning did not apply the requested operation");
     }
-    let output = finish_invite_create(server, minted, response, account_email)?;
-    if matches!(&output, AuthLoginOutcome::AgentAccountCreated(_))
-        && let Some(state) = identity_state::load()?
-        && let Some(root) = super::owner_root::load_recorded_root(&state)?
+    let enrollment = prepare_invite_create(server, minted, response, account_email)?;
+    if let Some(state) = &enrollment.claim_state
+        && let Some(root) = super::owner_root::load_recorded_root(state)?
     {
-        let credential = config::credentials::get_server_credential(server)?
-            .context("provisioned agent credential missing")?;
         pin_claimable_owner_root(
             server,
-            &credential.token,
-            credential
-                .private_key_pem
-                .as_deref()
-                .context("provisioned agent signer missing")?,
-            &credential.subject,
+            &enrollment.minted.token,
+            &enrollment.minted.private_key_pem,
+            &enrollment.minted.subject,
             root,
         )
         .await?;
     }
-    Ok(output)
+    enrollment.store(server)
 }
 
-fn finish_invite_create(
+/// Invite provisioning cannot know the account until the server consumes the
+/// invite. A home with an account pin must reuse/renew that enrollment instead;
+/// a different server or account needs a separate home. Check before even
+/// creating a node identity, and never guess the server of an unscoped pin.
+fn check_invite_home_compatibility(server: &str) -> Result<()> {
+    let home = repo::identity::heddle_home_dir();
+    let pinned = if let Some(state) = identity_state::load()? {
+        Some(format!("account {} on {}", state.owner_id, state.server))
+    } else if home.join("state/device-rpc/authority.bin").try_exists()? {
+        let authority = repo::device_authority::load(&home, chrono::Utc::now().timestamp())?;
+        let owner = authority.owner.owner.context("pinned account missing")?;
+        Some(format!(
+            "account {} (server not recorded in authority.bin)",
+            owner.id
+        ))
+    } else {
+        repo::identity::load_device(&repo::identity::device_identity_path())?
+            .map(|device| format!("a device enrolled on {}", device.server))
+    };
+    let Some(pinned) = pinned else {
+        return Ok(());
+    };
+    Err(HeddleError::recovery(RecoveryDetails::safety_refusal(
+        "auth_invite_home_already_enrolled",
+        format!("Cannot enroll a new account on {server}: this HEDDLE_HOME already pins {pinned}"),
+        "Use a separate HEDDLE_HOME for the new account, or log in to the existing account without --invite.",
+        "invite provisioning would replace this home's admitted account identity",
+        "consuming the invite before checking the account could fork local authority",
+        "no hosted request was sent, the invite is unclaimed, and local identity and credentials are unchanged",
+    )).into())
+}
+
+struct InviteEnrollment {
+    minted: AgentRoot,
+    claim_state: Option<ClaimState>,
+    ownership: Option<v2::OwnerState>,
+    outcome: AuthLoginOutcome,
+}
+
+impl InviteEnrollment {
+    /// Publish only after server admission. Keep the claim state as the final
+    /// write so failed authority/credential persistence cannot replace it.
+    fn store(self, server: &str) -> Result<AuthLoginOutcome> {
+        if let Some(ownership) = self.ownership {
+            repo::device_authority::publish(
+                &repo::identity::heddle_home_dir(),
+                &repo::device_authority::DeviceAuthority {
+                    owner: ownership,
+                    mint_roots: Vec::new(),
+                    revoked_ids: Vec::new(),
+                    revoked_mint_roots: Vec::new(),
+                    revoked_publishers: Vec::new(),
+                },
+                chrono::Utc::now().timestamp(),
+            )?;
+        }
+        store_agent_credential(server, self.minted)?;
+        if let Some(state) = self.claim_state {
+            identity_state::store(&state)?;
+        }
+        Ok(self.outcome)
+    }
+}
+
+fn prepare_invite_create(
     server: &str,
     mut minted: AgentRoot,
     response: ProvisionAccountResponse,
     account_email: Option<String>,
-) -> Result<AuthLoginOutcome> {
+) -> Result<InviteEnrollment> {
     let principal = response
         .principal
         .context("provisioning response has no principal")?;
@@ -224,10 +284,14 @@ fn finish_invite_create(
         verify_provisioned_owner(ownership, owner_id)?;
     }
     if tier != v2::RootingTier::AgentRooted {
-        store_agent_credential(server, minted)?;
-        return Ok(AuthLoginOutcome::Authenticated {
-            subject,
-            credential_saved: true,
+        return Ok(InviteEnrollment {
+            minted,
+            claim_state: None,
+            ownership: None,
+            outcome: AuthLoginOutcome::Authenticated {
+                subject,
+                credential_saved: true,
+            },
         });
     }
     let account_id = principal.account_id;
@@ -252,47 +316,63 @@ fn finish_invite_create(
     claim_state.record_account_email(account_email);
     let signer = Ed25519Signer::from_pem(&minted.private_key_pem)
         .context("loading the agent proof key for the claimable owner root")?;
-    if let Some(ownership) = response.ownership {
-        let signed = ownership.root.context("provisioned owner root missing")?;
+    let now = chrono::Utc::now().timestamp();
+    let ownership = if let Some(ownership) = response.ownership {
+        let signed = ownership
+            .root
+            .as_ref()
+            .context("provisioned owner root missing")?;
         if !ownership.accepted_transitions.is_empty()
             || !signed
                 .root
                 .as_ref()
                 .is_some_and(|root| root.claimable_deferred_human)
-            || repo::seq0_authority_public_key(&signed)? != signer.public_key()
+            || repo::seq0_authority_public_key(signed)? != signer.public_key()
         {
             bail!("unclaimed account ownership is not the proved agent's claimable root");
         }
         if let Some(previous) = super::owner_root::load_recorded_root(&claim_state)?
-            && previous != signed
+            && previous != *signed
         {
             bail!("provisioned owner root differs from the locally recorded original");
         }
         use prost::Message;
         claim_state.record_claimable_owner_root(signer.public_key(), &signed.encode_to_vec());
+        ownership
     } else {
-        super::owner_root::mint_and_record_claimable_root(
-            &mut claim_state,
-            &signer,
-            chrono::Utc::now().timestamp(),
-        )?;
-    }
-    identity_state::store(&claim_state)?;
-    store_agent_credential(server, minted)?;
-    Ok(AuthLoginOutcome::AgentAccountCreated(AgentAccountCreated {
-        account_id: account_id.clone(),
-        pet_name,
-        subject,
-        authenticated: true,
-        credential_saved: true,
-        next: super::auth::HumanPromotionDirective {
-            kind: "human_promotion_required",
-            summary: "Account is active and usable now; a human must complete the claim ceremony to bind ownership.",
-            account_id,
-            command: "heddle claim",
-            promotion_uri: None,
-        },
-    }))
+        let signed =
+            super::owner_root::mint_and_record_claimable_root(&mut claim_state, &signer, now)?;
+        let binding =
+            repo::sign_agent_claim_binding(&signer, &signed, &uuid::Uuid::now_v7().to_string())?;
+        v2::OwnerState {
+            owner: Some(v2::PrincipalRef {
+                id: account_id.clone(),
+            }),
+            root: Some(signed),
+            version: binding.root_state_hash.clone(),
+            binding: Some(binding),
+            ..Default::default()
+        }
+    };
+    Ok(InviteEnrollment {
+        minted,
+        claim_state: Some(claim_state),
+        ownership: Some(ownership),
+        outcome: AuthLoginOutcome::AgentAccountCreated(AgentAccountCreated {
+            account_id: account_id.clone(),
+            pet_name,
+            subject,
+            authenticated: true,
+            credential_saved: true,
+            next: super::auth::HumanPromotionDirective {
+                kind: "human_promotion_required",
+                summary: "Account is active and usable now; a human must complete the claim ceremony to bind ownership.",
+                account_id,
+                command: "heddle claim",
+                promotion_uri: None,
+            },
+        }),
+    })
 }
 
 fn verify_provisioned_owner(observed: &v2::OwnerState, account: uuid::Uuid) -> Result<()> {
@@ -369,7 +449,8 @@ pub(crate) fn finish_invite_create_from_response(
     server: &str,
     response: ProvisionAccountResponse,
 ) -> Result<AgentAccountCreated> {
-    match finish_invite_create(server, mint_agent_credential()?, response, None)? {
+    // This fixture stands in for server admission before local persistence.
+    match prepare_invite_create(server, mint_agent_credential()?, response, None)?.store(server)? {
         AuthLoginOutcome::AgentAccountCreated(created) => Ok(created),
         _ => bail!("fixture expected unclaimed account"),
     }
@@ -439,18 +520,27 @@ struct AgentRoot {
 }
 
 fn store_agent_credential(server: &str, minted: AgentRoot) -> Result<()> {
-    config::credentials::store_server_credential(
-        server,
-        config::credentials::ServerCredential {
-            mint_root_attachment: minted.mint_root_attachment,
-            token: minted.token,
-            subject: minted.subject,
-            device_id: None,
-            credential_id: minted.credential_id,
-            private_key_pem: Some(minted.private_key_pem),
-            expires_at: Some(minted.expires_at.to_rfc3339()),
-        },
-    )
+    let home = repo::identity::heddle_home_dir();
+    if home.join("state/device-rpc/authority.bin").try_exists()? {
+        let now = chrono::Utc::now().timestamp();
+        let authority = repo::device_authority::load(&home, now)?;
+        authority.verify_mint_root(&minted.public_key, now)?;
+        // Enrollment and renewal use the same admitted node key, including
+        // after logout removed its device signing alias.
+        repo::identity::link_device_key(&minted.public_key, &minted.private_key_pem, server)
+            .context("record enrolled agent signing identity")?;
+    }
+    let credential = config::credentials::ServerCredential {
+        mint_root_attachment: minted.mint_root_attachment,
+        token: minted.token,
+        subject: minted.subject,
+        device_id: None,
+        credential_id: minted.credential_id,
+        private_key_pem: Some(minted.private_key_pem),
+        expires_at: Some(minted.expires_at.to_rfc3339()),
+    };
+    super::source_author::retain_stored(server, &credential)?;
+    config::credentials::store_server_credential(server, credential)
 }
 
 fn mint_agent_credential_for_server(server: &str) -> Result<AgentRoot> {

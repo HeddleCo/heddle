@@ -40,6 +40,12 @@ const PUBLICATION_METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct PublicationCapture {
+    pub provision_requests: Vec<v2::ProvisionAccountRequest>,
+    pub claimed_invites: Vec<Vec<u8>>,
+    pub invite_account: Option<uuid::Uuid>,
+    pub bootstrap_home: Option<std::path::PathBuf>,
+    pub reject_bootstrap: bool,
+    pub account_owner: Option<v2::OwnerState>,
     pub import_jobs: Vec<ImportJob>,
     pub cancel_requests: Vec<v2::CancelOperationRequest>,
     pub import_requests: Vec<v2::ImportSourceRequest>,
@@ -166,6 +172,7 @@ fn published_ancestry(
 
 #[derive(Clone)]
 struct Fixture {
+    invite: bool,
     spool: uuid::Uuid,
     thread_name: String,
     thread_id: Vec<u8>,
@@ -174,6 +181,41 @@ struct Fixture {
     witness_set: Arc<Mutex<api::heddle::api::common::SignedHostedWitnessSetV1>>,
     _https: Arc<https::TestHttpsServer>,
     captured: Arc<Mutex<PublicationCapture>>,
+}
+
+impl Fixture {
+    fn owner(&self) -> v2::OwnerState {
+        if !self.invite {
+            return self.owner.clone();
+        }
+        let enrolled = self
+            .captured
+            .lock()
+            .expect("enrolled account")
+            .account_owner
+            .clone();
+        let Some(mut owner) = enrolled else {
+            return self.owner.clone();
+        };
+        let mut keyring = self
+            .owner
+            .resource_keyring
+            .clone()
+            .expect("fixture keyring");
+        keyring.owner_root = owner.root.clone();
+        keyring.accepted_state_hash = owner.version.clone();
+        keyring.pin.as_mut().expect("owner pin").expected_owner_id = owner
+            .root
+            .as_ref()
+            .expect("root")
+            .root
+            .as_ref()
+            .expect("root body")
+            .owner_id
+            .clone();
+        owner.resource_keyring = Some(keyring);
+        owner
+    }
 }
 
 pub fn enroll_device(spool: uuid::Uuid, home: &std::path::Path) {
@@ -234,7 +276,8 @@ pub async fn start(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<PublicationCapture>>) {
-    let (client, task, captured, _, _, _) = start_inner(spool, thread_name, thread_id, false).await;
+    let (client, task, captured, _, _, _) =
+        start_inner(spool, thread_name, thread_id, false, false).await;
     (client, task, captured)
 }
 
@@ -250,7 +293,22 @@ pub async fn start_routed(
     iroh::SecretKey,
     Arc<https::TestHttpsServer>,
 ) {
-    start_inner(spool, thread_name, thread_id, true).await
+    start_inner(spool, thread_name, thread_id, true, false).await
+}
+
+pub async fn start_routed_invite(
+    spool: uuid::Uuid,
+    thread_name: impl Into<String>,
+    thread_id: [u8; 32],
+) -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<PublicationCapture>>,
+    iroh::EndpointAddr,
+    iroh::SecretKey,
+    Arc<https::TestHttpsServer>,
+) {
+    start_inner(spool, thread_name, thread_id, true, true).await
 }
 
 async fn start_inner(
@@ -258,6 +316,7 @@ async fn start_inner(
     thread_name: impl Into<String>,
     thread_id: [u8; 32],
     routed: bool,
+    invite: bool,
 ) -> (
     HostedClient,
     JoinHandle<()>,
@@ -316,6 +375,7 @@ async fn start_inner(
         }
     }));
     let fixture = Fixture {
+        invite,
         spool,
         thread_name: thread_name.into(),
         thread_id: thread_id.to_vec(),
@@ -593,7 +653,7 @@ async fn serve_call(
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => match method.as_str() {
             "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" => {
-                let response = v2::DescribeEndpointResponse {
+                let mut response = v2::DescribeEndpointResponse {
                     endpoint: Some(v2::EndpointRef {
                         kind: v2::EndpointKind::Weft as i32,
                         public_key: server_key,
@@ -635,7 +695,154 @@ async fn serve_call(
                     ],
                     ..Default::default()
                 };
+                if fixture.invite {
+                    response.implemented_methods.extend([
+                        "/heddle.api.v1alpha2.IdentityService/ResolveSignupInvitation".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ProvisionAccount".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership".into(),
+                    ]);
+                }
                 write_unary(&mut send, &response).await;
+            }
+            "/heddle.api.v1alpha2.IdentityService/ResolveSignupInvitation" => {
+                write_unary(
+                    &mut send,
+                    &v2::SignupInvitationResolution {
+                        status: v2::signup_invitation_resolution::Status::Available as i32,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.IdentityService/ProvisionAccount" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::ProvisionAccountRequest::decode(
+                    decode_request_frame(&request)
+                        .expect("provision frame")
+                        .body,
+                )
+                .expect("provision request");
+                let signer = Ed25519Signer::from_seed(&[71; 32]).expect("fixture client key");
+                assert_eq!(body.agent_public_key, signer.public_key());
+                let account = {
+                    let mut captured = fixture.captured.lock().expect("provision requests");
+                    captured
+                        .claimed_invites
+                        .push(body.invitation_secret.clone());
+                    captured.provision_requests.push(body.clone());
+                    captured.invite_account.unwrap_or(uuid::Uuid::from_u128(2))
+                };
+                write_unary(
+                    &mut send,
+                    &v2::ProvisionAccountResponse {
+                        receipt: Some(v2::MutationReceipt {
+                            client_operation_id: body.client_operation_id,
+                            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                                v2::Applied::default(),
+                            )),
+                            ..Default::default()
+                        }),
+                        principal: Some(v2::PrincipalRecord {
+                            id: account.to_string(),
+                            account_id: account.to_string(),
+                            display_name: "invite-test".into(),
+                            rooting_tier: v2::RootingTier::AgentRooted as i32,
+                            ..Default::default()
+                        }),
+                        credential: Some(v2::CredentialResult {
+                            outcome: Some(v2::credential_result::Outcome::ClientOwned(
+                                v2::ClientOwnedCredential {
+                                    r#ref: Some(v2::RecordRef {
+                                        id: "invite-credential".into(),
+                                        spool: None,
+                                    }),
+                                    subject: format!(
+                                        "agent-key:{}",
+                                        hex::encode(signer.public_key())
+                                    ),
+                                    proof_public_key: body.agent_public_key,
+                                    kind: v2::CredentialKind::Agent as i32,
+                                },
+                            )),
+                            session: Some(v2::SessionRecord {
+                                r#ref: Some(v2::RecordRef {
+                                    id: "invite-session".into(),
+                                    spool: None,
+                                }),
+                                expires_at: Some(prost_types::Timestamp {
+                                    seconds: (chrono::Utc::now() + chrono::Duration::days(30))
+                                        .timestamp(),
+                                    nanos: 0,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::BootstrapOwnershipRequest::decode(
+                    decode_request_frame(&request)
+                        .expect("bootstrap frame")
+                        .body,
+                )
+                .expect("bootstrap request");
+                let reject = {
+                    let captured = fixture.captured.lock().expect("bootstrap admission");
+                    if let Some(home) = &captured.bootstrap_home {
+                        for path in [
+                            "state/device-rpc/authority.bin",
+                            "agent-claim.toml",
+                            "credentials.toml",
+                        ] {
+                            assert!(
+                                !home.join(path).exists(),
+                                "{path} was written before server admission"
+                            );
+                        }
+                    }
+                    captured.reject_bootstrap
+                };
+                if reject {
+                    write_unary(&mut send, &v2::MutationResponse::default()).await;
+                    return;
+                }
+                let owner = v2::OwnerState {
+                    owner: body.owner,
+                    root: body.root,
+                    version: body
+                        .binding
+                        .as_ref()
+                        .expect("client binding")
+                        .root_state_hash
+                        .clone(),
+                    binding: body.binding,
+                    ..Default::default()
+                };
+                repo::verify_account_owner_observation(&owner, chrono::Utc::now().timestamp())
+                    .expect("client-signed ownership");
+                fixture
+                    .captured
+                    .lock()
+                    .expect("admit ownership")
+                    .account_owner = Some(owner);
+                write_unary(
+                    &mut send,
+                    &v2::MutationResponse {
+                        receipt: Some(v2::MutationReceipt {
+                            client_operation_id: body.client_operation_id,
+                            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                                v2::Applied::default(),
+                            )),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await;
             }
             "/heddle.api.v1alpha2.WorkspaceService/ResolveResources" => {
                 read_request_body(&mut recv, &mut request).await;
@@ -810,7 +1017,10 @@ async fn serve_call(
                             subject: "clone-test".into(),
                             proof_public_key: credential.proof_public_key,
                             acting_agent_id: credential.agent_id.unwrap_or_default(),
-                            thread_control_authority: witnessing::envelope(&fixture.owner, &token),
+                            thread_control_authority: witnessing::envelope(
+                                &fixture.owner(),
+                                &token,
+                            ),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -989,7 +1199,7 @@ async fn serve_call(
                 "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" => {
                     for frame in snapshot_frames(server_key) {
                         let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
-                            .then(|| v2::ownership_event::Payload::Owner(fixture.owner.clone()));
+                            .then(|| v2::ownership_event::Payload::Owner(fixture.owner()));
                         write_message(
                             &mut send,
                             &v2::OwnershipEvent {
@@ -1050,7 +1260,7 @@ async fn serve_call(
                                     kind: v2::CredentialKind::Device as i32,
                                     subject: "clone-test".into(),
                                     thread_control_authority: witnessing::envelope(
-                                        &fixture.owner,
+                                        &fixture.owner(),
                                         &token,
                                     ),
                                     ..Default::default()
@@ -1942,7 +2152,7 @@ async fn serve_publication(
                 );
                 let proof = witnessing::bundle(
                     &fixture.owner_genesis,
-                    &fixture.owner,
+                    &fixture.owner(),
                     accepted.thread_genesis.as_ref().expect("client original"),
                     &accepted.operations,
                     &set,
@@ -1985,6 +2195,8 @@ async fn serve_publication(
                         index_data: accepted.index_data.clone(),
                         ancestry: published_ancestry(&accepted.operations),
                     });
+                    accepted.account_owner = capture.account_owner.clone();
+                    accepted.provision_requests = capture.provision_requests.clone();
                     *capture = accepted;
                 }
                 write_message(
@@ -2116,8 +2328,8 @@ async fn serve_fetch(
                 }),
                 thread: Some(reference),
                 current: Some(revision.clone()),
-                owner_genesis: Some(fixture.owner_genesis),
-                ownership: Some(fixture.owner),
+                owner_genesis: Some(fixture.owner_genesis.clone()),
+                ownership: Some(fixture.owner()),
                 thread_genesis: Some(genesis),
                 packs: packs.clone(),
                 checkpoint: Some(checkpoint.clone()),
