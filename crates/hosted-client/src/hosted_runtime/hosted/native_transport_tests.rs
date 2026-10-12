@@ -11,6 +11,108 @@ use prost::Message;
 use super::{CallContextFactory, HostedClient};
 
 #[tokio::test]
+async fn mandatory_feature_call_has_no_protocol_field_11_on_the_wire() {
+    #[derive(prost::Message)]
+    struct RemovedProtocolField {
+        #[prost(message, optional, tag = "11")]
+        protocol: Option<api::heddle::api::common::ProtocolCompatibility>,
+    }
+
+    let _guard = crate::test_process_env::shared().await;
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .expect("server address")
+        .bind()
+        .await
+        .expect("server");
+    let address = server.addr();
+    let key = server.id().as_bytes().to_vec();
+    let method = "/heddle.api.v1alpha2.IntegrationService/PrepareImportJob";
+    assert!(
+        !api::method_descriptor(method)
+            .expect("method")
+            .mandatory_features
+            .is_empty()
+    );
+    let task = tokio::spawn(async move {
+        let connection = server
+            .accept()
+            .await
+            .expect("client")
+            .await
+            .expect("connection");
+        let (mut send, mut recv) = connection.accept_bi().await.expect("endpoint negotiation");
+        let bytes = recv.read_to_end(65536).await.expect("request");
+        assert_eq!(
+            decode_request_frame(&bytes).expect("frame").method,
+            "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
+        );
+        let description = v2::DescribeEndpointResponse {
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: key,
+            }),
+            supported_packages: vec!["heddle.api.v1alpha2".into()],
+            implemented_methods: vec![method.into()],
+            protocol: Some(thread_api::hybrid::protocol()),
+            ..Default::default()
+        };
+        send.write_all(&encode_success_response(&description.encode_to_vec()).expect("frame"))
+            .await
+            .expect("description");
+        send.finish().expect("FIN");
+        let (mut send, mut recv) = connection.accept_bi().await.expect("gated call");
+        let bytes = recv.read_to_end(65536).await.expect("call bytes");
+        assert_eq!(decode_request_frame(&bytes).expect("frame").method, method);
+        let method_len = usize::from(u16::from_be_bytes(bytes[..2].try_into().expect("length")));
+        let context_len = u32::from_be_bytes(bytes[2..6].try_into().expect("length")) as usize;
+        // Inspect the original context bytes: decoding and re-encoding through
+        // the current CallContext would silently discard an unknown field 11.
+        let context = &bytes[6 + method_len..6 + method_len + context_len];
+        assert!(
+            RemovedProtocolField::decode(context)
+                .expect("context wire")
+                .protocol
+                .is_none()
+        );
+        send.write_all(
+            &encode_success_response(&v2::PrepareImportJobResponse::default().encode_to_vec())
+                .expect("frame"),
+        )
+        .await
+        .expect("response");
+        send.finish().expect("FIN");
+        connection.closed().await;
+        server.close().await;
+    });
+    let local = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .expect("client address")
+        .bind()
+        .await
+        .expect("client");
+    let client =
+        HostedClient::connect_addr_with_context(local, address, CallContextFactory::default())
+            .await
+            .expect("hosted client");
+    let _: v2::PrepareImportJobResponse = client
+        .call_unary(
+            method,
+            &v2::PrepareImportJobRequest {
+                client_operation_id: "wire-field-11".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("negotiated gated call");
+    client.close().await;
+    task.await.expect("server finished");
+}
+
+#[tokio::test]
 async fn native_client_accepts_source_frames_above_legacy_control_limit() {
     let _process_env_guard = crate::test_process_env::shared().await;
     let server = Endpoint::builder(presets::Minimal)

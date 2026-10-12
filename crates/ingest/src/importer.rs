@@ -2016,29 +2016,25 @@ mod tests {
         assert!(stats.skipped_refs.is_empty(), "{stats:?}");
     }
 
-    /// heddle#2019: the bound matches heddle-api's `MAX_IMPORT_SOURCE_REFS`
-    /// (4096); one more native ref is refused. Writing 4096 local refs costs
-    /// about five fsyncs each, so this checks the gate, not ref emission.
+    /// Real Git discovery crosses the former 4096-ref ceiling. The shared
+    /// object-model tests exercise the full API safety ceiling without creating
+    /// a million loose Git ref files.
     #[test]
-    fn conversion_admits_the_maximum_native_refs_and_refuses_one_more() {
+    fn conversion_admits_more_than_4096_native_refs() {
         let max = objects::object::thread_replication::git_import_graph::MAX_IMPORT_REFS;
-        assert_eq!(max, 4096);
+        let native = 4097;
+        assert!(native + 1 < max);
         let gitdir = TempDir::new().expect("Git temp dir");
-        seed_native_refs(gitdir.path(), max);
+        seed_native_refs(gitdir.path(), native);
         let git = GitSource::open(gitdir.path()).expect("Git source");
         let classified = classify_native_refs(&git)
-            .unwrap_or_else(|error| panic!("{max} native refs must convert: {error}"));
-        assert_eq!(classified.native_ref_count as usize, max);
+            .unwrap_or_else(|error| panic!("{native} native refs must convert: {error}"));
+        assert_eq!(classified.native_ref_count as usize, native);
         assert!(!classified.partial);
-        git_output(gitdir.path(), &["tag", "one-past-the-bound", "main"], None);
+        git_output(gitdir.path(), &["tag", "another-native-ref", "main"], None);
         let git = GitSource::open(gitdir.path()).expect("Git source");
-        let error = classify_native_refs(&git).expect_err("one ref past the bound");
-        assert!(
-            error
-                .to_string()
-                .contains("Git import has more than 4096 native refs"),
-            "{error}"
-        );
+        let classified = classify_native_refs(&git).expect("more refs remain admissible");
+        assert_eq!(classified.native_ref_count as usize, native + 1);
     }
 
     #[test]
