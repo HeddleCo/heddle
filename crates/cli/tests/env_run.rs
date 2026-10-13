@@ -200,8 +200,8 @@ fn capture_refuses_reserved_env_file() {
     std::fs::create_dir_all(&repo).expect("repo");
     Repository::init_default(&repo).expect("init");
     std::fs::write(repo.join(".env"), b"LEAK=1").expect("write");
-    let output = run_heddle(&repo, &home, &["capture", "-m", "should fail"]);
-    assert!(!output.status.success());
+    let output = run_heddle(&repo, &home, &["--verbose", "capture", "-m", "should fail"]);
+    assert_eq!(output.status.code(), Some(65));
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -209,6 +209,11 @@ fn capture_refuses_reserved_env_file() {
     );
     assert!(
         combined.contains("reserved") || combined.contains(".env"),
+        "{combined}"
+    );
+    assert!(combined.contains("HeddleCo/heddle#2089"), "{combined}");
+    assert!(
+        combined.contains("heddle env run --profile <name> -- <cmd>"),
         "{combined}"
     );
 }
