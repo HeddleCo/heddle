@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.1](https://github.com/HeddleCo/heddle/compare/heddle-ci-config-v0.31.0...heddle-ci-config-v0.31.1) - 2026-10-13
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.28.14](https://github.com/HeddleCo/heddle/compare/heddle-ci-config-v0.28.13...heddle-ci-config-v0.28.14) - 2026-10-08
 
 ### Other
