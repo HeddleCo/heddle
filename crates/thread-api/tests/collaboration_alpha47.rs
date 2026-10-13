@@ -12,6 +12,12 @@ fn fixtures() -> Value {
 }
 #[test]
 fn shared_signed_records_and_typed_mentions_preserve_api_bytes() {
+    let peer = api::heddle::api::common::ProtocolCompatibility {
+        mandatory_features: vec![
+            api::heddle::api::common::MandatoryProtocolFeature::CollaborationMentionsV1 as i32,
+        ],
+        ..Default::default()
+    };
     for (name, vector) in fixtures()["vectors"].as_object().expect("vectors") {
         let bytes = hex::decode(vector["record_wire_hex"].as_str().expect("wire")).expect("hex");
         let signed = SignedRecord::decode(bytes.as_slice()).expect("signed record");
@@ -34,7 +40,8 @@ fn shared_signed_records_and_typed_mentions_preserve_api_bytes() {
                 "{name}"
             );
             assert_eq!(
-                api::v2::collaboration::canonical_mention(&entity).expect("api encode"),
+                api::v2::collaboration::canonical_mention(&entity, Some(&peer))
+                    .expect("api encode"),
                 rmp_serde::to_vec_named(&native).expect("encode")
             );
         }

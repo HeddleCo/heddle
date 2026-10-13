@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Adopt heddle-api alpha.48 endpoint negotiation for collaboration mentions and discussion tags. Check before signing and transport, preserve authored reply mentions, and keep plain discussion/context commands usable without the new features. The daemon keeps incomplete feature contracts unadvertised and refuses unsupported command forms instead of admitting partial semantics.
+
 ## [0.31.2](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.31.1...heddle-hosted-client-v0.31.2) - 2026-10-13
 
 ### Fixed

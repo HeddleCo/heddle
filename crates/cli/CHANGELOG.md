@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Use the typed hosted protocol refusal (exit 76) when a collaboration send requires an unadvertised endpoint feature. `discuss` continues to write locally; push checks the destination endpoint.
+
 ### Added
 
 - `heddle promote` lifts a personal hosted spool to the shared root.

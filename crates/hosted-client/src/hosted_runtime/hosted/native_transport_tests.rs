@@ -422,3 +422,265 @@ async fn live_observation_keeps_long_lived_semantics() {
     client.close().await;
     server.abort();
 }
+
+/// Endpoint advertisement must reach the typed client's delivery checks. The
+/// transport counter proves missing support refuses before a write RPC.
+#[tokio::test]
+async fn collaboration_features_are_negotiated_before_transport() {
+    use super::helpers::native_client_error;
+    use api::heddle::api::common::{MandatoryProtocolFeature as Feature, ProtocolCompatibility};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use thread_api::rpc;
+    use wire::ProtocolError;
+
+    let _guard = crate::test_process_env::shared().await;
+    for features in [
+        None,
+        Some(vec![]),
+        Some(vec![2]),
+        Some(vec![3]),
+        Some(vec![2, 3, 4]),
+    ] {
+        let supported_features = features.clone();
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("server address")
+            .bind()
+            .await
+            .expect("server");
+        let address = server.addr();
+        let key = server.id().as_bytes().to_vec();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let task = tokio::spawn(async move {
+            let connection = server
+                .accept()
+                .await
+                .expect("client")
+                .await
+                .expect("connection");
+            while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                let bytes = recv.read_to_end(65536).await.expect("request");
+                let request = decode_request_frame(&bytes).expect("frame");
+                let response = if request.method
+                    == "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
+                {
+                    v2::DescribeEndpointResponse {
+                        endpoint: Some(v2::EndpointRef {
+                            kind: v2::EndpointKind::Weft as i32,
+                            public_key: key.clone(),
+                        }),
+                        supported_packages: vec!["heddle.api.v1alpha2".into()],
+                        implemented_methods: [
+                            "OpenDiscussion",
+                            "AppendTurn",
+                            "PutContext",
+                            "ResolveDiscussion",
+                            "EditDiscussionTags",
+                        ]
+                        .map(|method| format!("/heddle.api.v1alpha2.CollaborationService/{method}"))
+                        .to_vec(),
+                        protocol: features.clone().map(|mandatory_features| {
+                            ProtocolCompatibility {
+                                mandatory_features,
+                                protocol_version: 2,
+                            }
+                        }),
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                } else {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    v2::MutationResponse::default().encode_to_vec()
+                };
+                send.write_all(&encode_success_response(&response).expect("response frame"))
+                    .await
+                    .expect("response");
+                send.finish().expect("FIN");
+            }
+            server.close().await;
+        });
+        let local = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("client address")
+            .bind()
+            .await
+            .expect("client");
+        let client =
+            HostedClient::connect_addr_with_context(local, address, CallContextFactory::default())
+                .await
+                .expect("hosted client");
+        let remote = client.native().await.expect("negotiated endpoint");
+        let principal = v2::EntityRef {
+            entity: Some(v2::entity_ref::Entity::Principal(v2::PrincipalRef {
+                id: uuid::Uuid::from_u128(1).to_string(),
+            })),
+        };
+        let source = v2::EntityRef {
+            entity: Some(v2::entity_ref::Entity::Source(v2::SourceMention {
+                revision: Some(v2::RevisionRef {
+                    spool: Some(v2::SpoolRef {
+                        id: uuid::Uuid::from_u128(2).to_string(),
+                    }),
+                    revision: Some(v2::revision_ref::Revision::GitCommitOid("a".repeat(40))),
+                }),
+                path: "src/lib.rs".into(),
+                ..Default::default()
+            })),
+        };
+        let tags = vec![thread_api::collaboration::annotation_tag_ref(
+            &objects::object::AnnotationTag::from("decision"),
+        )];
+        let check = |result: Result<v2::MutationResponse, _>, feature: Feature, before: usize| {
+            if supported_features
+                .as_ref()
+                .is_some_and(|f| f.contains(&(feature as i32)))
+            {
+                result.expect("advertised variant reaches transport");
+                assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+            } else {
+                let error = native_client_error(result.expect_err("unsupported variant"));
+                assert!(
+                    matches!(&error, ProtocolError::CapabilityNotSupported(_)),
+                    "{error:?}"
+                );
+                assert!(error.to_string().contains(feature.as_str_name()), "{error}");
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    before,
+                    "refusal must precede transport"
+                );
+            }
+        };
+        for mention in [principal.clone(), source] {
+            let before = calls.load(Ordering::SeqCst);
+            check(
+                remote
+                    .api
+                    .call::<rpc::CollaborationServiceOpenDiscussion>(&v2::OpenDiscussionRequest {
+                        client_operation_id: "feature-negotiation".into(),
+                        mentions: vec![mention],
+                        ..Default::default()
+                    })
+                    .await,
+                Feature::CollaborationMentionsV1,
+                before,
+            );
+        }
+        let before = calls.load(Ordering::SeqCst);
+        check(
+            remote
+                .api
+                .call::<rpc::CollaborationServiceAppendTurn>(&v2::AppendDiscussionRequest {
+                    client_operation_id: "feature-negotiation".into(),
+                    mentions: vec![principal.clone()],
+                    ..Default::default()
+                })
+                .await,
+            Feature::CollaborationMentionsV1,
+            before,
+        );
+        let context = v2::ContextDraft {
+            mentions: vec![principal],
+            ..Default::default()
+        };
+        let before = calls.load(Ordering::SeqCst);
+        check(
+            remote
+                .api
+                .call::<rpc::CollaborationServicePutContext>(&v2::PutContextRequest {
+                    client_operation_id: "feature-negotiation".into(),
+                    context: Some(context.clone()),
+                    ..Default::default()
+                })
+                .await,
+            Feature::CollaborationMentionsV1,
+            before,
+        );
+        let before = calls.load(Ordering::SeqCst);
+        check(
+            remote
+                .api
+                .call::<rpc::CollaborationServiceResolveDiscussion>(&v2::ResolveDiscussionRequest {
+                    client_operation_id: "feature-negotiation".into(),
+                    resolution: Some(v2::resolve_discussion_request::Resolution::ExtractContext(
+                        context,
+                    )),
+                    ..Default::default()
+                })
+                .await,
+            Feature::CollaborationMentionsV1,
+            before,
+        );
+        let before = calls.load(Ordering::SeqCst);
+        check(
+            remote
+                .api
+                .call::<rpc::CollaborationServiceOpenDiscussion>(&v2::OpenDiscussionRequest {
+                    client_operation_id: "feature-negotiation".into(),
+                    tags: tags.clone(),
+                    ..Default::default()
+                })
+                .await,
+            Feature::DiscussionTagsV1,
+            before,
+        );
+        for replacement in [tags, vec![]] {
+            let before = calls.load(Ordering::SeqCst);
+            check(
+                remote
+                    .api
+                    .call::<rpc::CollaborationServiceEditDiscussionTags>(
+                        &v2::EditDiscussionTagsRequest {
+                            client_operation_id: "feature-negotiation".into(),
+                            tags: replacement,
+                            ..Default::default()
+                        },
+                    )
+                    .await,
+                Feature::DiscussionTagsV1,
+                before,
+            );
+        }
+        let before = calls.load(Ordering::SeqCst);
+        remote
+            .api
+            .call::<rpc::CollaborationServiceOpenDiscussion>(&v2::OpenDiscussionRequest {
+                client_operation_id: "plain-discussion".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("plain opening needs no feature");
+        remote
+            .api
+            .call::<rpc::CollaborationServiceAppendTurn>(&v2::AppendDiscussionRequest {
+                client_operation_id: "plain-discussion".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("plain reply needs no feature");
+        remote
+            .api
+            .call::<rpc::CollaborationServicePutContext>(&v2::PutContextRequest {
+                client_operation_id: "feature-negotiation".into(),
+                context: Some(v2::ContextDraft {
+                    tags: vec![thread_api::collaboration::annotation_tag_ref(
+                        &objects::object::AnnotationTag::from("existing"),
+                    )],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("existing context tags need no feature");
+        assert_eq!(calls.load(Ordering::SeqCst), before + 3);
+        client.close().await;
+        task.await.expect("server finished");
+    }
+}

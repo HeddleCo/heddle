@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin heddle-api alpha.48 for the unreleased 0.31.2; ordinary verification behavior is unchanged.
+
 ## [0.31.1](https://github.com/HeddleCo/heddle/compare/heddle-biscuit-verifier-v0.31.0...heddle-biscuit-verifier-v0.31.1) - 2026-10-13
 
 ### Other

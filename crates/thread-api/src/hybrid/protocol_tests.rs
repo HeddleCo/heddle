@@ -184,9 +184,23 @@ fn discovery_retains_peer_support_and_rejects_old_peers_before_the_gated_call() 
         (
             Some(ProtocolCompatibility {
                 protocol_version: 2,
-                mandatory_features: vec![1, 2],
+                mandatory_features: vec![1, 99],
             }),
             false,
+        ),
+        (
+            Some(ProtocolCompatibility {
+                protocol_version: 2,
+                mandatory_features: vec![2, 3, 4],
+            }),
+            false,
+        ),
+        (
+            Some(ProtocolCompatibility {
+                protocol_version: 2,
+                mandatory_features: vec![1, 2, 3, 4],
+            }),
+            true,
         ),
         (Some(super::protocol()), true),
     ] {

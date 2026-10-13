@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+use api::heddle::api::common::ProtocolCompatibility;
 use api::heddle::api::v1alpha2::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
@@ -27,7 +28,9 @@ use thread_api::rpc;
 use wire::ProtocolError;
 
 use super::{
-    HostedClient, helpers::native_client_error, operation_id::ClientOperationId,
+    HostedClient,
+    helpers::{native_client_error, request_feature_error},
+    operation_id::ClientOperationId,
     user::require_applied_receipt,
 };
 use crate::client::replication_report::CommandIds;
@@ -89,6 +92,53 @@ pub struct HostedDiscussion {
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
+}
+
+/// Enforce endpoint semantics before signing an authored command. Decoders and
+/// retained originals do not consult the connection's feature advertisement.
+fn require_discussion_features(
+    authored: &CollaborationOperationEnvelope,
+    peer: Option<&ProtocolCompatibility>,
+) -> Result<(), ProtocolError> {
+    use api::v2::collaboration::{
+        canonical_discussion_open_tags, canonical_discussion_tag_edit, validate_mentions,
+    };
+    let mentions: Vec<_> = authored
+        .metadata
+        .iter()
+        .flat_map(|metadata| &metadata.mentions)
+        .map(thread_api::collaboration::mention_ref)
+        .collect();
+    validate_mentions(&mentions, peer).map_err(request_feature_error)?;
+    match &authored.body {
+        Body::Open { tags, .. } => {
+            let tags: Vec<_> = tags
+                .iter()
+                .map(thread_api::collaboration::annotation_tag_ref)
+                .collect();
+            canonical_discussion_open_tags(&tags, peer).map_err(request_feature_error)?;
+        }
+        Body::EditTags { tags } => {
+            let tags: Vec<_> = tags
+                .iter()
+                .map(thread_api::collaboration::annotation_tag_ref)
+                .collect();
+            canonical_discussion_tag_edit(&tags, peer).map_err(request_feature_error)?;
+        }
+        Body::Resolve {
+            resolution: CollaborationResolution::IntoContext { context },
+        } => {
+            let mentions: Vec<_> = context
+                .metadata
+                .mentions
+                .iter()
+                .map(thread_api::collaboration::mention_ref)
+                .collect();
+            validate_mentions(&mentions, peer).map_err(request_feature_error)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Once observations must make progress through Complete on every page. Live
@@ -950,6 +1000,8 @@ impl HostedClient {
         default_thread_ref: &str,
         authored: &CollaborationOperationEnvelope,
     ) -> Result<contract::SignedRecord, ProtocolError> {
+        let remote = self.native().await.map_err(native_error)?;
+        require_discussion_features(authored, remote.description.protocol.as_ref())?;
         let Body::Open {
             blocking,
             title,
@@ -1384,6 +1436,8 @@ impl HostedClient {
         retained: &[contract::SignedRecord],
         body: Body,
     ) -> Result<(contract::SignedRecord, HostedDiscussion), PrepareDiscussionError> {
+        let remote = self.native().await.map_err(native_error)?;
+        require_discussion_features(authored, remote.description.protocol.as_ref())?;
         let discussion = parse_discussion_id(discussion_id)?;
         if discussion != authored.discussion_id {
             return Err(ProtocolError::InvalidState(
@@ -1438,7 +1492,11 @@ impl HostedClient {
             metadata: CollaborationMetadata {
                 scope,
                 actor,
-                mentions: vec![],
+                mentions: authored
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.mentions.clone())
+                    .unwrap_or_default(),
             },
             author: authored.author.clone(),
             occurred_at_ms: authored.occurred_at_ms,
@@ -1474,13 +1532,18 @@ impl HostedClient {
             spool: Some(spool.clone()),
             id: record.discussion_id.to_string(),
         };
+        let mentions = metadata
+            .mentions
+            .iter()
+            .map(thread_api::collaboration::mention_ref)
+            .collect();
         let request = AppendDiscussionRequest {
             client_operation_id: operation_id.to_wire(),
             discussion: Some(reference.clone()),
             body: turn.body.clone(),
             signed_operation: Some(signed),
             causal_parents: parent_bytes(&parents),
-            mentions: Vec::new(),
+            mentions,
         };
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
@@ -1769,6 +1832,120 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn authored_feature_variants_require_peer_but_local_decode_does_not() {
+        use api::heddle::api::common::MandatoryProtocolFeature as Feature;
+        use objects::object::CollaborationMention;
+        let scope = proof_scope();
+        let discussion = DiscussionRecordId::generate();
+        let opening = Body::Open {
+            tags: vec![],
+            blocking: false,
+            title: "feature test".into(),
+            anchor: Anchor::Repository,
+            visibility: VisibilityTier::Internal,
+            turn: DiscussionTurnV1::new("opening").expect("turn"),
+            thread_ref: None,
+        };
+        let sign = |body, mentions, parents: &[contract::SignedRecord]| {
+            let mut metadata = proof_metadata(scope.clone());
+            metadata.mentions = mentions;
+            thread_api::collaboration::Command {
+                discussion,
+                operation_id: CollaborationIdempotencyKey::new(Uuid::new_v4().to_string())
+                    .expect("key"),
+                metadata,
+                author: Attribution::human(Principal::new("author", "")),
+                occurred_at_ms: 1,
+                body,
+            }
+            .sign(parents, &proof_signer())
+            .expect("local signing needs no endpoint")
+        };
+        let root = sign(opening.clone(), vec![], &[]);
+        let plain = decoded_discussion(&root).expect("plain decode");
+        require_discussion_features(&plain, None).expect("plain discussion needs no peer");
+        let mut tagged = opening.clone();
+        if let Body::Open { tags, .. } = &mut tagged {
+            tags.push("decision".into());
+        }
+        let peer = ProtocolCompatibility {
+            mandatory_features: vec![
+                Feature::CollaborationMentionsV1 as i32,
+                Feature::DiscussionTagsV1 as i32,
+            ],
+            ..Default::default()
+        };
+        for (body, mentions, feature, parents) in [
+            (
+                opening,
+                vec![CollaborationMention::Principal {
+                    principal_id: Uuid::from_u128(1),
+                }],
+                Feature::CollaborationMentionsV1,
+                vec![],
+            ),
+            (
+                Body::AppendTurn {
+                    turn: DiscussionTurnV1::new("source reply").expect("turn"),
+                },
+                vec![CollaborationMention::Source {
+                    target: Box::new(objects::object::AnnotationSourceReference {
+                        scope: scope.clone(),
+                        source: objects::object::CollaborationSourceAnchor {
+                            revision: objects::object::CollaborationRevision::GitCommit {
+                                oid: "a".repeat(40),
+                            },
+                            path: "src/lib.rs".into(),
+                            symbol_id: String::new(),
+                            start_line: None,
+                            end_line: None,
+                            target: None,
+                        },
+                    }),
+                }],
+                Feature::CollaborationMentionsV1,
+                vec![root.clone()],
+            ),
+            (tagged, vec![], Feature::DiscussionTagsV1, vec![]),
+            (
+                Body::EditTags {
+                    tags: vec!["decision".into()],
+                },
+                vec![],
+                Feature::DiscussionTagsV1,
+                vec![root.clone()],
+            ),
+            (
+                Body::EditTags { tags: vec![] },
+                vec![],
+                Feature::DiscussionTagsV1,
+                vec![root],
+            ),
+        ] {
+            let signed = sign(body, mentions, &parents);
+            let authored =
+                decoded_discussion(&signed).expect("received signed records need no peer");
+            for peer in [None, Some(&ProtocolCompatibility::default())] {
+                let error =
+                    require_discussion_features(&authored, peer).expect_err("unsupported variant");
+                assert!(
+                    matches!(&error, ProtocolError::CapabilityNotSupported(_)),
+                    "{error:?}"
+                );
+                assert!(error.to_string().contains(feature.as_str_name()));
+            }
+            require_discussion_features(&authored, Some(&peer)).expect("advertised variant");
+            assert_eq!(
+                decoded_discussion(&signed)
+                    .expect("decode unchanged")
+                    .encode()
+                    .expect("encode"),
+                authored.encode().expect("original bytes")
+            );
+        }
+    }
 
     #[test]
     fn discussion_id_accepts_disc_prefix_and_raw_uuidv7() {

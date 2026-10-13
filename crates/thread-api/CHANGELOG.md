@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Adopt heddle-api alpha.48. Decode principal and pinned source mentions with native structural validation independently of endpoint negotiation; retain the shared alpha.47 signed-vector parity.
+
 ## [0.31.2](https://github.com/HeddleCo/heddle/compare/heddle-thread-api-v0.31.1...heddle-thread-api-v0.31.2) - 2026-10-13
 
 ### Fixed
