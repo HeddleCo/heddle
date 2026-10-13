@@ -14,7 +14,7 @@ fn main() -> Result<(), Error> {
     if check {
         let stale = stale_files(&repo_root, &rendered)?;
         if stale.is_empty() {
-            println!("llms.txt / llms-full.txt are up to date");
+            println!("llms.txt / llms-full.txt / heddleignore.md are up to date");
             return Ok(());
         }
         return Err(Error::Stale(stale));
@@ -22,7 +22,7 @@ fn main() -> Result<(), Error> {
 
     heddle_docsgen::write(&repo_root, &rendered)?;
     println!(
-        "wrote {INDEX_PATH} ({} bytes) and {FULL_PATH} ({} bytes) from {} docs",
+        "wrote {INDEX_PATH} ({} bytes), {FULL_PATH} ({} bytes), and docs/heddleignore.md from {} docs",
         rendered.index.len(),
         rendered.full.len(),
         rendered.source_count
@@ -37,7 +37,7 @@ fn parse_args() -> Result<Option<bool>, Error> {
             "--check" => check = true,
             "-h" | "--help" => {
                 println!(
-                    "Generate docs/llms.txt and docs/llms-full.txt from docs/*.md.\n\nUsage: heddle-docsgen [--check]\n\nOptions:\n    --check  Exit non-zero if the committed files are stale\n    -h, --help  Print help"
+                    "Generate docs/llms.txt and docs/llms-full.txt from docs/*.md, and docs/heddleignore.md from crates/cli-contract/heddleignore.md.\n\nUsage: heddle-docsgen [--check]\n\nOptions:\n    --check  Exit non-zero if the committed files are stale\n    -h, --help  Print help"
                 );
                 return Ok(None);
             }

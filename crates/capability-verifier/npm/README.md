@@ -1,9 +1,9 @@
 # `@heddleco/capability-verifier-wasm`
 
 Production browser bindings for `heddleco-capability-verifier`. All proof
-verification runs in Rust. This revision builds version **0.28.11**, using
-`heddle-api` **0.31.0-alpha.39**. Tapestry should pin
-`@heddleco/capability-verifier-wasm@0.28.11` exactly when that artifact is
+verification runs in Rust. This revision builds version **0.31.1**, using
+`heddle-api` **0.31.0-alpha.47**. Tapestry should pin
+`@heddleco/capability-verifier-wasm@0.31.1` exactly when that artifact is
 published. If the next Heddle release bumps the workspace version, pin that
 exact release version instead: CI requires npm, Cargo and the validated tag
 to agree. This PR does not publish a package.
@@ -19,7 +19,7 @@ const lineage = verifyResourceKeyring(keyringBytes, ownerStateBytes, nowSeconds,
 const policy = verifySignedPolicyChain(policyRecords, keyringBytes, ownerStateBytes, nowSeconds, ttlSeconds);
 ```
 
-Protobuf inputs are `Uint8Array` containing the matching alpha.39 message
+Protobuf inputs are `Uint8Array` containing the matching alpha.47 message
 bytes, with canonical protobuf encoding. Unknown fields, repeated-field
 aliases, wrong widths and oversized evidence fail closed. There is no TS
 verification implementation. Encode with the matching `@heddleco/api` schema

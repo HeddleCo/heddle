@@ -114,6 +114,9 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
                     "principal and agent references require an explicit mention contract",
                 ));
             }
+            Entity::Source(_) => {
+                return Err(Error::Protocol("source mentions are not supported locally"));
+            }
         },
     )
 }
