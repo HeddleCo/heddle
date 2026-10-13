@@ -422,7 +422,7 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         return Err(capture_refusal(
             "reserved_materialization_path",
             format!("Refusing to capture reserved path `{path}`"),
-            "Inject secrets with `heddle env run --profile <name> -- <cmd>` instead of writing `.env` files.",
+            "Personal encrypted `.env` sync is planned (HeddleCo/heddle#2089). For now, inject secrets with `heddle env run --profile <name> -- <cmd>`.",
             format!("`{path}` is a reserved confidential-runtime materialization path"),
             "capture would ingest reserved plaintext into Source History",
             "repository state, refs, metadata, and worktree files were left unchanged",

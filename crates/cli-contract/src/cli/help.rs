@@ -1126,6 +1126,7 @@ for a lesser audience, including when a private ancestor object is missing.\n\
 This is not a way to keep one secret file beside a public tip:\n\
   - Literal `.env` / `.env.local` / `config/.env` are reserved. Capture\n\
     exits 65. Do not work around that with another env-shaped path.\n\
+    Personal encrypted `.env` sync is planned (HeddleCo/heddle#2089).\n\
   - Runtime secrets that must never enter Source History: `heddle env`.\n\
   - Path-level hide of a blob already in history: `heddle redact`.\n\
     Redaction is cooperative render-hide; visibility is serve-withhold.\n\
