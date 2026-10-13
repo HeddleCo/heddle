@@ -2243,6 +2243,7 @@ fn hostile_discussion(fixture: &Fixture) -> api::heddle::api::v1alpha2::SignedRe
         )),
         occurred_at_ms: 1,
         body: objects::object::CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title: "unrelated".into(),
             anchor: objects::object::CollaborationAnchor::Repository,

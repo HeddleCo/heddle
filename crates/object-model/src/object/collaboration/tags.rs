@@ -126,8 +126,11 @@ impl AnnotationTag {
             }
         }
     }
-    fn source(&self) -> Option<&AnnotationSourceReference> {
+    pub(super) fn source(&self) -> Option<&AnnotationSourceReference> {
         match self {
+            Self::Entity {
+                target: CollaborationMention::Source { target },
+            } => Some(target),
             Self::Source { target }
             | Self::Symbol {
                 target: Some(target),

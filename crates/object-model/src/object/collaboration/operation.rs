@@ -114,9 +114,14 @@ pub enum CollaborationOperationBodyV1 {
         visibility: VisibilityTier,
         turn: DiscussionTurnV1,
         thread_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<super::AnnotationTag>,
     },
     AppendTurn {
         turn: DiscussionTurnV1,
+    },
+    EditTags {
+        tags: Vec<super::AnnotationTag>,
     },
     RebindAnchor {
         anchor: CollaborationAnchor,
@@ -150,6 +155,7 @@ impl CollaborationOperationBodyV1 {
         match self {
             Self::Open { .. } => "open",
             Self::AppendTurn { .. } => "append_turn",
+            Self::EditTags { .. } => "edit_tags",
             Self::RebindAnchor { .. } => "rebind_anchor",
             Self::Resolve { .. } => "resolve",
             Self::Reopen { .. } => "reopen",
@@ -165,6 +171,7 @@ impl CollaborationOperationBodyV1 {
                 anchor,
                 turn,
                 thread_ref,
+                tags,
                 ..
             } => {
                 require_text(title, "discussion title")?;
@@ -172,9 +179,11 @@ impl CollaborationOperationBodyV1 {
                 if let Some(thread_ref) = thread_ref {
                     require_text(thread_ref, "discussion thread ref")?;
                 }
+                super::validate_annotation_tags(tags)?;
                 turn.validate()
             }
             Self::AppendTurn { turn } => turn.validate(),
+            Self::EditTags { tags } => super::validate_annotation_tags(tags),
             Self::RebindAnchor { anchor, .. } => validate_anchor(anchor),
             Self::Resolve { resolution } => validate_resolution(resolution),
             Self::Reopen { reason } => require_text(reason, "reopen reason"),

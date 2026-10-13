@@ -31,94 +31,121 @@ fn endpoint(value: Option<&EndpointRef>) -> Result<[u8; 32], Error> {
 }
 pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
     use entity_ref::Entity;
-    Ok(
-        match value
-            .entity
-            .as_ref()
-            .ok_or(Error::Protocol("empty mention"))?
-        {
-            Entity::Spool(r) => Mention::Spool {
-                spool: spool(Some(r))?,
-            },
-            Entity::Thread(r) => Mention::Thread {
-                spool: spool(r.spool.as_ref())?,
-                thread: ContentHash::from_bytes(key(&r
-                    .id
-                    .as_ref()
-                    .ok_or(Error::Protocol("Thread mention requires ID"))?
-                    .value)?),
-            },
-            Entity::Checkout(r) => Mention::Checkout {
-                spool: spool(r.spool.as_ref())?,
-                device: endpoint(r.device.as_ref())?,
-                id: r.id.clone(),
-            },
-            Entity::Revision(r) => match r
-                .revision
-                .as_ref()
-                .ok_or(Error::Protocol("revision mention requires exact revision"))?
-            {
-                revision_ref::Revision::State(id) => Mention::State {
-                    spool: spool(r.spool.as_ref())?,
-                    state: StateId::from_bytes(key(&id.value)?),
-                },
-                revision_ref::Revision::GitCommitOid(oid) => Mention::GitCommit {
-                    spool: spool(r.spool.as_ref())?,
-                    oid: oid.clone(),
-                },
-            },
-            Entity::Device(r) => Mention::Device {
-                key: endpoint(Some(r))?,
-            },
-            Entity::Discussion(r) => record(r, Kind::Discussion)?,
-            Entity::Context(r) => record(r, Kind::Context)?,
-            Entity::Operation(r) => record(r, Kind::Operation)?,
-            Entity::Run(r) => record(r, Kind::Run)?,
-            Entity::Policy(r) => record(r, Kind::Policy)?,
-            Entity::Analysis(r) => record(r, Kind::Analysis)?,
-            Entity::Invitation(r) => record(r, Kind::Invitation)?,
-            Entity::Grant(r) => record(r, Kind::Grant)?,
-            Entity::DiscussionTurn(r) => record(r, Kind::DiscussionTurn)?,
-            Entity::Review(r) => record(r, Kind::Review)?,
-            Entity::Notification(r) => record(r, Kind::Notification)?,
-            Entity::AttentionItem(r) => record(r, Kind::AttentionItem)?,
-            Entity::Member(r) => record(r, Kind::Member)?,
-            Entity::ApprovalGroup(r) => record(r, Kind::ApprovalGroup)?,
-            Entity::Session(r) => record(r, Kind::Session)?,
-            Entity::SignupInvitation(r) => record(r, Kind::SignupInvitation)?,
-            Entity::TimelineEvent(r) => record(r, Kind::TimelineEvent)?,
-            Entity::Artifact(r) => record(r, Kind::Artifact)?,
-            Entity::Mount(r) => record(r, Kind::Mount)?,
-            Entity::SupportAccess(r) => record(r, Kind::SupportAccess)?,
-            Entity::DeviceRecord(r) => record(r, Kind::DeviceRecord)?,
-            Entity::Delegation(r) => record(r, Kind::Delegation)?,
-            Entity::Recovery(r) => record(r, Kind::Recovery)?,
-            Entity::OwnerTransition(r) => record(r, Kind::OwnerTransition)?,
-            Entity::Billing(r) => record(r, Kind::Billing)?,
-            Entity::Evidence(r) => record(r, Kind::Evidence)?,
-            Entity::CheckAcknowledgement(r) => record(r, Kind::CheckAcknowledgement)?,
-            Entity::ProviderConnection(r) => record(r, Kind::ProviderConnection)?,
-            Entity::RemoteLink(r) => record(r, Kind::RemoteLink)?,
-            Entity::Bookmark(_) => {
-                return Err(Error::Protocol(
-                    "bookmarks are account-private; mention their Spool or Thread instead",
-                ));
-            }
-            Entity::Passkey(_) => {
-                return Err(Error::Protocol(
-                    "passkeys are account-private credentials and cannot be mentioned",
-                ));
-            }
-            Entity::Principal(_) | Entity::Agent(_) => {
-                return Err(Error::Protocol(
-                    "principal and agent references require an explicit mention contract",
-                ));
-            }
-            Entity::Source(_) => {
-                return Err(Error::Protocol("source mentions are not supported locally"));
-            }
+    let result = match value
+        .entity
+        .as_ref()
+        .ok_or(Error::Protocol("empty mention"))?
+    {
+        Entity::Spool(r) => Mention::Spool {
+            spool: spool(Some(r))?,
         },
-    )
+        Entity::Thread(r) => Mention::Thread {
+            spool: spool(r.spool.as_ref())?,
+            thread: ContentHash::from_bytes(key(&r
+                .id
+                .as_ref()
+                .ok_or(Error::Protocol("Thread mention requires ID"))?
+                .value)?),
+        },
+        Entity::Checkout(r) => Mention::Checkout {
+            spool: spool(r.spool.as_ref())?,
+            device: endpoint(r.device.as_ref())?,
+            id: r.id.clone(),
+        },
+        Entity::Revision(r) => match r
+            .revision
+            .as_ref()
+            .ok_or(Error::Protocol("revision mention requires exact revision"))?
+        {
+            revision_ref::Revision::State(id) => Mention::State {
+                spool: spool(r.spool.as_ref())?,
+                state: StateId::from_bytes(key(&id.value)?),
+            },
+            revision_ref::Revision::GitCommitOid(oid) => Mention::GitCommit {
+                spool: spool(r.spool.as_ref())?,
+                oid: oid.clone(),
+            },
+        },
+        Entity::Device(r) => Mention::Device {
+            key: endpoint(Some(r))?,
+        },
+        Entity::Discussion(r) => record(r, Kind::Discussion)?,
+        Entity::Context(r) => record(r, Kind::Context)?,
+        Entity::Operation(r) => record(r, Kind::Operation)?,
+        Entity::Run(r) => record(r, Kind::Run)?,
+        Entity::Policy(r) => record(r, Kind::Policy)?,
+        Entity::Analysis(r) => record(r, Kind::Analysis)?,
+        Entity::Invitation(r) => record(r, Kind::Invitation)?,
+        Entity::Grant(r) => record(r, Kind::Grant)?,
+        Entity::DiscussionTurn(r) => record(r, Kind::DiscussionTurn)?,
+        Entity::Review(r) => record(r, Kind::Review)?,
+        Entity::Notification(r) => record(r, Kind::Notification)?,
+        Entity::AttentionItem(r) => record(r, Kind::AttentionItem)?,
+        Entity::Member(r) => record(r, Kind::Member)?,
+        Entity::ApprovalGroup(r) => record(r, Kind::ApprovalGroup)?,
+        Entity::Session(r) => record(r, Kind::Session)?,
+        Entity::SignupInvitation(r) => record(r, Kind::SignupInvitation)?,
+        Entity::TimelineEvent(r) => record(r, Kind::TimelineEvent)?,
+        Entity::Artifact(r) => record(r, Kind::Artifact)?,
+        Entity::Mount(r) => record(r, Kind::Mount)?,
+        Entity::SupportAccess(r) => record(r, Kind::SupportAccess)?,
+        Entity::DeviceRecord(r) => record(r, Kind::DeviceRecord)?,
+        Entity::Delegation(r) => record(r, Kind::Delegation)?,
+        Entity::Recovery(r) => record(r, Kind::Recovery)?,
+        Entity::OwnerTransition(r) => record(r, Kind::OwnerTransition)?,
+        Entity::Billing(r) => record(r, Kind::Billing)?,
+        Entity::Evidence(r) => record(r, Kind::Evidence)?,
+        Entity::CheckAcknowledgement(r) => record(r, Kind::CheckAcknowledgement)?,
+        Entity::ProviderConnection(r) => record(r, Kind::ProviderConnection)?,
+        Entity::RemoteLink(r) => record(r, Kind::RemoteLink)?,
+        Entity::Bookmark(_) => {
+            return Err(Error::Protocol(
+                "bookmarks are account-private; mention their Spool or Thread instead",
+            ));
+        }
+        Entity::Passkey(_) => {
+            return Err(Error::Protocol(
+                "passkeys are account-private credentials and cannot be mentioned",
+            ));
+        }
+        Entity::Principal(r) => {
+            api::v2::collaboration::canonical_mention(value)
+                .map_err(|_| Error::Protocol("invalid principal mention"))?;
+            Mention::Principal {
+                principal_id: r
+                    .id
+                    .parse()
+                    .map_err(|_| Error::Protocol("principal mention requires UUID"))?,
+            }
+        }
+        Entity::Agent(_) => {
+            return Err(Error::Protocol(
+                "agent references require an explicit mention contract",
+            ));
+        }
+        Entity::Source(r) => {
+            api::v2::collaboration::validate_source_mention(r)
+                .map_err(|_| Error::Protocol("invalid pinned source mention"))?;
+            let target = super::annotation_source(&AnnotationSourceReference {
+                source: Some(SourceAnchor {
+                    revision: r.revision.clone(),
+                    path: r.path.clone(),
+                    symbol_id: r.symbol_id.clone(),
+                    start_line: r.start_line,
+                    end_line: r.end_line,
+                    thread: r.thread.clone(),
+                    ..Default::default()
+                }),
+            })?;
+            Mention::Source {
+                target: Box::new(target),
+            }
+        }
+    };
+    result
+        .validate()
+        .map_err(|_| Error::Protocol("invalid collaboration mention"))?;
+    Ok(result)
 }
 fn record(r: &RecordRef, record_kind: Kind) -> Result<Mention, Error> {
     Ok(Mention::Record {
@@ -166,6 +193,22 @@ pub fn mention_ref(value: &Mention) -> EntityRef {
             revision: Some(revision_ref::Revision::GitCommitOid(oid.clone())),
         }),
         Mention::Device { key } => Entity::Device(wire_device(key)),
+        Mention::Principal { principal_id } => Entity::Principal(PrincipalRef {
+            id: principal_id.to_string(),
+        }),
+        Mention::Source { target } => {
+            let source = super::annotation_source_ref(target).source;
+            // Annotation source projection always supplies the original coordinates.
+            let source = source.unwrap_or_default();
+            Entity::Source(SourceMention {
+                revision: source.revision,
+                path: source.path,
+                symbol_id: source.symbol_id,
+                start_line: source.start_line,
+                end_line: source.end_line,
+                thread: source.thread,
+            })
+        }
         Mention::Record {
             spool,
             record_kind,
