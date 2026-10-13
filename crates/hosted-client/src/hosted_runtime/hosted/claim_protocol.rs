@@ -365,6 +365,8 @@ fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>
     if device {
         // Optional HYBRID Sync paths are supported; mandatory rollout remains
         // controlled separately by SYNC_MANDATORY_GATE.
+        // Mentions, discussion tags and outlines remain unadvertised until the
+        // daemon implements their complete admission and projection contracts.
         description.protocol = Some(thread_api::hybrid::protocol());
         description.implemented_methods.extend(
             super::super::device_rpc::METHODS

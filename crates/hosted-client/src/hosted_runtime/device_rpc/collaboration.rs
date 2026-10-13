@@ -21,6 +21,10 @@ impl DeviceRpc {
         method: &str,
         body: &[u8],
     ) -> Result<Vec<u8>> {
+        // The daemon does not advertise complete mentions/tags semantics yet.
+        // Gate command admission, independently of decoding retained originals.
+        let protocol = thread_api::hybrid::protocol();
+        api::v2::protocol::validate_request_features(method, body, Some(&protocol))?;
         let descriptor = api::v2::method_descriptor(method).context("collaboration method")?;
         let id = uuid::Uuid::parse_str(
             descriptor
@@ -93,6 +97,12 @@ impl DeviceRpc {
                 && metadata.actor.agent_id == session.agent_id,
             "original collaboration author differs from verified delivery authority"
         );
+        let mentions: Vec<_> = metadata
+            .mentions
+            .iter()
+            .map(thread_api::collaboration::mention_ref)
+            .collect();
+        api::v2::collaboration::validate_mentions(&mentions, Some(&protocol))?;
         let records = repo::thread_replication::collaboration::records(&operation)?;
         let record = records.first().context("record identity")?.clone();
         let reference = RecordRef {
@@ -297,6 +307,12 @@ fn draft_matches(draft: &ContextDraft, record: &ContextRevision, spool: &SpoolRe
     Ok(
         draft.r#ref.as_ref() == Some(&reference(record.id.to_string()))
             && draft.content == record.content
+            && draft
+                .mentions
+                .iter()
+                .map(thread_api::collaboration::mention)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                == record.metadata.mentions
             && thread_api::collaboration::annotation_tags(&draft.tags)? == record.tags
             && draft.supersedes == record.supersedes.map(|id| reference(id.to_string()))
             && draft.extracted_from == record.extracted_from.map(|id| reference(id.to_string()))
@@ -305,4 +321,74 @@ fn draft_matches(draft: &ContextDraft, record: &ContextRevision, spool: &SpoolRe
                 &record.metadata.scope,
             )? == record.anchor,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::{
+        CollaborationActor, CollaborationAnchor, CollaborationMention, CollaborationMetadata,
+        CollaborationScope, ContentHash,
+    };
+
+    #[test]
+    fn context_delivery_preserves_signed_mentions_without_decoder_negotiation() {
+        let scope = CollaborationScope {
+            spool: uuid::Uuid::from_u128(2),
+            thread: Some(ContentHash::from_bytes([5; 32])),
+        };
+        let record = ContextRevision {
+            version: 2,
+            id: uuid::Uuid::from_u128(1),
+            parents: vec![],
+            metadata: CollaborationMetadata {
+                scope,
+                actor: CollaborationActor {
+                    principal_id: uuid::Uuid::from_u128(3),
+                    agent_id: None,
+                },
+                mentions: vec![CollaborationMention::Principal {
+                    principal_id: uuid::Uuid::from_u128(4),
+                }],
+            },
+            anchor: CollaborationAnchor::Repository,
+            content: "context".into(),
+            tags: vec![],
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 1,
+            provenance: None,
+            canonical_body: Default::default(),
+        };
+        let spool = SpoolRef {
+            id: record.metadata.scope.spool.to_string(),
+        };
+        let mut draft = ContextDraft {
+            r#ref: Some(RecordRef {
+                spool: Some(spool.clone()),
+                id: record.id.to_string(),
+            }),
+            anchor: Some(
+                thread_api::collaboration::anchor_ref(&record.anchor, &record.metadata.scope)
+                    .expect("anchor"),
+            ),
+            content: record.content.clone(),
+            mentions: record
+                .metadata
+                .mentions
+                .iter()
+                .map(thread_api::collaboration::mention_ref)
+                .collect(),
+            ..Default::default()
+        };
+        assert!(draft_matches(&draft, &record, &spool).expect("matching metadata"));
+        draft.mentions.clear();
+        assert!(!draft_matches(&draft, &record, &spool).expect("omitted mentions"));
+        draft.mentions.push(EntityRef {
+            entity: Some(entity_ref::Entity::Principal(PrincipalRef {
+                id: uuid::Uuid::from_u128(6).to_string(),
+            })),
+        });
+        assert!(!draft_matches(&draft, &record, &spool).expect("changed principal"));
+    }
 }

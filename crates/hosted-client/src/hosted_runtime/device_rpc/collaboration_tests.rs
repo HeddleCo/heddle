@@ -80,7 +80,7 @@ pub(super) async fn roundtrip(
     let open = command(
         id,
         Body::Open {
-            tags: vec!["opening".into()],
+            tags: vec![],
             blocking: true,
             title: "Review source".into(),
             anchor: Anchor::Repository,
@@ -150,11 +150,47 @@ pub(super) async fn roundtrip(
         blocking: true,
         signed_operation: Some(open.clone()),
         audience: Audience::Public as i32,
-        tags: vec![thread_api::collaboration::annotation_tag_ref(
-            &"opening".into(),
-        )],
+        tags: vec![],
         ..Default::default()
     };
+    use api::{heddle::api::common::MandatoryProtocolFeature as Feature, v2::client::ClientError};
+    for (feature, mut unsupported) in [
+        (Feature::DiscussionTagsV1, request.clone()),
+        (Feature::CollaborationMentionsV1, request.clone()),
+    ] {
+        assert!(!api::v2::protocol::host_supports(
+            remote.description.protocol.as_ref(),
+            feature
+        ));
+        match feature {
+            Feature::DiscussionTagsV1 => {
+                unsupported
+                    .tags
+                    .push(thread_api::collaboration::annotation_tag_ref(
+                        &"opening".into(),
+                    ))
+            }
+            _ => unsupported.mentions.push(EntityRef {
+                entity: Some(entity_ref::Entity::Principal(PrincipalRef {
+                    id: uuid::Uuid::from_u128(1).to_string(),
+                })),
+            }),
+        }
+        let refused = remote
+            .api
+            .call::<thread_api::rpc::CollaborationServiceOpenDiscussion>(&unsupported)
+            .await
+            .expect_err("unadvertised feature");
+        assert!(
+            matches!(refused, ClientError::RequestFeature(api::hybrid_codec::Reject::MissingFeature(found)) if found == feature)
+        );
+        assert!(
+            replica
+                .collaboration_heads(&record)
+                .expect("refused heads")
+                .is_empty()
+        );
+    }
     let result = remote
         .api
         .call::<thread_api::rpc::CollaborationServiceOpenDiscussion>(&request)
@@ -184,16 +220,16 @@ pub(super) async fn roundtrip(
             .expect("opening summary")
             .discussion
             .tags,
-        vec!["opening".into()]
+        Vec::<objects::object::AnnotationTag>::new()
     );
-    let mut tag_parent = open.clone();
-    let mut tag_version = replica.collaboration_heads(&record).expect("heads");
+    let tag_parent = open.clone();
+    let tag_version = replica.collaboration_heads(&record).expect("heads");
     for tags in [vec!["edited".into()], Vec::new()] {
         let id = uuid::Uuid::new_v4();
         let signed = command(id, Body::EditTags { tags: tags.clone() })
             .sign(std::slice::from_ref(&tag_parent), &signer)
             .expect("tag edit");
-        let mut request = EditDiscussionTagsRequest {
+        let request = EditDiscussionTagsRequest {
             client_operation_id: id.to_string(),
             discussion: Some(RecordRef {
                 spool: Some(spool.clone()),
@@ -204,52 +240,24 @@ pub(super) async fn roundtrip(
                 .iter()
                 .map(thread_api::collaboration::annotation_tag_ref)
                 .collect(),
-            signed_operation: Some(signed.clone()),
+            signed_operation: Some(signed),
         };
-        let mut tampered = request.clone();
-        tampered
-            .tags
-            .push(thread_api::collaboration::annotation_tag_ref(
-                &"unsigned".into(),
-            ));
-        assert!(
-            remote
-                .api
-                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&tampered)
-                .await
-                .is_err()
-        );
-        let applied = remote
+        let refused = remote
             .api
             .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
             .await
-            .expect("tag edit");
-        assert_eq!(
-            remote
-                .api
-                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
-                .await
-                .expect("tag replay"),
-            applied
-        );
-        tag_version = replica.collaboration_heads(&record).expect("edited heads");
-        assert_eq!(
-            replica
-                .discussion_summary(discussion, 1024 * 1024)
-                .expect("summary")
-                .discussion
-                .tags,
-            tags
-        );
-        request.expected_version = vec![0; 32];
-        assert!(
-            remote
-                .api
-                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
-                .await
-                .is_err()
-        );
-        tag_parent = signed;
+            .expect_err("tag edits need advertised support, including clearing");
+        assert!(matches!(
+            refused,
+            ClientError::RequestFeature(api::hybrid_codec::Reject::MissingFeature(
+                Feature::DiscussionTagsV1
+            ))
+        ));
+        let unchanged = replica
+            .collaboration_heads(&record)
+            .expect("unchanged heads");
+        assert_eq!(unchanged.version, tag_version.version);
+        assert_eq!(unchanged.parents, tag_version.parents);
     }
     let id = uuid::Uuid::new_v4();
     let append = command(
@@ -363,7 +371,10 @@ pub(super) async fn roundtrip(
             Some(collaboration_event::Payload::Discussion(record)) => {
                 assert_eq!(record.status, discussion_record::Status::Resolved as i32);
                 assert_eq!(record.turn_count, 2);
-                assert!(record.tags.is_empty(), "cleared tags survive observation");
+                assert!(
+                    record.tags.is_empty(),
+                    "plain discussions need no tag feature"
+                );
                 current_version = record.version;
                 records += 1;
             }
@@ -372,8 +383,8 @@ pub(super) async fn roundtrip(
             _ => {}
         }
     }
-    // Open, edit, clear, append and resolve each retain their original signed proof.
-    assert_eq!((records, turns, proofs), (1, 2, 5));
+    // Open, append and resolve retain their original proofs; refused edits add none.
+    assert_eq!((records, turns, proofs), (1, 2, 3));
     assert!(committed);
     let id = uuid::Uuid::new_v4();
     let signed = command(

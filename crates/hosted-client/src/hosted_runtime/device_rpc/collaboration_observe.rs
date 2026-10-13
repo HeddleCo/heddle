@@ -29,6 +29,10 @@ impl DeviceRpc {
         send: iroh::endpoint::SendStream,
     ) -> Result<()> {
         let request = ObserveCollaborationRequest::decode(body)?;
+        ensure!(
+            request.discussion_tags.is_none(),
+            "device endpoint does not advertise MANDATORY_PROTOCOL_FEATURE_DISCUSSION_TAGS_V1"
+        );
         super::checkout::same_spool(session, request.spool.as_ref())?;
         ensure!(
             request.anchors.len() <= 128

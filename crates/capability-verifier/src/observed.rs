@@ -542,7 +542,7 @@ fn hybrid_error_code(reason: heddle_api::hybrid_codec::Reject) -> VerificationEr
         R::Revoked => C::HybridRevoked,
         R::SlotConflict => C::HybridSlotConflict,
         R::BoundaryAcceptance => C::HybridBoundaryAcceptance,
-        R::Protocol => C::HybridProtocol,
+        R::Protocol | R::MissingFeature(_) => C::HybridProtocol,
     }
 }
 

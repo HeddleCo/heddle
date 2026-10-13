@@ -53,6 +53,7 @@ pub(super) fn native_client_error(
     use api::v2::client::ClientError;
     use thread_api::transport::Error;
     match error {
+        ClientError::RequestFeature(error) => request_feature_error(error),
         ClientError::Transport(Error::Remote(failure)) => {
             let detail = match failure.detail() {
                 Ok(detail) => detail,
@@ -91,6 +92,18 @@ pub(super) fn native_client_error(
             message: format!("endpoint does not implement {method}"),
             details: Vec::new(),
         },
+        error => ProtocolError::InvalidState(error.to_string()),
+    }
+}
+
+pub(super) fn request_feature_error(error: api::hybrid_codec::Reject) -> ProtocolError {
+    match error {
+        api::hybrid_codec::Reject::MissingFeature(feature) => {
+            ProtocolError::CapabilityNotSupported(format!(
+                "endpoint does not advertise {}; no request was sent",
+                feature.as_str_name()
+            ))
+        }
         error => ProtocolError::InvalidState(error.to_string()),
     }
 }
