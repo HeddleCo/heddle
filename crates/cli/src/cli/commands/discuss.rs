@@ -209,6 +209,7 @@ fn open_discussion(
         repo.get_attribution()?,
         now_ms(),
         CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title,
             anchor: open_anchor(state_id, path, spec.symbol, spec.line)?,

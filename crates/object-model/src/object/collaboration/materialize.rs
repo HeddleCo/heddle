@@ -101,6 +101,7 @@ pub struct MaterializedDiscussion {
     pub body_changed_since_open: bool,
     pub visibility: VisibilityTier,
     pub thread_ref: Option<String>,
+    pub tags: Vec<super::AnnotationTag>,
     pub turns: Vec<(CollabOpId, DiscussionTurnV1)>,
     pub resolution: Option<CollaborationResolution>,
     pub conflict_operations: BTreeSet<CollabOpId>,
@@ -233,6 +234,11 @@ fn materialize_discussion(
         }
     };
 
+    let mut tags = match root {
+        CollaborationOperationBodyV1::Open { tags, .. } => tags.clone(),
+        _ => Vec::new(),
+    };
+    let mut tag_operations = BTreeSet::new();
     let mut turns = root_turns
         .into_iter()
         .map(|turn| (root_id, turn))
@@ -242,6 +248,9 @@ fn materialize_discussion(
     for id in ids.iter().copied().filter(|id| *id != root_id) {
         match &all[&id].operation.body {
             CollaborationOperationBodyV1::AppendTurn { turn } => turns.push((id, turn.clone())),
+            CollaborationOperationBodyV1::EditTags { .. } => {
+                tag_operations.insert(id);
+            }
             CollaborationOperationBodyV1::RebindAnchor { .. } => {
                 anchor_operations.insert(id);
             }
@@ -276,7 +285,7 @@ fn materialize_discussion(
         outcomes.insert(*id, resolution_outcome(*id, all, &mut BTreeSet::new())?);
     }
     let first_outcome = outcomes.values().next().cloned();
-    let conflicts = if outcomes
+    let mut conflicts = if outcomes
         .values()
         .all(|outcome| Some(outcome) == first_outcome.as_ref())
     {
@@ -289,6 +298,29 @@ fn materialize_discussion(
     } else {
         None
     };
+
+    let maximal_tags = tag_operations
+        .iter()
+        .filter(|candidate| {
+            !tag_operations
+                .iter()
+                .any(|other| candidate != &other && precedes(**candidate, *other, all))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if let Some(first) = maximal_tags.first() {
+        let CollaborationOperationBodyV1::EditTags { tags: selected } = &all[first].operation.body
+        else {
+            return Err(CollaborationCodecError::Invalid(
+                "tag operation is not a tag edit".into(),
+            ));
+        };
+        if maximal_tags.iter().all(|id| matches!(&all[id].operation.body, CollaborationOperationBodyV1::EditTags { tags } if tags == selected)) {
+            tags = selected.clone();
+        } else {
+            conflicts.extend(maximal_tags);
+        }
+    }
 
     let ids_set = ids.iter().copied().collect::<BTreeSet<_>>();
     let heads = ids_set
@@ -316,6 +348,7 @@ fn materialize_discussion(
         body_changed_since_open,
         visibility,
         thread_ref,
+        tags,
         turns,
         resolution,
         conflict_operations: conflicts,
@@ -480,6 +513,7 @@ mod tests {
             "root",
             1,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Review".to_string(),
                 anchor: CollaborationAnchor::Repository,
@@ -496,6 +530,7 @@ mod tests {
             "symbol-root",
             1,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Review".to_string(),
                 anchor: CollaborationAnchor::Symbol {
@@ -508,6 +543,63 @@ mod tests {
                 thread_ref: None,
             },
         )
+    }
+
+    #[test]
+    fn opening_tags_replace_clear_and_join_concurrent_edits() {
+        let mut operation = root().operation;
+        let CollaborationOperationBodyV1::Open { tags, .. } = &mut operation.body else {
+            panic!("open");
+        };
+        *tags = vec!["opening".into()];
+        let root = CollaborationOperationEnvelope::decode(&operation.encode().expect("encode"))
+            .expect("decode");
+        let left = decoded(
+            vec![root.operation_id],
+            "tags-left",
+            2,
+            CollaborationOperationBodyV1::EditTags {
+                tags: vec!["left".into()],
+            },
+        );
+        let right = decoded(
+            vec![root.operation_id],
+            "tags-right",
+            3,
+            CollaborationOperationBodyV1::EditTags {
+                tags: vec!["right".into()],
+            },
+        );
+        let view = materialize_repository_collaboration(vec![root.clone()]).expect("opening");
+        assert_eq!(
+            view.discussions[&discussion_id()].tags,
+            vec!["opening".into()]
+        );
+        let view =
+            materialize_repository_collaboration(vec![root.clone(), left.clone()]).expect("edit");
+        assert_eq!(view.discussions[&discussion_id()].tags, vec!["left".into()]);
+        let view =
+            materialize_repository_collaboration(vec![root.clone(), left.clone(), right.clone()])
+                .expect("conflict");
+        assert_eq!(
+            view.discussions[&discussion_id()].conflict_operations,
+            BTreeSet::from([left.operation_id, right.operation_id])
+        );
+        let clear = decoded(
+            vec![left.operation_id, right.operation_id],
+            "clear-tags",
+            4,
+            CollaborationOperationBodyV1::EditTags { tags: vec![] },
+        );
+        let view =
+            materialize_repository_collaboration(vec![clear, right, root, left]).expect("clear");
+        assert!(view.discussions[&discussion_id()].tags.is_empty());
+        assert!(
+            view.discussions[&discussion_id()]
+                .conflict_operations
+                .is_empty()
+        );
+        assert_eq!(view.discussions[&discussion_id()].turns.len(), 1);
     }
 
     #[test]

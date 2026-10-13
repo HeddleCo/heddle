@@ -617,6 +617,7 @@ impl DeviceRpc {
         for suffix in [
             "OpenDiscussion",
             "AppendTurn",
+            "EditDiscussionTags",
             "ResolveDiscussion",
             "ReopenDiscussion",
             "PutContext",

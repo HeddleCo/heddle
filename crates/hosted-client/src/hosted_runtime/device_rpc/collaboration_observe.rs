@@ -200,12 +200,13 @@ impl DeviceRpc {
                         continue;
                     }
                     let mut resolved_anchor = discussion.anchor.clone();
+                    let mut tags = discussion.tags.clone();
                     let (anchor_coverage, anchor_scope) = super::collaboration_targets::project(
                         session,
                         &replica,
                         &scope,
                         &mut resolved_anchor,
-                        &mut [],
+                        &mut tags,
                     )?;
                     if anchor_coverage == Coverage::Unavailable {
                         continue;
@@ -216,7 +217,7 @@ impl DeviceRpc {
                         continue;
                     }
                     if row.position.kind == 0 {
-                        collect_targets(&resolved_anchor, &[], &mut targets);
+                        collect_targets(&resolved_anchor, &tags, &mut targets);
                     }
                     if row.position.kind == 0 {
                         let (audience, label) =
@@ -246,7 +247,10 @@ impl DeviceRpc {
                             audience_label: label,
                             actions: Vec::new(),
                             resolutions: Vec::new(),
-                            tags: Vec::new(),
+                            tags: tags
+                                .iter()
+                                .map(thread_api::collaboration::annotation_tag_ref)
+                                .collect(),
                         })
                     } else {
                         let turn = match &record.body {

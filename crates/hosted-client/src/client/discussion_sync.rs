@@ -1603,6 +1603,7 @@ fn hosted_turn_body(
 ) -> Result<CollaborationOperationBodyV1> {
     if index == 0 {
         Ok(CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title: derive_title(&turn.body, &discussion.symbol),
             anchor: hosted_open_anchor(discussion, head_state),
@@ -2144,6 +2145,7 @@ mod tests {
             Attribution::human(Principal::new("Ada", "ada@x")),
             1,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "t".to_string(),
                 anchor: CollaborationAnchor::Symbol {
@@ -2211,6 +2213,7 @@ mod tests {
             author.clone(),
             1_700_000_000_000,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "run contract".to_string(),
                 anchor: CollaborationAnchor::Symbol {
@@ -2310,6 +2313,7 @@ mod tests {
                 author.clone(),
                 occurred_at_ms,
                 CollaborationOperationBodyV1::Open {
+                    tags: Vec::new(),
                     blocking: index % 2 == 0,
                     title: title.clone(),
                     anchor: anchor.clone(),
@@ -2904,6 +2908,7 @@ mod tests {
         let discussion_id = DiscussionRecordId::generate();
         let author = Attribution::human(Principal::new("Reviewer", "reviewer@example.com"));
         let body = || CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title: "run contract".to_string(),
             anchor: CollaborationAnchor::Symbol {
@@ -2965,6 +2970,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
@@ -3061,6 +3067,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {

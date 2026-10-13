@@ -105,6 +105,7 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration",
     "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion",
     "/heddle.api.v1alpha2.CollaborationService/AppendTurn",
+    "/heddle.api.v1alpha2.CollaborationService/EditDiscussionTags",
     "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion",
     "/heddle.api.v1alpha2.CollaborationService/ReopenDiscussion",
     "/heddle.api.v1alpha2.CollaborationService/PutContext",
@@ -387,6 +388,11 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         "AppendTurn" => scope!(AppendDiscussionRequest, |r: AppendDiscussionRequest| r
             .discussion
             .and_then(|v| v.spool)),
+        "EditDiscussionTags" => {
+            scope!(EditDiscussionTagsRequest, |r: EditDiscussionTagsRequest| r
+                .discussion
+                .and_then(|v| v.spool))
+        }
         "ResolveDiscussion" => scope!(ResolveDiscussionRequest, |r: ResolveDiscussionRequest| r
             .discussion
             .and_then(|v| v.spool)),

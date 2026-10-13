@@ -99,6 +99,9 @@ pub(super) fn project_for(
         };
     for tag in tags {
         match tag {
+            AnnotationTag::Entity {
+                target: objects::object::CollaborationMention::Source { target },
+            } => resolve(&mut target.scope, &mut target.source)?,
             AnnotationTag::Source { target }
             | AnnotationTag::Symbol {
                 target: Some(target),

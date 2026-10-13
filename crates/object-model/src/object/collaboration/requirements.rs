@@ -102,12 +102,7 @@ pub fn authored_source_requirements(
         })?,
     }
     for tag in tags {
-        if let AnnotationTag::Source { target }
-        | AnnotationTag::Symbol {
-            target: Some(target),
-            ..
-        } = tag
-        {
+        if let Some(target) = tag.source() {
             source_requirements(&target.scope, &target.source, &mut insert)?;
         }
     }
