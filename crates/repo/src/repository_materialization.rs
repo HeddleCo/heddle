@@ -680,11 +680,30 @@ impl Repository {
         root: &Path,
         writes: &[WorktreeWriteOp],
     ) -> Result<(usize, Vec<SeededWorktreeEntry>)> {
+        // Resolve redactions on the lock-owning caller. A worker cannot reenter
+        // its caller's repo.lock while the caller waits in join(). Retain the
+        // installation guard through all writes so purge/install cannot change
+        // the redaction decisions or remove blob bytes during this batch.
+        let _serialization = self.installation_lock()?;
         prepare_parent_directories(root, writes)?;
         let (symlinks, writes): (Vec<&WorktreeWriteOp>, Vec<&WorktreeWriteOp>) = writes
             .iter()
             .partition(|write| matches!(write, WorktreeWriteOp::Symlink { .. }));
 
+        let writes = writes
+            .into_iter()
+            .map(|write| {
+                let stub = match write {
+                    WorktreeWriteOp::Blob { hash, .. } => {
+                        self.redaction_stub_for_blob(hash).map_err(|err| {
+                            HeddleError::Config(format!("redaction lookup failed: {err}"))
+                        })?
+                    }
+                    _ => None,
+                };
+                Ok((write, stub))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let requested_threads = requested_materialization_threads();
         let worker_count = materialization_worker_count(writes.len(), requested_threads);
 
@@ -694,7 +713,7 @@ impl Repository {
         let context = MaterializationContext::new();
         if writes
             .iter()
-            .any(|write| matches!(write, WorktreeWriteOp::Blob { .. }))
+            .any(|(write, _)| matches!(write, WorktreeWriteOp::Blob { .. }))
         {
             let scratch = self.heddle_dir().join("tmp");
             fs::create_dir_all(&scratch)?;
@@ -716,8 +735,8 @@ impl Repository {
 
         let result = if worker_count <= 1 {
             let mut seeded = Vec::with_capacity(writes.len() + symlinks.len());
-            for write in writes {
-                seeded.extend(self.materialize_write_op(root, write, &context)?);
+            for (write, stub) in writes {
+                seeded.extend(self.materialize_write_op(root, write, stub.as_deref(), &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
@@ -735,8 +754,15 @@ impl Repository {
                         // Files vary widely in size. Take the next leaf when a
                         // worker finishes rather than leaving one large chunk
                         // on the critical path after the others become idle.
-                        while let Some(write) = writes.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            seeded.extend(self.materialize_write_op(root, write, context)?);
+                        while let Some((write, stub)) =
+                            writes.get(next.fetch_add(1, Ordering::Relaxed))
+                        {
+                            seeded.extend(self.materialize_write_op(
+                                root,
+                                write,
+                                stub.as_deref(),
+                                context,
+                            )?);
                             progress.inc(1);
                         }
                         Ok(seeded)
@@ -757,7 +783,7 @@ impl Repository {
         };
         let result = result.and_then(|(worker_count, mut seeded)| {
             for write in symlinks {
-                seeded.extend(self.materialize_write_op(root, write, &context)?);
+                seeded.extend(self.materialize_write_op(root, write, None, &context)?);
                 progress.inc(1);
             }
             Ok((worker_count, seeded))
@@ -781,6 +807,7 @@ impl Repository {
         &self,
         root: &Path,
         write: &WorktreeWriteOp,
+        redaction_stub: Option<&str>,
         context: &MaterializationContext,
     ) -> Result<Option<SeededWorktreeEntry>> {
         match write {
@@ -801,7 +828,7 @@ impl Repository {
                         }
                     })?;
                 }
-                self.materialize_blob(path, hash, *executable, context)?;
+                self.materialize_blob(path, hash, *executable, redaction_stub, context)?;
             }
             WorktreeWriteOp::Symlink { path, hash } => {
                 let blob = self
@@ -899,6 +926,7 @@ impl Repository {
         dest: &Path,
         hash: &ContentHash,
         executable: bool,
+        redaction_stub: Option<&str>,
         context: &MaterializationContext,
     ) -> Result<()> {
         // Redaction short-circuit: if any redaction declares this
@@ -907,13 +935,9 @@ impl Repository {
         // and whether the bytes have already been purged. Safe to
         // include in worktrees, semantic diffs, and Git projection
         // exports (which themselves call through `materialize_tree`).
-        // Errors loading the redactions store are propagated rather
-        // than swallowed — a partial redaction read shouldn't
-        // silently leak the original bytes.
-        if let Some(stub) = self
-            .redaction_stub_for_blob(hash)
-            .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?
-        {
+        // The caller resolved this stub under installation serialization before
+        // spawning workers; no repository lock may be acquired here.
+        if let Some(stub) = redaction_stub {
             let mut file = create_replacing_leaf(dest)?;
             file.write_all(stub.as_bytes())
                 .map_err(|err| HeddleError::Io(enrich_fs_error(dest, "writing", err)))?;
