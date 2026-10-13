@@ -713,6 +713,18 @@ fn open_request_from_signed(
         signed_operation: Some(signed),
         audience,
         audience_label,
+        mentions: record
+            .metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .mentions
+                    .iter()
+                    .map(thread_api::collaboration::mention_ref)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        tags: Vec::new(),
     })
 }
 
@@ -741,6 +753,12 @@ fn context_draft_from_revision(
             .extracted_from
             .as_ref()
             .map(|id| reference(id.to_string())),
+        mentions: context
+            .metadata
+            .mentions
+            .iter()
+            .map(thread_api::collaboration::mention_ref)
+            .collect(),
     })
 }
 

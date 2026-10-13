@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.1](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.31.0...heddle-repo-v0.31.1) - 2026-10-13
+
+### Other
+
+- Fix parallel materialization lock deadlock ([#2081](https://github.com/HeddleCo/heddle/pull/2081)) ([#2083](https://github.com/HeddleCo/heddle/pull/2083))
+
 ## [0.30.1](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.30.0...heddle-repo-v0.30.1) - 2026-10-12
 
 ### Other

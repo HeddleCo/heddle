@@ -246,6 +246,7 @@ impl DeviceRpc {
                             audience_label: label,
                             actions: Vec::new(),
                             resolutions: Vec::new(),
+                            tags: Vec::new(),
                         })
                     } else {
                         let turn = match &record.body {
@@ -341,6 +342,12 @@ impl DeviceRpc {
                         // Live display names are a server projection; unresolved here.
                         author_display_name: String::new(),
                         supersedes: record.supersedes.map(|id| reference(id.to_string())),
+                        mentions: record
+                            .metadata
+                            .mentions
+                            .iter()
+                            .map(thread_api::collaboration::mention_ref)
+                            .collect(),
                         extracted_from: record.extracted_from.map(|id| reference(id.to_string())),
                         anchor_coverage: anchor_coverage as i32,
                         superseded: replica.context_superseded(record.id)?,

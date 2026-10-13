@@ -14,3 +14,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "heddle-docsgen"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

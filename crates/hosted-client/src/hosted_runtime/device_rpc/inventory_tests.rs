@@ -39,6 +39,12 @@ fn all_device_deployment_methods_have_real_production_handlers() {
 }
 
 fn required_daemon_handler(path: &str) -> bool {
+    if path == "/heddle.api.v1alpha2.CollaborationService/EditDiscussionTags" {
+        // Alpha.47 adds this RPC, but the local discussion model has no tags
+        // yet. Keep it out of METHODS so the daemon does not advertise it and
+        // calls fail Unimplemented. Remove this exemption when the handler lands.
+        return false;
+    }
     if path == "/heddle.api.v1alpha2.SpoolService/PromoteSpool" {
         // Promotion moves a personal child into Weft's shared root namespace.
         // The local catalog has no shared namespace to mutate, and the CLI only

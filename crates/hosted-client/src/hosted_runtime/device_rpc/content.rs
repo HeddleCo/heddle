@@ -274,6 +274,9 @@ impl DeviceRpc {
                         limits,
                         &mut emit,
                     )?,
+                    content_read::Selection::Outline(_) => {
+                        bail!("outline content selections are not supported locally");
+                    }
                 }
             }
             Ok::<(), anyhow::Error>(())

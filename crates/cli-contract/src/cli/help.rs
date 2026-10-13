@@ -585,7 +585,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
     })
 }
 
-const HEDDLEIGNORE_TOPIC: &str = include_str!("../../../../docs/heddleignore.md");
+const HEDDLEIGNORE_TOPIC: &str = include_str!("../../heddleignore.md");
 
 /// Configuration environment + principal resolution. This reference
 /// material used to live on the retired `heddle help advanced` page;
