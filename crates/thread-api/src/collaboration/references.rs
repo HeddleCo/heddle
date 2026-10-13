@@ -29,6 +29,8 @@ fn endpoint(value: Option<&EndpointRef>) -> Result<[u8; 32], Error> {
     }
     key(&endpoint.public_key)
 }
+/// Decode a received or retained reference. Endpoint support gates sending,
+/// not interpretation of an author's signed metadata.
 pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
     use entity_ref::Entity;
     let result = match value
@@ -108,24 +110,18 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
                 "passkeys are account-private credentials and cannot be mentioned",
             ));
         }
-        Entity::Principal(r) => {
-            api::v2::collaboration::canonical_mention(value)
-                .map_err(|_| Error::Protocol("invalid principal mention"))?;
-            Mention::Principal {
-                principal_id: r
-                    .id
-                    .parse()
-                    .map_err(|_| Error::Protocol("principal mention requires UUID"))?,
-            }
-        }
+        Entity::Principal(r) => Mention::Principal {
+            principal_id: r
+                .id
+                .parse()
+                .map_err(|_| Error::Protocol("principal mention requires UUID"))?,
+        },
         Entity::Agent(_) => {
             return Err(Error::Protocol(
                 "agent references require an explicit mention contract",
             ));
         }
         Entity::Source(r) => {
-            api::v2::collaboration::validate_source_mention(r)
-                .map_err(|_| Error::Protocol("invalid pinned source mention"))?;
             let target = super::annotation_source(&AnnotationSourceReference {
                 source: Some(SourceAnchor {
                     revision: r.revision.clone(),

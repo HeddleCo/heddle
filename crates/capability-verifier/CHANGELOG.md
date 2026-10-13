@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin heddle-api alpha.48 in the unreleased 0.31.2 Rust/WASM verifier and native parity tool. Map the new MissingFeature rejection to the existing hybrid protocol error; verification bytes are unchanged.
+
 ## [0.31.1](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.31.0...heddleco-capability-verifier-v0.31.1) - 2026-10-13
 
 ### Other

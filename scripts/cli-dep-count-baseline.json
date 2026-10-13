@@ -1,9 +1,9 @@
 {
-  "_comment": "Package-scoped post-gix-removal transitive-dependency baseline for the heddle-cli crate (default features, normal edges only). Tracked by scripts/check-cli-dep-count.sh and wired into Rust Tests' Static contracts job. The gate FAILS if the live count exceeds baseline + slack; raise the baseline (with justification) only when a dependency addition is deliberate.",
+  "_comment": "Package-scoped post-gix-removal transitive-dependency baseline for the heddle-cli crate (default features, normal edges only). Tracked by scripts/check-cli-dep-count.sh and wired into Rust Tests' Static contracts job. The gate FAILS if the live count exceeds baseline + slack; raise the baseline (with justification) only when a dependency addition is deliberate. The 423 baseline reflects transitional duplicate RustCrypto generations from heddle-api alpha.46+ and heddle's older crypto stack, already present on main 0b5eec40; tracked in HeddleCo/heddle#2094 to unify and lower again.",
   "package": "heddle-cli",
   "features": "default",
-  "baseline": 408,
+  "baseline": 423,
   "slack": 10,
-  "measured_at": "2026-08-04",
-  "measured_against": "task/1226 after OTLP export moved behind the opt-in telemetry feature; package-scoped cargo tree avoids workspace dev-feature unification"
+  "measured_at": "2026-10-13",
+  "measured_against": "eea452ddd67f5d15e4e5fd0e3c3b50daf7f5e43c (alpha.48 adoption); 423 also measured on main 0b5eec40; transitional duplicate RustCrypto generations from heddle-api alpha.46+, tracked in HeddleCo/heddle#2094 to lower again"
 }

@@ -318,6 +318,16 @@ impl From<HeddleExitCode> for i32 {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn endpoint_feature_refusal_is_a_typed_protocol_exit() {
+        let error = anyhow::Error::new(wire::ProtocolError::CapabilityNotSupported(
+            "endpoint does not advertise MANDATORY_PROTOCOL_FEATURE_COLLABORATION_MENTIONS_V1; no request was sent".into(),
+        )).context("push discussion");
+        assert_eq!(HeddleExitCode::from_error(&error), HeddleExitCode::Protocol);
+        assert_eq!(i32::from(HeddleExitCode::from_error(&error)), 76);
+    }
+
     #[test]
     fn io_permission_denied_maps_to_noperm() {
         let err: anyhow::Error =
