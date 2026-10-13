@@ -31,18 +31,16 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  # sccache caches to LOCAL DISK, not the GitHub Actions (Azure-backed) cache.
-  # The Blacksmith self-hosted runners can't DNS-resolve the GHA cache's Azure
-  # blob backend, so SCCACHE_GHA_ENABLED=true hard-fails the job (exit 74) at
-  # sccache startup/stats. Cross-run target/ caching still comes from
-  # Swatinem/rust-cache, which Blacksmith transparently accelerates.
+  # sccache stays on local disk. Enabling the GHA backend would compete
+  # with rust-cache for the repo's 10 GB Actions cache and evict the
+  # shared rust-ws slot. Cross-run target/ caching is rust-cache's job.
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
   fast-check:
     name: fast-check
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     env:
       # GNU ld dominates the tail of the workspace-wide, all-targets links
       # this lane performs; LLVM lld is substantially faster. No heddle Rust
@@ -94,6 +92,11 @@ jobs:
           prefix-key: v1-rust-incr
           cache-on-failure: true
           cache-all-crates: true
+          # This lane is the rust-ws writer. shared-key keeps every PR
+          # on one Linux/ARM slot so saves do not multiply under the
+          # 10 GB repo cache. Other workflows restore this slot and
+          # only write it on main / the merge queue.
+          save-if: true
 
       - name: Rust source reachability and dead-code blankets
         if: github.event_name == 'pull_request'
@@ -131,8 +134,8 @@ jobs:
   cli-unit-tests:
     name: CLI unit tests
     if: github.event_name == 'pull_request'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     env:
       # Identical to fast-check so both jobs share one rust-cache slot
       # (rust-cache folds RUST* env into its key).
@@ -169,6 +172,7 @@ jobs:
           prefix-key: v1-rust-incr
           cache-on-failure: true
           cache-all-crates: true
+          save-if: true
 
       - name: CLI unit tests
         # CLI tests temporarily change HOME/HEDDLE_HOME; avoid process-global races.
@@ -181,8 +185,8 @@ jobs:
   regression-suites:
     name: CLI and hosted-client regression suites
     if: github.event_name == 'pull_request'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
@@ -215,6 +219,7 @@ jobs:
           prefix-key: v1-rust-incr
           cache-on-failure: true
           cache-all-crates: true
+          save-if: true
 
       # Run all CLI test binaries: the themed suites and standalone integration
       # targets exercise contracts that cli_basics alone does not cover.

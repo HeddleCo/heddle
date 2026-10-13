@@ -321,6 +321,7 @@ jobs:
         with:
           shared-key: publish-consumer
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build consumer from published and packaged crates
         env:
@@ -355,6 +356,7 @@ jobs:
         with:
           shared-key: publish-crates
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Publish each crate (idempotent, retry on 5xx)
         shell: bash

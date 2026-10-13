@@ -68,10 +68,17 @@ pub(super) fn print_runner_fingerprint(binary: &Path, samples: usize, negative: 
     );
 }
 
-pub(super) fn enforce_contract(results: &[CaseResult]) {
+pub(super) enum ContractStatus {
+    Green,
+    TimingAdvisory,
+}
+
+pub(super) fn enforce_contract(results: &[CaseResult]) -> ContractStatus {
     let baseline = load_baseline();
     println!("BASELINE profile={}", baseline.name);
-    let mut failures = Vec::new();
+    let soft_timing = env_flag("HEDDLE_PERF_SOFT_TIMING");
+    let mut structural = Vec::new();
+    let mut timing = Vec::new();
 
     for result in results {
         if result
@@ -79,7 +86,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
             .iter()
             .any(|sample| sample.counters.network_client_initializations > 0)
         {
-            failures.push(format!(
+            structural.push(format!(
                 "zero-network gate: {} @ {} paths initialized a network client",
                 result.kind.name(),
                 result.path_count
@@ -88,7 +95,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         let expected_opens = result.kind.expected_repo_opens();
         let observed_opens = result.counter(|counters| counters.repository_opens);
         if observed_opens.max != expected_opens as f64 {
-            failures.push(format!(
+            structural.push(format!(
                 "repository-open gate: {} @ {} paths max {:.0}, expected {expected_opens}",
                 result.kind.name(),
                 result.path_count,
@@ -98,7 +105,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         if result.path_count > 0 {
             let repository_open = result.metric(|sample| sample.repository_open_ms);
             if repository_open.p95 > 2.0 {
-                failures.push(format!(
+                timing.push(format!(
                     "repository-open latency gate: {} @ {} paths p95 {:.3} ms > 2.000 ms",
                     result.kind.name(),
                     result.path_count,
@@ -123,7 +130,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
                 wall.p95,
             );
             if wall.p95 > contract.gate_p95_ms {
-                failures.push(format!(
+                timing.push(format!(
                     "latency gate: {} @ {} paths p95 {:.3} ms > {:.3} ms ({})",
                     result.kind.name(),
                     result.path_count,
@@ -136,7 +143,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
     }
 
     for kind in [CaseKind::StatusClean, CaseKind::StatusDirty] {
-        enforce_scale(results, kind, &baseline, &mut failures);
+        enforce_scale(results, kind, &baseline, &mut timing);
     }
     if let Some(clean_100k) = find(results, CaseKind::StatusClean, 100_000) {
         let wall = clean_100k.metric(|sample| sample.wall_ms);
@@ -145,7 +152,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
             wall.p95
         );
         if wall.p95 > WARM_CLEAN_STATUS_100K_P95_MS {
-            failures.push(format!(
+            timing.push(format!(
                 "instant target gate: clean status @ 100k paths p95 {:.3} ms > {WARM_CLEAN_STATUS_100K_P95_MS:.3} ms",
                 wall.p95
             ));
@@ -153,19 +160,19 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         let dirs = clean_100k.counter(|counters| counters.directories_scanned);
         let hashes = clean_100k.counter(|counters| counters.files_hashed);
         if dirs.p95 > 10.0 || hashes.max > 0.0 {
-            failures.push(format!(
+            structural.push(format!(
                 "warm structural gate: clean status @ 100k dirs p95 {:.0} (<=10), files hashed max {:.0} (=0)",
                 dirs.p95, hashes.max
             ));
         }
     } else {
-        failures.push("instant target gate: missing clean status @ 100k paths".to_string());
+        structural.push("instant target gate: missing clean status @ 100k paths".to_string());
     }
     if let Some(dirty_100k) = find(results, CaseKind::StatusDirty, 100_000) {
         let dirs = dirty_100k.counter(|counters| counters.directories_scanned);
         let hashes = dirty_100k.counter(|counters| counters.files_hashed);
         if dirs.p95 > 12.0 || hashes.max > 1.0 {
-            failures.push(format!(
+            structural.push(format!(
                 "warm structural gate: one-path status @ 100k dirs p95 {:.0} (<=12), files hashed max {:.0} (<=1)",
                 dirs.p95, hashes.max
             ));
@@ -175,7 +182,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         let dirs = capture_100k.counter(|counters| counters.directories_scanned);
         let hashes = capture_100k.counter(|counters| counters.files_hashed);
         if dirs.p95 > 20.0 || hashes.max > 1.0 {
-            failures.push(format!(
+            structural.push(format!(
                 "warm structural gate: one-path capture @ 100k dirs p95 {:.0} (<=20), files hashed max {:.0} (<=1)",
                 dirs.p95, hashes.max
             ));
@@ -186,39 +193,72 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         results,
         CaseKind::StatusDirty,
         ONE_PATH_STATUS_100K_P95_MS,
-        &mut failures,
+        &mut timing,
+        &mut structural,
     );
     enforce_absolute_p95(
         results,
         CaseKind::CaptureOne,
         ONE_PATH_CAPTURE_100K_P95_MS,
-        &mut failures,
+        &mut timing,
+        &mut structural,
     );
     for kind in [
         CaseKind::DiffOne,
         CaseKind::LogBounded,
         CaseKind::ThreadListBounded,
     ] {
-        enforce_absolute_p95(results, kind, BOUNDED_LOCAL_READ_P95_MS, &mut failures);
+        enforce_absolute_p95(
+            results,
+            kind,
+            BOUNDED_LOCAL_READ_P95_MS,
+            &mut timing,
+            &mut structural,
+        );
     }
 
-    if !failures.is_empty() {
+    if !structural.is_empty() {
         eprintln!("PERF GATE RED");
-        for failure in &failures {
+        for failure in &structural {
             eprintln!("  - {failure}");
         }
-        panic!("{} core-loop performance gate(s) failed", failures.len());
+        panic!(
+            "{} structural core-loop performance gate(s) failed",
+            structural.len()
+        );
     }
+    if !timing.is_empty() {
+        if soft_timing {
+            eprintln!(
+                "PERF GATE YELLOW: timing gates are advisory until a GitHub-hosted baseline is recorded"
+            );
+            for failure in &timing {
+                eprintln!("  - {failure}");
+            }
+            return ContractStatus::TimingAdvisory;
+        }
+        eprintln!("PERF GATE RED");
+        for failure in &timing {
+            eprintln!("  - {failure}");
+        }
+        panic!("{} core-loop performance gate(s) failed", timing.len());
+    }
+    ContractStatus::Green
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
 fn enforce_absolute_p95(
     results: &[CaseResult],
     kind: CaseKind,
     budget_ms: f64,
-    failures: &mut Vec<String>,
+    timing: &mut Vec<String>,
+    structural: &mut Vec<String>,
 ) {
     let Some(result) = find(results, kind, 100_000) else {
-        failures.push(format!(
+        structural.push(format!(
             "absolute latency gate: missing {} @ 100000 paths",
             kind.name()
         ));
@@ -230,7 +270,7 @@ fn enforce_absolute_p95(
         kind.name()
     );
     if observed > budget_ms {
-        failures.push(format!(
+        timing.push(format!(
             "absolute latency gate: {} @ 100000 paths p95 {observed:.3} ms > {budget_ms:.3} ms",
             kind.name()
         ));
@@ -308,4 +348,21 @@ fn command_output(program: &str, args: &[&str]) -> String {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[test]
+fn ci_github_hosted_baseline_profile_is_registered() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/cli-core-loop-baseline.json");
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read baseline {}: {error}", path.display()));
+    let baseline: BaselineFile = serde_json::from_str(&contents)
+        .unwrap_or_else(|error| panic!("parse baseline {}: {error}", path.display()));
+    assert!(
+        baseline
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "ci-github-ubuntu-24.04"),
+        "CI HEDDLE_PERF_BASELINE profile must exist in the baseline file"
+    );
 }

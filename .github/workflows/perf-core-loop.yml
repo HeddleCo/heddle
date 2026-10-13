@@ -23,8 +23,17 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
+  # Local-disk sccache so the GHA backend does not compete for the
+  # repo's 10 GB Actions cache. See rust-tests.yml.
   SCCACHE_GHA_ENABLED: "false"
-  HEDDLE_PERF_BASELINE: ci-blacksmith-4vcpu-ubuntu-2404
+  # Runner-scoped profile. Numbers in the JSON are inherited from the
+  # retired Blacksmith recording until a GitHub-hosted run is stored.
+  # HEDDLE_PERF_SOFT_TIMING keeps wall-time / scale / absolute p95
+  # advisory so a noisier public runner cannot fail the job before
+  # that recording exists. Structural, repo-open-count, and
+  # zero-network gates still fail the job.
+  HEDDLE_PERF_BASELINE: ci-github-ubuntu-24.04
+  HEDDLE_PERF_SOFT_TIMING: "1"
 
 jobs:
   release-contract:
@@ -32,8 +41,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     # 10k/100k fixtures and release compiles write through TMPDIR.
     # `runner` is not a legal context in job env; using it there makes
     # GitHub reject the workflow file before any job starts. RUNNER_TEMP
@@ -53,6 +62,7 @@ jobs:
         with:
           shared-key: perf-core-loop-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       - name: Compile release harness (out of band)
         run: |
