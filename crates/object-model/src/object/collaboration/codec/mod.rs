@@ -123,6 +123,7 @@ mod tests {
         let change = ChangeId::from_bytes([2; 16]);
         let turn = || DiscussionTurnV1::new("x").unwrap();
         let open = |anchor| CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title: "t".to_string(),
             anchor,

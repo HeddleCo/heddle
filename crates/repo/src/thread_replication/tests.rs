@@ -172,6 +172,7 @@ fn discussion(
     let turn = DiscussionTurnV1::new(key).expect("turn");
     let body = if parents.is_empty() {
         CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: false,
             title: "Decision".into(),
             anchor: CollaborationAnchor::Repository,

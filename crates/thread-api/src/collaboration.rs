@@ -320,6 +320,7 @@ mod tests {
         let root = command(
             discussion,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Review".into(),
                 anchor: CollaborationAnchor::Repository,
@@ -377,6 +378,7 @@ mod tests {
         let root = command(
             discussion,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Review".into(),
                 anchor: CollaborationAnchor::Repository,
@@ -470,6 +472,7 @@ mod tests {
             command
         };
         let open = make(CollaborationOperationBodyV1::Open {
+            tags: Vec::new(),
             blocking: true,
             title: "Review".into(),
             anchor: CollaborationAnchor::Repository,
@@ -568,6 +571,7 @@ mod tests {
         let open = command(
             discussion,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: true,
                 title: "Review".into(),
                 anchor: CollaborationAnchor::Repository,
@@ -645,6 +649,7 @@ mod tests {
             command(
                 discussion,
                 CollaborationOperationBodyV1::Open {
+                    tags: Vec::new(),
                     blocking: true,
                     title: "Review source".into(),
                     visibility: VisibilityTier::Public,

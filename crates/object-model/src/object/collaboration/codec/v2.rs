@@ -110,9 +110,14 @@ enum WireBodyV1 {
         turn: WireTurnV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<crate::object::AnnotationTag>,
     },
     AppendTurn {
         turn: WireTurnV1,
+    },
+    EditTags {
+        tags: Vec<crate::object::AnnotationTag>,
     },
     RebindAnchor {
         anchor: WireAnchorV1,
@@ -347,6 +352,7 @@ impl From<CollaborationOperationBodyV1> for WireBodyV1 {
                 visibility,
                 turn,
                 thread_ref,
+                tags,
             } => Self::Open {
                 blocking,
                 title,
@@ -354,7 +360,9 @@ impl From<CollaborationOperationBodyV1> for WireBodyV1 {
                 visibility,
                 turn: turn.into(),
                 thread_ref,
+                tags,
             },
+            CollaborationOperationBodyV1::EditTags { tags } => Self::EditTags { tags },
             CollaborationOperationBodyV1::AppendTurn { turn } => {
                 Self::AppendTurn { turn: turn.into() }
             }
@@ -411,6 +419,7 @@ impl From<WireBodyV1> for CollaborationOperationBodyV1 {
                 visibility,
                 turn,
                 thread_ref,
+                tags,
             } => Self::Open {
                 blocking,
                 title,
@@ -418,7 +427,9 @@ impl From<WireBodyV1> for CollaborationOperationBodyV1 {
                 visibility,
                 turn: turn.into(),
                 thread_ref,
+                tags,
             },
+            WireBodyV1::EditTags { tags } => Self::EditTags { tags },
             WireBodyV1::AppendTurn { turn } => Self::AppendTurn { turn: turn.into() },
             WireBodyV1::RebindAnchor {
                 anchor,

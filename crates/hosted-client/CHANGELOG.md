@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.2](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.31.1...heddle-hosted-client-v0.31.2) - 2026-10-13
+
+### Fixed
+
+- support alpha.47 native collaboration forms
+
 ## [0.31.1](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.31.0...heddle-hosted-client-v0.31.1) - 2026-10-13
 
 ### Other

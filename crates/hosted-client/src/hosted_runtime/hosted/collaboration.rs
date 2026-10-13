@@ -695,6 +695,7 @@ fn open_request_from_signed(
         anchor,
         visibility,
         turn,
+        tags,
         ..
     } = record.body
     else {
@@ -724,7 +725,10 @@ fn open_request_from_signed(
                     .collect()
             })
             .unwrap_or_default(),
-        tags: Vec::new(),
+        tags: tags
+            .iter()
+            .map(thread_api::collaboration::annotation_tag_ref)
+            .collect(),
     })
 }
 
@@ -953,6 +957,7 @@ impl HostedClient {
             visibility,
             turn,
             thread_ref,
+            tags,
         } = &authored.body
         else {
             return Err(ProtocolError::InvalidState(
@@ -975,11 +980,16 @@ impl HostedClient {
             metadata: CollaborationMetadata {
                 scope,
                 actor,
-                mentions: vec![],
+                mentions: authored
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.mentions.clone())
+                    .unwrap_or_default(),
             },
             author: authored.author.clone(),
             occurred_at_ms: authored.occurred_at_ms,
             body: Body::Open {
+                tags: tags.clone(),
                 blocking: *blocking,
                 title: title.clone(),
                 anchor,
@@ -1898,6 +1908,7 @@ mod tests {
             author: Attribution::human(Principal::new("Author", "author@test")),
             occurred_at_ms: 100,
             body: Body::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Review".into(),
                 anchor: Anchor::Repository,
@@ -2092,6 +2103,7 @@ mod tests {
             author: Attribution::human(Principal::new("Attacker", "attacker@test")),
             occurred_at_ms: 99,
             body: Body::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Unrelated".into(),
                 anchor: Anchor::Repository,
@@ -2335,6 +2347,7 @@ mod tests {
             author: Attribution::human(Principal::new("alice", "")),
             occurred_at_ms: 1,
             body: Body::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: format!("{file}:{symbol}"),
                 anchor: anchor.clone(),
@@ -2393,6 +2406,7 @@ mod tests {
             author: Attribution::human(Principal::new("alice", "")),
             occurred_at_ms: 1,
             body: Body::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: format!("{file}:{symbol}"),
                 anchor,
@@ -2553,6 +2567,7 @@ mod tests {
                 author: author.clone(),
                 occurred_at_ms: 1_726_000_123_456,
                 body: Body::Open {
+                    tags: Vec::new(),
                     blocking: true,
                     title: "Authored title".into(),
                     anchor: anchor.clone(),
@@ -2688,6 +2703,7 @@ mod tests {
                 Attribution::human(Principal::new("Original Author", "author@test")),
                 1_726_000_123_456,
                 Body::Open {
+                    tags: Vec::new(),
                     blocking: false,
                     title: "exact scope".into(),
                     anchor: Anchor::Repository,

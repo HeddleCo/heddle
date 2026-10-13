@@ -80,6 +80,7 @@ pub(super) async fn roundtrip(
     let open = command(
         id,
         Body::Open {
+            tags: vec!["opening".into()],
             blocking: true,
             title: "Review source".into(),
             anchor: Anchor::Repository,
@@ -149,6 +150,9 @@ pub(super) async fn roundtrip(
         blocking: true,
         signed_operation: Some(open.clone()),
         audience: Audience::Public as i32,
+        tags: vec![thread_api::collaboration::annotation_tag_ref(
+            &"opening".into(),
+        )],
         ..Default::default()
     };
     let result = remote
@@ -174,6 +178,79 @@ pub(super) async fn roundtrip(
             .is_err(),
         "request cannot replace signed title"
     );
+    assert_eq!(
+        replica
+            .discussion_summary(discussion, 1024 * 1024)
+            .expect("opening summary")
+            .discussion
+            .tags,
+        vec!["opening".into()]
+    );
+    let mut tag_parent = open.clone();
+    let mut tag_version = replica.collaboration_heads(&record).expect("heads");
+    for tags in [vec!["edited".into()], Vec::new()] {
+        let id = uuid::Uuid::new_v4();
+        let signed = command(id, Body::EditTags { tags: tags.clone() })
+            .sign(std::slice::from_ref(&tag_parent), &signer)
+            .expect("tag edit");
+        let mut request = EditDiscussionTagsRequest {
+            client_operation_id: id.to_string(),
+            discussion: Some(RecordRef {
+                spool: Some(spool.clone()),
+                id: discussion.to_string(),
+            }),
+            expected_version: tag_version.version.clone(),
+            tags: tags
+                .iter()
+                .map(thread_api::collaboration::annotation_tag_ref)
+                .collect(),
+            signed_operation: Some(signed.clone()),
+        };
+        let mut tampered = request.clone();
+        tampered
+            .tags
+            .push(thread_api::collaboration::annotation_tag_ref(
+                &"unsigned".into(),
+            ));
+        assert!(
+            remote
+                .api
+                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&tampered)
+                .await
+                .is_err()
+        );
+        let applied = remote
+            .api
+            .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
+            .await
+            .expect("tag edit");
+        assert_eq!(
+            remote
+                .api
+                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
+                .await
+                .expect("tag replay"),
+            applied
+        );
+        tag_version = replica.collaboration_heads(&record).expect("edited heads");
+        assert_eq!(
+            replica
+                .discussion_summary(discussion, 1024 * 1024)
+                .expect("summary")
+                .discussion
+                .tags,
+            tags
+        );
+        request.expected_version = vec![0; 32];
+        assert!(
+            remote
+                .api
+                .call::<thread_api::rpc::CollaborationServiceEditDiscussionTags>(&request)
+                .await
+                .is_err()
+        );
+        tag_parent = signed;
+    }
     let id = uuid::Uuid::new_v4();
     let append = command(
         id,
@@ -181,7 +258,7 @@ pub(super) async fn roundtrip(
             turn: DiscussionTurnV1::new("Evidence attached").expect("turn"),
         },
     )
-    .sign(std::slice::from_ref(&open), &signer)
+    .sign(std::slice::from_ref(&tag_parent), &signer)
     .expect("append");
     let reference = RecordRef {
         spool: Some(spool.clone()),
@@ -193,7 +270,7 @@ pub(super) async fn roundtrip(
             client_operation_id: id.to_string(),
             discussion: Some(reference.clone()),
             causal_parents: vec![
-                thread_api::collaboration::operation_id(&open)
+                thread_api::collaboration::operation_id(&tag_parent)
                     .expect("parent")
                     .as_bytes()
                     .to_vec(),
@@ -286,6 +363,7 @@ pub(super) async fn roundtrip(
             Some(collaboration_event::Payload::Discussion(record)) => {
                 assert_eq!(record.status, discussion_record::Status::Resolved as i32);
                 assert_eq!(record.turn_count, 2);
+                assert!(record.tags.is_empty(), "cleared tags survive observation");
                 current_version = record.version;
                 records += 1;
             }
@@ -294,7 +372,8 @@ pub(super) async fn roundtrip(
             _ => {}
         }
     }
-    assert_eq!((records, turns, proofs), (1, 2, 3));
+    // Open, edit, clear, append and resolve each retain their original signed proof.
+    assert_eq!((records, turns, proofs), (1, 2, 5));
     assert!(committed);
     let id = uuid::Uuid::new_v4();
     let signed = command(
@@ -531,6 +610,7 @@ pub(super) async fn roundtrip(
         author: Attribution::human(Principal::new("Owner", "")),
         occurred_at_ms: chrono::Utc::now().timestamp_millis(),
         body: Body::Open {
+            tags: Vec::new(),
             blocking: false,
             title: "Embargoed search needle".into(),
             anchor: Anchor::Repository,
@@ -615,6 +695,7 @@ pub(super) async fn roundtrip(
             author: Attribution::human(Principal::new("Owner", "")),
             occurred_at_ms: chrono::Utc::now().timestamp_millis(),
             body: Body::Open {
+                tags: Vec::new(),
                 blocking: false,
                 title: "Embargoed search needle".into(),
                 anchor: Anchor::Repository,

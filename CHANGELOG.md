@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Release 0.31.2: support the api alpha.47 native collaboration codec (#2087): principal and pinned source mentions in discussions and contexts, opening tags, and tag replacement/clearing. Shared signed vectors remain byte-identical.
+
 - Release 0.31.0: adopt heddle-api 0.31.0-alpha.46 (#2066). Hosted import validates discovery in 512-ref pages up to the API's 1,048,576-ref ceiling, rejects absent selections before Prepare, and preserves deleted frozen pins at Commit. Signed result budgets use a 32x decoded-size forecast capped by the host maximum. Per-call protocol field 11 and the public `thread_api::hybrid::call_protocol` helper are removed; endpoint negotiation still gates mandatory features.
 
 - Release 0.29.0 (MINOR: breaking public API on 0.x). Native Fetch bounds source memory (#2045): `SourceBudget.max_objects` is removed, `PackReader::open` takes a scratch root, and `PackInventory` returns. Also: reserve `.git`/`.heddle` path aliases (#2033), symlink checkout (#2039), `-0000` timezone (#2041), refuse untrusted nested repositories and fix nested paths (#2037, #2043), iroh clone sync (#2044), fail on unavailable historical trees and blobs (#2046), adopt sley 0.12.1 (#2047), and CI/test fixes (#2036, #2049).

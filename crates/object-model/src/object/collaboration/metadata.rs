@@ -86,6 +86,12 @@ pub enum CollaborationMention {
     Device {
         key: [u8; 32],
     },
+    Principal {
+        principal_id: Uuid,
+    },
+    Source {
+        target: Box<super::AnnotationSourceReference>,
+    },
 }
 impl CollaborationMetadata {
     pub(crate) fn validate(&self) -> Result<(), CollaborationCodecError> {
@@ -101,6 +107,11 @@ impl CollaborationMetadata {
             id.trim().is_empty() || id.len() > 512 || id.chars().any(char::is_control)
         }) {
             return Err(invalid("invalid stable collaboration agent identity"));
+        }
+        let bytes = rmp_serde::to_vec_named(&self.mentions)
+            .map_err(|error| CollaborationCodecError::Encoding(error.to_string()))?;
+        if bytes.len() > 256 * 1024 {
+            return Err(invalid("canonical mentions exceed 256 KiB"));
         }
         for mention in &self.mentions {
             mention.validate()?;
@@ -149,6 +160,17 @@ impl CollaborationMention {
                 }
             }
             CollaborationMention::Device { .. } => {}
+            CollaborationMention::Principal { principal_id } => {
+                if principal_id.is_nil() {
+                    return Err(invalid("principal mention cannot be nil"));
+                }
+            }
+            CollaborationMention::Source { target } => {
+                target.validate()?;
+                if target.source.target.is_some() {
+                    return Err(invalid("source mentions require pinned coordinates"));
+                }
+            }
         }
         Ok(())
     }

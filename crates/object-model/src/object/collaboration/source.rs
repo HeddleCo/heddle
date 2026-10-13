@@ -92,6 +92,7 @@ mod tests {
             Attribution::human(Principal::new("Reviewer", "")),
             100,
             CollaborationOperationBodyV1::Open {
+                tags: Vec::new(),
                 blocking: true,
                 title: "Review exact lines".into(),
                 anchor: CollaborationAnchor::Source {

@@ -36,6 +36,10 @@ impl DeviceRpc {
                 let r = AppendDiscussionRequest::decode(body)?;
                 (r.signed_operation, r.discussion.and_then(|v| v.spool))
             }
+            "EditDiscussionTags" => {
+                let r = EditDiscussionTagsRequest::decode(body)?;
+                (r.signed_operation, r.discussion.and_then(|v| v.spool))
+            }
             "ResolveDiscussion" => {
                 let r = ResolveDiscussionRequest::decode(body)?;
                 (r.signed_operation, r.discussion.and_then(|v| v.spool))
@@ -108,6 +112,7 @@ impl DeviceRpc {
                     anchor,
                     visibility,
                     turn,
+                    tags,
                     ..
                 } = &record.body
                 else {
@@ -117,6 +122,13 @@ impl DeviceRpc {
                     request.title == *title
                         && request.blocking == *blocking
                         && request.initial_body == turn.body
+                        && request
+                            .mentions
+                            .iter()
+                            .map(thread_api::collaboration::mention)
+                            .collect::<std::result::Result<Vec<_>, _>>()?
+                            == metadata.mentions
+                        && thread_api::collaboration::annotation_tags(&request.tags)? == *tags
                         && thread_api::collaboration::visibility(
                             request.audience,
                             &request.audience_label
@@ -157,6 +169,18 @@ impl DeviceRpc {
                     "AppendTurn fields differ from signed record"
                 );
                 Precondition::Append
+            }
+            (Some("EditDiscussionTags"), Some(record), None) => {
+                let request = EditDiscussionTagsRequest::decode(body)?;
+                let Body::EditTags { tags } = &record.body else {
+                    bail!("EditDiscussionTags requires signed tag edit")
+                };
+                ensure!(
+                    request.discussion.as_ref() == Some(&reference)
+                        && thread_api::collaboration::annotation_tags(&request.tags)? == *tags,
+                    "tag edit differs from signed record"
+                );
+                Precondition::Exact(request.expected_version)
             }
             (Some("ResolveDiscussion"), Some(record), None) => {
                 let request = ResolveDiscussionRequest::decode(body)?;
