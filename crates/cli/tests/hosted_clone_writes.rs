@@ -4048,7 +4048,9 @@ fn warm_endpoint_cache_skips_descriptor_https_and_describe_rpc() {
             !calls.iter().any(|call| call.ends_with("/DescribeEndpoint")),
             "{calls:?}"
         );
-        assert_eq!(calls.len(), 6, "warm clone RPC budget: {calls:?}");
+        // Cold clone is 8 RPCs including DescribeEndpoint and ObserveSpool
+        // (configured default Thread). A warm descriptor cache skips Describe.
+        assert_eq!(calls.len(), 7, "warm clone RPC budget: {calls:?}");
         let requests = fixture
             .https
             .requests
