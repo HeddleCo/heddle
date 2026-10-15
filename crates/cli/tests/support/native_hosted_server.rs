@@ -881,10 +881,13 @@ async fn serve_call(
                         .and_then(|thread| thread.r#ref.as_ref())
                         .and_then(|reference| reference.id.as_ref())
                         .map(|id| id.value.clone());
-                    let thread_id = if name == fixture.thread_name {
-                        Some(fixture.thread_id.clone())
-                    } else if let Some(started) = started {
+                    // A StartThread publication is the live identity. The
+                    // fixture Thread id is only the bootstrap default before
+                    // that Thread exists.
+                    let thread_id = if let Some(started) = started {
                         Some(started)
+                    } else if name == fixture.thread_name {
+                        Some(fixture.thread_id.clone())
                     } else if name == "main" {
                         Some(vec![24; 32])
                     } else {
