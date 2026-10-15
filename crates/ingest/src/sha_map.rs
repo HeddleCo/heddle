@@ -54,7 +54,11 @@
 //! reads its session DB through it), so the cost is purely code,
 //! not deps.
 
-use std::{cell::RefCell, collections::HashMap, path::Path};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    path::Path,
+};
 
 use objects::object::{ChangeId, ContentHash, StateId};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -115,6 +119,9 @@ struct HotEntry {
 
 struct HotPage {
     entries: HashMap<String, HotEntry>,
+    /// Insertion order. Evicting the front is O(1). A touched entry stays
+    /// where it was inserted; the page is a bound, not a perfect LRU.
+    order: VecDeque<String>,
     tick: u64,
 }
 
@@ -136,18 +143,15 @@ impl HotPage {
             }
             return;
         }
-        if self.entries.len() >= TRANSLATION_PAGE_ENTRIES {
-            let victim = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.tick)
-                .map(|(sha, _)| sha.clone());
-            if let Some(victim) = victim {
-                self.entries.remove(&victim);
-            }
+        while self.entries.len() >= TRANSLATION_PAGE_ENTRIES {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&old);
         }
         self.tick = self.tick.saturating_add(1);
         let tick = self.tick;
+        self.order.push_back(sha.clone());
         self.entries.insert(
             sha,
             HotEntry {
@@ -174,10 +178,12 @@ impl HotPage {
 
     fn forget(&mut self, sha: &str) {
         self.entries.remove(sha);
+        self.order.retain(|old| old != sha);
     }
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
     }
 }
 
@@ -244,6 +250,7 @@ impl ShaMap {
             batch_depth: 0,
             hot: RefCell::new(HotPage {
                 entries: HashMap::new(),
+                order: VecDeque::new(),
                 tick: 0,
             }),
         }
@@ -275,6 +282,7 @@ impl ShaMap {
             batch_depth: 0,
             hot: RefCell::new(HotPage {
                 entries: HashMap::new(),
+                order: VecDeque::new(),
                 tick: 0,
             }),
         };

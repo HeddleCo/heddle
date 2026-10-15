@@ -1,5 +1,5 @@
 //! Local Thread creation and capture use the same immutable records as remote peers.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use crypto::{
@@ -536,6 +536,12 @@ impl Repository {
                 .map_err(|error| Error::Invalid(error.to_string()))?,
         };
         let oid_db = open_commit_oid_map(heddle_dir)?;
+        // One scan. A prepared lookup per state, per branch, re-read the same
+        // commit rows once for every ref that contains them.
+        let commit_oids = match oid_db.as_ref() {
+            Some(db) => load_commit_oids(db)?,
+            None => HashMap::new(),
+        };
         let admit_start = Instant::now();
         let wrote = (|| -> Result<(usize, u128, u128)> {
             // One transaction for every branch. Per-branch commits were an
@@ -550,12 +556,6 @@ impl Repository {
             let mut states = BTreeMap::new();
             let mut plans = Vec::with_capacity(tips.len());
             let mut leaves = Vec::new();
-            let mut oid_query = match oid_db.as_ref() {
-                Some(db) => {
-                    Some(db.prepare("SELECT git_sha FROM sha_map WHERE heddle_repr=?1 AND kind=0")?)
-                }
-                None => None,
-            };
             for (name, state_id) in tips {
                 let replica = replica_from_row(&tx, heddle_dir, name)?;
                 let genesis = signed_genesis_on(&tx, replica.thread_id())?.verify()?;
@@ -578,7 +578,7 @@ impl Repository {
                     leaves.push(crypto::import_batch::ImportLeaf {
                         thread: *replica.thread_id().as_bytes(),
                         state_id: *state.id().as_bytes(),
-                        git_oid: git_commit_oid(oid_query.as_mut(), state.id())?,
+                        git_oid: commit_oids.get(&state.id()).cloned().unwrap_or_default(),
                         parents: state
                             .parents
                             .iter()
@@ -596,7 +596,6 @@ impl Repository {
                     order_us,
                 });
             }
-            drop(oid_query);
             let sign_start = Instant::now();
             let batch = if leaves.is_empty() {
                 None
@@ -1446,17 +1445,20 @@ fn open_commit_oid_map(heddle_dir: &std::path::Path) -> Result<Option<rusqlite::
     Ok(Some(connection))
 }
 
-fn git_commit_oid(query: Option<&mut rusqlite::Statement<'_>>, state: StateId) -> Result<Vec<u8>> {
-    let Some(query) = query else {
-        return Ok(Vec::new());
-    };
-    let sha: Option<String> = query
-        .query_row([state.to_string_full()], |row| row.get(0))
-        .optional()?;
-    match sha {
-        Some(sha) => decode_git_oid(&sha),
-        None => Ok(Vec::new()),
+fn load_commit_oids(connection: &rusqlite::Connection) -> Result<HashMap<StateId, Vec<u8>>> {
+    let mut statement =
+        connection.prepare("SELECT heddle_repr, git_sha FROM sha_map WHERE kind = 0")?;
+    let mut rows = statement.query([])?;
+    let mut oids = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let repr: String = row.get(0)?;
+        let sha: String = row.get(1)?;
+        let state = StateId::parse(&repr).map_err(|error| {
+            Error::Invalid(format!("sha map commit {repr} is not a state id: {error}"))
+        })?;
+        oids.insert(state, decode_git_oid(&sha)?);
     }
+    Ok(oids)
 }
 
 fn decode_git_oid(hex_sha: &str) -> Result<Vec<u8>> {

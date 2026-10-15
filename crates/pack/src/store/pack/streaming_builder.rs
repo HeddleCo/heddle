@@ -65,13 +65,6 @@ use heddle_format::compression::CompressionConfig;
 
 use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
 
-/// How many bytes to reserve for the compressed-size varint in the
-/// streaming path. 10 is enough to encode any `u64` (max 9 7-bit
-/// continuation bytes plus 1 terminator). After streaming we patch
-/// the placeholder with a non-canonical varint that pads to exactly
-/// this length. Only the zstd-enabled compress path uses it.
-#[cfg(feature = "zstd")]
-const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
     store::{Result, StoreError},
@@ -164,37 +157,18 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// already cleaned and shouldn't be removed again.
     finalized: bool,
     durable: bool,
+    /// One zstd context for the whole pack. A fresh context per object costs
+    /// more than compressing the object.
+    #[cfg(feature = "zstd")]
+    zstd_ctx: Option<zstd::bulk::Compressor<'static>>,
+    /// Compressed frame for the object currently being written.
+    #[cfg(feature = "zstd")]
+    zstd_buf: Vec<u8>,
 }
 
 struct BucketWriter {
     writer: BufWriter<File>,
     last_used: u64,
-}
-
-#[cfg(feature = "zstd")]
-struct CountingWriter<'a, W: Write> {
-    inner: &'a mut W,
-    written: u64,
-}
-
-#[cfg(feature = "zstd")]
-impl<'a, W: Write> CountingWriter<'a, W> {
-    fn new(inner: &'a mut W) -> Self {
-        Self { inner, written: 0 }
-    }
-}
-
-#[cfg(feature = "zstd")]
-impl<W: Write> Write for CountingWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        self.written = self.written.saturating_add(written as u64);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
@@ -342,6 +316,10 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             index_path,
             finalized: false,
             durable,
+            #[cfg(feature = "zstd")]
+            zstd_ctx: None,
+            #[cfg(feature = "zstd")]
+            zstd_buf: Vec::new(),
         })
     }
 
@@ -361,6 +339,45 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         &self.bucket_dir
     }
 
+    /// Compress `data` into [`Self::zstd_buf`] with the builder's zstd context.
+    ///
+    /// The frame matches `Encoder::new` plus a pledged source size: level and
+    /// an empty dictionary are set once, then each object reuses that context.
+    #[cfg(feature = "zstd")]
+    fn fill_zstd_buf(&mut self, data: &[u8]) -> Result<()> {
+        if self.zstd_ctx.is_none() {
+            self.zstd_ctx = Some(
+                zstd::bulk::Compressor::new(self.compression.level).map_err(|error| {
+                    StoreError::InvalidObject(format!("zstd compressor: {error}"))
+                })?,
+            );
+        }
+        let mut compressor = self
+            .zstd_ctx
+            .take()
+            .ok_or_else(|| StoreError::InvalidObject("zstd compressor missing".into()))?;
+        if let Err(error) = compressor
+            .context_mut()
+            .reset(zstd::zstd_safe::ResetDirective::SessionOnly)
+        {
+            self.zstd_ctx = Some(compressor);
+            return Err(StoreError::InvalidObject(format!("zstd reset: {error}")));
+        }
+        self.zstd_buf.clear();
+        let result = (|| -> std::io::Result<()> {
+            let mut enc = zstd::stream::write::Encoder::with_context(
+                &mut self.zstd_buf,
+                compressor.context_mut(),
+            );
+            enc.set_pledged_src_size(Some(data.len() as u64))?;
+            enc.write_all(data)?;
+            enc.finish()?;
+            Ok(())
+        })();
+        self.zstd_ctx = Some(compressor);
+        result.map_err(StoreError::from)
+    }
+
     /// Add an object with a content-hash id.
     pub fn add(&mut self, hash: ContentHash, obj_type: ObjectType, data: Vec<u8>) -> Result<()> {
         self.add_id(PackObjectId::Hash(hash), obj_type, data)
@@ -375,19 +392,13 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
     /// - `data: Vec<u8>` (the input, owned by the caller — comes from
     ///   gix' `find_object` and isn't ours to stream further).
     /// - A ~40-byte stack scratch for the entry header.
-    /// - zstd's internal compression context (~128 KB constant).
+    /// - One reused zstd context for the builder, and one reused buffer
+    ///   holding the current object's compressed frame.
     /// - One 50-byte index-bucket entry buffered into the bucket's
     ///   `BufWriter`.
     ///
-    /// The compressed payload is **never materialized** as a `Vec<u8>` —
-    /// it streams directly through `zstd::stream::write::Encoder` into
-    /// the pack writer. The pack format requires a `compressed_size`
-    /// varint *before* the compressed bytes, which we don't know yet
-    /// when we write the header; we reserve a 10-byte placeholder and
-    /// seek-back to patch it after the encoder finishes. Heddle's
-    /// varint decoder accepts non-canonical encodings (it walks
-    /// continuation bits without enforcing minimum-byte form), so the
-    /// padded write decodes back to the same value any reader expects.
+    /// The frame is compressed before the entry is written, so the
+    /// compressed-size varint is known and the pack writer only appends.
     pub fn add_id(
         &mut self,
         id: PackObjectId,
@@ -395,6 +406,18 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         data: impl AsRef<[u8]>,
     ) -> Result<()> {
         let data = data.as_ref();
+        // Compress before borrowing the pack writer. The frame length is
+        // known, so the entry is appended: no placeholder and no flush.
+        #[cfg(feature = "zstd")]
+        let compress = self.compression.enabled && data.len() >= self.compression.min_size;
+        #[cfg(feature = "zstd")]
+        if compress {
+            self.fill_zstd_buf(data)?;
+        }
+        #[cfg(feature = "zstd")]
+        let store_raw = !compress || self.zstd_buf.len() == data.len();
+        #[cfg(not(feature = "zstd"))]
+        let store_raw = true;
         // Compute the entry's offset relative to the header from our logical
         // append cursor. Asking the underlying file for its position would
         // flush the BufWriter on every object, which defeats the streaming
@@ -430,129 +453,38 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             .ok_or_else(|| {
                 StoreError::InvalidObject("streaming pack position overflow".to_string())
             })?;
-        // Only consumed by the zstd-enabled streaming branch below, but
-        // we compute it here while we already have `header_buf`'s length
-        // in scope.
-        #[cfg(feature = "zstd")]
-        let csize_pos = entry_start + header_buf.len() as u64;
-
-        // Phase 2: stream the compressed payload. We branch here on
-        // whether to compress at all — for tiny objects (`< min_size`)
-        // the bulk path traditionally wrote raw bytes to skip zstd
-        // overhead, and the reader's existing `compressed_size ==
-        // uncompressed_size` heuristic in `pack_reader.rs:128` reads
-        // raw entries back unchanged. We preserve that policy.
-        // `want_compress` gates the zstd path. Even with the feature
-        // enabled we fall through to raw for tiny entries (where
-        // zstd's frame overhead dominates) or when the caller
-        // explicitly disabled compression in `CompressionConfig`.
-        // Without the `zstd` Cargo feature, every entry takes the raw
-        // branch — same fallback shape as `compress_pack_payload`.
-        let want_compress: bool;
-        #[cfg(feature = "zstd")]
-        {
-            want_compress = self.compression.enabled && data.len() >= self.compression.min_size;
-        }
-        #[cfg(not(feature = "zstd"))]
-        {
-            want_compress = false;
-        }
-        if !want_compress {
-            // Raw entry: known compressed_size = data.len(). One canonical
-            // varint + the data itself. No seek-back needed.
-            let mut csize_buf = Vec::with_capacity(10);
-            super::varint::encode_varint(data.len() as u64, &mut csize_buf);
-            pw.write_all(&csize_buf).map_err(StoreError::from)?;
-            self.pack_position = self
-                .pack_position
-                .checked_add(csize_buf.len() as u64)
-                .ok_or_else(|| {
-                    StoreError::InvalidObject("streaming pack position overflow".to_string())
-                })?;
-            pw.write_all(data).map_err(StoreError::from)?;
-            self.pack_position = self
-                .pack_position
-                .checked_add(data.len() as u64)
-                .ok_or_else(|| {
-                    StoreError::InvalidObject("streaming pack position overflow".to_string())
-                })?;
-            self.total_compressed += data.len() as u64;
+        // Tiny objects stay raw: a zstd frame would be larger than the
+        // bytes, and readers treat equal stored and logical lengths as raw.
+        // A frame that happens to be the same length is stored raw too.
+        let stored_len = if store_raw {
+            data.len()
         } else {
             #[cfg(feature = "zstd")]
             {
-                // Streaming entry: reserve 10 bytes for compressed_size,
-                // stream-compress the payload, then seek back to patch.
-                pw.write_all(&[0u8; CSIZE_PLACEHOLDER_LEN])
-                    .map_err(StoreError::from)?;
-                self.pack_position = self
-                    .pack_position
-                    .checked_add(CSIZE_PLACEHOLDER_LEN as u64)
-                    .ok_or_else(|| {
-                        StoreError::InvalidObject("streaming pack position overflow".to_string())
-                    })?;
-                let body_start = self.pack_position;
-                let compressed_size;
-                {
-                    let mut counting = CountingWriter::new(&mut *pw);
-                    let mut enc =
-                        zstd::stream::write::Encoder::new(&mut counting, self.compression.level)
-                            .map_err(StoreError::from)?;
-                    // Pass the source size so the zstd frame's optional
-                    // Frame Content Size field is set — lets decoders
-                    // preallocate output buffers and validates that we
-                    // wrote exactly what we promised at finish().
-                    enc.set_pledged_src_size(Some(data.len() as u64))
-                        .map_err(StoreError::from)?;
-                    enc.write_all(data).map_err(StoreError::from)?;
-                    enc.finish().map_err(StoreError::from)?;
-                    compressed_size = counting.written;
-                }
-                self.pack_position =
-                    self.pack_position
-                        .checked_add(compressed_size)
-                        .ok_or_else(|| {
-                            StoreError::InvalidObject(
-                                "streaming pack position overflow".to_string(),
-                            )
-                        })?;
-                let body_end = body_start.checked_add(compressed_size).ok_or_else(|| {
-                    StoreError::InvalidObject("streaming pack position overflow".to_string())
-                })?;
-                self.total_compressed += compressed_size;
-
-                // Seek back over the placeholder, write a 10-byte
-                // non-canonical varint encoding the actual compressed_size,
-                // then seek forward to where we left off so subsequent
-                // adds append correctly.
-                let mut csize_bytes = [0u8; CSIZE_PLACEHOLDER_LEN];
-                encode_varint_padded_to_10(compressed_size, &mut csize_bytes);
-                pw.flush().map_err(StoreError::from)?;
-                let inner = pw.get_mut();
-                inner
-                    .seek(SeekFrom::Start(csize_pos))
-                    .map_err(StoreError::from)?;
-                inner.write_all(&csize_bytes).map_err(StoreError::from)?;
-                // Pack entries have no explicit compression bit: readers treat
-                // equal stored/logical lengths as raw bytes. A zstd frame can
-                // occasionally be exactly as long as its input, so replace
-                // that ambiguous frame in place with the original payload.
-                if compressed_size == data.len() as u64 {
-                    inner
-                        .seek(SeekFrom::Start(body_start))
-                        .map_err(StoreError::from)?;
-                    inner.write_all(data).map_err(StoreError::from)?;
-                }
-                inner
-                    .seek(SeekFrom::Start(body_end))
-                    .map_err(StoreError::from)?;
+                self.zstd_buf.len()
             }
             #[cfg(not(feature = "zstd"))]
             {
-                // Unreachable: `want_compress` is forced to `false`
-                // when the `zstd` feature is off.
-                unreachable!("compression branch reached without `zstd` feature");
+                data.len()
             }
+        };
+        let mut csize_buf = Vec::with_capacity(10);
+        super::varint::encode_varint(stored_len as u64, &mut csize_buf);
+        pw.write_all(&csize_buf).map_err(StoreError::from)?;
+        if store_raw {
+            pw.write_all(data).map_err(StoreError::from)?;
+        } else {
+            #[cfg(feature = "zstd")]
+            pw.write_all(&self.zstd_buf).map_err(StoreError::from)?;
         }
+        self.pack_position = self
+            .pack_position
+            .checked_add(csize_buf.len() as u64)
+            .and_then(|position| position.checked_add(stored_len as u64))
+            .ok_or_else(|| {
+                StoreError::InvalidObject("streaming pack position overflow".to_string())
+            })?;
+        self.total_compressed += stored_len as u64;
 
         self.add_index_entry(id, offset)?;
         self.record_count += 1;
@@ -859,19 +791,11 @@ fn write_index_entry<W: Write>(out: &mut W, id: PackObjectId, offset: u64) -> Re
     out.write_all(&buf).map_err(StoreError::from)
 }
 
-/// Encode a `u64` as a non-canonical 10-byte LEB128 varint. The first
-/// 9 bytes always set the continuation bit (`0x80`), the 10th never
-/// does — so the decoder reads exactly 10 bytes regardless of the
-/// value. Used by the streaming path to reserve a fixed-width
-/// placeholder for `compressed_size` before stream-compressing the
-/// payload, then patch the placeholder with the actual size after.
+/// Encode a `u64` as a non-canonical 10-byte LEB128 varint.
 ///
-/// `decode_varint` ignores the canonicalness of the encoding (it
-/// walks continuation bits without checking minimum-byte form), so
-/// the value round-trips exactly. Cost is up to 9 wasted bytes per
-/// entry, ~115 KB on a 13 K-entry import — negligible relative to
-/// the pack body.
-#[cfg(feature = "zstd")]
+/// Readers accept this form. The streaming writer no longer emits it;
+/// the test keeps the decoder contract.
+#[cfg(all(test, feature = "zstd"))]
 fn encode_varint_padded_to_10(value: u64, out: &mut [u8; 10]) {
     let mut v = value;
     for slot in out.iter_mut().take(9) {
@@ -1824,18 +1748,10 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[test]
     fn streaming_path_does_not_buffer_compressed_payload_in_memory() {
-        // Smoke check: write a single 8 MiB payload, observe the
-        // pack file size on disk during/after the add. The pack file
-        // grows incrementally during the streaming compression — if
-        // we were buffering an intermediate compressed `Vec<u8>` the
-        // on-disk size would jump by ~8 MiB at finalize, not stay
-        // bounded as the encoder pumps bytes through.
-        //
-        // We can't easily measure peak heap from inside Rust without
-        // a custom allocator. What we *can* verify is that calling
-        // `add` returns control with the pack file already at its
-        // final body size, demonstrating the encoder wrote through
-        // and didn't accumulate.
+        // The compressed frame is one reused buffer, then appended to
+        // the pack writer. `flush_pack` publishes that entry without
+        // waiting for finalize, and the file stays far smaller than
+        // the 8 MiB input.
         let tmp = tempfile::TempDir::new().unwrap();
         let bucket_dir = tmp.path().join("buckets");
         let pack_path = tmp.path().join("pack.dat");
@@ -1857,9 +1773,9 @@ mod tests {
         let payload = vec![0xa5u8; 8 * 1024 * 1024];
         let hash = deterministic_hash(0x66);
         b.add(hash, ObjectType::Blob, payload.clone()).unwrap();
-        // Pack file already on disk holds at least the entry header +
-        // compressed payload (excluding the 32-byte trailer the builder
-        // appends at finalize).
+        // The frame sits in the pack `BufWriter` until flushed. One object
+        // is buffered, not the pack.
+        b.flush_pack().unwrap();
         let mid_size = std::fs::metadata(&pack_path).unwrap().len();
         assert!(
             mid_size > 16 + 40,
