@@ -486,21 +486,21 @@ impl Repository {
     /// Thread. Git merges belong to that graph, even when a sibling Thread has
     /// already imported the same revisions; they are not new local landings.
     ///
-    /// Each imported state keeps its own signed capture. A single import-floor
-    /// receipt would leave ancestors without an admitted operation, so a later
-    /// capture on one of those parents could not name a publisher signature.
-    /// The signatures are produced on one connection: WAL, `synchronous=NORMAL`
-    /// for the admit, and commits of [`IMPORT_ADMIT_BATCH`] states. Genesis is
-    /// verified once. Interactive capture stays on `synchronous=FULL`.
+    /// The publisher signs one import manifest for the states admitted in this
+    /// call. Each state keeps a capture operation so later parents can name it,
+    /// and that operation is stored only with an inclusion proof under the
+    /// manifest. The signature means the publisher imported this batch, not
+    /// that they authored each state. Genesis is verified once. Interactive
+    /// capture stays on `synchronous=FULL`.
     pub fn record_native_imported_source(&self, name: &str, state_id: StateId) -> Result<()> {
         self.record_native_imported_sources(&[(name, state_id)])
     }
 
-    /// Admit every imported branch on one connection. Each branch still gets
-    /// its own signed captures. WAL stays `synchronous=NORMAL` until every
-    /// branch has committed, then one durable checkpoint shrinks the log.
-    /// Checkpointing after each branch rewrote the whole metadata database
-    /// once per ref.
+    /// Admit every imported branch on one connection. One batch signature
+    /// covers every state admitted by this call. WAL stays `synchronous=NORMAL`
+    /// until every branch has committed, then one durable checkpoint shrinks
+    /// the log. Checkpointing after each branch rewrote the whole metadata
+    /// database once per ref.
     pub fn record_native_imported_sources(&self, tips: &[(&str, StateId)]) -> Result<()> {
         if tips.is_empty() {
             return Ok(());
@@ -527,8 +527,17 @@ impl Repository {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=268435456;",
         )?;
         let first = replica_from_row(&connection, heddle_dir, tips[0].0)?;
+        let source = import_source_identity(self.root());
+        let names = tips.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        let commitment = crypto::import_batch::ImportBatchCommitment {
+            source_kind: source.0,
+            source_identity: source.1,
+            parameters: crypto::import_batch::import_parameters(&names)
+                .map_err(|error| Error::Invalid(error.to_string()))?,
+        };
+        let oid_db = open_commit_oid_map(heddle_dir)?;
         let admit_start = Instant::now();
-        let wrote = (|| -> Result<(usize, u128)> {
+        let wrote = (|| -> Result<(usize, u128, u128)> {
             // One transaction for every branch. Per-branch commits were an
             // fsync each, and the source triggers are replaced for this
             // transaction so a resumed database picks up deferred indexing.
@@ -539,24 +548,99 @@ impl Repository {
             // Branch tips share commits. Keep the decoded states for the next
             // thread instead of reading the object store again.
             let mut states = BTreeMap::new();
+            let mut plans = Vec::with_capacity(tips.len());
+            let mut leaves = Vec::new();
+            let mut oid_query = match oid_db.as_ref() {
+                Some(db) => {
+                    Some(db.prepare("SELECT git_sha FROM sha_map WHERE heddle_repr=?1 AND kind=0")?)
+                }
+                None => None,
+            };
             for (name, state_id) in tips {
                 let replica = replica_from_row(&tx, heddle_dir, name)?;
                 let genesis = signed_genesis_on(&tx, replica.thread_id())?.verify()?;
                 let author = import_author_on(&replica, &tx, &publisher)?;
-                wrote += self.admit_imported_captures(
+                let fresh = !thread_has_accepted_operation(&tx, &replica.thread_id())?;
+                let order_start = Instant::now();
+                let order = self.import_capture_order(
                     &replica,
                     &tx,
-                    &genesis,
-                    &signer,
-                    publisher,
-                    &author,
+                    genesis.base,
                     *state_id,
+                    fresh,
                     &mut states,
+                )?;
+                let order_us = order_start.elapsed().as_micros();
+                let bare = self.import_admit_is_bare(&tx, &replica.thread_id())?;
+                let fast =
+                    bare && bare_import_can_skip_receive_scan(&tx, &replica, &publisher, &genesis)?;
+                for state in &order {
+                    leaves.push(crypto::import_batch::ImportLeaf {
+                        thread: *replica.thread_id().as_bytes(),
+                        state_id: *state.id().as_bytes(),
+                        git_oid: git_commit_oid(oid_query.as_mut(), state.id())?,
+                        parents: state
+                            .parents
+                            .iter()
+                            .map(|parent| *parent.as_bytes())
+                            .collect(),
+                    });
+                }
+                plans.push(ThreadAdmitPlan {
+                    replica,
+                    genesis,
+                    author,
+                    order: order.iter().map(State::id).collect(),
+                    bare,
+                    fast,
+                    order_us,
+                });
+            }
+            drop(oid_query);
+            let sign_start = Instant::now();
+            let batch = if leaves.is_empty() {
+                None
+            } else {
+                let batch = crypto::import_batch::sign_import_batch(&signer, &commitment, leaves)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+                for plan in &plans {
+                    for state_id in &plan.order {
+                        if !batch.covers(plan.replica.thread_id().as_bytes(), state_id.as_bytes()) {
+                            return Err(Error::Invalid(
+                                "imported state is not covered by the batch signature".into(),
+                            ));
+                        }
+                    }
+                }
+                Some(batch)
+            };
+            let batch_sign_us = sign_start.elapsed().as_micros();
+            for plan in &plans {
+                let order = plan
+                    .order
+                    .iter()
+                    .map(|state_id| {
+                        states.get(state_id).cloned().ok_or_else(|| {
+                            Error::Invalid("imported state left the admit cache".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                wrote += self.admit_imported_order(
+                    &plan.replica,
+                    &tx,
+                    &plan.genesis,
+                    publisher,
+                    &plan.author,
+                    &order,
+                    plan.bare,
+                    plan.fast,
+                    plan.order_us,
+                    batch.as_ref(),
                 )?;
             }
             let commit_start = Instant::now();
             tx.commit()?;
-            Ok((wrote, commit_start.elapsed().as_micros()))
+            Ok((wrote, commit_start.elapsed().as_micros(), batch_sign_us))
         })();
         let admit_us = admit_start.elapsed().as_micros();
         let checkpoint_start = Instant::now();
@@ -564,7 +648,7 @@ impl Repository {
             connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);");
         let checkpoint_us = checkpoint_start.elapsed().as_micros();
         drop(connection);
-        let (wrote, commit_us) = match wrote {
+        let (wrote, commit_us, batch_sign_us) = match wrote {
             Ok(value) => value,
             Err(error) => {
                 if std::env::var_os("HEDDLE_PROFILE").is_some() {
@@ -581,9 +665,10 @@ impl Repository {
         };
         if std::env::var_os("HEDDLE_PROFILE").is_some() {
             eprintln!(
-                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
+                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_batch_sign_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
                 tips.len(),
                 admit_us as f64 / 1000.0,
+                batch_sign_us as f64 / 1000.0,
                 commit_us as f64 / 1000.0,
                 checkpoint_us as f64 / 1000.0,
             );
@@ -853,27 +938,23 @@ impl Repository {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn admit_imported_captures(
+    fn admit_imported_order(
         &self,
         replica: &ThreadReplica,
         tx: &rusqlite::Transaction<'_>,
         genesis: &ThreadGenesis,
-        signer: &Ed25519Signer,
         publisher: [u8; 32],
         author: &SourceAuthor,
-        tip: StateId,
-        states: &mut BTreeMap<StateId, State>,
+        order: &[State],
+        bare: bool,
+        fast: bool,
+        order_us: u128,
+        batch: Option<&crypto::import_batch::SignedImportBatch>,
     ) -> Result<usize> {
-        let order_start = Instant::now();
-        let fresh = !thread_has_accepted_operation(tx, &replica.thread_id())?;
-        let order = self.import_capture_order(replica, tx, genesis.base, tip, fresh, states)?;
-        let order_us = order_start.elapsed().as_micros();
         // A Git import has no reference seeds, inherited closures, or visibility
         // sidecars. `prepare` then returns the State bytes alone. Building that
-        // capture directly keeps the signed payload and skips the per-state
-        // catalog queries and installation lock.
-        let bare = self.import_admit_is_bare(tx, &replica.thread_id())?;
-        let fast = bare && bare_import_can_skip_receive_scan(tx, replica, &publisher, genesis)?;
+        // capture directly keeps the payload and skips the per-state catalog
+        // queries and installation lock.
         let mut clock = AdmitClock::default();
         let mut wrote = 0usize;
         let mut index = 0usize;
@@ -882,23 +963,26 @@ impl Repository {
         let mut admitted_ops: BTreeMap<StateId, Vec<ContentHash>> = BTreeMap::new();
         while index < order.len() {
             let end = (index + IMPORT_ADMIT_BATCH).min(order.len());
+            let covered = batch.ok_or_else(|| {
+                Error::Invalid("imported state is not covered by the batch signature".into())
+            })?;
             if fast {
                 self.admit_bare_captures_in(
                     replica,
                     tx,
                     genesis,
-                    signer,
                     publisher,
                     author,
                     &order[index..end],
                     &mut admitted_ops,
                     &mut clock,
+                    covered,
                 )?;
                 wrote += end - index;
             } else {
                 for state in &order[index..end] {
                     self.admit_imported_capture_in(
-                        replica, tx, genesis, signer, publisher, author, state, bare, &mut clock,
+                        replica, tx, genesis, publisher, author, state, bare, &mut clock, covered,
                     )?;
                     wrote += 1;
                 }
@@ -1011,12 +1095,12 @@ impl Repository {
         replica: &ThreadReplica,
         tx: &rusqlite::Transaction<'_>,
         genesis: &ThreadGenesis,
-        signer: &Ed25519Signer,
         publisher: [u8; 32],
         author: &SourceAuthor,
         state: &State,
         bare: bool,
         clock: &mut AdmitClock,
+        batch: &crypto::import_batch::SignedImportBatch,
     ) -> Result<()> {
         let mut parents = BTreeSet::new();
         for parent in &state.parents {
@@ -1051,9 +1135,14 @@ impl Repository {
                 },
             ),
         };
-        let sign_start = Instant::now();
-        let signed = SignedOperation::sign(&operation, signer)?;
-        clock.sign_us += sign_start.elapsed().as_micros();
+        let canonical = operation.encode()?;
+        let signature = batch
+            .envelope(replica.thread_id().as_bytes(), state.id().as_bytes())
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        let signed = SignedOperation {
+            canonical,
+            signature,
+        };
         let receive_start = Instant::now();
         replica.require_trusted_integration(&operation)?;
         replica.require_local_integration_source_in(tx, &operation)?;
@@ -1111,37 +1200,34 @@ impl Repository {
         Ok(true)
     }
 
-    /// Admit bare Git captures without decoding each signed operation again.
+    /// Admit bare Git captures without decoding each operation again.
     ///
-    /// Signing already produced canonical bytes. The operation id is the
-    /// `OPERATION_FORMAT` hash of those bytes, which is what `ThreadOperation::id`
-    /// returns after a fresh signature. Each parent link is an operation already
-    /// admitted for that state parent. The row is inserted accepted, after its
-    /// parent links. Source revisions, heads, and the search queue are written
-    /// once from this batch, matching the insert trigger's net frontier.
-    /// Generation still
-    /// advances for the insert, the acceptance, and a new possession row,
-    /// applied once at the end of the batch. Callers keep the ordinary
-    /// `receive_in` path when the capture is not a bare local import.
+    /// The operation id is the `OPERATION_FORMAT` hash of the canonical bytes,
+    /// which is what `ThreadOperation::id` returns. The signature column is an
+    /// inclusion proof under the import manifest, not an authorship signature.
+    /// Each parent link is an operation already admitted for that state parent.
+    /// The row is inserted accepted, after its parent links. Source revisions,
+    /// heads, and the search queue are written once from this batch, matching
+    /// the insert trigger's net frontier. Generation still advances for the
+    /// insert, the acceptance, and a new possession row, applied once at the
+    /// end of the batch. Callers keep the ordinary `receive_in` path when the
+    /// capture is not a bare local import.
     #[allow(clippy::too_many_arguments, clippy::unused_self)]
     fn admit_bare_captures_in(
         &self,
         replica: &ThreadReplica,
         tx: &rusqlite::Transaction<'_>,
         genesis: &ThreadGenesis,
-        signer: &Ed25519Signer,
         publisher: [u8; 32],
         author: &SourceAuthor,
         states: &[State],
         admitted: &mut BTreeMap<StateId, Vec<ContentHash>>,
         clock: &mut AdmitClock,
+        batch: &crypto::import_batch::SignedImportBatch,
     ) -> Result<()> {
         author
             .validate()
             .map_err(|error| Error::Invalid(error.to_string()))?;
-        if signer.public_key() != publisher.as_slice() {
-            return Err(Error::Invalid("publisher differs from signing key".into()));
-        }
         if let SourceAuthor::Account { spool, .. } = author
             && spool.to_string() != genesis.spool
         {
@@ -1203,17 +1289,18 @@ impl Repository {
                 &canonical,
             );
             admitted.entry(state.id()).or_default().push(id);
+            let signature = batch
+                .envelope(thread.as_bytes(), state.id().as_bytes())
+                .map_err(|error| Error::Invalid(error.to_string()))?;
             prepared.push(PreparedCapture {
                 id,
                 canonical,
                 state_id: state.id(),
                 parents: operation.parents,
+                signature,
             });
         }
         drop(parent_query);
-        let sign_start = Instant::now();
-        let signatures = sign_import_canonicals(signer, &prepared)?;
-        clock.sign_us += sign_start.elapsed().as_micros();
         let receive_start = Instant::now();
         let mut insert_op = tx.prepare_cached(
             "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision,status) VALUES(?1,?2,?3,?4,?5,?6,1)",
@@ -1224,7 +1311,7 @@ impl Repository {
             "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
         )?;
         let mut bumps = 0i64;
-        for (capture, signature) in prepared.iter().zip(signatures) {
+        for capture in &prepared {
             // Parent links first so a non-deferred trigger would see them.
             for parent in &capture.parents {
                 insert_parent.execute(params![capture.id.as_bytes(), parent.as_bytes()])?;
@@ -1234,7 +1321,7 @@ impl Repository {
                 thread.as_bytes(),
                 facet,
                 &capture.canonical,
-                signature,
+                &capture.signature,
                 capture.state_id.as_bytes(),
             ])?;
             if inserted != 1 {
@@ -1274,6 +1361,17 @@ struct PreparedCapture {
     canonical: Vec<u8>,
     state_id: StateId,
     parents: BTreeSet<ContentHash>,
+    signature: Vec<u8>,
+}
+
+struct ThreadAdmitPlan {
+    replica: ThreadReplica,
+    genesis: ThreadGenesis,
+    author: SourceAuthor,
+    order: Vec<StateId>,
+    bare: bool,
+    fast: bool,
+    order_us: u128,
 }
 
 #[derive(Default)]
@@ -1285,55 +1383,89 @@ struct AdmitClock {
     commit_us: u128,
 }
 
-/// Ed25519 over already-encoded captures. Parent ids depend on earlier
-/// canonical bytes, so encoding stays in order and only the signatures run
-/// together. Each worker gets the same seed; the signature is deterministic.
-fn sign_import_canonicals(
-    signer: &Ed25519Signer,
-    prepared: &[PreparedCapture],
-) -> Result<Vec<Vec<u8>>> {
-    if prepared.is_empty() {
-        return Ok(Vec::new());
+fn import_source_identity(root: &std::path::Path) -> (u8, String) {
+    if let Some(url) = git_origin_url(root) {
+        return (crypto::import_batch::IMPORT_SOURCE_GIT_URL, url);
     }
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1)
-        .clamp(1, prepared.len())
-        .min(8);
-    if workers == 1 || prepared.len() < 2 {
-        return prepared
-            .iter()
-            .map(|capture| sign_one_canonical(signer, &capture.canonical))
-            .collect();
-    }
-    let seed = signer.to_seed();
-    let chunk = prepared.len().div_ceil(workers);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(workers);
-        for group in prepared.chunks(chunk) {
-            handles.push(scope.spawn(move || {
-                let signer = Ed25519Signer::from_seed(&seed)
-                    .map_err(|error| Error::Invalid(error.to_string()))?;
-                group
-                    .iter()
-                    .map(|capture| sign_one_canonical(&signer, &capture.canonical))
-                    .collect::<Result<Vec<_>>>()
-            }));
-        }
-        let mut signatures = Vec::with_capacity(prepared.len());
-        for handle in handles {
-            let signed = handle
-                .join()
-                .map_err(|_| Error::Invalid("import signature worker failed".into()))??;
-            signatures.extend(signed);
-        }
-        Ok(signatures)
-    })
+    (
+        crypto::import_batch::IMPORT_SOURCE_LOCAL_PATH,
+        root.display().to_string(),
+    )
 }
 
-fn sign_one_canonical(signer: &Ed25519Signer, canonical: &[u8]) -> Result<Vec<u8>> {
-    SignedOperation::sign_canonical(canonical, signer)
-        .map_err(|error| Error::Invalid(error.to_string()))
+fn git_origin_url(root: &std::path::Path) -> Option<String> {
+    let git_dir = git_metadata_dir(root)?;
+    let text = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let mut in_origin = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed == "[remote \"origin\"]";
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix("url") else {
+            continue;
+        };
+        let value = value.trim().strip_prefix('=')?.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn git_metadata_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let git = root.join(".git");
+    if git.is_dir() {
+        return Some(git);
+    }
+    let text = std::fs::read_to_string(&git).ok()?;
+    let line = text.lines().next()?.trim();
+    let path = line.strip_prefix("gitdir:")?.trim();
+    let path = std::path::PathBuf::from(path);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(root.join(path))
+    }
+}
+
+fn open_commit_oid_map(heddle_dir: &std::path::Path) -> Result<Option<rusqlite::Connection>> {
+    let path = heddle_dir.join("ingest").join("sha_map.sqlite");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(30))?;
+    Ok(Some(connection))
+}
+
+fn git_commit_oid(query: Option<&mut rusqlite::Statement<'_>>, state: StateId) -> Result<Vec<u8>> {
+    let Some(query) = query else {
+        return Ok(Vec::new());
+    };
+    let sha: Option<String> = query
+        .query_row([state.to_string_full()], |row| row.get(0))
+        .optional()?;
+    match sha {
+        Some(sha) => decode_git_oid(&sha),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn decode_git_oid(hex_sha: &str) -> Result<Vec<u8>> {
+    if hex_sha.len() != 40 && hex_sha.len() != 64 {
+        return Err(Error::Invalid(format!(
+            "git commit id {hex_sha} is not a SHA-1 or SHA-256 id"
+        )));
+    }
+    hex::decode(hex_sha).map_err(|error| Error::Invalid(error.to_string()))
 }
 
 fn directory_has_import_visibility(path: &std::path::Path) -> Result<bool> {

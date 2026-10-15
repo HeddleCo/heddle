@@ -813,24 +813,41 @@ impl GitSource {
         Ok(out)
     }
 
+    /// A repository handle that shares this source's object database.
+    ///
+    /// Blob translation reads through these handles on other threads. The
+    /// database caches are shared; each handle borrows no mutable importer
+    /// state.
+    pub(crate) fn thread_reader(&self) -> SleyRepository {
+        self.repo.clone()
+    }
+
     /// Read a blob's full contents into memory. Callers should treat this
     /// as the authoritative byte stream for the import — subsequent blob
     /// translation hashes these bytes directly.
     pub fn read_blob(&self, blob_sha: &str) -> crate::Result<Vec<u8>> {
-        let oid = parse_oid(self.repo.object_format(), blob_sha)?;
-        let object = self
-            .repo
-            .read_object(&oid)
-            .map_err(|e| IngestError::Git(format!("find_object {blob_sha}: {e}")))?;
-        if object.object_type != GitObjectType::Blob {
-            return Err(IngestError::Git(format!(
-                "object {blob_sha} is {}, not a blob",
-                object.object_type.as_str()
-            )));
-        }
-        Ok(object.body.clone())
+        read_blob_from(&self.repo, blob_sha)
     }
+}
 
+pub(crate) fn read_blob_from(repo: &SleyRepository, blob_sha: &str) -> crate::Result<Vec<u8>> {
+    let oid = parse_oid(repo.object_format(), blob_sha)?;
+    let object = repo
+        .read_object(&oid)
+        .map_err(|e| IngestError::Git(format!("find_object {blob_sha}: {e}")))?;
+    if object.object_type != GitObjectType::Blob {
+        return Err(IngestError::Git(format!(
+            "object {blob_sha} is {}, not a blob",
+            object.object_type.as_str()
+        )));
+    }
+    match std::sync::Arc::try_unwrap(object) {
+        Ok(object) => Ok(object.body),
+        Err(object) => Ok(object.body.clone()),
+    }
+}
+
+impl GitSource {
     /// Iterate every reflog entry across `HEAD` and every local branch/tag
     /// ref. Entries are returned in (ref-name asc, file-order) — within a
     /// ref, that's oldest-first, which matches how git writes the log.

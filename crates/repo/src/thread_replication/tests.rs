@@ -1444,7 +1444,13 @@ fn imported_states_keep_a_verifiable_signed_capture() {
             .expect("read operation")
             .expect("operation present");
         assert_eq!(status, Admission::Accepted);
-        let operation = signed.verify().expect("publisher signature verifies");
+        let operation = signed
+            .verify()
+            .expect("batch signature covers this imported state");
+        assert!(
+            crypto::import_batch::is_import_batch_signature(&signed.signature),
+            "import provenance is one batch attestation, not a per-state authorship signature"
+        );
         let recorded = operation
             .source_state()
             .expect("source body")
@@ -1526,4 +1532,25 @@ fn imported_states_keep_a_verifiable_signed_capture() {
         })
         .expect("deferral");
     assert_eq!(deferred, 0, "import clears the source-index deferral");
+    let (first_signed, _) = replica
+        .operation(&operation_for[&first.id()])
+        .expect("read")
+        .expect("present");
+    let (second_signed, _) = replica
+        .operation(&operation_for[&second.id()])
+        .expect("read")
+        .expect("present");
+    assert_eq!(
+        crypto::import_batch::manifest_signature_of(&first_signed.signature),
+        crypto::import_batch::manifest_signature_of(&second_signed.signature),
+        "every imported state carries the same manifest signature"
+    );
+    let forged = crypto::thread_operation::SignedOperation {
+        canonical: second_signed.canonical,
+        signature: first_signed.signature,
+    };
+    assert!(
+        forged.verify().is_err(),
+        "a state is not admitted by another state's inclusion proof"
+    );
 }

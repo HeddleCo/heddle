@@ -37,6 +37,7 @@ struct AdoptImportStats {
     commits_imported: usize,
     states_created: usize,
     state_store_write_ms: u128,
+    object_translate_ms: u128,
     native_admit_ms: u128,
     branches_synced: usize,
     tags_synced: usize,
@@ -115,6 +116,7 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
             "import local",
             &[
                 ProfileField::millis("import_ms", import_ms),
+                ProfileField::millis("object_translate_ms", stats.object_translate_ms),
                 ProfileField::millis("state_store_write_ms", stats.state_store_write_ms),
                 ProfileField::millis("native_admit_ms", stats.native_admit_ms),
                 ProfileField::millis("verification_ms", verification_ms),
@@ -250,6 +252,7 @@ fn import_ingest_for_adopt(
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
         state_store_write_ms: stats.state_store_write_ms,
+        object_translate_ms: stats.object_translate_ms,
         native_admit_ms,
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,

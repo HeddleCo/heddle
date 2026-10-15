@@ -54,7 +54,7 @@
 //! reads its session DB through it), so the cost is purely code,
 //! not deps.
 
-use std::path::Path;
+use std::{cell::RefCell, collections::HashMap, path::Path};
 
 use objects::object::{ChangeId, ContentHash, StateId};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -92,6 +92,93 @@ pub struct ShaMap {
     /// `> 1` hits the matching savepoint, abort/flush at depth 1 hits
     /// the outer transaction.
     batch_depth: usize,
+    /// Recent lookups. Fixed capacity, cleared on abort.
+    hot: RefCell<HotPage>,
+}
+
+/// Lookups kept beside SQLite for the commits being translated.
+///
+/// A history import resolves the same trees and blobs again at every
+/// descendant. The page is a fixed entry count: a repository of millions of
+/// objects still reads SQLite once the working set spills. Abort drops the
+/// page so a rolled-back insert cannot be served from memory.
+const TRANSLATION_PAGE_ENTRIES: usize = 4096;
+
+struct HotEntry {
+    tick: u64,
+    kind: MapKind,
+    repr: String,
+    /// `None` until this handle has seen the lossy column. `Some(None)` is a
+    /// lossless tree. `Some(Some(json))` is the persisted lossy list.
+    lossy: Option<Option<String>>,
+}
+
+struct HotPage {
+    entries: HashMap<String, HotEntry>,
+    tick: u64,
+}
+
+impl HotPage {
+    fn remember(
+        &mut self,
+        sha: String,
+        kind: MapKind,
+        repr: String,
+        lossy: Option<Option<String>>,
+    ) {
+        if let Some(existing) = self.entries.get_mut(&sha) {
+            self.tick = self.tick.saturating_add(1);
+            existing.tick = self.tick;
+            existing.kind = kind;
+            existing.repr = repr;
+            if lossy.is_some() {
+                existing.lossy = lossy;
+            }
+            return;
+        }
+        if self.entries.len() >= TRANSLATION_PAGE_ENTRIES {
+            let victim = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.tick)
+                .map(|(sha, _)| sha.clone());
+            if let Some(victim) = victim {
+                self.entries.remove(&victim);
+            }
+        }
+        self.tick = self.tick.saturating_add(1);
+        let tick = self.tick;
+        self.entries.insert(
+            sha,
+            HotEntry {
+                tick,
+                kind,
+                repr,
+                lossy,
+            },
+        );
+    }
+
+    fn touch(&mut self, sha: &str) -> Option<(MapKind, String, Option<Option<String>>)> {
+        let entry = self.entries.get_mut(sha)?;
+        self.tick = self.tick.saturating_add(1);
+        entry.tick = self.tick;
+        Some((entry.kind, entry.repr.clone(), entry.lossy.clone()))
+    }
+
+    fn set_lossy(&mut self, sha: &str, lossy: Option<String>) {
+        if let Some(entry) = self.entries.get_mut(sha) {
+            entry.lossy = Some(lossy);
+        }
+    }
+
+    fn forget(&mut self, sha: &str) {
+        self.entries.remove(sha);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl std::fmt::Debug for ShaMap {
@@ -155,6 +242,10 @@ impl ShaMap {
         Self {
             conn,
             batch_depth: 0,
+            hot: RefCell::new(HotPage {
+                entries: HashMap::new(),
+                tick: 0,
+            }),
         }
     }
 
@@ -182,6 +273,10 @@ impl ShaMap {
         let map = Self {
             conn,
             batch_depth: 0,
+            hot: RefCell::new(HotPage {
+                entries: HashMap::new(),
+                tick: 0,
+            }),
         };
         debug!(path = %path.display(), records = map.len(), "sha_map opened");
         Ok(map)
@@ -294,6 +389,7 @@ impl ShaMap {
             );
         }
         self.batch_depth -= 1;
+        self.hot.borrow_mut().clear();
     }
 
     /// Insert a commit mapping. Idempotent on identical re-insert,
@@ -386,6 +482,7 @@ impl ShaMap {
             "DELETE FROM sha_map WHERE git_sha = ? AND kind = ?",
             params![git_sha, MapKind::Commit.as_i64()],
         )?;
+        self.hot.borrow_mut().forget(&git_sha);
         Ok(())
     }
 
@@ -450,7 +547,10 @@ impl ShaMap {
             "INSERT INTO sha_map (git_sha, kind, heddle_repr, lossy_entries) VALUES (?, ?, ?, ?)",
         )?;
         match stmt.execute(params![git_sha, kind.as_i64(), heddle_repr, lossy_json]) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.remember(git_sha, kind, heddle_repr, Some(lossy_json));
+                Ok(())
+            }
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
@@ -473,6 +573,7 @@ impl ShaMap {
                                 params![lossy_json, git_sha, kind.as_i64()],
                             )?;
                         }
+                        self.remember(git_sha, kind, heddle_repr, Some(lossy_json));
                         Ok(())
                     }
                     Some(s) => Err(ShaMapError::Conflict {
@@ -528,6 +629,15 @@ impl ShaMap {
         git_sha: &str,
     ) -> Result<Option<Vec<LossyImportEntry>>, ShaMapError> {
         let git_sha = normalize_git_sha(git_sha)?;
+        if let Some((kind, _, lossy)) = self.hot.borrow_mut().touch(&git_sha)
+            && kind == MapKind::Tree
+            && let Some(lossy) = lossy
+        {
+            return match lossy {
+                None => Ok(Some(Vec::new())),
+                Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            };
+        }
         let mut stmt = self
             .conn
             .prepare_cached("SELECT lossy_entries FROM sha_map WHERE git_sha = ? AND kind = ?")?;
@@ -539,6 +649,7 @@ impl ShaMap {
         else {
             return Ok(None);
         };
+        self.hot.borrow_mut().set_lossy(&git_sha, json.clone());
         let Some(json) = json else {
             return Ok(Some(Vec::new()));
         };
@@ -562,12 +673,34 @@ impl ShaMap {
 
     fn get_for_kind(&self, git_sha: &str, want: MapKind) -> Result<Option<String>, ShaMapError> {
         let git_sha = normalize_git_sha(git_sha)?;
+        // Commit ids are parsed from the row on every read. The page is for
+        // trees and blobs, which a later commit looks up again and again.
+        // Caching a commit would hide a corrupt stored state id.
+        if want != MapKind::Commit
+            && let Some((kind, repr, _)) = self.hot.borrow_mut().touch(&git_sha)
+            && kind == want
+        {
+            return Ok(Some(repr));
+        }
         let mut stmt = self
             .conn
             .prepare_cached("SELECT heddle_repr FROM sha_map WHERE git_sha = ? AND kind = ?")?;
-        Ok(stmt
+        let found: Option<String> = stmt
             .query_row(params![git_sha, want.as_i64()], |r| r.get(0))
-            .optional()?)
+            .optional()?;
+        if want != MapKind::Commit
+            && let Some(repr) = found.clone()
+        {
+            self.remember(git_sha, want, repr, None);
+        }
+        Ok(found)
+    }
+
+    fn remember(&self, sha: String, kind: MapKind, repr: String, lossy: Option<Option<String>>) {
+        if kind == MapKind::Commit {
+            return;
+        }
+        self.hot.borrow_mut().remember(sha, kind, repr, lossy);
     }
 
     /// Reverse lookup: the git SHA that produced a given Heddle repr.
@@ -1132,5 +1265,17 @@ mod tests {
                 "missing commit {sha}"
             );
         }
+        assert_eq!(
+            m.hot.borrow().entries.len(),
+            0,
+            "commit rows are not copied into the translation page"
+        );
+        m.insert_tree(
+            &format!("{:040x}", 10_000u32),
+            deterministic_content_hash("capped-tree"),
+        )
+        .unwrap();
+        assert_eq!(m.hot.borrow().entries.len(), 1);
+        assert!(m.hot.borrow().entries.len() <= TRANSLATION_PAGE_ENTRIES);
     }
 }
