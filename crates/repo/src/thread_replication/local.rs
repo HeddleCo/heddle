@@ -507,21 +507,33 @@ impl Repository {
         }
         let serialization = InstallationLock::acquire(self.heddle_dir())?;
         let _guard = self.native_identity_lock(&serialization)?;
-        let first = self.native_thread(tips[0].0)?;
-        let mut connection = first.connect()?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // One signer for the whole import. `create_native_thread` already
+        // bound every fresh thread to this repository-local key. Reading it
+        // again per branch opened a new SQLite connection, and each of those
+        // connections auto-checkpointed the growing WAL.
+        let signer = self.new_local_thread_signer()?;
+        let publisher: [u8; 32] = signer
+            .public_key()
+            .try_into()
+            .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
+        let heddle_dir = self.heddle_dir();
+        let mut connection = super::install_artifacts::InstallationConnection::open(
+            heddle_dir,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        // wal_autocheckpoint=0 keeps commits from rewriting the database every
+        // thousand pages. The explicit checkpoint below is the one flush.
+        connection.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=-262144;",
+        )?;
+        let first = replica_from_row(&connection, heddle_dir, tips[0].0)?;
         let admit_start = Instant::now();
         let wrote = (|| -> Result<usize> {
             let mut wrote = 0usize;
             for (name, state_id) in tips {
-                let replica = self.native_thread(name)?;
-                let genesis = replica.signed_genesis()?.verify()?;
-                let signer = self.native_thread_signer(&replica)?;
-                let publisher: [u8; 32] = signer
-                    .public_key()
-                    .try_into()
-                    .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
-                let author = replica.source_author_for(&publisher)?;
+                let replica = replica_from_row(&connection, heddle_dir, name)?;
+                let genesis = signed_genesis_on(&connection, replica.thread_id())?.verify()?;
+                let author = import_author_on(&replica, &connection, &publisher)?;
                 wrote += self.admit_imported_captures(
                     &replica,
                     &mut connection,
@@ -534,22 +546,21 @@ impl Repository {
             }
             Ok(wrote)
         })();
-        let admit_ms = admit_start.elapsed().as_millis();
+        let admit_us = admit_start.elapsed().as_micros();
         let checkpoint_start = Instant::now();
         let restored =
             connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);");
-        let checkpoint_ms = checkpoint_start.elapsed().as_millis();
+        let checkpoint_us = checkpoint_start.elapsed().as_micros();
         drop(connection);
         if std::env::var_os("HEDDLE_PROFILE").is_some() {
             eprintln!(
-                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {admit_ms}\n  admit_checkpoint_ms: {checkpoint_ms}",
+                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
                 tips.len(),
+                admit_us as f64 / 1000.0,
+                checkpoint_us as f64 / 1000.0,
             );
         }
-        let wrote = match wrote {
-            Ok(wrote) => wrote,
-            Err(error) => return Err(error),
-        };
+        let wrote = wrote?;
         restored?;
         if wrote > 0 {
             first.notify_committed()?;
@@ -827,35 +838,59 @@ impl Repository {
     ) -> Result<usize> {
         let order_start = Instant::now();
         let order = self.import_capture_order(replica, connection, genesis.base, tip)?;
-        let order_ms = order_start.elapsed().as_millis();
+        let order_us = order_start.elapsed().as_micros();
         // A Git import has no reference seeds, inherited closures, or visibility
         // sidecars. `prepare` then returns the State bytes alone. Building that
         // capture directly keeps the signed payload and skips the per-state
         // catalog queries and installation lock.
         let bare = self.import_admit_is_bare(connection, &replica.thread_id())?;
+        let fast =
+            bare && bare_import_can_skip_receive_scan(connection, replica, &publisher, genesis)?;
         let mut clock = AdmitClock::default();
         let mut wrote = 0usize;
         let mut index = 0usize;
+        // Parent ids recorded earlier in this thread, including rows committed
+        // by the previous batch. Avoids a source-revision lookup per parent.
+        let mut admitted_ops: BTreeMap<StateId, Vec<ContentHash>> = BTreeMap::new();
         while index < order.len() {
             let end = (index + IMPORT_ADMIT_BATCH).min(order.len());
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            for state in &order[index..end] {
-                self.admit_imported_capture_in(
-                    replica, &tx, genesis, signer, publisher, author, state, bare, &mut clock,
+            if fast {
+                self.admit_bare_captures_in(
+                    replica,
+                    &tx,
+                    genesis,
+                    signer,
+                    publisher,
+                    author,
+                    &order[index..end],
+                    &mut admitted_ops,
+                    &mut clock,
                 )?;
-                wrote += 1;
+                wrote += end - index;
+            } else {
+                for state in &order[index..end] {
+                    self.admit_imported_capture_in(
+                        replica, &tx, genesis, signer, publisher, author, state, bare, &mut clock,
+                    )?;
+                    wrote += 1;
+                }
             }
+            let commit_start = Instant::now();
             tx.commit()?;
+            clock.commit_us += commit_start.elapsed().as_micros();
             index = end;
         }
         if std::env::var_os("HEDDLE_PROFILE").is_some() {
             eprintln!(
-                "heddle profile:\n  command: import local admit\n  thread: {}\n  admit_order_ms: {order_ms}\n  admit_capture_ms: {}\n  admit_sign_ms: {}\n  admit_receive_ms: {}\n  admit_states: {wrote}\n  bare_capture: {bare}",
+                "heddle profile:\n  command: import local admit\n  thread: {}\n  admit_order_ms: {:.3}\n  admit_capture_ms: {:.3}\n  admit_sign_ms: {:.3}\n  admit_receive_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_states: {wrote}\n  bare_capture: {bare}\n  direct_admit: {fast}",
                 replica.thread_id(),
-                clock.capture_ms,
-                clock.sign_ms,
-                clock.receive_ms,
+                order_us as f64 / 1000.0,
+                clock.capture_us as f64 / 1000.0,
+                clock.sign_us as f64 / 1000.0,
+                clock.receive_us as f64 / 1000.0,
+                clock.commit_us as f64 / 1000.0,
             );
         }
         Ok(wrote)
@@ -969,7 +1004,7 @@ impl Repository {
         } else {
             replica.prepare_capture_in(tx, genesis, self, state)?
         };
-        clock.capture_ms += capture_start.elapsed().as_millis();
+        clock.capture_us += capture_start.elapsed().as_micros();
         let operation = ThreadOperation {
             version: 1,
             thread: replica.thread_id(),
@@ -984,7 +1019,7 @@ impl Repository {
         };
         let sign_start = Instant::now();
         let signed = SignedOperation::sign(&operation, signer)?;
-        clock.sign_ms += sign_start.elapsed().as_millis();
+        clock.sign_us += sign_start.elapsed().as_micros();
         let receive_start = Instant::now();
         replica.require_trusted_integration(&operation)?;
         replica.require_local_integration_source_in(tx, &operation)?;
@@ -998,7 +1033,7 @@ impl Repository {
             }
         }
         replica.record_source_possession_in(tx, state.id())?;
-        clock.receive_ms += receive_start.elapsed().as_millis();
+        clock.receive_us += receive_start.elapsed().as_micros();
         Ok(())
     }
 
@@ -1041,13 +1076,145 @@ impl Repository {
         }
         Ok(true)
     }
+
+    /// Admit bare Git captures without decoding each signed operation again.
+    ///
+    /// Signing already produced canonical bytes. The operation id is the
+    /// `OPERATION_FORMAT` hash of those bytes, which is what `ThreadOperation::id`
+    /// returns after a fresh signature. Each parent link is an operation already
+    /// admitted for that state parent. Status still moves from 0 to 1, so the
+    /// source-index and search triggers record the revision, and generation
+    /// still advances for the insert, the acceptance, and a new possession row.
+    /// Those increments are applied once at the end of the batch. Callers keep
+    /// the ordinary `receive_in` path when the capture is not a bare local
+    /// import.
+    #[allow(clippy::too_many_arguments, clippy::unused_self)]
+    fn admit_bare_captures_in(
+        &self,
+        replica: &ThreadReplica,
+        tx: &rusqlite::Transaction<'_>,
+        genesis: &ThreadGenesis,
+        signer: &Ed25519Signer,
+        publisher: [u8; 32],
+        author: &SourceAuthor,
+        states: &[State],
+        admitted: &mut BTreeMap<StateId, Vec<ContentHash>>,
+        clock: &mut AdmitClock,
+    ) -> Result<()> {
+        author
+            .validate()
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        if let SourceAuthor::Account { spool, .. } = author
+            && spool.to_string() != genesis.spool
+        {
+            return Err(Error::Invalid(
+                "original source author crosses Spool scope".into(),
+            ));
+        }
+        let facet = super::facet_number(ThreadFacet::Source);
+        let thread = replica.thread_id();
+        let mut parent_query = tx.prepare_cached(
+            "SELECT id FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 AND facet=?3 ORDER BY id LIMIT 1024",
+        )?;
+        let mut insert_op = tx.prepare_cached(
+            "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision) VALUES(?1,?2,?3,?4,?5,?6)",
+        )?;
+        let mut insert_parent =
+            tx.prepare_cached("INSERT INTO parents(child,parent) VALUES(?1,?2)")?;
+        let mut admit =
+            tx.prepare_cached("UPDATE operations SET status=1 WHERE id=?1 AND status=0")?;
+        let mut possess = tx.prepare_cached(
+            "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
+        )?;
+        let mut bumps = 0i64;
+        for state in states {
+            if state.parents.is_empty()
+                || state.parents.len() != state.parents.iter().collect::<BTreeSet<_>>().len()
+            {
+                return Err(Error::Invalid(
+                    "capture source ancestry differs from causal parents".into(),
+                ));
+            }
+            let parents = imported_parent_operations(
+                &mut parent_query,
+                admitted,
+                &thread,
+                state,
+                genesis.base,
+                facet,
+            )?;
+            let capture_start = Instant::now();
+            let result = state.encode_current_msgpack()?.into();
+            clock.capture_us += capture_start.elapsed().as_micros();
+            let operation = ThreadOperation {
+                version: 1,
+                thread,
+                parents,
+                publisher,
+                body: ThreadOperationBody::Capture(
+                    objects::object::thread_replication::AuthoredCapture {
+                        result,
+                        author: author.clone(),
+                    },
+                ),
+            };
+            replica.require_trusted_integration(&operation)?;
+            let sign_start = Instant::now();
+            let signed = SignedOperation::sign(&operation, signer)?;
+            clock.sign_us += sign_start.elapsed().as_micros();
+            let receive_start = Instant::now();
+            let id = ContentHash::compute_typed(
+                objects::object::thread_replication::OPERATION_FORMAT,
+                &signed.canonical,
+            );
+            let inserted = insert_op.execute(params![
+                id.as_bytes(),
+                thread.as_bytes(),
+                facet,
+                &signed.canonical,
+                &signed.signature,
+                state.id().as_bytes(),
+            ])?;
+            if inserted != 1 {
+                return Err(Error::Invalid(
+                    "imported capture already has an operation".into(),
+                ));
+            }
+            for parent in &operation.parents {
+                insert_parent.execute(params![id.as_bytes(), parent.as_bytes()])?;
+            }
+            // Captures have no collaboration record. Indexing here keeps the
+            // same side effects as `receive_in` if a body ever carries one.
+            super::collaboration::index_operation(tx, &operation)?;
+            if admit.execute(params![id.as_bytes()])? != 1 {
+                return Err(Error::Invalid("imported capture was not admitted".into()));
+            }
+            let possessed = possess.execute(params![thread.as_bytes(), state.id().as_bytes()])?;
+            bumps += 2 + i64::from(possessed != 0);
+            admitted.entry(state.id()).or_default().push(id);
+            clock.receive_us += receive_start.elapsed().as_micros();
+        }
+        drop(parent_query);
+        drop(insert_op);
+        drop(insert_parent);
+        drop(admit);
+        drop(possess);
+        if bumps > 0 {
+            tx.execute(
+                "UPDATE threads SET generation=generation+?2 WHERE id=?1",
+                params![thread.as_bytes(), bumps],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct AdmitClock {
-    capture_ms: u128,
-    sign_ms: u128,
-    receive_ms: u128,
+    capture_us: u128,
+    sign_us: u128,
+    receive_us: u128,
+    commit_us: u128,
 }
 
 fn directory_has_import_visibility(path: &std::path::Path) -> Result<bool> {
@@ -1066,7 +1233,171 @@ fn directory_has_import_visibility(path: &std::path::Path) -> Result<bool> {
     Ok(false)
 }
 
-const IMPORT_ADMIT_BATCH: usize = 1024;
+fn replica_from_row(
+    connection: &rusqlite::Connection,
+    heddle_dir: &std::path::Path,
+    name: &str,
+) -> Result<ThreadReplica> {
+    let id: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT thread FROM local_thread_names WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let id = id.ok_or_else(|| Error::Invalid(format!("Thread {name:?} has no native identity")))?;
+    Ok(ThreadReplica {
+        path: heddle_dir.join(crate::local_metadata::DATABASE_NAME),
+        thread: super::hash(&id)?,
+    })
+}
+
+fn signed_genesis_on(
+    connection: &rusqlite::Connection,
+    thread: ContentHash,
+) -> Result<SignedGenesis> {
+    let signed = connection.query_row(
+        "SELECT genesis,genesis_signature FROM threads WHERE id=?1",
+        [thread.as_bytes()],
+        |row| {
+            Ok(SignedGenesis {
+                canonical: row.get(0)?,
+                signature: row.get(1)?,
+            })
+        },
+    )?;
+    if signed.verify()?.id()? != thread {
+        return Err(Error::Invalid(
+            "stored creator proof differs from Thread identity".into(),
+        ));
+    }
+    Ok(signed)
+}
+
+fn import_author_on(
+    replica: &ThreadReplica,
+    connection: &rusqlite::Connection,
+    publisher: &[u8; 32],
+) -> Result<SourceAuthor> {
+    use objects::object::thread_replication::GenesisOwner;
+    match replica.effective_owner_in(connection)? {
+        GenesisOwner::LocalKey(owner) if &owner == publisher => Ok(SourceAuthor::LocalKey),
+        GenesisOwner::LocalKey(_) => Err(Error::Invalid(
+            "unclaimed Thread requires original local source signer".into(),
+        )),
+        GenesisOwner::Account(_) => {
+            let spool = replica
+                .genesis_in(connection)?
+                .spool
+                .parse()
+                .map_err(|error: uuid::Error| Error::Invalid(error.to_string()))?;
+            let author = crate::identity::source_author::load(
+                &crate::identity::heddle_home_dir(),
+                publisher,
+                spool,
+            )
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+            if matches!(author, SourceAuthor::LocalKey) {
+                return Err(Error::Invalid(
+                    "account Thread requires original device account proof".into(),
+                ));
+            }
+            Ok(author)
+        }
+    }
+}
+
+/// States admitted in one transaction. Parent operation ids stay in memory
+/// across the batch, and the generation counter moves once at the end.
+const IMPORT_ADMIT_BATCH: usize = 65_536;
+
+/// The direct admit path matches `receive_in` only for a fresh local capture.
+/// A hosted import key, an existing import admission, an ownership claim, or a
+/// forked genesis still goes through the full parent decode.
+fn bare_import_can_skip_receive_scan(
+    connection: &rusqlite::Connection,
+    replica: &ThreadReplica,
+    publisher: &[u8; 32],
+    genesis: &ThreadGenesis,
+) -> Result<bool> {
+    if genesis.parent.is_some() {
+        return Ok(false);
+    }
+    let witnessed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hosted_import_job_keys WHERE public_key=?1)",
+        [publisher.as_slice()],
+        |row| row.get(0),
+    )?;
+    if witnessed {
+        return Ok(false);
+    }
+    let admissions: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hosted_import_admissions)",
+        [],
+        |row| row.get(0),
+    )?;
+    if admissions {
+        return Ok(false);
+    }
+    let claims: i64 = connection.query_row(
+        "SELECT count(*) FROM thread_owner_claims WHERE thread=?1",
+        [replica.thread_id().as_bytes()],
+        |row| row.get(0),
+    )?;
+    Ok(claims == 0)
+}
+
+fn imported_parent_operations(
+    query: &mut rusqlite::CachedStatement<'_>,
+    admitted: &mut BTreeMap<StateId, Vec<ContentHash>>,
+    thread: &ContentHash,
+    state: &State,
+    base: StateId,
+    facet: u32,
+) -> Result<BTreeSet<ContentHash>> {
+    let mut parents = BTreeSet::new();
+    for parent in &state.parents {
+        if *parent == base {
+            continue;
+        }
+        if !admitted.contains_key(parent) {
+            let rows = query.query_map(
+                params![thread.as_bytes(), parent.as_bytes(), facet],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let mut ops = Vec::new();
+            for row in rows {
+                ops.push(super::hash(&row?)?);
+            }
+            if ops.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "capture parent {} has no admitted native operation",
+                    parent.to_string_full()
+                )));
+            }
+            if ops.len() == 1024 {
+                return Err(Error::Invalid(format!(
+                    "capture parent {} has too many admitted operations",
+                    parent.to_string_full()
+                )));
+            }
+            admitted.insert(*parent, ops);
+        }
+        let Some(ops) = admitted.get(parent) else {
+            return Err(Error::Invalid(
+                "capture parent has no admitted native operation".into(),
+            ));
+        };
+        if ops.is_empty() {
+            return Err(Error::Invalid(format!(
+                "capture parent {} has no admitted native operation",
+                parent.to_string_full()
+            )));
+        }
+        parents.extend(ops.iter().copied());
+    }
+    Ok(parents)
+}
 
 fn accepted_import_revision(
     connection: &rusqlite::Connection,

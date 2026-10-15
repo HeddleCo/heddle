@@ -1498,4 +1498,14 @@ fn imported_states_keep_a_verifiable_signed_capture() {
             .is_empty(),
         "the genesis base is not itself a signed capture"
     );
+    assert_eq!(
+        replica.source_head_revisions().expect("source heads"),
+        std::collections::BTreeSet::from([merged.id()]),
+        "the source frontier is the imported tip"
+    );
+    assert_eq!(
+        replica.view().expect("view").generation,
+        13,
+        "creation records the base, and each imported state bumps generation for insert, acceptance, and possession"
+    );
 }
