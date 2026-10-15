@@ -158,7 +158,8 @@ impl SourceSearchReader {
     }
 }
 
-pub(super) const SCHEMA: &str = "
+pub(super) const SEARCH_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS source_index_defer(thread BLOB PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS source_search_candidates(
  candidate BLOB NOT NULL UNIQUE CHECK(length(candidate)=32),
  operation BLOB NOT NULL CHECK(length(operation)=32),
@@ -211,14 +212,21 @@ INSERT OR IGNORE INTO source_search_bootstrap(version) VALUES(3);
 INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
 SELECT o.id,o.thread,o.source_revision FROM source_search_ready r
 JOIN operations o ON o.id=r.operation AND o.status=1 AND o.facet=1
-WHERE r.extractor_version<>3;
-CREATE TRIGGER IF NOT EXISTS source_search_admitted_update AFTER UPDATE OF status ON operations
+WHERE r.extractor_version<>3;";
+
+/// Queue one accepted capture unless this import is writing the queue in bulk.
+pub(super) const SEARCH_ADMIT_TRIGGERS: &str = "
+DROP TRIGGER IF EXISTS source_search_admitted_update;
+CREATE TRIGGER source_search_admitted_update AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO source_search_queue(operation,thread,revision) VALUES(NEW.id,NEW.thread,NEW.source_revision);
 END;
-CREATE TRIGGER IF NOT EXISTS source_search_admitted_insert AFTER INSERT ON operations
+DROP TRIGGER IF EXISTS source_search_admitted_insert;
+CREATE TRIGGER source_search_admitted_insert AFTER INSERT ON operations
 WHEN NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO source_search_queue(operation,thread,revision) VALUES(NEW.id,NEW.thread,NEW.source_revision);
 END;";
@@ -685,7 +693,8 @@ mod tests {
             )
             .expect("old path-only projection");
         connection
-            .execute_batch(SCHEMA)
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("upgrade source projection");
         assert_eq!(
             due(&directory, 21, 1)
@@ -706,7 +715,10 @@ mod tests {
         connection
             .execute("DELETE FROM source_search_bootstrap", [])
             .expect("legacy install");
-        connection.execute_batch(SCHEMA).expect("one-time backfill");
+        connection
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
+            .expect("one-time backfill");
         assert_eq!(
             due(&directory, 21, 1).expect("backfilled"),
             vec![QueuedOriginal {
@@ -726,7 +738,8 @@ mod tests {
             .execute("DELETE FROM source_search_queue", [])
             .expect("drain");
         connection
-            .execute_batch(SCHEMA)
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("repeat initialization");
         assert!(
             due(&directory, 21, 1)
@@ -868,7 +881,8 @@ mod tests {
             "stale extractor rows must not be served"
         );
         connection
-            .execute_batch(SCHEMA)
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("queue stale projection");
         assert!(
             due(&directory, chrono::Utc::now().timestamp(), 4)

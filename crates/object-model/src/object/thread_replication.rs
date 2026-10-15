@@ -331,6 +331,30 @@ impl ThreadOperation {
         Ok(bytes)
     }
 
+    /// Canonical bytes for a capture whose state body is already
+    /// [`State::encode_current_msgpack`].
+    ///
+    /// [`Self::encode`] decodes and re-encodes that body so a peer cannot
+    /// submit non-canonical bytes. Bytes this process just encoded already
+    /// satisfy that check, and repeating it dominates a large local import.
+    /// The msgpack matches `encode` for a capture with no visibility sidecar.
+    /// A sidecar still runs [`Capture::validated_state`].
+    pub fn encode_locally_prepared_capture(&self) -> Result<Vec<u8>> {
+        if self.version != 1 {
+            return Err(invalid("unsupported Thread operation version"));
+        }
+        let ThreadOperationBody::Capture(authored) = &self.body else {
+            return Err(invalid("prepared capture encode requires a capture"));
+        };
+        authored.author.validate()?;
+        if authored.result.visibility.is_some() {
+            authored.result.validated_state()?;
+        }
+        let bytes = rmp_serde::to_vec_named(self)?;
+        bounded(&bytes)?;
+        Ok(bytes)
+    }
+
     pub fn id(&self) -> Result<ContentHash> {
         Ok(ContentHash::compute_typed(
             OPERATION_FORMAT,
@@ -544,6 +568,32 @@ mod capture_shape_tests {
         assert!(
             ThreadOperation::decode(&bytes).is_err(),
             "capture has one typed shape, without a legacy byte decoder"
+        );
+    }
+
+    #[test]
+    fn locally_prepared_capture_matches_full_encode() {
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![],
+            Attribution::human(Principal::new("author", "")),
+        );
+        let operation = ThreadOperation {
+            version: 1,
+            thread: ContentHash::from_bytes([1; 32]),
+            parents: BTreeSet::new(),
+            publisher: [9; 32],
+            body: ThreadOperationBody::Capture(AuthoredCapture {
+                result: state.encode_current_msgpack().expect("state").into(),
+                author: SourceAuthor::LocalKey,
+            }),
+        };
+        assert_eq!(
+            operation.encode().expect("encode"),
+            operation
+                .encode_locally_prepared_capture()
+                .expect("prepared capture"),
+            "skipping the state round trip must not change the signed bytes"
         );
     }
 }

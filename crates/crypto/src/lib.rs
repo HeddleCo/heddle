@@ -8,6 +8,7 @@ mod ed25519;
 mod error;
 #[cfg(feature = "owner-root")]
 pub mod import_authority;
+pub mod import_batch;
 #[cfg(feature = "owner-root")]
 pub mod native_witness;
 pub mod original_boundary_acceptance;

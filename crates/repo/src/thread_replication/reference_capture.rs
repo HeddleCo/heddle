@@ -12,7 +12,9 @@ use objects::{
             SourceTargetCore,
             capture::{self, FileResolution, ReferenceClosure, ResolutionStatus, TargetResolution},
         },
-        thread_replication::{Capture, ThreadFacet, ThreadOperation, ThreadOperationBody},
+        thread_replication::{
+            Capture, ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
+        },
     },
     reference_store::Source,
     store::ObjectStore,
@@ -268,7 +270,21 @@ impl ThreadReplica {
     /// Called after source capture but before signing its publication. Retrying
     /// an admitted State reuses its exact signed descriptor, never today's tags.
     pub fn prepare_capture(&self, repo: &Repository, state: &State) -> Result<Capture> {
-        self.prepare_source_result(repo, state, Vec::new())
+        let connection = self.connect()?;
+        let genesis = self.genesis_in(&connection)?;
+        self.prepare_capture_in(&connection, &genesis, repo, state)
+    }
+    /// Same capture bytes as [`Self::prepare_capture`], on a connection the
+    /// caller already holds. Import admission uses this so a branch does not
+    /// open a new database handle per state.
+    pub(super) fn prepare_capture_in(
+        &self,
+        connection: &rusqlite::Connection,
+        genesis: &ThreadGenesis,
+        repo: &Repository,
+        state: &State,
+    ) -> Result<Capture> {
+        self.prepare_source_result(connection, genesis, repo, state, Vec::new())
     }
     /// Integration inherits the exact selected source operation and every exact
     /// target frontier, not either Thread's latest mutable checkout.
@@ -340,25 +356,31 @@ impl ThreadReplica {
                 )?);
             }
         }
-        self.prepare_source_result(repo, state, roots)
+        let connection = self.connect()?;
+        let genesis = self.genesis_in(&connection)?;
+        self.prepare_source_result(&connection, &genesis, repo, state, roots)
     }
     fn prepare_source_result(
         &self,
+        connection: &rusqlite::Connection,
+        genesis: &ThreadGenesis,
         repo: &Repository,
         state: &State,
         mut roots: Vec<ReferenceClosure>,
     ) -> Result<Capture> {
-        let connection = self.connect()?;
         let existing:Option<Vec<u8>>=connection.query_row("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.source_revision=?2 AND o.status=1 ORDER BY o.id LIMIT 1",params![self.thread.as_bytes(),state.id().as_bytes()],|r|r.get(0)).optional()?;
         if let Some(bytes) = existing
             && let Some(capture) = ThreadOperation::decode(&bytes)?.source_result()?
         {
             return Ok(capture);
         }
-        let scope = self.reference_scope()?;
+        let scope = CollaborationScope {
+            spool: genesis.spool.parse().map_err(err)?,
+            thread: Some(self.thread),
+        };
         let store = repo.store();
         for parent in &state.parents {
-            roots.extend(self.reference_snapshots_at(*parent, store)?);
+            roots.extend(self.reference_snapshots_at_in(connection, genesis, *parent, store)?);
         }
         let known_targets: std::collections::BTreeSet<_> = roots
             .iter()
@@ -433,7 +455,7 @@ impl ThreadReplica {
                 },
             });
         }
-        let frontier = self.frontier_page(ThreadFacet::Discussion, None, 129)?;
+        let frontier = self.frontier_page_in(connection, ThreadFacet::Discussion, None, 129)?;
         if frontier.len() > 128 {
             return Err(err("reference collaboration frontier budget exceeded"));
         }
@@ -513,12 +535,26 @@ impl ThreadReplica {
         state: StateId,
         store: &impl ObjectStore,
     ) -> Result<Vec<ReferenceClosure>> {
-        if self.reference_projection_pending_for_revision(state)? {
+        let connection = self.connect()?;
+        let genesis = self.genesis_in(&connection)?;
+        self.reference_snapshots_at_in(&connection, &genesis, state, store)
+    }
+    fn reference_snapshots_at_in(
+        &self,
+        connection: &rusqlite::Connection,
+        genesis: &ThreadGenesis,
+        state: StateId,
+        store: &impl ObjectStore,
+    ) -> Result<Vec<ReferenceClosure>> {
+        let pending: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
+            params![self.thread.as_bytes(), state.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if pending {
             return Err(Error::ReferenceProjectionPending);
         }
-        let connection = self.connect()?;
-        let genesis = self.genesis()?;
-        let (owner, bytes) = descriptor_rows_at(&connection, self.thread, state)?;
+        let (owner, bytes) = descriptor_rows_at(connection, self.thread, state)?;
         if owner != self.thread {
             let pending: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
