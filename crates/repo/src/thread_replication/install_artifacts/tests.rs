@@ -27,7 +27,10 @@ fn concurrent_capture_and_native_rename_follow_repository_lock_order() {
     let (attempt_tx, attempt_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
-    let timeout = Duration::from_secs(10);
+    // The worker stays paused for the whole capture. snapshot_with_attribution
+    // on windows-latest has exceeded 10s, which timed the pause out before
+    // resume. 60s still fails a lock inversion instead of hanging the job.
+    let timeout = Duration::from_secs(60);
     // Capture owns this same reentrant lock through native admission. Pause
     // rename exactly before it attempts repository serialization, then probe
     // its identity lock without ever creating the second blocking edge.
