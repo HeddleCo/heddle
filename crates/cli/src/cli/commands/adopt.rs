@@ -37,6 +37,7 @@ struct AdoptImportStats {
     commits_imported: usize,
     states_created: usize,
     state_store_write_ms: u128,
+    native_admit_ms: u128,
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
@@ -115,6 +116,7 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
             &[
                 ProfileField::millis("import_ms", import_ms),
                 ProfileField::millis("state_store_write_ms", stats.state_store_write_ms),
+                ProfileField::millis("native_admit_ms", stats.native_admit_ms),
                 ProfileField::millis("verification_ms", verification_ms),
                 ProfileField::millis(
                     "verification_worktree_status_ms",
@@ -127,6 +129,8 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
     }
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
     let recommended_action = action_value(&trust);
+    let mut trust = trust;
+    trust.machine_contract_coverage = verbs::MachineContractCoverage::omitted();
     // The .heddle data dir lives inside the repo; render it relative to the
     // repo root so adopt output stays repo-relative and doesn't leak the
     // user's absolute home path (#551).
@@ -239,13 +243,16 @@ fn import_ingest_for_adopt(
         }
         other => anyhow::Error::from(other),
     })?;
+    let admit_start = std::time::Instant::now();
     if let Some(root_parent) = root_parent {
         register_imported_native_threads(repo, root_parent)?;
     }
+    let native_admit_ms = admit_start.elapsed().as_millis();
     Ok(AdoptImportStats {
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
         state_store_write_ms: stats.state_store_write_ms,
+        native_admit_ms,
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,

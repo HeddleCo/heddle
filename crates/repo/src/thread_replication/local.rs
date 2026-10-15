@@ -10,7 +10,7 @@ use objects::{
     object::{
         ContentHash, State, StateId, VisibilityTier,
         thread_replication::{
-            ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
+            SourceAuthor, ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
             local_integration::{self, LocalIntegration},
         },
     },
@@ -484,11 +484,47 @@ impl Repository {
     /// Admit an imported branch's existing ancestry into its already created
     /// Thread. Git merges belong to that graph, even when a sibling Thread has
     /// already imported the same revisions; they are not new local landings.
-    /// Capture admission still verifies every real parent in this Thread.
+    ///
+    /// Each imported state keeps its own signed capture. A single import-floor
+    /// receipt would leave ancestors without an admitted operation, so a later
+    /// capture on one of those parents could not name a publisher signature.
+    /// The signatures are produced on one connection: WAL, `synchronous=NORMAL`
+    /// for the admit, and commits of [`IMPORT_ADMIT_BATCH`] states. Genesis is
+    /// verified once. Interactive capture stays on `synchronous=FULL`.
     pub fn record_native_imported_source(&self, name: &str, state_id: StateId) -> Result<()> {
-        let _serialization = InstallationLock::acquire(self.heddle_dir())?;
-        self.native_thread(name)?;
-        self.record_native_source_graph(name, state_id, |_| Ok(AttachedSourceKind::Capture))
+        let serialization = InstallationLock::acquire(self.heddle_dir())?;
+        let _guard = self.native_identity_lock(&serialization)?;
+        let replica = self.native_thread(name)?;
+        let genesis = replica.signed_genesis()?.verify()?;
+        let signer = self.native_thread_signer(&replica)?;
+        let publisher: [u8; 32] = signer
+            .public_key()
+            .try_into()
+            .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
+        let author = replica.source_author_for(&publisher)?;
+        let mut connection = replica.connect()?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        let wrote = self.admit_imported_captures(
+            &replica,
+            &mut connection,
+            &genesis,
+            &signer,
+            publisher,
+            &author,
+            state_id,
+        );
+        let restored =
+            connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);");
+        drop(connection);
+        let wrote = match wrote {
+            Ok(wrote) => wrote,
+            Err(error) => return Err(error),
+        };
+        restored?;
+        if wrote > 0 {
+            replica.notify_committed()?;
+        }
+        Ok(())
     }
 
     fn record_native_source_graph(
@@ -747,6 +783,190 @@ impl Repository {
             ))),
         }
     }
+
+    fn admit_imported_captures(
+        &self,
+        replica: &ThreadReplica,
+        connection: &mut rusqlite::Connection,
+        genesis: &ThreadGenesis,
+        signer: &Ed25519Signer,
+        publisher: [u8; 32],
+        author: &SourceAuthor,
+        tip: StateId,
+    ) -> Result<usize> {
+        let order = self.import_capture_order(replica, connection, genesis.base, tip)?;
+        let mut wrote = 0usize;
+        let mut index = 0usize;
+        while index < order.len() {
+            let end = (index + IMPORT_ADMIT_BATCH).min(order.len());
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for state in &order[index..end] {
+                self.admit_imported_capture_in(
+                    replica, &tx, genesis, signer, publisher, author, state,
+                )?;
+                wrote += 1;
+            }
+            tx.commit()?;
+            index = end;
+        }
+        Ok(wrote)
+    }
+
+    /// Parent-first states that still need a signed capture. Already accepted
+    /// revisions and the synthetic genesis base are not revisited.
+    fn import_capture_order(
+        &self,
+        replica: &ThreadReplica,
+        connection: &rusqlite::Connection,
+        base: StateId,
+        tip: StateId,
+    ) -> Result<Vec<State>> {
+        let thread = replica.thread_id();
+        let mut pending = BTreeMap::new();
+        let mut stack = vec![tip];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if accepted_import_revision(connection, &thread, id)? {
+                continue;
+            }
+            let state = self
+                .store()
+                .get_state(&id)?
+                .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+            if state.parents.is_empty() {
+                continue;
+            }
+            for parent in &state.parents {
+                if *parent != base {
+                    stack.push(*parent);
+                }
+            }
+            pending.insert(id, state);
+        }
+        let mut children: BTreeMap<StateId, Vec<StateId>> = BTreeMap::new();
+        let mut indegree: BTreeMap<StateId, usize> = BTreeMap::new();
+        for (id, state) in &pending {
+            let mut degree = 0usize;
+            for parent in &state.parents {
+                if pending.contains_key(parent) {
+                    degree += 1;
+                    children.entry(*parent).or_default().push(*id);
+                }
+            }
+            indegree.insert(*id, degree);
+        }
+        let mut ready: BTreeSet<StateId> = indegree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut order = Vec::with_capacity(pending.len());
+        while let Some(id) = ready.pop_first() {
+            let Some(state) = pending.remove(&id) else {
+                return Err(Error::Invalid("imported history has a cycle".into()));
+            };
+            if let Some(dependents) = children.get(&id) {
+                for child in dependents {
+                    let Some(degree) = indegree.get_mut(child) else {
+                        return Err(Error::Invalid("imported history has a cycle".into()));
+                    };
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.insert(*child);
+                    }
+                }
+            }
+            order.push(state);
+        }
+        if !pending.is_empty() {
+            return Err(Error::Invalid("imported history has a cycle".into()));
+        }
+        Ok(order)
+    }
+
+    fn admit_imported_capture_in(
+        &self,
+        replica: &ThreadReplica,
+        tx: &rusqlite::Transaction<'_>,
+        genesis: &ThreadGenesis,
+        signer: &Ed25519Signer,
+        publisher: [u8; 32],
+        author: &SourceAuthor,
+        state: &State,
+    ) -> Result<()> {
+        let mut parents = BTreeSet::new();
+        for parent in &state.parents {
+            if *parent == genesis.base {
+                continue;
+            }
+            let operations = admitted_source_operations(tx, &replica.thread_id(), *parent)?;
+            if operations.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "capture parent {} has no admitted native operation",
+                    parent.to_string_full()
+                )));
+            }
+            parents.extend(operations);
+        }
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents,
+            publisher,
+            body: ThreadOperationBody::Capture(
+                objects::object::thread_replication::AuthoredCapture {
+                    result: replica.prepare_capture_in(tx, genesis, self, state)?,
+                    author: author.clone(),
+                },
+            ),
+        };
+        let signed = SignedOperation::sign(&operation, signer)?;
+        replica.require_trusted_integration(&operation)?;
+        replica.require_local_integration_source_in(tx, &operation)?;
+        replica.validate_reference_capture_in(tx, genesis, &operation, self.store())?;
+        match replica.receive_in(tx, &signed, &operation, self.store(), false, None, false)? {
+            Admission::Accepted => {}
+            other => {
+                return Err(Error::Invalid(format!(
+                    "local capture was not admitted: {other:?}"
+                )));
+            }
+        }
+        replica.record_source_possession_in(tx, state.id())?;
+        Ok(())
+    }
+}
+
+const IMPORT_ADMIT_BATCH: usize = 1024;
+
+fn accepted_import_revision(
+    connection: &rusqlite::Connection,
+    thread: &ContentHash,
+    revision: StateId,
+) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1)",
+        params![thread.as_bytes(), revision.as_bytes()],
+        |row| row.get(0),
+    )?)
+}
+
+fn admitted_source_operations(
+    connection: &rusqlite::Connection,
+    thread: &ContentHash,
+    revision: StateId,
+) -> Result<Vec<ContentHash>> {
+    let mut query = connection.prepare(
+        "SELECT id FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 ORDER BY id LIMIT 1024",
+    )?;
+    let rows = query.query_map(params![thread.as_bytes(), revision.as_bytes()], |row| {
+        row.get::<_, Vec<u8>>(0)
+    })?;
+    rows.map(|row| super::hash(&row?)).collect()
 }
 
 enum AttachedSourceKind {

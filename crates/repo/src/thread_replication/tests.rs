@@ -2,7 +2,7 @@
 use crypto::{Ed25519Signer, Signer};
 use objects::object::{
     Attribution, CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
-    DiscussionRecordId, DiscussionTurnV1, Principal, Tree, VisibilityTier,
+    DiscussionRecordId, DiscussionTurnV1, Principal, State, Tree, VisibilityTier,
 };
 use tempfile::TempDir;
 
@@ -1395,5 +1395,87 @@ fn explicit_source_resolution_requires_current_candidates_and_retains_all_parent
             )
             .expect("retry"),
         resolved
+    );
+}
+
+#[test]
+fn imported_states_keep_a_verifiable_signed_capture() {
+    let temp = TempDir::new().expect("repo directory");
+    let repo = crate::init_test_repository(temp.path()).expect("repository");
+    let base = repo.head().expect("head").expect("base");
+    repo.store().put_tree(&Tree::new()).expect("empty tree");
+    repo.create_native_thread("main", base, None, "")
+        .expect("thread");
+    let tree = Tree::new().hash();
+    let first = State::new_snapshot(tree, vec![base], author());
+    repo.store().put_state(&first).expect("first state");
+    let second = State::new_snapshot(tree, vec![first.id()], author());
+    repo.store().put_state(&second).expect("second state");
+    let sibling = State::new_snapshot(tree, vec![base], author());
+    repo.store().put_state(&sibling).expect("sibling state");
+    let merged = State::new_snapshot(tree, vec![second.id(), sibling.id()], author());
+    repo.store().put_state(&merged).expect("merged state");
+
+    repo.record_native_imported_source("main", merged.id())
+        .expect("admit imported ancestry");
+    repo.record_native_imported_source("main", merged.id())
+        .expect("resume is idempotent");
+
+    let replica = repo.native_thread("main").expect("named thread");
+    let mut operation_for = std::collections::BTreeMap::new();
+    for state in [&first, &second, &sibling, &merged] {
+        let page = replica
+            .source_operation_page(state.id(), None, 8)
+            .expect("operation page");
+        assert_eq!(page.len(), 1, "one admitted operation per imported state");
+        let (signed, status) = replica
+            .operation(&page[0])
+            .expect("read operation")
+            .expect("operation present");
+        assert_eq!(status, Admission::Accepted);
+        let operation = signed.verify().expect("publisher signature verifies");
+        let recorded = operation
+            .source_state()
+            .expect("source body")
+            .expect("captured state");
+        assert_eq!(recorded.id(), state.id());
+        assert_eq!(operation.thread, replica.thread_id());
+        operation_for.insert(state.id(), page[0]);
+    }
+    let second_operation = replica
+        .operation(&operation_for[&second.id()])
+        .expect("read")
+        .expect("present")
+        .0
+        .verify()
+        .expect("second signature");
+    assert!(
+        second_operation
+            .parents
+            .contains(&operation_for[&first.id()])
+    );
+    let merged_operation = replica
+        .operation(&operation_for[&merged.id()])
+        .expect("read")
+        .expect("present")
+        .0
+        .verify()
+        .expect("merge signature");
+    assert!(
+        merged_operation
+            .parents
+            .contains(&operation_for[&second.id()])
+    );
+    assert!(
+        merged_operation
+            .parents
+            .contains(&operation_for[&sibling.id()])
+    );
+    assert!(
+        replica
+            .source_operation_page(base, None, 1)
+            .expect("base page")
+            .is_empty(),
+        "the genesis base is not itself a signed capture"
     );
 }

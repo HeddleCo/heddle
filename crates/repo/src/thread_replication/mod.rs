@@ -1349,10 +1349,19 @@ impl ThreadReplica {
         after: Option<ContentHash>,
         limit: usize,
     ) -> Result<Vec<ContentHash>> {
+        self.frontier_page_in(&*self.connect()?, facet, after, limit)
+    }
+
+    pub(super) fn frontier_page_in(
+        &self,
+        connection: &Connection,
+        facet: ThreadFacet,
+        after: Option<ContentHash>,
+        limit: usize,
+    ) -> Result<Vec<ContentHash>> {
         if limit == 0 || limit > 1024 {
             return Err(Error::Invalid("page size must be 1..1024".into()));
         }
-        let connection = self.connect()?;
         let mut query = connection.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=?2 AND o.status=1 AND (?3 IS NULL OR o.id>?3) AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1) ORDER BY o.id LIMIT ?4")?;
         query
             .query_map(
