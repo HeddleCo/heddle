@@ -3333,7 +3333,8 @@ mod tests {
         let resolved = captured
             .resolution_requests
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
         assert_eq!(
             resolved.as_slice(),
             [name.as_str()],
