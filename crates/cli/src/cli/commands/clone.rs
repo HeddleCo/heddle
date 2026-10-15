@@ -2711,8 +2711,8 @@ fn clone_remote_default_thread_unset_advice(remote_label: &str) -> RecoveryAdvic
         format!("remote '{remote_label}' has no configured default Thread"),
         "clone cannot choose a state to fetch until a Thread is named",
         "destination path was left unchanged; no local clone repository was initialized",
-        "heddle clone <remote> --thread <name>",
-        vec!["heddle clone <remote> --thread <name>".to_string()],
+        "heddle clone <remote> <path> --thread <thread>",
+        vec!["heddle clone <remote> <path> --thread <thread>".to_string()],
     )
 }
 
@@ -3997,7 +3997,7 @@ mod tests {
             assert!(advice.hint.contains("--thread"));
             assert_eq!(
                 advice.primary_command,
-                "heddle clone <remote> --thread <name>"
+                "heddle clone <remote> <path> --thread <thread>"
             );
         }
 

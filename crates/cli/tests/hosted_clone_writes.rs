@@ -3912,7 +3912,7 @@ fn clone_without_default_thread_asks_for_thread_flag() {
         );
         assert_eq!(
             envelope["primary_command"],
-            "heddle clone <remote> --thread <name>"
+            "heddle clone <remote> <path> --thread <thread>"
         );
         assert!(
             envelope["hint"]

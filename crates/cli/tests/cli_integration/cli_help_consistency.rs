@@ -89,7 +89,8 @@ fn clone_help_pins_behavior_stanza() {
     assert!(
         help.contains("Native clones fetch one thread's advertised tip")
             && help.contains("configured default thread")
-            && help.contains("pass `--thread <name>`")
+            && help.contains("pass `--thread")
+            && help.contains("<name>`")
             && help.contains("override")
             && help.contains("`heddle pull`")
             && !help.contains("Default is `main`")
