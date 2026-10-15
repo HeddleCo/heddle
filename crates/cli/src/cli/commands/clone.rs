@@ -1832,7 +1832,14 @@ async fn clone_network_connected(
                         },
                     )
                     .await
-                    .map_err(anyhow::Error::from)
+                    .map_err(|error| {
+                        map_hosted_clone_pull_error(
+                            error,
+                            thread.as_deref(),
+                            repo_path,
+                            &mut cleanup,
+                        )
+                    })
             }),
         )
         .context("clone setup or source fetch failed")?;
@@ -1996,9 +2003,8 @@ async fn clone_network_connected(
         .await
         .context("post-install metadata sync failed; source installed; clone intent retained")?;
         CloneIntent::clear(local_path)?;
-        // A Thread with several hosted heads cloned every head; one is checked
-        // out (or advertised) by the documented default and the rest stay
-        // selectable with `heddle resolve`.
+        // Clone installs the selected Thread's advertised tip. Concurrent heads
+        // and other Threads stay on the remote until `heddle pull --thread`.
         let mut source_heads = Vec::new();
         for entry in remote_refs.iter().filter(|entry| entry.is_user_thread()) {
             if let Some(heads) = verbs::source_heads::source_heads_report(
@@ -2655,6 +2661,27 @@ fn select_recover_clone_thread<'a>(
         intent.advertised_head.as_deref(),
         &intent.repository,
     )
+}
+
+#[cfg(feature = "client")]
+fn map_hosted_clone_pull_error(
+    error: wire::ProtocolError,
+    requested: Option<&str>,
+    repo_path: &str,
+    cleanup: &mut CloneDestinationCleanup<'_>,
+) -> anyhow::Error {
+    match error {
+        wire::ProtocolError::ObjectNotFound(message)
+            if message.contains("Thread '") || message.contains("is not published") =>
+        {
+            cleanup.arm();
+            anyhow!(clone_hosted_thread_not_found_advice(
+                requested.unwrap_or("main"),
+                repo_path
+            ))
+        }
+        other => anyhow::Error::from(other),
+    }
 }
 
 #[cfg(feature = "client")]

@@ -3482,13 +3482,13 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
     );
     let failed = capture.failed_clone_call.expect("failure was injected");
     assert!(
-        !calls[failed + 1..]
-            .iter()
-            .any(|call| call.ends_with("/ObserveThread")
-                || (recovery
-                    && (call.ends_with("/ObserveCollaboration")
-                        || call.ends_with("/ObserveThreads")
-                        || call.ends_with("/ResolveResources")))),
+        !calls[failed + 1..].iter().any(|call| {
+            recovery
+                && (call.ends_with("/ObserveThread")
+                    || call.ends_with("/ObserveCollaboration")
+                    || call.ends_with("/ObserveThreads")
+                    || call.ends_with("/ResolveResources"))
+        }),
         "no subsequent metadata lookup after failed stage: {calls:?}"
     );
     if !recovery {
@@ -3497,8 +3497,8 @@ async fn assert_clone_stage_failure(stage: &str, recovery: bool) {
                 .iter()
                 .filter(|call| call.ends_with("/ObserveThreads"))
                 .count()
-                <= 1,
-            "only the already-started setup listing may arrive: {calls:?}"
+                == 0,
+            "clone must not list Threads during a failed setup: {calls:?}"
         );
         assert!(
             !fixture.clone.join("story.txt").exists(),
@@ -3588,6 +3588,231 @@ fn fresh_clone_rpc_and_https_budget() {
             budget,
             (1, 1, 2, 1, 1, 1, 7, 1),
             "clone critical path: {calls:?}"
+        );
+        fixture.close().await;
+    });
+}
+
+fn clone_method_counts(calls: &[String]) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let count = |method: &str| calls.iter().filter(|call| call.ends_with(method)).count();
+    (
+        count("/ResolveResources"),
+        count("/ObserveThreads"),
+        count("/ObserveCollaboration"),
+        count("/DescribeEndpoint"),
+        count("/Fetch"),
+        count("/ObserveThread"),
+        calls.len(),
+    )
+}
+
+fn inject_unrelated_advertised_threads(fixture: &Fixture, count: usize) {
+    let spool = api::heddle::api::v1alpha2::SpoolRef {
+        id: fixture.spool.to_string(),
+    };
+    let extra = (0..count)
+        .map(|index| api::heddle::api::v1alpha2::ThreadOverview {
+            name: format!("extra-{index:03}"),
+            r#ref: Some(api::heddle::api::v1alpha2::ThreadRef {
+                spool: Some(spool.clone()),
+                id: Some(api::heddle::api::v1alpha2::ThreadId {
+                    value: vec![index.saturating_add(10) as u8; 32],
+                }),
+            }),
+            source_heads: vec![api::heddle::api::v1alpha2::RevisionRef {
+                spool: Some(spool.clone()),
+                revision: Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(
+                    api::heddle::api::common::StateId {
+                        value: vec![0xee; 32],
+                    },
+                )),
+            }],
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    fixture
+        .captured
+        .lock()
+        .expect("extra threads")
+        .started
+        .extend(extra);
+}
+
+#[test]
+fn clone_rpc_budget_does_not_grow_with_unrelated_threads() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        inject_unrelated_advertised_threads(&fixture, 64);
+        fixture.captured.lock().expect("reset calls").calls.clear();
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        let calls = fixture.captured.lock().expect("calls").calls.clone();
+        let budget = clone_method_counts(&calls);
+        println!(
+            "clone with 64 extra threads (resolve, threads, collaboration, describe, fetch, thread, total): {budget:?}"
+        );
+        assert_eq!(
+            budget.1, 0,
+            "clone must not list unrelated Threads: {calls:?}"
+        );
+        assert_eq!(
+            budget.4, 1,
+            "clone must Fetch only the selected tip: {calls:?}"
+        );
+        fixture.assert_identity();
+        let cloned = Repository::open(&fixture.clone).expect("clone");
+        let names = cloned
+            .refs()
+            .list_threads()
+            .expect("local threads")
+            .into_iter()
+            .map(|name| name.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            !names.iter().any(|name| name.starts_with("extra-")),
+            "unrelated advertised Threads must not be installed: {names:?}"
+        );
+        fixture.close().await;
+    });
+}
+
+#[test]
+fn clone_rpc_budget_does_not_grow_with_history_depth() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture.run_at(
+            &fixture.source,
+            &["remote", "add", "origin", &fixture.remote()],
+        );
+        for generation in 0..8 {
+            let unique = fixture.source.join(format!("hist-{generation}.bin"));
+            std::fs::write(&unique, vec![generation as u8; 64 * 1024]).expect("historical blob");
+            fixture.run_at(
+                &fixture.source,
+                &["capture", "-m", &format!("history {generation}")],
+            );
+            std::fs::remove_file(&unique).expect("drop historical blob from tip");
+        }
+        fixture.run_at(
+            &fixture.source,
+            &["capture", "-m", "tip without history blobs"],
+        );
+        assert_push_succeeded(&fixture, &fixture.source);
+
+        fixture.captured.lock().expect("reset calls").calls.clear();
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        let calls = fixture.captured.lock().expect("calls").calls.clone();
+        let budget = clone_method_counts(&calls);
+        println!(
+            "clone after deep history (resolve, threads, collaboration, describe, fetch, thread, total): {budget:?}"
+        );
+        assert_eq!(
+            budget.4, 1,
+            "history depth must not add Fetch RPCs: {calls:?}"
+        );
+        assert_eq!(
+            budget.1, 0,
+            "history depth must not list Threads: {calls:?}"
+        );
+        fixture.assert_identity();
+        for generation in 0..8 {
+            assert!(
+                !fixture
+                    .clone
+                    .join(format!("hist-{generation}.bin"))
+                    .exists(),
+                "clone must not materialize dropped historical blobs"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fixture.clone.join("story.txt")).expect("tip file"),
+            "source only\n"
+        );
+        let log: Value =
+            serde_json::from_str(&fixture.run(&["--output", "json", "log"])).expect("log JSON");
+        let states = log["states"].as_array().expect("log states");
+        assert!(
+            states.len() >= 8,
+            "signed operation ancestry must still be queryable after a tip clone: {log}"
+        );
+        fixture
+            .captured
+            .lock()
+            .expect("reset pull calls")
+            .calls
+            .clear();
+        fixture.run(&["pull"]);
+        let pull_calls = fixture.captured.lock().expect("pull calls").calls.clone();
+        assert!(
+            pull_calls.iter().any(|call| call.ends_with("/Fetch")),
+            "pull hydrates the selected Thread's remaining history: {pull_calls:?}"
+        );
+        fixture.close().await;
+    });
+}
+
+#[test]
+fn clone_one_thread_status_capture_and_pull_another_thread() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture.run_at(
+            &fixture.source,
+            &["remote", "add", "origin", &fixture.remote()],
+        );
+        let started = fixture.run_at(&fixture.source, &["start", "other", "--print-cd-path"]);
+        let other = PathBuf::from(started.trim());
+        std::fs::write(other.join("other.txt"), "from the other thread\n").expect("other file");
+        fixture.run_at(&other, &["capture", "-m", "other thread tip"]);
+        assert_push_succeeded(&fixture, &other);
+
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        fixture.assert_identity();
+        let status = fixture.run(&["--output", "json", "status"]);
+        let status: Value = serde_json::from_str(&status).expect("status JSON");
+        assert_eq!(status["thread"], "main");
+        std::fs::write(fixture.clone.join("story.txt"), "clone capture\n").expect("edit");
+        fixture.run(&["capture", "-m", "from cloned tip"]);
+        let feature_path = fixture.run(&["start", "feature", "--print-cd-path"]);
+        let feature = PathBuf::from(feature_path.trim());
+        std::fs::write(feature.join("feature.txt"), "landed from clone\n").expect("feature file");
+        fixture.run_at(&feature, &["capture", "-m", "feature work"]);
+        fixture.run_at(&feature, &["ready"]);
+        fixture.run_at(&feature, &["land"]);
+
+        let pulled = fixture.output_at(
+            &fixture.clone,
+            &["--output", "json", "pull", "--thread", "other"],
+        );
+        assert!(
+            pulled.status.success(),
+            "pull other thread: {}\n{}",
+            String::from_utf8_lossy(&pulled.stdout),
+            String::from_utf8_lossy(&pulled.stderr)
+        );
+        let cloned = Repository::open(&fixture.clone).expect("clone");
+        assert!(
+            cloned.native_thread("other").is_ok(),
+            "later fetch of another Thread must install it"
         );
         fixture.close().await;
     });

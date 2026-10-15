@@ -654,8 +654,10 @@ Run `heddle clone --help` for the flag list.
 - A Git source is streamed by Sley directly into the destination `.git`, then
   initialized as Git Overlay. No Git executable or `.heddle/git` mirror is used.
 - A native source is cloned into Heddle-owned storage.
-- Native clones follow the remote default thread; pass `--thread <name>`
-  to override.
+- Native clones fetch one thread's advertised tip (trees and blobs for that
+  state). Default is `main`, then `master`; pass `--thread <name>` to
+  override. Other threads and older history stay on the remote until
+  `heddle pull` / `heddle pull --thread <name>`.
 - Clone never prompts.
 
 A bare hosted name (`https://host/notes`) clones your personal copy

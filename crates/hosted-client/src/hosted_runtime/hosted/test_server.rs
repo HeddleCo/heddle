@@ -392,37 +392,42 @@ async fn serve_call(
                     send.finish().unwrap();
                     return;
                 }
+                let entity = if let Some(name) = thread_name {
+                    let moved = thread_listing.as_ref().and_then(|fixture| {
+                        (*fixture
+                            .resolved_thread_byte
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner()))
+                        .map(|byte| v2::ThreadRef {
+                            spool: Some(spool.clone()),
+                            id: Some(v2::ThreadId {
+                                value: vec![byte; 32],
+                            }),
+                        })
+                    });
+                    moved
+                        .or(listed_thread)
+                        .or_else(|| {
+                            thread_listing.is_none().then(|| v2::ThreadRef {
+                                spool: Some(spool.clone()),
+                                id: Some(v2::ThreadId {
+                                    value: vec![if name == "main" { 4 } else { 3 }; 32],
+                                }),
+                            })
+                        })
+                        .map(v2::entity_ref::Entity::Thread)
+                } else {
+                    Some(v2::entity_ref::Entity::Spool(spool))
+                };
                 let mut results = vec![v2::ResourceResolution {
                     resource: Some(v2::EntityRef {
-                        entity: if let Some(name) = thread_name {
-                            let moved = thread_listing.as_ref().and_then(|fixture| {
-                                (*fixture
-                                    .resolved_thread_byte
-                                    .lock()
-                                    .unwrap_or_else(|poison| poison.into_inner()))
-                                .map(|byte| v2::ThreadRef {
-                                    spool: Some(spool.clone()),
-                                    id: Some(v2::ThreadId {
-                                        value: vec![byte; 32],
-                                    }),
-                                })
-                            });
-                            moved
-                                .or(listed_thread)
-                                .or_else(|| {
-                                    thread_listing.is_none().then(|| v2::ThreadRef {
-                                        spool: Some(spool.clone()),
-                                        id: Some(v2::ThreadId {
-                                            value: vec![if name == "main" { 4 } else { 3 }; 32],
-                                        }),
-                                    })
-                                })
-                                .map(v2::entity_ref::Entity::Thread)
-                        } else {
-                            Some(v2::entity_ref::Entity::Spool(spool))
-                        },
+                        entity: entity.clone(),
                     }),
-                    coverage: v2::Coverage::Complete as i32,
+                    coverage: if entity.is_some() {
+                        v2::Coverage::Complete as i32
+                    } else {
+                        v2::Coverage::Unavailable as i32
+                    },
                     ..Default::default()
                 }];
                 if scoped_handle {
@@ -549,7 +554,14 @@ async fn serve_call(
         }
         StreamingShape::ServerStreaming => {
             if method == "/heddle.api.v1alpha2.ThreadService/ObserveThread" {
-                serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
+                serve_native_thread_observation(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    thread_listing.as_ref(),
+                )
+                .await;
             } else if method == "/heddle.api.v1alpha2.SpoolService/ObserveSpool" {
                 serve_native_spool_observation(
                     &mut send,
@@ -1267,6 +1279,112 @@ async fn serve_native_identity_observation(
     for (index, event) in events.iter_mut().enumerate() {
         event.frame.as_mut().expect("identity event frame").sequence = (index + 1) as u64;
     }
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_thread_observation(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    thread_listing: Option<&ThreadListingFixture>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveThreadRequest::decode(frame.body).ok())
+        .expect("native Thread observation request");
+    if body.sections.contains(&(v2::ThreadSection::Review as i32)) {
+        serve_native_thread_review(send, recv, request, server_key).await;
+        return;
+    }
+    let thread = body.thread.expect("observed Thread identity");
+    serve_native_thread_overview_events(send, thread, server_key, thread_listing).await;
+}
+
+async fn serve_native_thread_overview_events(
+    send: &mut iroh::endpoint::SendStream,
+    thread: v2::ThreadRef,
+    server_key: Vec<u8>,
+    thread_listing: Option<&ThreadListingFixture>,
+) {
+    let overview = thread_listing
+        .and_then(|fixture| {
+            fixture
+                .overviews
+                .iter()
+                .find(|overview| overview.r#ref.as_ref() == Some(&thread))
+        })
+        .cloned()
+        .unwrap_or_else(|| v2::ThreadOverview {
+            r#ref: Some(thread.clone()),
+            name: "main".into(),
+            source_heads: vec![v2::RevisionRef {
+                spool: thread.spool.clone(),
+                revision: Some(v2::revision_ref::Revision::State(
+                    api::heddle::api::common::StateId { value: vec![5; 32] },
+                )),
+            }],
+            ..Default::default()
+        });
+    let now = chrono::Utc::now().timestamp();
+    let events = [
+        v2::ThreadEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(v2::EndpointRef {
+                        kind: v2::EndpointKind::Weft as i32,
+                        public_key: server_key,
+                    }),
+                    binding_digest: vec![8; 32],
+                    authority_valid_until: Some(prost_types::Timestamp {
+                        seconds: now + 240,
+                        nanos: 0,
+                    }),
+                    accepted_budget: Some(v2::ReadBudget {
+                        max_items: 64,
+                        max_frame_bytes: 65536,
+                        max_snapshot_bytes: 1048576,
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::ThreadEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::thread_event::Payload::Overview(overview)),
+        },
+        v2::ThreadEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
     for event in events {
         send.write_chunk(Bytes::from(
             encode_stream_message(&event.encode_to_vec()).unwrap(),

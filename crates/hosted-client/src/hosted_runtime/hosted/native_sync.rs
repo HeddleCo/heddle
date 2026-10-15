@@ -134,6 +134,18 @@ fn overview_thread_id(overview: &ThreadOverview) -> Result<ContentHash, Protocol
     Ok(ContentHash::from_bytes(bytes))
 }
 
+fn clone_bootstrap_refs(overview: &ThreadOverview) -> Result<PullBootstrapRefs, ProtocolError> {
+    let Some(entry) = hosted_ref_from_overview(overview)? else {
+        return Err(ProtocolError::InvalidState(
+            "Fetch requires a started Thread with published source; this spool has none".into(),
+        ));
+    };
+    Ok(PullBootstrapRefs {
+        head_thread: Some(overview.name.clone()),
+        refs: vec![entry],
+    })
+}
+
 fn hosted_ref_from_overview(
     overview: &ThreadOverview,
 ) -> Result<Option<HostedRefEntry>, ProtocolError> {
@@ -478,6 +490,162 @@ impl HostedClient {
             head_thread = refs.first().map(|entry| entry.name.clone());
         }
         Ok(PullBootstrapRefs { head_thread, refs })
+    }
+
+    /// Resolve one Thread by name and observe only that overview.
+    ///
+    /// Clone uses this instead of paging every advertised Thread. A missing
+    /// name is `ObjectNotFound` so `--thread` can fail closed without scanning.
+    async fn observe_named_thread_overview(
+        &self,
+        repo_path: &str,
+        name: &str,
+    ) -> Result<ThreadOverview, ProtocolError> {
+        let reference =
+            self.resolve_thread_ref(repo_path, name)
+                .await
+                .map_err(|error| match error {
+                    ProtocolError::ObjectNotFound(_) => ProtocolError::ObjectNotFound(format!(
+                        "Thread '{name}' is not published on this spool"
+                    )),
+                    error => error,
+                })?;
+        let mut overview = self.observe_thread_overview(&reference).await?;
+        if overview.name.is_empty() {
+            overview.name = name.to_string();
+        } else if overview.name != name {
+            return Err(ProtocolError::InvalidState(format!(
+                "Thread '{name}' resolved to advertised name '{}'",
+                overview.name
+            )));
+        }
+        if overview.r#ref.as_ref() != Some(&reference) {
+            return Err(ProtocolError::InvalidState(format!(
+                "observed Thread '{name}' returned a different identity"
+            )));
+        }
+        Ok(overview)
+    }
+
+    async fn observe_thread_overview(
+        &self,
+        reference: &ThreadRef,
+    ) -> Result<ThreadOverview, ProtocolError> {
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::ThreadServiceObserveThread>(
+                contract::ObserveThreadRequest {
+                    thread: Some(reference.clone()),
+                    sections: vec![contract::ThreadSection::Overview as i32],
+                    observe: Some(once_observe()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+            for event in batch.changes {
+                if let contract::thread_event::Payload::Overview(overview) = event
+                    && overview.r#ref.as_ref() == Some(reference)
+                {
+                    return Ok(overview);
+                }
+            }
+        }
+        Err(ProtocolError::InvalidState(
+            "Thread observation ended without an overview for the resolved identity".into(),
+        ))
+    }
+
+    /// Default clone target: `--thread`, else `main`, else `master`, else the
+    /// first published NameAsc Thread. Does not validate unrelated refs.
+    async fn select_clone_thread(
+        &self,
+        repo_path: &str,
+        requested: Option<&str>,
+    ) -> Result<(String, ThreadOverview), ProtocolError> {
+        if let Some(name) = requested {
+            let overview = self.observe_named_thread_overview(repo_path, name).await?;
+            return Ok((overview.name.clone(), overview));
+        }
+        for name in ["main", "master"] {
+            match self.observe_named_thread_overview(repo_path, name).await {
+                Ok(overview) => return Ok((overview.name.clone(), overview)),
+                Err(ProtocolError::ObjectNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        let overview = self
+            .observe_first_published_thread(repo_path)
+            .await?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "Fetch requires a started Thread with published source; this spool has none"
+                        .into(),
+                )
+            })?;
+        Ok((overview.name.clone(), overview))
+    }
+
+    /// First published Thread in NameAsc order. Stops at that overview; later
+    /// pages and unpublished names are not validated.
+    async fn observe_first_published_thread(
+        &self,
+        repo_path: &str,
+    ) -> Result<Option<ThreadOverview>, ProtocolError> {
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let remote = self.native().await.map_err(native_error)?;
+        let query = ThreadQuery {
+            spools: vec![spool],
+            order: thread_query::Order::NameAsc as i32,
+            ..Default::default()
+        };
+        let mut after_page = Vec::new();
+        let mut page_tokens = std::collections::BTreeSet::new();
+        loop {
+            let mut observation = remote
+                .observe::<rpc::ThreadServiceObserveThreads>(
+                    ObserveThreadsRequest {
+                        query: Some(query.clone()),
+                        page: Some(PageRequest {
+                            size: THREAD_PAGE_SIZE,
+                            after_page: after_page.clone(),
+                        }),
+                        observe: Some(once_observe()),
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_error)?;
+            let mut page = None;
+            while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+                if batch.page.is_some() {
+                    page = batch.page;
+                }
+                for change in batch.changes {
+                    if let thread_list_event::Payload::Thread(thread) = change
+                        && overview_state(&thread).is_some()
+                    {
+                        return Ok(Some(thread));
+                    }
+                }
+            }
+            let page = page.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "Thread listing ended without snapshot page coverage".into(),
+                )
+            })?;
+            if page.exhausted {
+                return Ok(None);
+            }
+            if page.next_page.is_empty() || !page_tokens.insert(page.next_page.clone()) {
+                return Err(ProtocolError::InvalidState(
+                    "Thread listing pagination did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     async fn observe_thread_overviews(
@@ -1414,40 +1582,30 @@ impl HostedClient {
         F: FnOnce(&PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        // Retain this complete, paged snapshot for every Thread installed by
-        // this clone. Other reads and later pulls still observe current heads.
-        let overviews = self.observe_thread_overviews(repo_path).await?;
-        let advertised = self
-            .advertised_pull_refs(repo_path, Some(&overviews))
+        // One Thread, its advertised tip. Unrelated refs are not listed or
+        // installed; later `pull --thread` observes current heads. Fetch of
+        // that tip still verifies genesis, signed operations, and the selected
+        // State's trees and blobs.
+        let (track, overview) = self
+            .select_clone_thread(repo_path, requested_thread)
             .await?;
-        if advertised.refs.is_empty() {
-            return Err(ProtocolError::InvalidState(
-                "Fetch requires a started Thread with published source; this spool has none".into(),
-            ));
-        }
-        let track = requested_thread
-            .map(str::to_string)
-            .or_else(|| advertised.head_thread.clone())
-            .or_else(|| advertised.refs.first().map(|entry| entry.name.clone()))
-            .ok_or_else(|| {
-                ProtocolError::InvalidState("server does not advertise clone refs".into())
-            })?;
-        if !advertised.refs.iter().any(|entry| entry.name == track) {
-            return Err(ProtocolError::ObjectNotFound(format!(
-                "Thread '{track}' is not published on this spool"
-            )));
-        }
+        let advertised = clone_bootstrap_refs(&overview)?;
+        let tip = overview_state(&overview).ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "Fetch requires a started Thread with a published source revision".into(),
+            )
+        })?;
         let repo = initialize(&advertised)?;
         let complete = self
-            .fetch_hosted_thread(&repo, repo_path, &track, None, None, Some(&overviews))
+            .fetch_hosted_thread(
+                &repo,
+                repo_path,
+                &track,
+                Some(tip),
+                None,
+                Some(std::slice::from_ref(&overview)),
+            )
             .await?;
-        for entry in &advertised.refs {
-            if !entry.is_user_thread() || entry.name == track {
-                continue;
-            }
-            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None, None, Some(&overviews))
-                .await?;
-        }
         Ok((complete, repo))
     }
 
@@ -1517,28 +1675,32 @@ impl HostedClient {
         let observed;
         let resolved;
         let overviews = match snapshot {
-            // Clone's complete listing already selected the name and stable
-            // identity. Fetch that identity without another name lookup.
+            // Clone already resolved this identity. Fetch it without another
+            // name lookup or a complete Thread listing.
             Some(overviews) => {
                 resolved = None;
                 overviews
             }
             None => {
-                let (threads, reference) = tokio::try_join!(
-                    Box::pin(self.observe_thread_overviews(repo_path)),
-                    Box::pin(self.resolve_thread_ref(repo_path, remote_thread)),
-                )?;
-                observed = threads;
-                resolved = Some(reference);
-                &observed
+                observed = vec![
+                    self.observe_named_thread_overview(repo_path, remote_thread)
+                        .await?,
+                ];
+                resolved = observed[0].r#ref.clone();
+                observed.as_slice()
             }
         };
-        let overview = overviews.iter().find(|overview| {
-                overview.name == remote_thread && resolved.as_ref().is_none_or(|resolved| overview.r#ref.as_ref() == Some(resolved))
+        let overview = overviews
+            .iter()
+            .find(|overview| {
+                overview.name == remote_thread
+                    && resolved
+                        .as_ref()
+                        .is_none_or(|resolved| overview.r#ref.as_ref() == Some(resolved))
             })
             .ok_or_else(|| {
                 ProtocolError::InvalidState(format!(
-                    "resolved Thread '{remote_thread}' was absent from its complete listing snapshot"
+                    "resolved Thread '{remote_thread}' was absent from its observed overview"
                 ))
             })?;
         let reference = overview
@@ -2907,6 +3069,101 @@ mod tests {
                 .len(),
             2,
             "direct Thread resolution must not restart the paged collection scan"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_selects_one_thread_without_paging_unrelated_refs() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let spool = SpoolRef {
+            id: Uuid::from_bytes([2; 16]).to_string(),
+        };
+        let revision = revision_ref(&spool, StateId::from_bytes([7; 32]));
+        let mut names = (0..65)
+            .map(|index| format!("a{index:03}"))
+            .collect::<Vec<_>>();
+        names.extend(["main".to_string(), "wanted".to_string()]);
+        let overviews = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| ThreadOverview {
+                name,
+                r#ref: Some(ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(contract::ThreadId {
+                        value: vec![(index + 1) as u8; 32],
+                    }),
+                }),
+                source_heads: vec![revision.clone()],
+                ..Default::default()
+            })
+            .collect();
+        let fixture = super::super::test_server::ThreadListingFixture {
+            overviews,
+            page_size: 64,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            resolution_failure: None,
+            resolution_requests: Arc::new(Mutex::new(Vec::new())),
+            resolved_thread_byte: Default::default(),
+        };
+        let (client, server, captured) =
+            super::super::test_server::start_with_thread_listing(fixture).await;
+
+        let (name, overview) = client
+            .select_clone_thread("acme/widgets", Some("wanted"))
+            .await
+            .expect("wanted Thread resolves without a listing scan");
+        assert_eq!(name, "wanted");
+        assert_eq!(
+            overview_state(&overview),
+            Some(StateId::from_bytes([7; 32]))
+        );
+        {
+            let listing = captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert!(
+                listing.is_empty(),
+                "clone must not page ObserveThreads to select --thread: {listing:?}"
+            );
+            let resolved = captured
+                .resolution_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(resolved.as_slice(), ["wanted"]);
+        }
+
+        let (name, overview) = client
+            .select_clone_thread("acme/widgets", None)
+            .await
+            .expect("default clone resolves main by name");
+        assert_eq!(name, "main");
+        assert_eq!(
+            overview_state(&overview),
+            Some(StateId::from_bytes([7; 32]))
+        );
+        {
+            let listing = captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert!(
+                listing.is_empty(),
+                "default clone must not page ObserveThreads to find main: {listing:?}"
+            );
+        }
+
+        let missing = client
+            .select_clone_thread("acme/widgets", Some("missing"))
+            .await
+            .expect_err("unknown Thread fails closed");
+        assert!(
+            missing.to_string().contains("missing"),
+            "missing Thread refusal: {missing}"
         );
 
         client.close().await;

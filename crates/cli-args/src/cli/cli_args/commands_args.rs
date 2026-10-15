@@ -1187,7 +1187,7 @@ pub struct CloneArgs {
     #[arg(long, value_enum, hide_possible_values = true)]
     pub source: Option<super::CloneSourceArg>,
 
-    /// Thread to check out after cloning.
+    /// Thread to clone (tip only). Default: `main`, then `master`. Other threads stay remote until pulled.
     #[arg(long)]
     pub thread: Option<String>,
 

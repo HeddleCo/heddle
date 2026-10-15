@@ -625,8 +625,10 @@ fn short_clone_thread_name(name: &str) -> &str {
 ///
 /// Priority: explicit `--thread` (must be advertised), then the remote's
 /// advertised HEAD / current thread, then `main`, then the first remaining
-/// short name. `refs/`-prefixed companion names are ignored. Fails closed
-/// when the requested thread is missing or nothing usable was advertised.
+/// short name. Hosted native clone resolves that name directly and does not
+/// page or validate unrelated Threads. `refs/`-prefixed companion names are
+/// ignored. Fails closed when the requested thread is missing or nothing
+/// usable was advertised.
 pub fn select_clone_checkout_thread<'a>(
     requested: Option<&str>,
     advertised_head: Option<&str>,

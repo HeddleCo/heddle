@@ -477,7 +477,9 @@ async fn serve_call(
     let (delay, setup) = {
         let mut capture = fixture.captured.lock().expect("clone setup");
         let setup = if capture.clone_setup_requests < 3
-            && (method.ends_with("/ObserveThreads") || method.ends_with("/ObserveCollaboration"))
+            && (method.ends_with("/ObserveThread")
+                || method.ends_with("/ObserveThreads")
+                || method.ends_with("/ObserveCollaboration"))
         {
             capture.clone_setup_requests += 1;
             capture.clone_setup_barrier.clone()
@@ -875,28 +877,36 @@ async fn serve_call(
                         .and_then(|reference| reference.id.as_ref())
                         .map(|id| id.value.clone());
                     let thread_id = if name == fixture.thread_name {
-                        fixture.thread_id.clone()
+                        Some(fixture.thread_id.clone())
                     } else if let Some(started) = started {
-                        started
+                        Some(started)
+                    } else if name == "main" {
+                        Some(vec![24; 32])
                     } else {
-                        assert_eq!(name, "main", "fixture's landing target");
-                        vec![24; 32]
+                        None
                     };
-                    v2::entity_ref::Entity::Thread(v2::ThreadRef {
-                        spool: Some(spool),
-                        id: Some(v2::ThreadId { value: thread_id }),
+                    thread_id.map(|value| {
+                        v2::entity_ref::Entity::Thread(v2::ThreadRef {
+                            spool: Some(spool.clone()),
+                            id: Some(v2::ThreadId { value }),
+                        })
                     })
                 } else {
-                    v2::entity_ref::Entity::Spool(spool)
+                    Some(v2::entity_ref::Entity::Spool(spool))
                 };
+                let found = entity.is_some();
                 write_unary(
                     &mut send,
                     &v2::ResolveResourcesResponse {
                         results: vec![v2::ResourceResolution {
-                            resource: Some(v2::EntityRef {
+                            resource: entity.map(|entity| v2::EntityRef {
                                 entity: Some(entity),
                             }),
-                            coverage: v2::Coverage::Complete as i32,
+                            coverage: if found {
+                                v2::Coverage::Complete as i32
+                            } else {
+                                v2::Coverage::Unavailable as i32
+                            },
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -1142,6 +1152,12 @@ async fn serve_call(
                         hosted_client::hosted_runtime::hosted::test_server::serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
                     } else {
                         let capture = fixture.captured.lock().expect("source view").clone();
+                        let name = capture
+                            .started
+                            .iter()
+                            .find(|thread| thread.r#ref == body.thread)
+                            .map(|thread| thread.name.clone())
+                            .unwrap_or_else(|| fixture.thread_name.clone());
                         for frame in snapshot_frames(server_key) {
                             let payload = matches!(
                                 frame.body,
@@ -1150,7 +1166,7 @@ async fn serve_call(
                             .then(|| {
                                 v2::thread_event::Payload::Overview(v2::ThreadOverview {
                                     r#ref: body.thread.clone(),
-                                    name: fixture.thread_name.clone(),
+                                    name: name.clone(),
                                     source_heads: capture.source_heads_for(body.thread.as_ref()),
                                     ..Default::default()
                                 })

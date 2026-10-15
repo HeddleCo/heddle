@@ -87,12 +87,13 @@ fn clone_help_pins_behavior_stanza() {
         "clone topic should explain the Git-overlay transport and storage path: {help}"
     );
     assert!(
-        help.contains("Native clones follow the remote default thread")
+        help.contains("Native clones fetch one thread's advertised tip")
             && help.contains("pass `--thread <name>`")
             && help.contains("to override")
+            && help.contains("`heddle pull`")
             && !help.contains("Native clones target `main`")
             && !help.contains("if the remote has no `main` thread"),
-        "clone topic should explain native default-thread selection: {help}"
+        "clone topic should explain one-thread tip clone: {help}"
     );
     // Cross-reference to the thread model topic.
     assert!(
