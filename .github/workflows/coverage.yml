@@ -39,7 +39,7 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,7 +78,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -93,13 +93,13 @@ jobs:
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload LCOV report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
 
       - name: Upload HTML coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: target/llvm-cov/html
