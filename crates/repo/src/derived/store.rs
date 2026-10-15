@@ -42,7 +42,7 @@ fn read_blob(
 /// Local immutable results. The caller chooses a path under repository state.
 /// SQLite transactions publish nodes before bindings; concurrent writers either
 /// agree byte-for-byte or get a conflict. Nodes are capped at 1 MiB; the page
-/// cache is capped independently at 1 MiB. No transaction spans source/host I/O.
+/// cache has an independent 1 MiB target. No transaction spans source/host I/O.
 pub struct LocalDerivedStore {
     connection: Connection,
 }

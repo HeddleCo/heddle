@@ -15,6 +15,8 @@ use objects::object::{ContentHash, StateId, derived::*};
 pub use store::LocalDerivedStore;
 use work::Work;
 
+const WORK_CACHE_BYTES: usize = 1024 * 1024;
+
 /// Per-call bounds. Byte accounting includes the 1 MiB worklist page cache and
 /// conservative space for encoded/decoded inputs, parent values and output.
 /// Source/store caches and implementation-internal compose scratch are owned
@@ -76,14 +78,16 @@ fn read_input(
     source: &impl DerivedSource,
     state: StateId,
     limits: Limits,
+    available_bytes: usize,
 ) -> DerivedResult<DerivedInput> {
+    let cap = limits.max_input_bytes.min(available_bytes / 4);
     let input = source
-        .input(state, limits.max_input_bytes, limits.max_parents)?
+        .input(state, cap, limits.max_parents)?
         .ok_or(DerivedError::MissingState(state))?;
     if input.state != state {
         return Err(DerivedError::Corrupt("input identity"));
     }
-    input.check_limits(limits.max_input_bytes, limits.max_parents)?;
+    input.check_limits(cap, limits.max_parents)?;
     Ok(input)
 }
 
@@ -135,19 +139,21 @@ pub fn ensure(
     let key = descriptor.key(state);
     if let Some(root) = store.lookup(key)? {
         let cap = limits.max_node_bytes.min(limits.max_working_bytes / 4);
-        read_node(store, root, cap)?.check_key(key)?;
+        let node = read_node(store, root, cap)?;
+        node.check_key(key)?;
         return Ok(Ready {
             root,
             computed: 0,
-            peak_working_bytes: cap * 4,
+            peak_working_bytes: node.encoded_len().saturating_mul(4),
             scratch_bytes: 0,
         });
     }
+    let mut initial = WORK_CACHE_BYTES;
+    charge(&mut initial, 0, limits)?;
     let work = Work::new(limits)?;
     let mut steps = 0;
     step(&mut steps, limits)?;
-    let input = read_input(source, state, limits)?;
-    let mut initial = 1024 * 1024;
+    let input = read_input(source, state, limits, limits.max_working_bytes - initial)?;
     charge(&mut initial, input.encoded_len().saturating_mul(4), limits)?;
     work.push(0, &input)?;
     drop(input);
@@ -157,7 +163,7 @@ pub fn ensure(
     loop {
         step(&mut steps, limits)?;
         let (input, next) = work.top(depth)?;
-        let mut used = 1024 * 1024;
+        let mut used = WORK_CACHE_BYTES;
         charge(&mut used, input.encoded_len().saturating_mul(4), limits)?;
         if let Some(parent) = input.parents.get(next).copied() {
             work.advance(depth)?;
@@ -169,7 +175,8 @@ pub fn ensure(
                 node.check_key(descriptor.key(parent))?;
                 charge(&mut used, node.encoded_len().saturating_mul(4), limits)?;
             } else {
-                let parent_input = read_input(source, parent, limits)?;
+                let parent_input =
+                    read_input(source, parent, limits, limits.max_working_bytes - used)?;
                 charge(
                     &mut used,
                     parent_input.encoded_len().saturating_mul(4),
@@ -183,6 +190,14 @@ pub fn ensure(
             peak = peak.max(used);
             continue;
         }
+        charge(
+            &mut used,
+            input
+                .parents
+                .len()
+                .saturating_mul(std::mem::size_of::<DerivedNode>()),
+            limits,
+        )?;
         let mut parents = Vec::with_capacity(input.parents.len());
         for parent in &input.parents {
             step(&mut steps, limits)?;
@@ -193,6 +208,16 @@ pub fn ensure(
             charge(&mut used, node.encoded_len().saturating_mul(4), limits)?;
             parents.push(node);
         }
+        charge(
+            &mut used,
+            input
+                .parents
+                .len()
+                .saturating_mul(100)
+                .saturating_mul(4)
+                .saturating_add(512),
+            limits,
+        )?;
         let handles: Vec<_> = parents
             .iter()
             .map(|node| {
@@ -202,15 +227,6 @@ pub fn ensure(
                 })
             })
             .collect::<DerivedResult<_>>()?;
-        charge(
-            &mut used,
-            handles
-                .len()
-                .saturating_mul(100)
-                .saturating_mul(4)
-                .saturating_add(512),
-            limits,
-        )?;
         let header = 77usize.saturating_add(handles.len().saturating_mul(100));
         let output_cap = limits
             .max_node_bytes
@@ -256,6 +272,8 @@ pub fn closure_contains(
     state: StateId,
     limits: Limits,
 ) -> DerivedResult<bool> {
+    let mut baseline = WORK_CACHE_BYTES;
+    charge(&mut baseline, 0, limits)?;
     let work = Work::new(limits)?;
     work.visit(root, None)?;
     let descriptor = StateClosure.descriptor();
@@ -264,7 +282,7 @@ pub fn closure_contains(
         step(&mut steps, limits)?;
         let cap = limits
             .max_node_bytes
-            .min(limits.max_working_bytes.saturating_sub(1024 * 1024) / 4);
+            .min(limits.max_working_bytes.saturating_sub(WORK_CACHE_BYTES) / 4);
         let node = read_node(store, hash, cap)?;
         node.check_key(descriptor.key(node.key.state))?;
         if let Some(key) = expected {
