@@ -266,10 +266,24 @@ fn seed_hosted_publishable_base(repo: &Repository) -> Result<StateId> {
 }
 
 fn register_imported_native_threads(repo: &Repository, base: StateId) -> Result<()> {
+    let create_start = std::time::Instant::now();
+    let mut created = Vec::new();
     for (name, tip) in repo.refs().list_threads_with_states()? {
         let name = name.to_string();
         repo.create_native_thread(&name, base, None, "")?;
-        repo.record_native_imported_source(&name, tip)?;
+        created.push((name, tip));
+    }
+    let create_ms = create_start.elapsed().as_millis();
+    let tips = created
+        .iter()
+        .map(|(name, tip)| (name.as_str(), *tip))
+        .collect::<Vec<_>>();
+    repo.record_native_imported_sources(&tips)?;
+    if instrumentation_enabled() {
+        eprintln!(
+            "heddle profile:\n  command: import local threads\n  thread_create_ms: {create_ms}\n  threads: {}",
+            created.len(),
+        );
     }
     Ok(())
 }

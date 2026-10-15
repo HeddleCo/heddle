@@ -1,5 +1,6 @@
 //! Local Thread creation and capture use the same immutable records as remote peers.
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use crypto::{
     Ed25519Signer, Signer as _,
@@ -492,37 +493,66 @@ impl Repository {
     /// for the admit, and commits of [`IMPORT_ADMIT_BATCH`] states. Genesis is
     /// verified once. Interactive capture stays on `synchronous=FULL`.
     pub fn record_native_imported_source(&self, name: &str, state_id: StateId) -> Result<()> {
+        self.record_native_imported_sources(&[(name, state_id)])
+    }
+
+    /// Admit every imported branch on one connection. Each branch still gets
+    /// its own signed captures. WAL stays `synchronous=NORMAL` until every
+    /// branch has committed, then one durable checkpoint shrinks the log.
+    /// Checkpointing after each branch rewrote the whole metadata database
+    /// once per ref.
+    pub fn record_native_imported_sources(&self, tips: &[(&str, StateId)]) -> Result<()> {
+        if tips.is_empty() {
+            return Ok(());
+        }
         let serialization = InstallationLock::acquire(self.heddle_dir())?;
         let _guard = self.native_identity_lock(&serialization)?;
-        let replica = self.native_thread(name)?;
-        let genesis = replica.signed_genesis()?.verify()?;
-        let signer = self.native_thread_signer(&replica)?;
-        let publisher: [u8; 32] = signer
-            .public_key()
-            .try_into()
-            .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
-        let author = replica.source_author_for(&publisher)?;
-        let mut connection = replica.connect()?;
+        let first = self.native_thread(tips[0].0)?;
+        let mut connection = first.connect()?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        let wrote = self.admit_imported_captures(
-            &replica,
-            &mut connection,
-            &genesis,
-            &signer,
-            publisher,
-            &author,
-            state_id,
-        );
+        let admit_start = Instant::now();
+        let wrote = (|| -> Result<usize> {
+            let mut wrote = 0usize;
+            for (name, state_id) in tips {
+                let replica = self.native_thread(name)?;
+                let genesis = replica.signed_genesis()?.verify()?;
+                let signer = self.native_thread_signer(&replica)?;
+                let publisher: [u8; 32] = signer
+                    .public_key()
+                    .try_into()
+                    .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
+                let author = replica.source_author_for(&publisher)?;
+                wrote += self.admit_imported_captures(
+                    &replica,
+                    &mut connection,
+                    &genesis,
+                    &signer,
+                    publisher,
+                    &author,
+                    *state_id,
+                )?;
+            }
+            Ok(wrote)
+        })();
+        let admit_ms = admit_start.elapsed().as_millis();
+        let checkpoint_start = Instant::now();
         let restored =
             connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);");
+        let checkpoint_ms = checkpoint_start.elapsed().as_millis();
         drop(connection);
+        if std::env::var_os("HEDDLE_PROFILE").is_some() {
+            eprintln!(
+                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {admit_ms}\n  admit_checkpoint_ms: {checkpoint_ms}",
+                tips.len(),
+            );
+        }
         let wrote = match wrote {
             Ok(wrote) => wrote,
             Err(error) => return Err(error),
         };
         restored?;
         if wrote > 0 {
-            replica.notify_committed()?;
+            first.notify_committed()?;
         }
         Ok(())
     }
@@ -795,7 +825,15 @@ impl Repository {
         author: &SourceAuthor,
         tip: StateId,
     ) -> Result<usize> {
+        let order_start = Instant::now();
         let order = self.import_capture_order(replica, connection, genesis.base, tip)?;
+        let order_ms = order_start.elapsed().as_millis();
+        // A Git import has no reference seeds, inherited closures, or visibility
+        // sidecars. `prepare` then returns the State bytes alone. Building that
+        // capture directly keeps the signed payload and skips the per-state
+        // catalog queries and installation lock.
+        let bare = self.import_admit_is_bare(connection, &replica.thread_id())?;
+        let mut clock = AdmitClock::default();
         let mut wrote = 0usize;
         let mut index = 0usize;
         while index < order.len() {
@@ -804,12 +842,21 @@ impl Repository {
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             for state in &order[index..end] {
                 self.admit_imported_capture_in(
-                    replica, &tx, genesis, signer, publisher, author, state,
+                    replica, &tx, genesis, signer, publisher, author, state, bare, &mut clock,
                 )?;
                 wrote += 1;
             }
             tx.commit()?;
             index = end;
+        }
+        if std::env::var_os("HEDDLE_PROFILE").is_some() {
+            eprintln!(
+                "heddle profile:\n  command: import local admit\n  thread: {}\n  admit_order_ms: {order_ms}\n  admit_capture_ms: {}\n  admit_sign_ms: {}\n  admit_receive_ms: {}\n  admit_states: {wrote}\n  bare_capture: {bare}",
+                replica.thread_id(),
+                clock.capture_ms,
+                clock.sign_ms,
+                clock.receive_ms,
+            );
         }
         Ok(wrote)
     }
@@ -899,6 +946,8 @@ impl Repository {
         publisher: [u8; 32],
         author: &SourceAuthor,
         state: &State,
+        bare: bool,
+        clock: &mut AdmitClock,
     ) -> Result<()> {
         let mut parents = BTreeSet::new();
         for parent in &state.parents {
@@ -914,6 +963,13 @@ impl Repository {
             }
             parents.extend(operations);
         }
+        let capture_start = Instant::now();
+        let result = if bare {
+            state.encode_current_msgpack()?.into()
+        } else {
+            replica.prepare_capture_in(tx, genesis, self, state)?
+        };
+        clock.capture_ms += capture_start.elapsed().as_millis();
         let operation = ThreadOperation {
             version: 1,
             thread: replica.thread_id(),
@@ -921,12 +977,15 @@ impl Repository {
             publisher,
             body: ThreadOperationBody::Capture(
                 objects::object::thread_replication::AuthoredCapture {
-                    result: replica.prepare_capture_in(tx, genesis, self, state)?,
+                    result,
                     author: author.clone(),
                 },
             ),
         };
+        let sign_start = Instant::now();
         let signed = SignedOperation::sign(&operation, signer)?;
+        clock.sign_ms += sign_start.elapsed().as_millis();
+        let receive_start = Instant::now();
         replica.require_trusted_integration(&operation)?;
         replica.require_local_integration_source_in(tx, &operation)?;
         replica.validate_reference_capture_in(tx, genesis, &operation, self.store())?;
@@ -939,8 +998,72 @@ impl Repository {
             }
         }
         replica.record_source_possession_in(tx, state.id())?;
+        clock.receive_ms += receive_start.elapsed().as_millis();
         Ok(())
     }
+
+    /// True when an imported capture's signed bytes are only the State.
+    /// Reference rows or visibility sidecars still go through `prepare_capture`.
+    fn import_admit_is_bare(
+        &self,
+        connection: &rusqlite::Connection,
+        thread: &ContentHash,
+    ) -> Result<bool> {
+        let seeds: i64 = connection.query_row(
+            "SELECT count(*) FROM reference_seeds WHERE thread=?1",
+            [thread.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if seeds != 0 {
+            return Ok(false);
+        }
+        let pending: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1)",
+            [thread.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Ok(false);
+        }
+        let captures: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_captures WHERE thread=?1)",
+            [thread.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if captures {
+            return Ok(false);
+        }
+        if directory_has_import_visibility(&self.state_visibility_dir())? {
+            return Ok(false);
+        }
+        if directory_has_import_visibility(&self.entry_visibility_dir())? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct AdmitClock {
+    capture_ms: u128,
+    sign_ms: u128,
+    receive_ms: u128,
+}
+
+fn directory_has_import_visibility(path: &std::path::Path) -> Result<bool> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(Error::Invalid(error.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| Error::Invalid(error.to_string()))?;
+        if entry.file_name() == "audience_label" {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 const IMPORT_ADMIT_BATCH: usize = 1024;

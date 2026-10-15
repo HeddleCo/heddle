@@ -1168,7 +1168,7 @@ impl ThreadReplica {
         )?;
         let genesis = ThreadGenesis::decode(&genesis_bytes)?;
         loop {
-            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (o.facet<>3 OR o.authority_admitted=1) AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
+            let ready: Vec<Vec<u8>> = tx.prepare_cached("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (o.facet<>3 OR o.authority_admitted=1) AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
                 .query_map([self.thread.as_bytes()], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
             if ready.is_empty() {
                 break;
@@ -1192,15 +1192,17 @@ impl ThreadReplica {
                     )?;
                     continue;
                 }
-                let mut parents = Vec::new();
-                for parent in &operation.parents {
-                    let bytes: Vec<u8> = tx.query_row(
-                        "SELECT canonical FROM operations WHERE id=?1",
-                        [parent.as_bytes()],
-                        |r| r.get(0),
-                    )?;
-                    parents.push(ThreadOperation::decode(&bytes)?);
-                }
+                let parents = {
+                    let mut parent_canonical =
+                        tx.prepare_cached("SELECT canonical FROM operations WHERE id=?1")?;
+                    let mut parents = Vec::new();
+                    for parent in &operation.parents {
+                        let bytes: Vec<u8> =
+                            parent_canonical.query_row([parent.as_bytes()], |r| r.get(0))?;
+                        parents.push(ThreadOperation::decode(&bytes)?);
+                    }
+                    parents
+                };
                 if let Err(error) = self.validate_source_owner_in(tx, &operation) {
                     tx.execute(
                         "UPDATE operations SET status=2,reason=?2 WHERE id=?1",

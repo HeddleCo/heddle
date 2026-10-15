@@ -1416,6 +1416,17 @@ fn imported_states_keep_a_verifiable_signed_capture() {
     let merged = State::new_snapshot(tree, vec![second.id(), sibling.id()], author());
     repo.store().put_state(&merged).expect("merged state");
 
+    let replica = repo.native_thread("main").expect("named thread");
+    let prepared = replica
+        .prepare_capture(&repo, &first)
+        .expect("prepare empty capture");
+    assert_eq!(
+        prepared,
+        first.encode_current_msgpack().expect("state bytes").into(),
+        "a thread with no references signs the State bytes alone"
+    );
+    drop(replica);
+
     repo.record_native_imported_source("main", merged.id())
         .expect("admit imported ancestry");
     repo.record_native_imported_source("main", merged.id())
@@ -1439,6 +1450,15 @@ fn imported_states_keep_a_verifiable_signed_capture() {
             .expect("source body")
             .expect("captured state");
         assert_eq!(recorded.id(), state.id());
+        let captured = operation
+            .source_result()
+            .expect("capture body")
+            .expect("authored capture");
+        assert_eq!(
+            captured,
+            state.encode_current_msgpack().expect("state bytes").into(),
+            "imported capture keeps the prepared State bytes"
+        );
         assert_eq!(operation.thread, replica.thread_id());
         operation_for.insert(state.id(), page[0]);
     }
