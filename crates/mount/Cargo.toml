@@ -52,7 +52,7 @@ tokio = { workspace = true, optional = true }
 # Linux, so on other platforms the dep is a no-op even if the
 # feature is on by accident.
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.17", optional = true }
+fuser = { version = "0.18", optional = true }
 
 # `windows` provides the ProjFS bindings on Windows. Gated behind
 # the `projfs` feature mirroring `fuse`/`fskit`. The `Foundation`

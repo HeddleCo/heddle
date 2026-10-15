@@ -424,17 +424,16 @@ impl FuseShell {
     /// of the mount (returns when unmounted or on error).
     ///
     /// We build the [`Session`] explicitly (rather than the
-    /// `fuser::mount2` convenience) so we can install the kernel
+    /// `fuser::mount` convenience) so we can install the kernel
     /// [`Notifier`] into the shell's [`NotifyGate`] *before* the event
     /// loop starts serving callbacks — that's what lets the write-side
     /// callbacks push active cache invalidations (heddle#87). The gate
     /// is shared via `self.notify`, which gets moved into the session
     /// along with `self`; we kept a clone of the `Arc` before the move.
     ///
-    /// `Session::run` is crate-private in fuser, so to keep blocking
-    /// semantics we spawn the worker thread and `join()` it — the join
-    /// returns when the mount is torn down, exactly as the old
-    /// `mount2` call did.
+    /// Spawning the worker and `join()`ing it keeps the calling thread
+    /// blocked until the mount is torn down, which is the blocking
+    /// behavior the old `mount2` helper had.
     pub fn mount(self, mountpoint: impl AsRef<Path>) -> Result<()> {
         let config = default_config();
         let gate = Arc::clone(&self.notify);
@@ -482,7 +481,7 @@ fn default_config() -> Config {
     // instead of constructing fields directly — that keeps us
     // forward-compatible with future Config additions.
     //
-    // We deliberately do *not* set `AutoUnmount`: fuser 0.17 rejects
+    // We deliberately do *not* set `AutoUnmount`: fuser rejects
     // `AutoUnmount` unless the session ACL is `AllowOther` or
     // `AllowRoot`, which in turn requires `user_allow_other` in
     // `/etc/fuse.conf` on most distros. That's a host-side gate we
@@ -607,7 +606,7 @@ fn entry_attr_from(entry: &Entry, mtime: std::time::SystemTime) -> FileAttr {
 }
 
 /// Convert a `MountError`'s errno back into the `Errno` newtype that
-/// fuser 0.17's `reply.error()` requires. `MountError::to_errno()`
+/// fuser's `reply.error()` requires. `MountError::to_errno()`
 /// returns the raw `i32` so the rest of the crate stays
 /// platform-neutral; we only do the wrap at the FUSE boundary.
 fn errno_from_mount_error(err: crate::error::MountError) -> Errno {

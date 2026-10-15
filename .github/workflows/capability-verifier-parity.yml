@@ -24,13 +24,13 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -38,7 +38,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install pinned wasm-bindgen
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
 
       - name: Build the publishable npm binding
         run: npm run build

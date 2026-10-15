@@ -164,4 +164,7 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# heddle#1805 / weft#2077: workspace [patch] of noq 1.3.0. Stock crates.io
+# noq panics when ACK_FREQUENCY is written into a nearly-full packet; the
+# pinned rev gates that write. Published crates do not carry the patch.
+allow-git = ["https://github.com/HeddleCo/noq"]
