@@ -76,7 +76,7 @@ jobs:
   validate-tag:
     name: validate tag
     # Pin must be a commit ON MAIN; changes to validate-release-tag.yml must land via a direct-to-main PR (batches rebase and rewrite SHAs), then be repinned.
-    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@f6f50cc1cdf67529afd918a47838d468956461e4
+    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@10d547b496b1b36c689354e0f30e9d958595c72d
     permissions:
       contents: read
 
