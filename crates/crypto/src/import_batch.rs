@@ -62,6 +62,17 @@
 //! in the envelope, folds the siblings using the manifest's state count, and
 //! checks the manifest signature. The same check accepts the whole batch by
 //! recomputing the root from every leaf.
+//!
+//! # Hosted admit
+//!
+//! heddle-api 0.31.0-alpha.48 `verify_native` accepts only a 64-byte Ed25519
+//! signature over `format || 0 || canonical`. An import envelope is longer and
+//! is not that signature. Weft admits an imported operation by running
+//! [`verify_batch_operation`] on the envelope stored in `operations.signature`.
+//! A state whose envelope does not fold to the signed root is rejected. The
+//! envelope stays on the operation record. It is not copied into a native
+//! proof dependency until `verify_native` accepts this envelope, because that
+//! copy is what current heddle-api rejects as noncanonical.
 
 use std::collections::HashMap;
 
