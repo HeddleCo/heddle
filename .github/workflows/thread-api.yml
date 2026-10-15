@@ -15,11 +15,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: thread-api-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Retained-prefix replay makes both native configurations substantial. Run
   # them independently so their sum cannot exhaust the client job's budget.
   thread-native:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -31,13 +35,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          shared-key: thread-api-${{ runner.os }}-${{ matrix.configuration }}
+          # PR-only workflow: one slot per configuration. Saving here is
+          # the only writer; GitHub's 10 GB cache cannot absorb a new
+          # job-named entry on every push.
+          save-if: true
       - if: matrix.configuration == 'default'
         run: cargo test --locked -p heddle-thread-api
       - if: matrix.configuration == 'native'
         run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
 
   thread-client:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +56,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          shared-key: thread-api-${{ runner.os }}-client
+          save-if: true
       - name: Build the portable client for WASM
         run: |
           rustup target add wasm32-unknown-unknown

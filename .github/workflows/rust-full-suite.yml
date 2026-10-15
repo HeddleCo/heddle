@@ -38,11 +38,9 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  # sccache caches to LOCAL DISK, not the GitHub Actions (Azure-backed) cache.
-  # The Blacksmith self-hosted runners can't DNS-resolve the GHA cache's Azure
-  # blob backend, so SCCACHE_GHA_ENABLED=true hard-fails the job (exit 74) at
-  # sccache startup/stats. Cross-run target/ caching still comes from
-  # Swatinem/rust-cache, which Blacksmith transparently accelerates.
+  # sccache stays on local disk. Enabling the GHA backend would compete
+  # with rust-cache for the repo's 10 GB Actions cache and evict the
+  # shared rust-ws slot. Cross-run target/ caching is rust-cache's job.
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
@@ -51,7 +49,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -79,7 +77,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
@@ -256,7 +254,7 @@ jobs:
     name: Quality
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
       # Match the fast lane: LLVM lld for the link-heavy test builds. This job
@@ -298,6 +296,9 @@ jobs:
           prefix-key: v1-rust-incr
           cache-on-failure: true
           cache-all-crates: true
+          # PRs restore the rust-ws slot written by rust-tests.yml.
+          # Only main and the merge queue write from this heavier lane.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       - name: Rust source reachability and dead-code blankets
         if: needs.changes.outputs.skip_cargo != 'true'
@@ -364,7 +365,7 @@ jobs:
     name: Feature contracts
     needs: changes
     if: needs.changes.outputs.cli_checks == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
 
     steps:
@@ -380,6 +381,7 @@ jobs:
         with:
           shared-key: feature-contracts-${{ runner.os }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       # Cargo features unify across normal dependencies, so repository
       # authority isolation is checked directly on heddle-repo. The CLI checks
@@ -436,7 +438,7 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
       - name: Require every extracted quality gate
@@ -499,7 +501,7 @@ jobs:
     name: CLI fault-injection tests
     needs: changes
     if: needs.changes.outputs.fault_tests == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -512,6 +514,7 @@ jobs:
         with:
           shared-key: cli-fault-injection-tests-${{ runner.os }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       - name: CLI fault-injection tests
         if: needs.changes.outputs.cli_fault == 'true'
@@ -528,12 +531,10 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
-  # Linux FUSE mount smoke. Pinned to a GitHub-hosted `ubuntu-latest`
-  # runner so we get `/dev/fuse`, `fusermount3`, and the system-wide
-  # FUSE policy without having to special-case the Blacksmith image.
-  # The blacksmith ARM runner above doesn't ship `fuse3 libfuse3-dev`
-  # by default, and asking it to install them post-boot adds image
-  # drift we'd rather not chase.
+  # Linux FUSE mount smoke. Pinned to GitHub-hosted `ubuntu-24.04`
+  # so we get `/dev/fuse`, `fusermount3`, and the system-wide FUSE
+  # policy. The ARM quality lane above does not assume those packages
+  # are present; this job installs `fuse3 libfuse3-dev` explicitly.
   #
   # This job is the load-bearing check that Linux teammates can mount
   # a heddle thread, read it, write through the mount, and unmount
@@ -548,7 +549,7 @@ jobs:
     name: FUSE mount smoke (Linux)
     needs: changes
     if: needs.changes.outputs.mount == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -561,6 +562,7 @@ jobs:
         with:
           shared-key: fuse-smoke-${{ runner.os }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       # `fuse3` ships `fusermount3`, the SUID helper the FUSE shell
       # uses to publish the mount to the kernel; `libfuse3-dev` is
@@ -719,8 +721,8 @@ jobs:
     name: Coverage
     needs: changes
     if: needs.changes.outputs.coverage == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v7
@@ -728,6 +730,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+
+      # The OpenCode hook regression executes the installed Bun plugin.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -737,6 +744,7 @@ jobs:
         with:
           shared-key: coverage-${{ runner.os }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
 
       # `--all-features` would enable `heddle-cli/weft-client`, which from
       # OSS resolves to the 0.0.0 reservation stub and won't compile.
@@ -840,6 +848,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fskit-check
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'merge_group' }}
       - name: cargo check with fskit
         run: cargo check --locked -p heddle-mount --features fskit
 
@@ -862,7 +871,7 @@ jobs:
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every full-suite gate

@@ -46,33 +46,45 @@ mod tests {
         let _ = extract_tree(&encoded, first).unwrap();
         let _ = decode_tree_frame(&encoded).unwrap();
 
-        const ITERATIONS: u32 = 200;
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let decoded = decode_tree_frame(&encoded).unwrap();
-            let _ = decoded
-                .into_iter()
-                .map(|tree| rmp_serde::to_vec_named(&tree).unwrap())
-                .collect::<Vec<_>>();
-        }
-        let decode_all = start.elapsed();
+        // GitHub-hosted runners steal wall time in bursts. Three back-to-back
+        // blocks let one stall land entirely on the last extract and invert a
+        // comparison that holds on a quiet core (observed: last 183ms, decode
+        // 148ms, first 40ms). Interleave the phases and keep the median round.
+        const ROUNDS: usize = 5;
+        const ITERATIONS: u32 = 40;
+        let mut rounds = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let mut decode_all = std::time::Duration::ZERO;
+            let mut extract_first = std::time::Duration::ZERO;
+            let mut extract_last = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let start = Instant::now();
+                let decoded = decode_tree_frame(&encoded).unwrap();
+                let _ = decoded
+                    .into_iter()
+                    .map(|tree| rmp_serde::to_vec_named(&tree).unwrap())
+                    .collect::<Vec<_>>();
+                decode_all += start.elapsed();
 
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let tree = extract_tree(&encoded, first).unwrap();
-            let _ = rmp_serde::to_vec_named(&tree).unwrap();
-        }
-        let extract_first = start.elapsed();
+                let start = Instant::now();
+                let tree = extract_tree(&encoded, first).unwrap();
+                let _ = rmp_serde::to_vec_named(&tree).unwrap();
+                extract_first += start.elapsed();
 
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            let tree = extract_tree(&encoded, last).unwrap();
-            let _ = rmp_serde::to_vec_named(&tree).unwrap();
+                let start = Instant::now();
+                let tree = extract_tree(&encoded, last).unwrap();
+                let _ = rmp_serde::to_vec_named(&tree).unwrap();
+                extract_last += start.elapsed();
+            }
+            rounds.push((decode_all, extract_first, extract_last));
         }
-        let extract_last = start.elapsed();
+        rounds.sort_by_key(|(decode_all, _, extract_last)| {
+            extract_last.as_nanos() / decode_all.as_nanos().max(1)
+        });
+        let (decode_all, extract_first, extract_last) = rounds[ROUNDS / 2];
 
         eprintln!(
-            "compact tree frame (64 trees, {ITERATIONS} iters): decode-all+serialize-all {decode_all:?}; extract-first {extract_first:?}; extract-last {extract_last:?}"
+            "compact tree frame (64 trees, {ROUNDS}x{ITERATIONS} interleaved, median): decode-all+serialize-all {decode_all:?}; extract-first {extract_first:?}; extract-last {extract_last:?}"
         );
         assert!(
             extract_first < decode_all && extract_last < decode_all,

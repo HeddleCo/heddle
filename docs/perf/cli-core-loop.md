@@ -66,8 +66,12 @@ one-path capture, one-path diff, a 20-entry log over 1,000 ancestors, and a
 help enforce the cold-process band; repository commands run after two explicit
 native-monitor warmups. The versioned, runner-scoped cold-process and scale
 baselines live in `docs/perf/cli-core-loop-baseline.json`. CI selects the
-controlled Blacksmith profile with `HEDDLE_PERF_BASELINE`; local runs use the
-recorded local calibration profile.
+GitHub-hosted `ubuntu-24.04` profile with `HEDDLE_PERF_BASELINE`; local runs
+use the recorded local calibration profile. Until a GitHub-hosted recording
+replaces the inherited Blacksmith numbers, CI sets `HEDDLE_PERF_SOFT_TIMING=1`
+so wall-time, scale, and absolute p95 gates print `PERF GATE YELLOW` instead
+of failing the job. Structural directory, hash, repository-open-count, and
+zero-network gates still fail closed.
 
 The ignored marker keeps the harness out of debug and ordinary unit-test runs;
 the dedicated release workflow runs it on a controlled runner. Every bounded

@@ -8,7 +8,7 @@ mod profile;
 use std::{env, path::Path, time::Duration};
 
 use fixture::PerfFixture;
-use gates::{enforce_contract, print_runner_fingerprint};
+use gates::{ContractStatus, enforce_contract, print_runner_fingerprint};
 use measurement::{CaseKind, NegativeControl, measure_case};
 
 use super::*;
@@ -125,10 +125,14 @@ fn core_loop_release_contract() {
     if record_only {
         println!("GATES skipped: HEDDLE_PERF_RECORD_ONLY=1");
     } else {
-        enforce_contract(&results);
-        println!(
-            "GATES green: absolute p95 targets, scale invariance, structural bounds, repository opens, zero network"
-        );
+        match enforce_contract(&results) {
+            ContractStatus::Green => println!(
+                "GATES green: absolute p95 targets, scale invariance, structural bounds, repository opens, zero network"
+            ),
+            ContractStatus::TimingAdvisory => println!(
+                "GATES yellow: structural bounds, repository opens, zero network; timing advisory until a GitHub-hosted baseline is recorded"
+            ),
+        }
     }
 }
 

@@ -52,6 +52,54 @@
       ]
     },
     {
+      "name": "ci-github-ubuntu-24.04",
+      "runner_fingerprint": "unrecorded; GitHub-hosted ubuntu-24.04 (4 vCPU x64). Numbers inherited from ci-blacksmith-4vcpu-ubuntu-2404 until a GitHub-hosted contract run is stored. CI sets HEDDLE_PERF_SOFT_TIMING=1 so wall-time gates stay advisory until then.",
+      "cases": [
+        {
+          "case": "version",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 2.024,
+          "gate_p95_ms": 20.0,
+          "disposition": "placeholder; inherited from retired Blacksmith profile until re-recorded"
+        },
+        {
+          "case": "help",
+          "paths": 0,
+          "target_p95_ms": 20.0,
+          "measured_p95_ms": 8.930,
+          "gate_p95_ms": 20.0,
+          "disposition": "placeholder; inherited from retired Blacksmith profile until re-recorded"
+        },
+        {
+          "case": "status_clean",
+          "paths": 100000,
+          "target_p95_ms": 50.0,
+          "measured_p95_ms": 337.419,
+          "gate_p95_ms": 50.0,
+          "disposition": "placeholder; inherited from retired Blacksmith profile until re-recorded"
+        }
+      ],
+      "scale_cases": [
+        {
+          "case": "status_clean",
+          "measured_wall_ratio": 7.564,
+          "gate_wall_ratio": 8.33,
+          "measured_directory_ratio": 1.0,
+          "gate_directory_ratio": 3.0,
+          "disposition": "placeholder wall-time ratchet; structural directory invariant still enforced"
+        },
+        {
+          "case": "status_one_dirty",
+          "measured_wall_ratio": 8.686,
+          "gate_wall_ratio": 9.56,
+          "measured_directory_ratio": 9.824,
+          "gate_directory_ratio": 10.0,
+          "disposition": "placeholder wall-time ratchet; structural directory invariant still enforced"
+        }
+      ]
+    },
+    {
       "name": "local-calibration",
       "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 59765776 bytes",
       "cases": [

@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: capability-verifiers-${{ github.workflow }}-${{ github.ref }}
+  # Superseded PR pushes should stop; keep main-branch runs to completion
+  # so a fast follow-up push cannot cancel an in-flight publish-surface check.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -18,7 +24,7 @@ defaults:
 jobs:
   native:
     name: Native test, conformance, and clippy
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +55,7 @@ jobs:
 
   wasm:
     name: Worker WASM build and parity
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +82,7 @@ jobs:
 
   publish-packages:
     name: crates.io package surfaces
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

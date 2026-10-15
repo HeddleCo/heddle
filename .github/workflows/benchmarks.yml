@@ -17,14 +17,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  # Local-disk sccache, not the GHA (Azure) cache: the Blacksmith self-hosted
-  # runners can't reach the Azure cache backend (exit 74). See rust-tests.yml.
+  # Local-disk sccache. Do not enable the GHA backend — it would compete
+  # with rust-cache for the repo's 10 GB Actions cache. See rust-tests.yml.
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
   criterion:
     name: Criterion suite
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
@@ -39,6 +39,7 @@ jobs:
         with:
           shared-key: benchmarks-${{ runner.os }}
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install FUSE
         run: |

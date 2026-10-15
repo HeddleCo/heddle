@@ -28,7 +28,9 @@ pub mod source_author;
 #[cfg(test)]
 mod test_isolation;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use crypto::{Ed25519Signer, Signer, SignerError};
 use objects::fs_atomic::write_file_atomic_secret;
@@ -90,6 +92,67 @@ impl std::fmt::Debug for DeviceIdentity {
     }
 }
 
+thread_local! {
+    static PROCESS_HOME_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Serializes process-global `HOME` / `HEDDLE_HOME` changes with catalog
+/// resolution. CLI unit tests that point `HOME` at a `TempDir` share a
+/// process with every other test in the binary. The device catalog is
+/// SQLite WAL at `<heddle_home>/state/device-rpc/catalog.sqlite3`; deleting
+/// that directory while another thread has it open returns SQLite's
+/// `disk I/O error`. Hold this guard across the whole mutation, and drop
+/// the temp directory only after `HOME` is restored.
+static PROCESS_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct ProcessHomeGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl ProcessHomeGuard {
+    pub fn acquire() -> Self {
+        let guard = PROCESS_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        PROCESS_HOME_LOCK_HELD.with(|held| held.set(true));
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for ProcessHomeGuard {
+    fn drop(&mut self) {
+        PROCESS_HOME_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
+fn with_process_home_lock<T>(read: impl FnOnce() -> T) -> T {
+    if PROCESS_HOME_LOCK_HELD.with(|held| held.get()) {
+        return read();
+    }
+    let guard = PROCESS_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let value = read();
+    drop(guard);
+    value
+}
+
+fn read_heddle_home_override() -> Option<PathBuf> {
+    std::env::var_os("HEDDLE_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn read_heddle_home_dir() -> PathBuf {
+    if let Some(explicit) = read_heddle_home_override() {
+        return explicit;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".heddle")
+}
+
 /// `<heddle_home>` — `$HEDDLE_HOME` if set, else `$HOME/.heddle`, else
 /// `./.heddle`. Mirrors the credential store location so the device identity
 /// sits beside `credentials.toml`. `HEDDLE_HOME` exists primarily as a test
@@ -97,6 +160,8 @@ impl std::fmt::Debug for DeviceIdentity {
 ///
 /// Unit tests (`cfg(test)`) ignore the process-global env and use a per-test
 /// tempdir so the device catalog cannot leak across the suite (heddle#1766).
+/// Dependents such as `heddle-cli` compile this crate without `cfg(test)`, so
+/// their tests take [`ProcessHomeGuard`] before swapping `HOME`.
 pub fn heddle_home_dir() -> PathBuf {
     #[cfg(test)]
     {
@@ -104,21 +169,13 @@ pub fn heddle_home_dir() -> PathBuf {
     }
     #[cfg(not(test))]
     {
-        if let Some(explicit) = heddle_home_override() {
-            return explicit;
-        }
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".heddle")
+        with_process_home_lock(read_heddle_home_dir)
     }
 }
 
 /// Explicit non-empty `HEDDLE_HOME` override, when configured.
 pub fn heddle_home_override() -> Option<PathBuf> {
-    std::env::var_os("HEDDLE_HOME")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    with_process_home_lock(read_heddle_home_override)
 }
 
 /// Path to the global device identity file.
@@ -414,6 +471,47 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn process_home_guard_blocks_other_threads_until_drop() {
+        let guard = ProcessHomeGuard::acquire();
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let entered_thread = std::sync::Arc::clone(&entered);
+        let handle = std::thread::spawn(move || {
+            entered_thread.wait();
+            let _guard = ProcessHomeGuard::acquire();
+        });
+        entered.wait();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !handle.is_finished(),
+            "process home lock did not exclude the other thread"
+        );
+        drop(guard);
+        handle.join().expect("home lock waiter");
+    }
+
+    #[test]
+    fn process_home_guard_allows_reentrant_home_read() {
+        let _guard = ProcessHomeGuard::acquire();
+        let previous_home = std::env::var_os("HOME");
+        let previous_heddle_home = std::env::var_os("HEDDLE_HOME");
+        let dir = TempDir::new().expect("temp home");
+        unsafe {
+            std::env::remove_var("HEDDLE_HOME");
+            std::env::set_var("HOME", dir.path());
+        }
+        let resolved = with_process_home_lock(read_heddle_home_dir);
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_heddle_home {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+        assert_eq!(resolved, dir.path().join(".heddle"));
+    }
 
     #[test]
     fn enrolled_device_bearer_survives_active_credential_changes() {
