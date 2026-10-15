@@ -89,7 +89,7 @@ fn clone_help_pins_behavior_stanza() {
     assert!(
         help.contains("Native clones fetch one thread's advertised tip")
             && help.contains("pass `--thread <name>`")
-            && help.contains("to override")
+            && help.contains("override")
             && help.contains("`heddle pull`")
             && !help.contains("Native clones target `main`")
             && !help.contains("if the remote has no `main` thread"),

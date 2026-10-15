@@ -476,7 +476,8 @@ async fn serve_call(
         .push(method.clone());
     let (delay, setup) = {
         let mut capture = fixture.captured.lock().expect("clone setup");
-        let setup = if capture.clone_setup_requests < 3
+        let setup = if capture.clone_setup_barrier.is_some()
+            && capture.clone_setup_requests < 3
             && (method.ends_with("/ObserveThread")
                 || method.ends_with("/ObserveThreads")
                 || method.ends_with("/ObserveCollaboration"))

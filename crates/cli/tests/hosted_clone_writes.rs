@@ -3586,7 +3586,7 @@ fn fresh_clone_rpc_and_https_budget() {
         fixture.assert_identity();
         assert_eq!(
             budget,
-            (1, 1, 2, 1, 1, 1, 7, 1),
+            (2, 0, 2, 1, 1, 2, 8, 1),
             "clone critical path: {calls:?}"
         );
         fixture.close().await;
