@@ -36,6 +36,7 @@ mod native_transport_tests;
 mod netd_trust_tests;
 pub(crate) mod operation_id;
 mod provider_transport;
+mod publication_suffix;
 mod resolution;
 mod resolver;
 #[cfg(test)]
