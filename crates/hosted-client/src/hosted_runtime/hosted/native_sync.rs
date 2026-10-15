@@ -8,6 +8,8 @@
 //! No v1 RepoSyncService frames.
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
     time::Instant,
 };
 
@@ -60,6 +62,65 @@ const ANCESTRY_RECORDS: usize = 10_000;
 const ANCESTRY_BYTES: usize = 16 * 1024 * 1024;
 const LINEAGE_STATES: usize = 4096;
 const THREAD_PAGE_SIZE: u32 = 64;
+
+/// Hold `gate` across a repository read or install. `None` is the
+/// single-threaded fetch path and does not lock.
+pub(super) async fn lock_repo_install(
+    gate: Option<&tokio::sync::Mutex<()>>,
+) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    match gate {
+        Some(gate) => Some(gate.lock().await),
+        None => None,
+    }
+}
+
+/// Run fetch futures four at a time. Fewer than four in the last batch still
+/// overlap. Callers release `install_gate` during the transfer those futures
+/// perform, and take it again for the repository install.
+async fn join_fetch_batches<'a, T: Send>(
+    mut work: Vec<Pin<Box<dyn Future<Output = Result<T, ProtocolError>> + Send + 'a>>>,
+) -> Result<Vec<T>, ProtocolError> {
+    let mut done = Vec::with_capacity(work.len());
+    while !work.is_empty() {
+        let end = 4.min(work.len());
+        let mut slots = [None, None, None, None];
+        for (slot, job) in slots.iter_mut().zip(work.drain(..end)) {
+            *slot = Some(job);
+        }
+        match (
+            slots[0].take(),
+            slots[1].take(),
+            slots[2].take(),
+            slots[3].take(),
+        ) {
+            (Some(first), None, None, None) => done.push(first.await?),
+            (Some(first), Some(second), None, None) => {
+                let (first, second) = tokio::join!(first, second);
+                done.push(first?);
+                done.push(second?);
+            }
+            (Some(first), Some(second), Some(third), None) => {
+                let (first, second, third) = tokio::join!(first, second, third);
+                done.push(first?);
+                done.push(second?);
+                done.push(third?);
+            }
+            (Some(first), Some(second), Some(third), Some(fourth)) => {
+                let (first, second, third, fourth) = tokio::join!(first, second, third, fourth);
+                done.push(first?);
+                done.push(second?);
+                done.push(third?);
+                done.push(fourth?);
+            }
+            _ => {
+                return Err(ProtocolError::InvalidState(
+                    "clone installs at most four threads in one batch".into(),
+                ));
+            }
+        }
+    }
+    Ok(done)
+}
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
@@ -1441,14 +1502,50 @@ impl HostedClient {
         let complete = self
             .fetch_hosted_thread(&repo, repo_path, &track, None, None, Some(&overviews))
             .await?;
-        for entry in &advertised.refs {
-            if !entry.is_user_thread() || entry.name == track {
-                continue;
-            }
-            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None, None, Some(&overviews))
+        let rest = advertised
+            .refs
+            .iter()
+            .filter(|entry| entry.is_user_thread() && entry.name != track)
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        // The checkout thread is installed first. Other user threads share
+        // that repository, so their installs take one gate while their Fetch
+        // transfers overlap.
+        if !rest.is_empty() {
+            let gate = tokio::sync::Mutex::new(());
+            self.fetch_user_threads(&repo, repo_path, &rest, &overviews, &gate)
                 .await?;
         }
         Ok((complete, repo))
+    }
+
+    /// Install the remaining user threads. Up to four Fetches run at once.
+    /// Repository writes take `gate`; the byte transfer does not.
+    async fn fetch_user_threads(
+        &self,
+        repo: &Repository,
+        repo_path: &str,
+        names: &[String],
+        overviews: &[ThreadOverview],
+        gate: &tokio::sync::Mutex<()>,
+    ) -> Result<(), ProtocolError> {
+        let work = names
+            .iter()
+            .map(|name| {
+                Box::pin(self.fetch_hosted_thread_gated(
+                    repo,
+                    repo_path,
+                    name,
+                    None,
+                    None,
+                    Some(overviews),
+                    Some(gate),
+                ))
+                    as Pin<Box<dyn Future<Output = Result<PullComplete, ProtocolError>> + Send>>
+            })
+            .collect();
+        join_fetch_batches(work).await?;
+        Ok(())
     }
 
     pub async fn pull_with_depth(
@@ -1512,6 +1609,28 @@ impl HostedClient {
         target_state: Option<StateId>,
         local_tip: Option<StateId>,
         snapshot: Option<&[ThreadOverview]>,
+    ) -> Result<PullComplete, ProtocolError> {
+        self.fetch_hosted_thread_gated(
+            repo,
+            repo_path,
+            remote_thread,
+            target_state,
+            local_tip,
+            snapshot,
+            None,
+        )
+        .await
+    }
+
+    async fn fetch_hosted_thread_gated(
+        &self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        target_state: Option<StateId>,
+        local_tip: Option<StateId>,
+        snapshot: Option<&[ThreadOverview]>,
+        install_gate: Option<&tokio::sync::Mutex<()>>,
     ) -> Result<PullComplete, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let observed;
@@ -1578,6 +1697,7 @@ impl HostedClient {
                     break;
                 }
                 bases_planned = true;
+                let _install = lock_repo_install(install_gate).await;
                 for base in missing_merge_bases(repo, &installed)? {
                     optional_bases.insert(base);
                     pending.push_back((base, revision_ref(&spool, base), reference.clone(), false));
@@ -1590,9 +1710,12 @@ impl HostedClient {
             if !fetched.insert(selected) {
                 continue;
             }
-            let metadata_present = repo.store().get_state(&selected)?.is_some();
+            let metadata_present = {
+                let _install = lock_repo_install(install_gate).await;
+                repo.store().get_state(&selected)?.is_some()
+            };
             match self
-                .fetch_and_install_revision(repo, &source, revision, selected)
+                .fetch_and_install_revision(repo, &source, revision, selected, install_gate)
                 .await
             {
                 Ok(_) => {}
@@ -1609,6 +1732,7 @@ impl HostedClient {
                 Err(error) => return Err(error),
             }
             if target_state.is_none() && (head || !metadata_present) {
+                let _install = lock_repo_install(install_gate).await;
                 pending.extend(
                     missing_replay_ancestry(repo, selected, &source)?
                         .into_iter()
@@ -1618,6 +1742,7 @@ impl HostedClient {
         }
         // Fetch retained the original signed genesis and admitted source.
         // Bind the advertised name to that replica before any local authoring.
+        let _install = lock_repo_install(install_gate).await;
         ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(&reference)?)
             .map_err(replica_err)?
             .bind_local_name(remote_thread)
@@ -1649,6 +1774,7 @@ impl HostedClient {
         reference: &ThreadRef,
         revision: RevisionRef,
         selected: StateId,
+        install_gate: Option<&tokio::sync::Mutex<()>>,
     ) -> Result<StateId, ProtocolError> {
         // ProviderDialRoute is a client hint on FetchOpen. Weft matches those
         // hints against configured shards; DescribeEndpoint and ThreadOverview
@@ -1667,17 +1793,20 @@ impl HostedClient {
         // its tips lets the endpoint omit tens of thousands of States on a
         // later pull; staging still proves any floor it does receive, and a
         // revision below a tip still arrives with its parent-chain proof.
-        let exclude_revisions = match (
-            reference.spool.as_ref(),
-            ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?),
-        ) {
-            (Some(spool), Ok(replica)) => replica
-                .import_floor_tips()
-                .map_err(replica_err)?
-                .into_iter()
-                .map(|tip| revision_ref(spool, tip))
-                .collect(),
-            _ => Vec::new(),
+        let exclude_revisions = {
+            let _install = lock_repo_install(install_gate).await;
+            match (
+                reference.spool.as_ref(),
+                ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?),
+            ) {
+                (Some(spool), Ok(replica)) => replica
+                    .import_floor_tips()
+                    .map_err(replica_err)?
+                    .into_iter()
+                    .map(|tip| revision_ref(spool, tip))
+                    .collect(),
+                _ => Vec::new(),
+            }
         };
         let open = preferred_fetch_open(
             FetchOpen {
@@ -1701,15 +1830,17 @@ impl HostedClient {
             objects::store::pack::ScratchDir::new(&scratch_root, "heddle-source-transfer-")
                 .map_err(native_error)?;
         let staged = self
-            .fetch_native_source(
+            .fetch_native_source_gated(
                 repo,
                 open,
                 thread_api::fetch::Limits::default(),
                 scratch.path(),
+                install_gate,
             )
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let imported = staged.import_authority().is_some();
+        let _install = lock_repo_install(install_gate).await;
         let final_state = self.install_staged_source(repo, staged).await?;
         if final_state != selected {
             return Err(ProtocolError::InvalidState(format!(
@@ -2625,6 +2756,49 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[tokio::test]
+    async fn four_clone_threads_overlap_transfers_and_serialize_installs() {
+        use std::{
+            future::Future,
+            pin::Pin,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+
+        let gate = tokio::sync::Mutex::new(());
+        let transferring = AtomicUsize::new(0);
+        let max_transfer = AtomicUsize::new(0);
+        let installing = AtomicUsize::new(0);
+        let max_install = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let work = (0..4)
+            .map(|_| {
+                Box::pin(async {
+                    let now = transferring.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_transfer.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    transferring.fetch_sub(1, Ordering::SeqCst);
+                    let _install = super::lock_repo_install(Some(&gate)).await;
+                    let now = installing.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_install.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    installing.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                    as Pin<Box<dyn Future<Output = Result<(), ProtocolError>> + Send>>
+            })
+            .collect();
+        join_fetch_batches(work)
+            .await
+            .expect("four overlapping fetches");
+        assert_eq!(max_transfer.load(Ordering::SeqCst), 4);
+        assert_eq!(max_install.load(Ordering::SeqCst), 1);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "overlapping fetches took {elapsed:?}"
+        );
+    }
 
     #[test]
     fn foreign_prefix_fetch_depth_33_refuses_with_typed_limit() {
