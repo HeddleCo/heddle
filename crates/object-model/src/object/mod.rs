@@ -12,6 +12,7 @@ mod audience_tier;
 mod blob;
 pub mod check_evidence;
 pub mod collaboration;
+pub mod derived;
 mod diff;
 mod discussion;
 mod entry_redactions;
