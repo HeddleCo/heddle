@@ -110,7 +110,7 @@ regex-lite = "0.1"
 regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 rmp-serde = "1"
-rusqlite = { version = "0.39", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 schemars = { version = "1.2", features = ["chrono04"] }
 sec1 = { version = "0.8", features = ["pem"] }
