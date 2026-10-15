@@ -530,6 +530,9 @@ impl Repository {
         let admit_start = Instant::now();
         let wrote = (|| -> Result<usize> {
             let mut wrote = 0usize;
+            // Branch tips share commits. Keep the decoded states for the next
+            // thread instead of reading the object store again.
+            let mut states = BTreeMap::new();
             for (name, state_id) in tips {
                 let replica = replica_from_row(&connection, heddle_dir, name)?;
                 let genesis = signed_genesis_on(&connection, replica.thread_id())?.verify()?;
@@ -542,6 +545,7 @@ impl Repository {
                     publisher,
                     &author,
                     *state_id,
+                    &mut states,
                 )?;
             }
             Ok(wrote)
@@ -835,9 +839,12 @@ impl Repository {
         publisher: [u8; 32],
         author: &SourceAuthor,
         tip: StateId,
+        states: &mut BTreeMap<StateId, State>,
     ) -> Result<usize> {
         let order_start = Instant::now();
-        let order = self.import_capture_order(replica, connection, genesis.base, tip)?;
+        let fresh = !thread_has_accepted_operation(connection, &replica.thread_id())?;
+        let order =
+            self.import_capture_order(replica, connection, genesis.base, tip, fresh, states)?;
         let order_us = order_start.elapsed().as_micros();
         // A Git import has no reference seeds, inherited closures, or visibility
         // sidecars. `prepare` then returns the State bytes alone. Building that
@@ -904,6 +911,8 @@ impl Repository {
         connection: &rusqlite::Connection,
         base: StateId,
         tip: StateId,
+        fresh: bool,
+        cache: &mut BTreeMap<StateId, State>,
     ) -> Result<Vec<State>> {
         let thread = replica.thread_id();
         let mut pending = BTreeMap::new();
@@ -913,13 +922,21 @@ impl Repository {
             if !seen.insert(id) {
                 continue;
             }
-            if accepted_import_revision(connection, &thread, id)? {
+            // A new thread has no accepted captures, so the per-state existence
+            // query would only return false. Resume still checks.
+            if !fresh && accepted_import_revision(connection, &thread, id)? {
                 continue;
             }
-            let state = self
-                .store()
-                .get_state(&id)?
-                .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+            let state = if let Some(state) = cache.get(&id) {
+                state.clone()
+            } else {
+                let state = self
+                    .store()
+                    .get_state(&id)?
+                    .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+                cache.insert(id, state.clone());
+                state
+            };
             if state.parents.is_empty() {
                 continue;
             }
@@ -1082,12 +1099,12 @@ impl Repository {
     /// Signing already produced canonical bytes. The operation id is the
     /// `OPERATION_FORMAT` hash of those bytes, which is what `ThreadOperation::id`
     /// returns after a fresh signature. Each parent link is an operation already
-    /// admitted for that state parent. Status still moves from 0 to 1, so the
-    /// source-index and search triggers record the revision, and generation
-    /// still advances for the insert, the acceptance, and a new possession row.
-    /// Those increments are applied once at the end of the batch. Callers keep
-    /// the ordinary `receive_in` path when the capture is not a bare local
-    /// import.
+    /// admitted for that state parent. The row is inserted accepted, after its
+    /// parent links, so the source-index insert trigger records the revision.
+    /// That trigger matches the status-update trigger. Generation still
+    /// advances for the insert, the acceptance, and a new possession row,
+    /// applied once at the end of the batch. Callers keep the ordinary
+    /// `receive_in` path when the capture is not a bare local import.
     #[allow(clippy::too_many_arguments, clippy::unused_self)]
     fn admit_bare_captures_in(
         &self,
@@ -1117,12 +1134,10 @@ impl Repository {
             "SELECT id FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 AND facet=?3 ORDER BY id LIMIT 1024",
         )?;
         let mut insert_op = tx.prepare_cached(
-            "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision) VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision,status) VALUES(?1,?2,?3,?4,?5,?6,1)",
         )?;
         let mut insert_parent =
             tx.prepare_cached("INSERT INTO parents(child,parent) VALUES(?1,?2)")?;
-        let mut admit =
-            tx.prepare_cached("UPDATE operations SET status=1 WHERE id=?1 AND status=0")?;
         let mut possess = tx.prepare_cached(
             "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
         )?;
@@ -1167,6 +1182,10 @@ impl Repository {
                 objects::object::thread_replication::OPERATION_FORMAT,
                 &signed.canonical,
             );
+            // Parent links first: the accepted-insert trigger reads them.
+            for parent in &operation.parents {
+                insert_parent.execute(params![id.as_bytes(), parent.as_bytes()])?;
+            }
             let inserted = insert_op.execute(params![
                 id.as_bytes(),
                 thread.as_bytes(),
@@ -1180,15 +1199,9 @@ impl Repository {
                     "imported capture already has an operation".into(),
                 ));
             }
-            for parent in &operation.parents {
-                insert_parent.execute(params![id.as_bytes(), parent.as_bytes()])?;
-            }
             // Captures have no collaboration record. Indexing here keeps the
             // same side effects as `receive_in` if a body ever carries one.
             super::collaboration::index_operation(tx, &operation)?;
-            if admit.execute(params![id.as_bytes()])? != 1 {
-                return Err(Error::Invalid("imported capture was not admitted".into()));
-            }
             let possessed = possess.execute(params![thread.as_bytes(), state.id().as_bytes()])?;
             bumps += 2 + i64::from(possessed != 0);
             admitted.entry(state.id()).or_default().push(id);
@@ -1197,7 +1210,6 @@ impl Repository {
         drop(parent_query);
         drop(insert_op);
         drop(insert_parent);
-        drop(admit);
         drop(possess);
         if bumps > 0 {
             tx.execute(
@@ -1397,6 +1409,17 @@ fn imported_parent_operations(
         parents.extend(ops.iter().copied());
     }
     Ok(parents)
+}
+
+fn thread_has_accepted_operation(
+    connection: &rusqlite::Connection,
+    thread: &ContentHash,
+) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE thread=?1 AND status=1)",
+        [thread.as_bytes()],
+        |row| row.get(0),
+    )?)
 }
 
 fn accepted_import_revision(
