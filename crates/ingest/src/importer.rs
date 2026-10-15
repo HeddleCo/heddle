@@ -547,10 +547,11 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             let object_translate_ms = translate_start.elapsed().as_millis();
             if packed.profile {
                 eprintln!(
-                    "heddle profile:\n  command: import local translate\n  object_translate_ms: {object_translate_ms}\n  tree_read_ms: {:.3}\n  blob_prepare_ms: {:.3}\n  tree_encode_ms: {:.3}",
+                    "heddle profile:\n  command: import local translate\n  object_translate_ms: {object_translate_ms}\n  tree_read_ms: {:.3}\n  blob_prepare_ms: {:.3}\n  tree_encode_ms: {:.3}\n  pack_write_ms: {:.3}",
                     packed.tree_read_us as f64 / 1000.0,
                     packed.blob_prepare_us as f64 / 1000.0,
                     packed.tree_encode_us as f64 / 1000.0,
+                    packed.pack_write_us as f64 / 1000.0,
                 );
             }
             let mut stats = packed.stats;
@@ -733,7 +734,7 @@ impl ImportPackSink for PackBuilder {
 }
 
 enum ImportPackBuilder {
-    Streaming(StreamingPackBuilder<std::fs::File>),
+    Streaming(Box<StreamingPackBuilder<std::fs::File>>),
     DeltaSearch(PackBuilder),
 }
 
@@ -772,7 +773,7 @@ impl ImportPackBuilder {
             compression,
             bucket_dir.to_path_buf(),
         )?;
-        Ok(Self::Streaming(builder))
+        Ok(Self::Streaming(Box::new(builder)))
     }
 
     fn finish<S: ObjectStore>(
@@ -803,7 +804,7 @@ impl ImportPackSink for ImportPackBuilder {
         data: &[u8],
     ) -> crate::Result<()> {
         match self {
-            Self::Streaming(builder) => ImportPackSink::add(builder, hash, obj_type, data),
+            Self::Streaming(builder) => ImportPackSink::add(builder.as_mut(), hash, obj_type, data),
             Self::DeltaSearch(builder) => ImportPackSink::add(builder, hash, obj_type, data),
         }
     }
@@ -815,7 +816,9 @@ impl ImportPackSink for ImportPackBuilder {
         data: &[u8],
     ) -> crate::Result<()> {
         match self {
-            Self::Streaming(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
+            Self::Streaming(builder) => {
+                ImportPackSink::add_id(builder.as_mut(), id, obj_type, data)
+            }
             Self::DeltaSearch(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
         }
     }
@@ -843,6 +846,7 @@ struct PackedImport<'a, B: ImportPackSink> {
     tree_read_us: u128,
     blob_prepare_us: u128,
     tree_encode_us: u128,
+    pack_write_us: u128,
 }
 
 impl<'a, B: ImportPackSink> PackedImport<'a, B> {
@@ -866,6 +870,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             tree_read_us: 0,
             blob_prepare_us: 0,
             tree_encode_us: 0,
+            pack_write_us: 0,
         }
     }
 
@@ -977,7 +982,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             self.tree_encode_us += start.elapsed().as_micros();
         }
         if self.emit_objects {
-            self.builder.add(hash, PackObjectType::Tree, &data)?;
+            self.add_to_pack(hash, PackObjectType::Tree, &data)?;
             self.stats.object_count += 1;
         }
         self.stats.trees += 1;
@@ -1081,6 +1086,34 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         Ok(hash)
     }
 
+    fn add_to_pack(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: &[u8],
+    ) -> crate::Result<()> {
+        let start = self.profile.then(std::time::Instant::now);
+        self.builder.add(hash, obj_type, data)?;
+        if let Some(start) = start {
+            self.pack_write_us += start.elapsed().as_micros();
+        }
+        Ok(())
+    }
+
+    fn add_id_to_pack(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: &[u8],
+    ) -> crate::Result<()> {
+        let start = self.profile.then(std::time::Instant::now);
+        self.builder.add_id(id, obj_type, data)?;
+        if let Some(start) = start {
+            self.pack_write_us += start.elapsed().as_micros();
+        }
+        Ok(())
+    }
+
     fn emit_blob(
         &mut self,
         git_blob_sha: &str,
@@ -1091,7 +1124,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             self.materialized_blobs.insert(git_blob_sha.to_string());
         }
         if self.emit_objects {
-            self.builder.add(hash, PackObjectType::Blob, bytes)?;
+            self.add_to_pack(hash, PackObjectType::Blob, bytes)?;
             self.stats.object_count += 1;
         }
         self.stats.blobs += 1;
@@ -1265,7 +1298,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
                         .map_err(|error| IngestError::Git(error.to_string()))?;
                 let hash = tag.hash();
                 let encoded = tag.encode_current_msgpack();
-                self.builder.add_id(
+                self.add_id_to_pack(
                     PackObjectId::AnnotatedTag(hash),
                     PackObjectType::AnnotatedTag,
                     &encoded,
@@ -1340,7 +1373,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             .encode_current_msgpack()
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         if self.emit_objects {
-            self.builder.add_id(
+            self.add_id_to_pack(
                 PackObjectId::StateId(state.id()),
                 PackObjectType::State,
                 &data,

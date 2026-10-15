@@ -341,8 +341,9 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
 
     /// Compress `data` into [`Self::zstd_buf`] with the builder's zstd context.
     ///
-    /// The frame matches `Encoder::new` plus a pledged source size: level and
-    /// an empty dictionary are set once, then each object reuses that context.
+    /// One context serves every object. Bulk compression writes the frame
+    /// straight into the reused buffer; a streaming encoder would allocate a
+    /// fresh output buffer per object.
     #[cfg(feature = "zstd")]
     fn fill_zstd_buf(&mut self, data: &[u8]) -> Result<()> {
         if self.zstd_ctx.is_none() {
@@ -352,30 +353,17 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                 })?,
             );
         }
-        let mut compressor = self
+        let compressor = self
             .zstd_ctx
-            .take()
+            .as_mut()
             .ok_or_else(|| StoreError::InvalidObject("zstd compressor missing".into()))?;
-        if let Err(error) = compressor
-            .context_mut()
-            .reset(zstd::zstd_safe::ResetDirective::SessionOnly)
-        {
-            self.zstd_ctx = Some(compressor);
-            return Err(StoreError::InvalidObject(format!("zstd reset: {error}")));
-        }
         self.zstd_buf.clear();
-        let result = (|| -> std::io::Result<()> {
-            let mut enc = zstd::stream::write::Encoder::with_context(
-                &mut self.zstd_buf,
-                compressor.context_mut(),
-            );
-            enc.set_pledged_src_size(Some(data.len() as u64))?;
-            enc.write_all(data)?;
-            enc.finish()?;
-            Ok(())
-        })();
-        self.zstd_ctx = Some(compressor);
-        result.map_err(StoreError::from)
+        self.zstd_buf
+            .reserve(zstd::zstd_safe::compress_bound(data.len()));
+        compressor
+            .compress_to_buffer(data, &mut self.zstd_buf)
+            .map_err(StoreError::from)?;
+        Ok(())
     }
 
     /// Add an object with a content-hash id.
@@ -1679,13 +1667,11 @@ mod tests {
         // length. Find a stable boundary payload whose zstd frame is exactly
         // as long as its input, then pin the streaming writer's raw fallback.
         fn encode_like_streaming_writer(data: &[u8]) -> Vec<u8> {
-            let mut compressed = Vec::new();
-            let mut encoder = zstd::stream::write::Encoder::new(&mut compressed, 3).unwrap();
-            encoder
-                .set_pledged_src_size(Some(data.len() as u64))
+            let mut compressor = zstd::bulk::Compressor::new(3).unwrap();
+            let mut compressed = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
+            compressor
+                .compress_to_buffer(data, &mut compressed)
                 .unwrap();
-            std::io::Write::write_all(&mut encoder, data).unwrap();
-            encoder.finish().unwrap();
             compressed
         }
 
