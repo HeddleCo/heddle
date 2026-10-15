@@ -2870,6 +2870,8 @@ mod tests {
                 resolution_failure: failure,
                 resolution_requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 resolved_thread_byte: Default::default(),
+                default_thread: None,
+                omit_default_thread: false,
             };
             let (mut client, server, captured) =
                 test_server::start_with_thread_listing(fixture).await;

@@ -3572,6 +3572,7 @@ fn fresh_clone_rpc_and_https_budget() {
             - before;
         let budget = (
             count("/ResolveResources"),
+            count("/ObserveSpool"),
             count("/ObserveThreads"),
             count("/ObserveCollaboration"),
             count("/DescribeEndpoint"),
@@ -3581,19 +3582,21 @@ fn fresh_clone_rpc_and_https_budget() {
             https,
         );
         println!(
-            "clone budget (resolve, threads, collaboration, describe, fetch, thread, total, HTTPS connections): {budget:?}"
+            "clone budget (resolve, spool, threads, collaboration, describe, fetch, thread, total, HTTPS connections): {budget:?}"
         );
         fixture.assert_identity();
         assert_eq!(
             budget,
-            (2, 0, 2, 1, 1, 2, 8, 1),
+            (1, 1, 0, 2, 1, 1, 2, 8, 1),
             "clone critical path: {calls:?}"
         );
         fixture.close().await;
     });
 }
 
-fn clone_method_counts(calls: &[String]) -> (usize, usize, usize, usize, usize, usize, usize) {
+fn clone_method_counts(
+    calls: &[String],
+) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
     let count = |method: &str| calls.iter().filter(|call| call.ends_with(method)).count();
     (
         count("/ResolveResources"),
@@ -3603,6 +3606,7 @@ fn clone_method_counts(calls: &[String]) -> (usize, usize, usize, usize, usize, 
         count("/Fetch"),
         count("/ObserveThread"),
         calls.len(),
+        count("/ObserveSpool"),
     )
 }
 
@@ -3655,7 +3659,7 @@ fn clone_rpc_budget_does_not_grow_with_unrelated_threads() {
         let calls = fixture.captured.lock().expect("calls").calls.clone();
         let budget = clone_method_counts(&calls);
         println!(
-            "clone with 64 extra threads (resolve, threads, collaboration, describe, fetch, thread, total): {budget:?}"
+            "clone with 64 extra threads (resolve, threads, collaboration, describe, fetch, thread, total, spool): {budget:?}"
         );
         assert_eq!(
             budget.1, 0,
@@ -3664,6 +3668,10 @@ fn clone_rpc_budget_does_not_grow_with_unrelated_threads() {
         assert_eq!(
             budget.4, 1,
             "clone must Fetch only the selected tip: {calls:?}"
+        );
+        assert_eq!(
+            budget.7, 1,
+            "default clone observes the spool once for its configured default Thread: {calls:?}"
         );
         fixture.assert_identity();
         let cloned = Repository::open(&fixture.clone).expect("clone");
@@ -3717,7 +3725,7 @@ fn clone_rpc_budget_does_not_grow_with_history_depth() {
         let calls = fixture.captured.lock().expect("calls").calls.clone();
         let budget = clone_method_counts(&calls);
         println!(
-            "clone after deep history (resolve, threads, collaboration, describe, fetch, thread, total): {budget:?}"
+            "clone after deep history (resolve, threads, collaboration, describe, fetch, thread, total, spool): {budget:?}"
         );
         assert_eq!(
             budget.4, 1,
@@ -3814,6 +3822,115 @@ fn clone_one_thread_status_capture_and_pull_another_thread() {
             cloned.native_thread("other").is_ok(),
             "later fetch of another Thread must install it"
         );
+        fixture.close().await;
+    });
+}
+
+#[test]
+fn clone_uses_the_spool_configured_default_thread() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture.run_at(
+            &fixture.source,
+            &["remote", "add", "origin", &fixture.remote()],
+        );
+        let started = fixture.run_at(&fixture.source, &["start", "other", "--print-cd-path"]);
+        let other = PathBuf::from(started.trim());
+        std::fs::write(other.join("other.txt"), "configured default\n").expect("other file");
+        fixture.run_at(&other, &["capture", "-m", "other thread tip"]);
+        assert_push_succeeded(&fixture, &other);
+        let other_id = Repository::open(&other)
+            .expect("other repo")
+            .native_thread("other")
+            .expect("other identity")
+            .thread_id();
+        fixture
+            .captured
+            .lock()
+            .expect("default Thread")
+            .default_thread = Some(api::heddle::api::v1alpha2::ThreadRef {
+            spool: Some(api::heddle::api::v1alpha2::SpoolRef {
+                id: fixture.spool.to_string(),
+            }),
+            id: Some(api::heddle::api::v1alpha2::ThreadId {
+                value: other_id.as_bytes().to_vec(),
+            }),
+        });
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        let status = fixture.run(&["--output", "json", "status"]);
+        let status: Value = serde_json::from_str(&status).expect("status JSON");
+        assert_eq!(status["thread"], "other");
+        assert_eq!(
+            std::fs::read_to_string(fixture.clone.join("other.txt")).expect("default checkout"),
+            "configured default\n"
+        );
+        fixture.close().await;
+    });
+}
+
+#[test]
+fn clone_without_default_thread_asks_for_thread_flag() {
+    on_large_stack(|| async {
+        let fixture = Fixture::uninstalled().await;
+        fixture
+            .captured
+            .lock()
+            .expect("omit default")
+            .omit_default_thread = true;
+        let dest = fixture._temp.path().join("no-default");
+        let output = fixture.output_at(
+            fixture._temp.path(),
+            &[
+                "--output",
+                "json",
+                "clone",
+                &fixture.remote(),
+                dest.to_str().expect("path"),
+            ],
+        );
+        assert_eq!(
+            json_error_kind(&output),
+            "clone_remote_default_thread_unset"
+        );
+        assert!(
+            !dest.exists(),
+            "unset default must not create the destination"
+        );
+        let envelope: Value = serde_json::from_slice(&output.stderr).expect("JSON refusal");
+        assert!(
+            envelope["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("no default thread")),
+            "{envelope}"
+        );
+        assert_eq!(
+            envelope["primary_command"],
+            "heddle clone <remote> --thread <name>"
+        );
+        assert!(
+            envelope["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("--thread")),
+            "{envelope}"
+        );
+        fixture.run_at(
+            fixture._temp.path(),
+            &[
+                "clone",
+                "--thread",
+                "main",
+                &fixture.remote(),
+                fixture.clone.to_str().expect("path"),
+            ],
+        );
+        fixture.assert_identity();
         fixture.close().await;
     });
 }

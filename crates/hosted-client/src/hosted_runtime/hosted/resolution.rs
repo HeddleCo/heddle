@@ -303,6 +303,8 @@ mod tests {
             resolution_failure: None,
             resolution_requests: Arc::default(),
             resolved_thread_byte: Arc::default(),
+            default_thread: None,
+            omit_default_thread: false,
         };
         let (client, server, captured) = start_with_thread_listing(fixture).await;
         let client = client.with_command_resolution_cache();
@@ -506,6 +508,8 @@ mod tests {
             resolution_failure: None,
             resolution_requests: Arc::default(),
             resolved_thread_byte: Arc::default(),
+            default_thread: None,
+            omit_default_thread: false,
         };
         let (client, server, captured) = start_with_thread_listing(fixture).await;
         assert!(client.resolutions.is_none());

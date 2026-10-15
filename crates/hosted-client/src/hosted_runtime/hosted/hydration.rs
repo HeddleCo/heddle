@@ -715,6 +715,8 @@ mod tests {
             resolution_failure: None,
             resolution_requests: Arc::default(),
             resolved_thread_byte: Arc::default(),
+            default_thread: None,
+            omit_default_thread: false,
         };
         let (mut client, server, captured) = start_with_thread_listing(fixture).await;
         let (_temp, repo) = temp_repo();

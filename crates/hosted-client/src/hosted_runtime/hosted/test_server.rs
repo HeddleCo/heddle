@@ -62,6 +62,25 @@ pub(crate) struct ThreadListingFixture {
     /// When set, thread-name resolution returns this id byte (x32) instead,
     /// so a test can move a name to a new id between calls.
     pub resolved_thread_byte: Arc<Mutex<Option<u8>>>,
+    /// Explicit spool `default_thread`. `None` derives the overview named `main`.
+    pub default_thread: Option<v2::ThreadRef>,
+    /// When true, ObserveSpool omits `default_thread` even if `main` is listed.
+    pub omit_default_thread: bool,
+}
+
+impl ThreadListingFixture {
+    fn advertised_default_thread(&self) -> Option<v2::ThreadRef> {
+        if self.omit_default_thread {
+            return None;
+        }
+        if self.default_thread.is_some() {
+            return self.default_thread.clone();
+        }
+        self.overviews
+            .iter()
+            .find(|overview| overview.name == "main")
+            .and_then(|overview| overview.r#ref.clone())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -569,6 +588,9 @@ async fn serve_call(
                     &mut request,
                     server_key,
                     grants,
+                    thread_listing
+                        .as_ref()
+                        .and_then(ThreadListingFixture::advertised_default_thread),
                 )
                 .await;
             } else if method == "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" {
@@ -1596,6 +1618,7 @@ async fn serve_native_spool_observation(
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
     grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+    default_thread: Option<v2::ThreadRef>,
 ) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
@@ -1643,7 +1666,10 @@ async fn serve_native_spool_observation(
                 version: vec![7; 32],
                 slug: "acme".into(),
                 path_segments: vec!["acme".into()],
-                settings: Some(v2::SpoolSettings::default()),
+                settings: Some(v2::SpoolSettings {
+                    default_thread,
+                    ..Default::default()
+                }),
                 ..Default::default()
             })),
         },

@@ -619,6 +619,10 @@ async fn serve_owner_views(
                             version: vec![1; 32],
                             path_segments: vec!["acme".into(), "widgets".into()],
                             owner_genesis: Some(fixture.owner_genesis.clone()),
+                            settings: Some(v2::SpoolSettings {
+                                default_thread: Some(thread_ref(fixture)),
+                                ..Default::default()
+                            }),
                             ..Default::default()
                         })
                     }),

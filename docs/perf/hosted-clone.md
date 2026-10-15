@@ -139,23 +139,26 @@ status, deletion, target changes, replacement, and recovery. Populated gitlink
 replacement refuses with an actionable message and preserves the contents;
 empty directory replacement succeeds. The reflink probe lives in metadata.
 
-Native clone now resolves one Thread by name and Fetches only that advertised
-tip. Unrelated Threads are not listed or installed; older blobs stay on the
-remote until `heddle pull`. Measured on `537f9d55` plus the budget assertion
-update in this change:
+Native clone Fetches one Thread's advertised tip. Default is the spool's
+configured `default_thread`; `--thread` selects a name instead. Unrelated
+Threads are not listed or installed; older blobs stay on the remote until
+`heddle pull`. If the spool has no default Thread, clone refuses and asks
+for `--thread` instead of guessing `main`/`master`/first-published. Measured
+on this change against the native hosted fixture:
 
-| RPC | #2067 after, fresh cache | One-thread tip (this change) | 64 extra advertised Threads | 8 unique historical blobs dropped from tip |
-| --- | ---: | ---: | ---: | ---: |
-| ResolveResources | 1 | 2 | 2 | 2 |
-| ObserveThreads | 1 | 0 | 0 | 0 |
-| ObserveCollaboration | 2 | 2 | 2 | 2 |
-| DescribeEndpoint | 1 | 1 | 1 | 0 |
-| Fetch | 1 | 1 | 1 | 1 |
-| ObserveThread | 1 | 2 | 2 | 2 |
-| Total | 7 | 8 | 8 | 7 |
+| RPC | #2067 after, fresh cache | One-thread tip | Configured default (this change) | 64 extra advertised Threads | 8 unique historical blobs dropped from tip |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ResolveResources | 1 | 2 | 1 | 1 | 1 |
+| ObserveSpool | 0 | 0 | 1 | 1 | 1 |
+| ObserveThreads | 1 | 0 | 0 | 0 | 0 |
+| ObserveCollaboration | 2 | 2 | 2 | 2 | 2 |
+| DescribeEndpoint | 1 | 1 | 1 | 1 | 0 |
+| Fetch | 1 | 1 | 1 | 1 | 1 |
+| ObserveThread | 1 | 2 | 2 | 2 | 2 |
+| Total | 7 | 8 | 8 | 8 | 7 |
 
-The extra ResolveResources is the selected Thread name; the extra ObserveThread
-is that Thread's overview. ObserveThreads is gone from the clone path. Fetch
-stays 1 with 64 unrelated Threads and with deeper history. Truncating signed
+The extra ObserveSpool is the configured default Thread; `--thread` still
+resolves one name. ObserveThreads is gone from the clone path. Fetch stays 1
+with 64 unrelated Threads and with deeper history. Truncating signed
 operation ancestry would require a weft/protocol change; tip trees and blobs
 are already the Fetch content.

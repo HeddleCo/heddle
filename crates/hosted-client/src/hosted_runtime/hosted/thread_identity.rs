@@ -191,10 +191,29 @@ impl HostedClient {
                 id: Some(contract::ThreadId { value }),
             });
         }
+        self.resolve_thread_name_on_spool(spool, name_or_id).await
+    }
+
+    /// Resolve a Thread by advertised name. A 64-character hex spelling is a
+    /// name, not a Thread id shortcut; `--thread` uses this path.
+    pub async fn resolve_thread_name(
+        &self,
+        spool_address: &str,
+        name: &str,
+    ) -> Result<contract::ThreadRef, ProtocolError> {
+        let spool = self.resolve_spool_ref(spool_address).await?;
+        self.resolve_thread_name_on_spool(spool, name).await
+    }
+
+    async fn resolve_thread_name_on_spool(
+        &self,
+        spool: contract::SpoolRef,
+        name: &str,
+    ) -> Result<contract::ThreadRef, ProtocolError> {
         let Some(cache) = &self.resolutions else {
-            return self.resolve_thread_remote(spool, name_or_id).await;
+            return self.resolve_thread_remote(spool, name).await;
         };
-        let key = (spool.id.clone(), name_or_id.to_owned());
+        let key = (spool.id.clone(), name.to_owned());
         let request = {
             let mut entries = cache.entries().await;
             if let Some(thread) = entries.threads.get(&key) {
@@ -207,7 +226,7 @@ impl HostedClient {
                 .clone()
         };
         let reference = request
-            .get_or_try_init(|| self.resolve_thread_remote(spool, name_or_id))
+            .get_or_try_init(|| self.resolve_thread_remote(spool, name))
             .await?
             .clone();
         let mut entries = cache.entries().await;

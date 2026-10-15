@@ -2676,9 +2676,13 @@ fn map_hosted_clone_pull_error(
         {
             cleanup.arm();
             anyhow!(clone_hosted_thread_not_found_advice(
-                requested.unwrap_or("main"),
+                requested.unwrap_or("the selected Thread"),
                 repo_path
             ))
+        }
+        wire::ProtocolError::InvalidState(message) if message.contains("no default Thread") => {
+            cleanup.arm();
+            anyhow!(clone_remote_default_thread_unset_advice(repo_path))
         }
         other => anyhow::Error::from(other),
     }
@@ -2695,6 +2699,20 @@ fn clone_hosted_thread_not_found_advice(track_name: &str, remote_label: &str) ->
         "destination path was left unchanged; no local clone repository was initialized",
         "heddle thread list",
         vec!["heddle thread list".to_string()],
+    )
+}
+
+#[cfg(feature = "client")]
+fn clone_remote_default_thread_unset_advice(remote_label: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_remote_default_thread_unset",
+        format!("Remote '{remote_label}' has no default thread"),
+        "Pass `--thread <name>` to clone a published thread on this remote.",
+        format!("remote '{remote_label}' has no configured default Thread"),
+        "clone cannot choose a state to fetch until a Thread is named",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle clone <remote> --thread <name>",
+        vec!["heddle clone <remote> --thread <name>".to_string()],
     )
 }
 
@@ -3970,6 +3988,18 @@ mod tests {
         assert_eq!(advice.kind, "clone_remote_thread_not_found");
         assert!(advice.error.contains("feature/x"));
         assert_eq!(advice.primary_command, "heddle thread list");
+
+        #[cfg(feature = "client")]
+        {
+            let advice = clone_remote_default_thread_unset_advice("spool/acme");
+            assert_eq!(advice.kind, "clone_remote_default_thread_unset");
+            assert!(advice.error.contains("spool/acme"));
+            assert!(advice.hint.contains("--thread"));
+            assert_eq!(
+                advice.primary_command,
+                "heddle clone <remote> --thread <name>"
+            );
+        }
 
         let advice = clone_checkout_not_attached_advice("main");
         assert_eq!(advice.kind, "clone_checkout_not_attached");

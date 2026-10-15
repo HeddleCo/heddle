@@ -89,6 +89,10 @@ pub struct PublicationCapture {
     pub reject_discussions: bool,
     /// Fail a clone's observation or metadata RPC, after source installation.
     pub fail_clone_stage: Option<String>,
+    /// When true, ObserveSpool omits `settings.default_thread`.
+    pub omit_default_thread: bool,
+    /// Override the advertised default Thread. `None` uses the fixture Thread.
+    pub default_thread: Option<v2::ThreadRef>,
     pub clone_observations: Vec<bool>,
     pub clone_metadata_obstruction: Option<std::path::PathBuf>,
     pub clone_sync_barrier: Option<Arc<tokio::sync::Barrier>>,
@@ -1184,6 +1188,16 @@ async fn serve_call(
                     }
                 }
                 "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
+                    let capture = fixture.captured.lock().expect("spool settings").clone();
+                    let default_thread = if capture.omit_default_thread {
+                        None
+                    } else {
+                        Some(
+                            capture
+                                .default_thread
+                                .unwrap_or_else(|| thread_ref(&fixture)),
+                        )
+                    };
                     for frame in snapshot_frames(server_key) {
                         let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
                             .then(|| {
@@ -1200,6 +1214,10 @@ async fn serve_call(
                                         .expect("keyring")
                                         .canonical_spool_path_segments
                                         .clone(),
+                                    settings: Some(v2::SpoolSettings {
+                                        default_thread: default_thread.clone(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 })
                             });
@@ -2214,6 +2232,8 @@ async fn serve_publication(
                     });
                     accepted.account_owner = capture.account_owner.clone();
                     accepted.provision_requests = capture.provision_requests.clone();
+                    accepted.omit_default_thread = capture.omit_default_thread;
+                    accepted.default_thread = capture.default_thread.clone();
                     *capture = accepted;
                 }
                 write_message(

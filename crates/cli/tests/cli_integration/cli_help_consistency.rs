@@ -88,9 +88,11 @@ fn clone_help_pins_behavior_stanza() {
     );
     assert!(
         help.contains("Native clones fetch one thread's advertised tip")
+            && help.contains("configured default thread")
             && help.contains("pass `--thread <name>`")
             && help.contains("override")
             && help.contains("`heddle pull`")
+            && !help.contains("Default is `main`")
             && !help.contains("Native clones target `main`")
             && !help.contains("if the remote has no `main` thread"),
         "clone topic should explain one-thread tip clone: {help}"

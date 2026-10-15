@@ -60,6 +60,7 @@ const ANCESTRY_RECORDS: usize = 10_000;
 const ANCESTRY_BYTES: usize = 16 * 1024 * 1024;
 const LINEAGE_STATES: usize = 4096;
 const THREAD_PAGE_SIZE: u32 = 64;
+const NO_DEFAULT_CLONE_THREAD: &str = "this spool has no default Thread; pass --thread <name>";
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
@@ -502,7 +503,7 @@ impl HostedClient {
         name: &str,
     ) -> Result<ThreadOverview, ProtocolError> {
         let reference =
-            self.resolve_thread_ref(repo_path, name)
+            self.resolve_thread_name(repo_path, name)
                 .await
                 .map_err(|error| match error {
                     ProtocolError::ObjectNotFound(_) => ProtocolError::ObjectNotFound(format!(
@@ -558,8 +559,9 @@ impl HostedClient {
         ))
     }
 
-    /// Default clone target: `--thread`, else `main`, else `master`, else the
-    /// first published NameAsc Thread. Does not validate unrelated refs.
+    /// Default clone target: `--thread`, else the spool's configured
+    /// `default_thread`. Unset/deleted/unreadable defaults look identical and
+    /// refuse rather than guessing `main`, `master`, or the first listing.
     async fn select_clone_thread(
         &self,
         repo_path: &str,
@@ -569,83 +571,26 @@ impl HostedClient {
             let overview = self.observe_named_thread_overview(repo_path, name).await?;
             return Ok((overview.name.clone(), overview));
         }
-        for name in ["main", "master"] {
-            match self.observe_named_thread_overview(repo_path, name).await {
-                Ok(overview) => return Ok((overview.name.clone(), overview)),
-                Err(ProtocolError::ObjectNotFound(_)) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        let overview = self
-            .observe_first_published_thread(repo_path)
-            .await?
-            .ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "Fetch requires a started Thread with published source; this spool has none"
-                        .into(),
-                )
-            })?;
-        Ok((overview.name.clone(), overview))
-    }
-
-    /// First published Thread in NameAsc order. Stops at that overview; later
-    /// pages and unpublished names are not validated.
-    async fn observe_first_published_thread(
-        &self,
-        repo_path: &str,
-    ) -> Result<Option<ThreadOverview>, ProtocolError> {
-        let spool = self.resolve_spool_ref(repo_path).await?;
-        let remote = self.native().await.map_err(native_error)?;
-        let query = ThreadQuery {
-            spools: vec![spool],
-            order: thread_query::Order::NameAsc as i32,
-            ..Default::default()
+        let spool = self.native_spool_overview(repo_path).await?;
+        let Some(reference) = spool
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.default_thread.clone())
+        else {
+            return Err(ProtocolError::InvalidState(NO_DEFAULT_CLONE_THREAD.into()));
         };
-        let mut after_page = Vec::new();
-        let mut page_tokens = std::collections::BTreeSet::new();
-        loop {
-            let mut observation = remote
-                .observe::<rpc::ThreadServiceObserveThreads>(
-                    ObserveThreadsRequest {
-                        query: Some(query.clone()),
-                        page: Some(PageRequest {
-                            size: THREAD_PAGE_SIZE,
-                            after_page: after_page.clone(),
-                        }),
-                        observe: Some(once_observe()),
-                    },
-                    None,
-                )
-                .await
-                .map_err(native_error)?;
-            let mut page = None;
-            while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
-                if batch.page.is_some() {
-                    page = batch.page;
-                }
-                for change in batch.changes {
-                    if let thread_list_event::Payload::Thread(thread) = change
-                        && overview_state(&thread).is_some()
-                    {
-                        return Ok(Some(thread));
-                    }
-                }
-            }
-            let page = page.ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "Thread listing ended without snapshot page coverage".into(),
-                )
-            })?;
-            if page.exhausted {
-                return Ok(None);
-            }
-            if page.next_page.is_empty() || !page_tokens.insert(page.next_page.clone()) {
-                return Err(ProtocolError::InvalidState(
-                    "Thread listing pagination did not advance".into(),
-                ));
-            }
-            after_page = page.next_page;
+        if reference.id.as_ref().is_none_or(|id| id.value.len() != 32) {
+            return Err(ProtocolError::InvalidState(
+                "this spool advertised an invalid default Thread".into(),
+            ));
         }
+        let overview = self.observe_thread_overview(&reference).await?;
+        if overview.name.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "default Thread observation omitted its name".into(),
+            ));
+        }
+        Ok((overview.name.clone(), overview))
     }
 
     async fn observe_thread_overviews(
@@ -3025,6 +2970,8 @@ mod tests {
             resolution_failure: None,
             resolution_requests: Arc::new(Mutex::new(Vec::new())),
             resolved_thread_byte: Default::default(),
+            default_thread: None,
+            omit_default_thread: false,
         };
         let (mut client, server, captured) =
             super::super::test_server::start_with_thread_listing(fixture).await;
@@ -3108,6 +3055,8 @@ mod tests {
             resolution_failure: None,
             resolution_requests: Arc::new(Mutex::new(Vec::new())),
             resolved_thread_byte: Default::default(),
+            default_thread: None,
+            omit_default_thread: false,
         };
         let (client, server, captured) =
             super::super::test_server::start_with_thread_listing(fixture).await;
@@ -3140,7 +3089,7 @@ mod tests {
         let (name, overview) = client
             .select_clone_thread("acme/widgets", None)
             .await
-            .expect("default clone resolves main by name");
+            .expect("default clone uses the spool default Thread");
         assert_eq!(name, "main");
         assert_eq!(
             overview_state(&overview),
@@ -3153,7 +3102,16 @@ mod tests {
                 .unwrap_or_else(|poison| poison.into_inner());
             assert!(
                 listing.is_empty(),
-                "default clone must not page ObserveThreads to find main: {listing:?}"
+                "default clone must not page ObserveThreads to find the default: {listing:?}"
+            );
+            let resolved = captured
+                .resolution_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(
+                resolved.as_slice(),
+                ["wanted"],
+                "default clone must observe the spool default, not resolve main by name: {resolved:?}"
             );
         }
 
@@ -3164,6 +3122,192 @@ mod tests {
         assert!(
             missing.to_string().contains("missing"),
             "missing Thread refusal: {missing}"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_uses_configured_default_thread_instead_of_main() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let spool = SpoolRef {
+            id: Uuid::from_bytes([2; 16]).to_string(),
+        };
+        let revision = revision_ref(&spool, StateId::from_bytes([7; 32]));
+        let wanted = ThreadRef {
+            spool: Some(spool.clone()),
+            id: Some(contract::ThreadId { value: vec![9; 32] }),
+        };
+        let overviews = vec![
+            ThreadOverview {
+                name: "main".into(),
+                r#ref: Some(ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(contract::ThreadId {
+                        value: vec![1; 32],
+                    }),
+                }),
+                source_heads: vec![revision.clone()],
+                ..Default::default()
+            },
+            ThreadOverview {
+                name: "wanted".into(),
+                r#ref: Some(wanted.clone()),
+                source_heads: vec![revision],
+                ..Default::default()
+            },
+        ];
+        let fixture = super::super::test_server::ThreadListingFixture {
+            overviews,
+            page_size: 64,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            resolution_failure: None,
+            resolution_requests: Arc::new(Mutex::new(Vec::new())),
+            resolved_thread_byte: Default::default(),
+            default_thread: Some(wanted),
+            omit_default_thread: false,
+        };
+        let (client, server, captured) =
+            super::super::test_server::start_with_thread_listing(fixture).await;
+
+        let (name, overview) = client
+            .select_clone_thread("acme/widgets", None)
+            .await
+            .expect("configured default Thread is cloned");
+        assert_eq!(name, "wanted");
+        assert_eq!(
+            overview.r#ref.and_then(|reference| reference.id),
+            Some(contract::ThreadId { value: vec![9; 32] })
+        );
+        {
+            let listing = captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert!(listing.is_empty(), "must not list Threads: {listing:?}");
+            let resolved = captured
+                .resolution_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert!(
+                resolved.is_empty(),
+                "configured default must not resolve a Thread name: {resolved:?}"
+            );
+        }
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_without_default_thread_refuses_without_thread_flag() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let spool = SpoolRef {
+            id: Uuid::from_bytes([2; 16]).to_string(),
+        };
+        let revision = revision_ref(&spool, StateId::from_bytes([7; 32]));
+        let fixture = super::super::test_server::ThreadListingFixture {
+            overviews: vec![ThreadOverview {
+                name: "main".into(),
+                r#ref: Some(ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(contract::ThreadId { value: vec![4; 32] }),
+                }),
+                source_heads: vec![revision],
+                ..Default::default()
+            }],
+            page_size: 64,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            resolution_failure: None,
+            resolution_requests: Arc::new(Mutex::new(Vec::new())),
+            resolved_thread_byte: Default::default(),
+            default_thread: None,
+            omit_default_thread: true,
+        };
+        let (client, server, captured) =
+            super::super::test_server::start_with_thread_listing(fixture).await;
+
+        let error = client
+            .select_clone_thread("acme/widgets", None)
+            .await
+            .expect_err("unset default Thread fails closed");
+        assert!(
+            error.to_string().contains("no default Thread")
+                && error.to_string().contains("--thread"),
+            "unset default must ask for --thread: {error}"
+        );
+        {
+            let listing = captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert!(
+                listing.is_empty(),
+                "unset default must not guess from a Thread listing: {listing:?}"
+            );
+        }
+
+        let (name, _) = client
+            .select_clone_thread("acme/widgets", Some("main"))
+            .await
+            .expect("--thread still clones when the default is unset");
+        assert_eq!(name, "main");
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_thread_flag_resolves_a_hex_spelling_as_a_name() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let spool = SpoolRef {
+            id: Uuid::from_bytes([2; 16]).to_string(),
+        };
+        let revision = revision_ref(&spool, StateId::from_bytes([7; 32]));
+        let name = "ab".repeat(32);
+        let fixture = super::super::test_server::ThreadListingFixture {
+            overviews: vec![ThreadOverview {
+                name: name.clone(),
+                r#ref: Some(ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(contract::ThreadId {
+                        value: vec![11; 32],
+                    }),
+                }),
+                source_heads: vec![revision],
+                ..Default::default()
+            }],
+            page_size: 64,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            resolution_failure: None,
+            resolution_requests: Arc::new(Mutex::new(Vec::new())),
+            resolved_thread_byte: Default::default(),
+            default_thread: None,
+            omit_default_thread: false,
+        };
+        let (client, server, captured) =
+            super::super::test_server::start_with_thread_listing(fixture).await;
+
+        let (selected, overview) = client
+            .select_clone_thread("acme/widgets", Some(&name))
+            .await
+            .expect("64-character hex Thread names resolve by name");
+        assert_eq!(selected, name);
+        assert_eq!(
+            overview.r#ref.and_then(|reference| reference.id),
+            Some(contract::ThreadId {
+                value: vec![11; 32],
+            })
+        );
+        let resolved = captured
+            .resolution_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(
+            resolved.as_slice(),
+            [name.as_str()],
+            "hex Thread names must use ThreadName resolution, not an id shortcut: {resolved:?}"
         );
 
         client.close().await;
