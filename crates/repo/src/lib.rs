@@ -41,6 +41,7 @@ mod context_consumption;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_snapshot_travel;
 pub mod daemon;
+pub mod derived;
 pub mod device_artifacts;
 pub mod device_authority;
 pub mod device_catalog;
