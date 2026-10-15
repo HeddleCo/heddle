@@ -45,11 +45,11 @@ biscuit-auth = { version = "6.0", default-features = false, features = ["datalog
 # feature omits js: https://docs.rs/crate/biscuit-auth/6.0.0/source/Cargo.toml
 # Remove when upstream enables its WASM entropy backend; see docs/rustcrypto-dependencies.md.
 getrandom = { version = "0.2", features = ["js"] }
-wasm-bindgen = "=0.2.127"
-js-sys = "=0.3.104"
+wasm-bindgen = "=0.2.129"
+js-sys = "=0.3.106"
 
 [dev-dependencies]
-wasm-bindgen-test = "=0.3.77"
+wasm-bindgen-test = "=0.3.79"
 
 [lints.rust]
 missing_docs = "warn"

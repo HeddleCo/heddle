@@ -11,8 +11,8 @@ function run(command, args, capture = false) {
   if (result.status !== 0) throw new Error(`${command} failed (${result.status}): ${result.stderr ?? ""}`);
   return result.stdout;
 }
-if (run("wasm-bindgen", ["--version"], true).trim() !== "wasm-bindgen 0.2.127") {
-  throw new Error("Install wasm-bindgen-cli 0.2.127 with cargo install --locked.");
+if (run("wasm-bindgen", ["--version"], true).trim() !== "wasm-bindgen 0.2.129") {
+  throw new Error("Install wasm-bindgen-cli 0.2.129 with cargo install --locked.");
 }
 const metadata = JSON.parse(run("cargo", ["metadata", "--locked", "--no-deps", "--format-version", "1"], true));
 const crate = metadata.packages.find(p => p.name === "heddleco-capability-verifier");

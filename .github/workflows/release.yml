@@ -101,7 +101,7 @@ jobs:
         with:
           shared-key: release-verifier-npm
       - name: Install pinned binding generator
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - name: Build, validate release version, and pack
         working-directory: crates/capability-verifier
         env:

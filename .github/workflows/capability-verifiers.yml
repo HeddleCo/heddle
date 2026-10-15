@@ -64,7 +64,7 @@ jobs:
         # for the action's stable toolchain does not install it for that pin.
         run: rustup target add wasm32-unknown-unknown
       - name: Install the WASM test runner
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - name: Build Worker target
         run: cargo build --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib
       - name: Check ordinary verifier independently
