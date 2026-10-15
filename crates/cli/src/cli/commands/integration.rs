@@ -1341,25 +1341,72 @@ mod tests {
     use super::*;
     use crate::cli::Commands;
 
-    struct HomeEnvGuard(Option<std::ffi::OsString>);
+    /// Points `HOME` at a private directory for one test.
+    ///
+    /// The directory outlives the env restore: `Drop` puts `HOME` back while
+    /// the process home lock is still held, then deletes the directory, then
+    /// releases the lock. Another test blocked in `heddle_home_dir` therefore
+    /// cannot open the device catalog in a directory that is about to vanish
+    /// (SQLite WAL reports that as `disk I/O error`).
+    struct HomeEnvGuard {
+        previous: Option<std::ffi::OsString>,
+        home: tempfile::TempDir,
+        _lock: repo::identity::ProcessHomeGuard,
+    }
 
     impl HomeEnvGuard {
-        fn set(path: &Path) -> Self {
-            let original = std::env::var_os("HOME");
-            unsafe {
-                std::env::set_var("HOME", path);
+        fn temporary() -> Self {
+            let lock = repo::identity::ProcessHomeGuard::acquire();
+            let home = tempfile::TempDir::new().expect("temporary HOME");
+            let previous = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", home.path()) };
+            Self {
+                previous,
+                home,
+                _lock: lock,
             }
-            Self(original)
+        }
+
+        fn path(&self) -> &Path {
+            self.home.path()
         }
     }
 
     impl Drop for HomeEnvGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.previous.take() {
                 Some(value) => unsafe { std::env::set_var("HOME", value) },
                 None => unsafe { std::env::remove_var("HOME") },
             }
         }
+    }
+
+    #[test]
+    fn temporary_home_is_invisible_to_other_threads() {
+        let home = HomeEnvGuard::temporary();
+        let temp = home.path().to_path_buf();
+        let previous_heddle_home = std::env::var_os("HEDDLE_HOME");
+        unsafe { std::env::remove_var("HEDDLE_HOME") };
+        let resolved = std::thread::scope(|scope| {
+            let handle = scope.spawn(repo::identity::heddle_home_dir);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(
+                repo::identity::heddle_home_dir(),
+                temp.join(".heddle"),
+                "the thread that holds the home lock must see its temporary HOME"
+            );
+            match previous_heddle_home {
+                Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+                None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+            }
+            drop(home);
+            handle.join().expect("home reader")
+        });
+        assert!(
+            !resolved.starts_with(&temp),
+            "another thread observed the temporary HOME at {}",
+            resolved.display()
+        );
     }
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
@@ -1445,8 +1492,7 @@ mod tests {
         static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
-        let home = tempfile::TempDir::new().unwrap();
-        let _home_guard = HomeEnvGuard::set(home.path());
+        let home = HomeEnvGuard::temporary();
         let mut manifest = IntegrationManifest::default();
 
         install_claude(
@@ -1828,8 +1874,7 @@ mod tests {
         static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
-        let home = tempfile::TempDir::new().unwrap();
-        let _home_guard = HomeEnvGuard::set(home.path());
+        let home = HomeEnvGuard::temporary();
         let mut manifest = IntegrationManifest::default();
 
         install_opencode(
@@ -1873,8 +1918,7 @@ mod tests {
         static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_temp, repo) = init_repo();
-        let home = tempfile::TempDir::new().unwrap();
-        let _home_guard = HomeEnvGuard::set(home.path());
+        let home = HomeEnvGuard::temporary();
         let mut manifest = IntegrationManifest::default();
 
         install_codex(

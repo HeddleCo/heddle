@@ -42,7 +42,12 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Cold GitHub-hosted release compiles on ubuntu-24.04 measured
+    # 23m (heddle-cli bins) + 21m (cli_basics) + 10m (heddle-repo) and
+    # were still compiling heddle-hosted-client when the 60m job
+    # timeout cancelled the run. 180m covers that cold cache plus the
+    # 10k/100k samples. main's rust-cache makes later runs shorter.
+    timeout-minutes: 180
     # 10k/100k fixtures and release compiles write through TMPDIR.
     # `runner` is not a legal context in job env; using it there makes
     # GitHub reject the workflow file before any job starts. RUNNER_TEMP
