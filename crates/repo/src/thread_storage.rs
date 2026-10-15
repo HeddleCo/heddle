@@ -253,33 +253,51 @@ fn materialized_thread_for_state(
     let genesis = replica
         .genesis()
         .map_err(|error| HeddleError::Config(error.to_string()))?;
-    let parent_thread = genesis
-        .parent
-        .map(|parent| {
-            repo.list_native_threads()
+    // One-thread clone installs only the selected Thread. A child default
+    // still has signed parent lineage, but the parent replica stays remote
+    // until `heddle pull --thread`. Absence is not a clone failure.
+    let parent_thread = match genesis.parent {
+        None => None,
+        Some(parent) => {
+            if let Some((name, _)) = repo
+                .list_native_threads()
                 .map_err(|error| HeddleError::Config(error.to_string()))?
                 .into_iter()
                 .find(|(_, named)| named.thread_id() == parent)
-                .map(|(name, _)| Ok(name))
-                .unwrap_or_else(|| {
-                    crate::thread_replication::ThreadReplica::open(repo.heddle_dir(), parent)
-                        .and_then(|replica| replica.genesis())
-                        .map(|genesis| genesis.name)
-                        .map_err(|error| HeddleError::Config(error.to_string()))
-                })
-        })
-        .transpose()?;
+            {
+                Some(name)
+            } else {
+                match crate::thread_replication::ThreadReplica::open(repo.heddle_dir(), parent) {
+                    Ok(replica) => Some(
+                        replica
+                            .genesis()
+                            .map_err(|error| HeddleError::Config(error.to_string()))?
+                            .name,
+                    ),
+                    Err(crate::thread_replication::Error::Sql(
+                        rusqlite::Error::QueryReturnedNoRows,
+                    )) => None,
+                    Err(error) => return Err(HeddleError::Config(error.to_string())),
+                }
+            }
+        }
+    };
     let base = if genesis.parent.is_some() {
         genesis.base
     } else {
         ref_state
     };
-    let base_state = repo.store().get_state(&base)?.ok_or_else(|| {
-        HeddleError::NotFound(format!(
-            "Thread '{thread}' fork base {} is missing",
-            base.to_string_full()
-        ))
-    })?;
+    let base_root = match repo.store().get_state(&base)? {
+        Some(state) => state.tree.to_hex(),
+        // Tip-only clone of a child does not Fetch the fork base; pull hydrates it.
+        None if genesis.parent.is_some() => String::new(),
+        None => {
+            return Err(HeddleError::NotFound(format!(
+                "Thread '{thread}' fork base {} is missing",
+                base.to_string_full()
+            )));
+        }
+    };
     let now = Utc::now();
     Ok(Thread {
         id: stable_id,
@@ -289,7 +307,7 @@ fn materialized_thread_for_state(
         mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: base.to_string_full(),
-        base_root: base_state.tree.to_hex(),
+        base_root,
         current_state: Some(ref_state.to_string_full()),
         merged_state: None,
         task: None,

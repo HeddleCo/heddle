@@ -1832,7 +1832,14 @@ async fn clone_network_connected(
                         },
                     )
                     .await
-                    .map_err(anyhow::Error::from)
+                    .map_err(|error| {
+                        map_hosted_clone_pull_error(
+                            error,
+                            thread.as_deref(),
+                            repo_path,
+                            &mut cleanup,
+                        )
+                    })
             }),
         )
         .context("clone setup or source fetch failed")?;
@@ -1996,9 +2003,8 @@ async fn clone_network_connected(
         .await
         .context("post-install metadata sync failed; source installed; clone intent retained")?;
         CloneIntent::clear(local_path)?;
-        // A Thread with several hosted heads cloned every head; one is checked
-        // out (or advertised) by the documented default and the rest stay
-        // selectable with `heddle resolve`.
+        // Clone installs the selected Thread's advertised tip. Concurrent heads
+        // and other Threads stay on the remote until `heddle pull --thread`.
         let mut source_heads = Vec::new();
         for entry in remote_refs.iter().filter(|entry| entry.is_user_thread()) {
             if let Some(heads) = verbs::source_heads::source_heads_report(
@@ -2658,6 +2664,31 @@ fn select_recover_clone_thread<'a>(
 }
 
 #[cfg(feature = "client")]
+fn map_hosted_clone_pull_error(
+    error: wire::ProtocolError,
+    requested: Option<&str>,
+    repo_path: &str,
+    cleanup: &mut CloneDestinationCleanup<'_>,
+) -> anyhow::Error {
+    match error {
+        wire::ProtocolError::ObjectNotFound(message)
+            if message.contains("Thread '") || message.contains("is not published") =>
+        {
+            cleanup.arm();
+            anyhow!(clone_hosted_thread_not_found_advice(
+                requested.unwrap_or("the selected Thread"),
+                repo_path
+            ))
+        }
+        wire::ProtocolError::InvalidState(message) if message.contains("no default Thread") => {
+            cleanup.arm();
+            anyhow!(clone_remote_default_thread_unset_advice(repo_path))
+        }
+        other => anyhow::Error::from(other),
+    }
+}
+
+#[cfg(feature = "client")]
 fn clone_hosted_thread_not_found_advice(track_name: &str, remote_label: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "clone_remote_thread_not_found",
@@ -2668,6 +2699,20 @@ fn clone_hosted_thread_not_found_advice(track_name: &str, remote_label: &str) ->
         "destination path was left unchanged; no local clone repository was initialized",
         "heddle thread list",
         vec!["heddle thread list".to_string()],
+    )
+}
+
+#[cfg(feature = "client")]
+fn clone_remote_default_thread_unset_advice(remote_label: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_remote_default_thread_unset",
+        format!("Remote '{remote_label}' has no default thread"),
+        "Pass `--thread <name>` to clone a published thread on this remote.",
+        format!("remote '{remote_label}' has no configured default Thread"),
+        "clone cannot choose a state to fetch until a Thread is named",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle clone <remote> <path> --thread <thread>",
+        vec!["heddle clone <remote> <path> --thread <thread>".to_string()],
     )
 }
 
@@ -3943,6 +3988,18 @@ mod tests {
         assert_eq!(advice.kind, "clone_remote_thread_not_found");
         assert!(advice.error.contains("feature/x"));
         assert_eq!(advice.primary_command, "heddle thread list");
+
+        #[cfg(feature = "client")]
+        {
+            let advice = clone_remote_default_thread_unset_advice("spool/acme");
+            assert_eq!(advice.kind, "clone_remote_default_thread_unset");
+            assert!(advice.error.contains("spool/acme"));
+            assert!(advice.hint.contains("--thread"));
+            assert_eq!(
+                advice.primary_command,
+                "heddle clone <remote> <path> --thread <thread>"
+            );
+        }
 
         let advice = clone_checkout_not_attached_advice("main");
         assert_eq!(advice.kind, "clone_checkout_not_attached");

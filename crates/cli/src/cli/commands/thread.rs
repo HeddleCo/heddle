@@ -2207,10 +2207,15 @@ fn capture_constraints_supplied(
         if seen.len() > 64 {
             return Ok((supplied, true));
         }
-        let state = repo
-            .store()
-            .get_state(&id)?
-            .ok_or(HeddleError::StateNotFound(id))?;
+        // Tip-only clone keeps the selected Thread's tip (and a child fork
+        // base) without the grandparent's States. This walk is local evidence
+        // only; a missing ancestor is unhydrated history, not a show failure.
+        let Some(state) = repo.store().get_state(&id)? else {
+            if id == head {
+                return Err(HeddleError::StateNotFound(id).into());
+            }
+            continue;
+        };
         if let Some(receipt) = repo.context_receipt(&id)?
             && receipt.thread == thread
         {

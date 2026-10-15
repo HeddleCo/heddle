@@ -1166,9 +1166,9 @@ pub struct PullArgs {
 ///
 /// Help style budget (heddle#652): `--help` carries the signature, flags,
 /// a one-screen Behavior summary, and the hidden-flag breadcrumb
-/// (heddle#646). The full default-thread fallback chain and --depth
-/// exposition moved to `heddle help clone` (help.rs CLONE_TOPIC); keep
-/// flag docs single-line so clap renders the compact help layout.
+/// (heddle#646). Default-thread selection and --depth exposition live
+/// in `heddle help clone` (help.rs CLONE_TOPIC); keep flag docs
+/// single-line so clap renders the compact help layout.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
@@ -1187,7 +1187,7 @@ pub struct CloneArgs {
     #[arg(long, value_enum, hide_possible_values = true)]
     pub source: Option<super::CloneSourceArg>,
 
-    /// Thread to check out after cloning.
+    /// Thread to clone (its advertised heads, not history). Default: the remote's configured default thread. Other threads stay remote until pulled.
     #[arg(long)]
     pub thread: Option<String>,
 
