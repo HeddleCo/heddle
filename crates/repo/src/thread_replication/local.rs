@@ -1117,8 +1117,9 @@ impl Repository {
     /// `OPERATION_FORMAT` hash of those bytes, which is what `ThreadOperation::id`
     /// returns after a fresh signature. Each parent link is an operation already
     /// admitted for that state parent. The row is inserted accepted, after its
-    /// parent links, so the source-index insert trigger records the revision.
-    /// That trigger matches the status-update trigger. Generation still
+    /// parent links. Source revisions, heads, and the search queue are written
+    /// once from this batch, matching the insert trigger's net frontier.
+    /// Generation still
     /// advances for the insert, the acceptance, and a new possession row,
     /// applied once at the end of the batch. Callers keep the ordinary
     /// `receive_in` path when the capture is not a bare local import.
@@ -1248,7 +1249,15 @@ impl Repository {
         drop(insert_op);
         drop(insert_parent);
         drop(possess);
-        super::source_index::finish_deferred_source_index(tx, thread.as_bytes(), facet)?;
+        let deferred: Vec<super::source_index::DeferredSourceCapture<'_>> = prepared
+            .iter()
+            .map(|capture| super::source_index::DeferredSourceCapture {
+                id: capture.id.as_bytes(),
+                revision: capture.state_id.as_bytes(),
+                parents: &capture.parents,
+            })
+            .collect();
+        super::source_index::finish_deferred_source_index(tx, thread.as_bytes(), &deferred)?;
         if bumps > 0 {
             tx.execute(
                 "UPDATE threads SET generation=generation+?2 WHERE id=?1",

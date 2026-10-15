@@ -693,7 +693,8 @@ mod tests {
             )
             .expect("old path-only projection");
         connection
-            .execute_batch(SEARCH_TABLES).and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("upgrade source projection");
         assert_eq!(
             due(&directory, 21, 1)
@@ -714,7 +715,10 @@ mod tests {
         connection
             .execute("DELETE FROM source_search_bootstrap", [])
             .expect("legacy install");
-        connection.execute_batch(SEARCH_TABLES).and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS)).expect("one-time backfill");
+        connection
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
+            .expect("one-time backfill");
         assert_eq!(
             due(&directory, 21, 1).expect("backfilled"),
             vec![QueuedOriginal {
@@ -734,7 +738,8 @@ mod tests {
             .execute("DELETE FROM source_search_queue", [])
             .expect("drain");
         connection
-            .execute_batch(SEARCH_TABLES).and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("repeat initialization");
         assert!(
             due(&directory, 21, 1)
@@ -876,7 +881,8 @@ mod tests {
             "stale extractor rows must not be served"
         );
         connection
-            .execute_batch(SEARCH_TABLES).and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
+            .execute_batch(SEARCH_TABLES)
+            .and_then(|()| connection.execute_batch(SEARCH_ADMIT_TRIGGERS))
             .expect("queue stale projection");
         assert!(
             due(&directory, chrono::Utc::now().timestamp(), 4)
