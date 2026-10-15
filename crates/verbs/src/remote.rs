@@ -2707,9 +2707,13 @@ mod tests {
             "[remote \"origin\"]\n\turl = https://example.com/external\n",
         )
         .unwrap();
+        // Git config treats `\` as an escape, so `Path::display` on Windows
+        // is not a valid include. Forward slashes are the portable absolute
+        // spelling, including `C:/...`.
+        let include = external.to_string_lossy().replace('\\', "/");
         fs::write(
             git_dir.join("config"),
-            format!("[include]\n\tpath = {}\n", external.display()),
+            format!("[include]\n\tpath = \"{include}\"\n"),
         )
         .unwrap();
 

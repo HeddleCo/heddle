@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread capture-split and thread-move repository operations.
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{error::Error, fmt, fs, io::Read, path::Path};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+#[cfg(unix)]
+use objects::nofollow::write_symlink_beneath;
 use objects::{
     nofollow::{
         NoFollowDirectories, open_existing_nofollow, remove_path_beneath, write_file_beneath,
-        write_symlink_beneath,
     },
     object::{StateId, ThreadName},
     store::ObjectStore,
@@ -487,15 +490,30 @@ fn write_file(root: &Path, path: &Path, content: &[u8], executable: bool) -> Res
     Ok(())
 }
 
+/// Recreate `path` as a symlink to `target` beneath `root`.
+///
+/// On Unix this is `write_symlink_beneath`: the target is stored exactly, and
+/// a symlink already at `path` or in a parent is replaced, never followed
+/// (heddle#2017, heddle#2039).
+///
+/// Other platforms do not materialize native symlinks. Checkout documents the
+/// same limit: Windows leaves reparse points to ProjFS, and `heddle materialize`
+/// does not create a native link. Success here would drop the symlink while
+/// thread move and capture-split reported the path restored.
 fn write_symlink(root: &Path, path: &Path, target: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
         write_symlink_beneath(root, path, std::ffi::OsStr::from_bytes(target))?;
+        Ok(())
     }
     #[cfg(not(unix))]
-    let _ = (root, path, target);
-    Ok(())
+    {
+        let _ = (root, target);
+        Err(anyhow!(
+            "cannot write symlink {}: this platform does not materialize native symlinks",
+            path.display()
+        ))
+    }
 }
 
 fn matches_prefix(path: &str, prefixes: &[String]) -> bool {
@@ -507,6 +525,9 @@ fn matches_prefix(path: &str, prefixes: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     #[test]
@@ -538,6 +559,61 @@ mod tests {
             move_paths.error,
             "No captured paths matched the requested prefixes"
         );
+    }
+
+    /// Unix checkout writes the symlink target exactly and replaces a leaf
+    /// symlink in place. The bytes behind that leaf must stay untouched.
+    #[test]
+    #[cfg(unix)]
+    fn write_symlink_replaces_a_leaf_symlink_without_following_it() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        let leaf = root.path().join("leaf");
+        symlink(&victim, &leaf).unwrap();
+
+        write_symlink(root.path(), &leaf, b"other-target").unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(fs::read_link(&leaf).unwrap(), Path::new("other-target"));
+        assert!(
+            fs::symlink_metadata(&leaf)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// Non-Unix hosts must fail the write. Success with no link on disk is how
+    /// thread move and capture-split used to drop symlinks on Windows.
+    #[test]
+    #[cfg(not(unix))]
+    fn write_symlink_refuses_without_creating_or_replacing_a_path() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("nested").join("link");
+        let missing_error = write_symlink(root.path(), &missing, b"target").unwrap_err();
+        assert!(
+            missing_error
+                .to_string()
+                .contains("does not materialize native symlinks"),
+            "{missing_error}"
+        );
+        assert!(
+            !root.path().join("nested").exists(),
+            "a refused symlink write must not create parent directories"
+        );
+
+        let existing = root.path().join("already");
+        fs::write(&existing, b"keep").unwrap();
+        let existing_error = write_symlink(root.path(), &existing, b"target").unwrap_err();
+        assert!(
+            existing_error
+                .to_string()
+                .contains("does not materialize native symlinks"),
+            "{existing_error}"
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"keep");
     }
 
     #[test]

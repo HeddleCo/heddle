@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 
 use super::*;
@@ -184,6 +185,7 @@ fn thread_drop_removes_materialized_checkout_and_optionally_thread_ref() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rejects_symlink_target_path_for_materialized_start() {
     let main = setup_repo("base.txt", "base");
     let temp = TempDir::new().unwrap();

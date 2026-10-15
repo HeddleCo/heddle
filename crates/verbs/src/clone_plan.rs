@@ -312,9 +312,11 @@ pub fn normalize_clone_depth(depth: Option<u32>) -> Option<u32> {
 /// Whether an unparsed remote string looks like a filesystem path.
 ///
 /// Matches CLI: absolute paths, `.` / `..`, `./` / `../`, and `~/`.
+/// A leading `/` is a path on every platform. `Path::is_absolute` covers
+/// drive-letter and UNC paths on Windows.
 pub fn looks_like_local_path(remote: &str) -> bool {
-    let path = Path::new(remote);
-    path.is_absolute()
+    Path::new(remote).is_absolute()
+        || remote.starts_with('/')
         || remote == "."
         || remote == ".."
         || remote.starts_with("./")
@@ -1480,6 +1482,11 @@ mod tests {
         assert!(looks_like_local_path("~/home"));
         assert!(!looks_like_local_path("host:8421/repo"));
         assert!(!looks_like_local_path("https://example.com/repo.git"));
+        if cfg!(windows) {
+            assert!(looks_like_local_path(r"C:\abs\path"));
+            assert!(looks_like_local_path("C:/abs/path"));
+            assert!(looks_like_local_path(r"\\server\share\repo"));
+        }
     }
 
     #[test]
