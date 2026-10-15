@@ -655,10 +655,10 @@ Run `heddle clone --help` for the flag list.
   initialized as Git Overlay. No Git executable or `.heddle/git` mirror is used.
 - A native source is cloned into Heddle-owned storage.
 - Native clones fetch one thread's advertised tip (trees and blobs for each
-  concurrent source head of that thread). Default is the remote's configured
-  default thread; pass `--thread <name>` to override. If no default is set,
-  clone refuses and asks for `--thread`. Other threads and older history stay
-  on the remote until `heddle pull` / `heddle pull --thread <name>`.
+  concurrent source head of that thread). Default is the remote's configured default thread; pass `--thread
+  <name>` to override. If no default is set, clone refuses and asks for
+  `--thread`. Other threads and older history stay on the remote until
+  `heddle pull` / `heddle pull --thread <name>`.
 - Clone never prompts.
 
 A bare hosted name (`https://host/notes`) clones your personal copy
