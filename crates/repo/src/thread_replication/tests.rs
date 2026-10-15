@@ -1508,4 +1508,22 @@ fn imported_states_keep_a_verifiable_signed_capture() {
         13,
         "creation records the base, and each imported state bumps generation for insert, acceptance, and possession"
     );
+    let queued: i64 = replica
+        .connect()
+        .expect("metadata")
+        .query_row(
+            "SELECT COUNT(*) FROM source_search_queue WHERE thread=?1",
+            [replica.thread_id().as_bytes()],
+            |row| row.get(0),
+        )
+        .expect("search queue");
+    assert_eq!(queued, 4, "each imported capture is queued for search once");
+    let deferred: i64 = replica
+        .connect()
+        .expect("metadata")
+        .query_row("SELECT COUNT(*) FROM source_index_defer", [], |row| {
+            row.get(0)
+        })
+        .expect("deferral");
+    assert_eq!(deferred, 0, "import clears the source-index deferral");
 }

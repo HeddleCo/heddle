@@ -5,7 +5,7 @@ use rusqlite::Transaction;
 
 use super::{Error, Result, hash};
 
-pub(super) const SCHEMA: &str = "
+pub(super) const SOURCE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS thread_source_bases(thread BLOB PRIMARY KEY,revision BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS thread_source_bases_revision ON thread_source_bases(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_revisions(
@@ -37,10 +37,16 @@ CREATE TRIGGER IF NOT EXISTS thread_source_head_delete AFTER DELETE ON thread_so
 BEGIN
  UPDATE thread_source_head_revisions SET references_count=references_count-1 WHERE thread=OLD.thread AND revision=OLD.revision;
  DELETE FROM thread_source_head_revisions WHERE thread=OLD.thread AND revision=OLD.revision AND references_count=0;
-END;
-CREATE TRIGGER IF NOT EXISTS thread_source_admitted
+END;";
+
+/// Per-row source maintenance. A deferred import sets `source_index_defer` and
+/// writes the same rows once for the thread after the batch.
+pub(super) const SOURCE_INDEX_TRIGGERS: &str = "
+DROP TRIGGER IF EXISTS thread_source_admitted;
+CREATE TRIGGER thread_source_admitted
 AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
  INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
@@ -50,8 +56,10 @@ BEGIN
  INSERT INTO thread_source_heads(thread,operation,revision)
  VALUES(NEW.thread,NEW.id,NEW.source_revision);
 END;
-CREATE TRIGGER IF NOT EXISTS thread_source_inserted
+DROP TRIGGER IF EXISTS thread_source_inserted;
+CREATE TRIGGER thread_source_inserted
 AFTER INSERT ON operations WHEN NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
  INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
@@ -61,6 +69,73 @@ BEGIN
  INSERT INTO thread_source_heads(thread,operation,revision)
  VALUES(NEW.thread,NEW.id,NEW.source_revision);
 END;";
+
+/// Skip per-row source indexing for one import thread, then write the net index.
+pub(super) fn begin_deferred_source_index(
+    tx: &Transaction<'_>,
+    thread: &[u8],
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO source_index_defer(thread) VALUES(?1)",
+        [thread],
+    )?;
+    Ok(())
+}
+
+/// Revisions, count, heads, and the search queue for every accepted capture.
+/// Clears the deferral in the same transaction so later captures use the triggers.
+pub(super) fn finish_deferred_source_index(
+    tx: &Transaction<'_>,
+    thread: &[u8],
+    facet: u32,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO thread_source_revisions(thread, revision)
+         SELECT thread, source_revision FROM operations
+         WHERE thread=?1 AND status=1 AND facet=?2 AND source_revision IS NOT NULL",
+        params_thread(thread, facet),
+    )?;
+    tx.execute(
+        "INSERT INTO thread_source_counts(thread, count)
+         SELECT ?1, COUNT(*) FROM thread_source_revisions WHERE thread=?1
+         ON CONFLICT(thread) DO UPDATE SET count=excluded.count",
+        [thread],
+    )?;
+    tx.execute("DELETE FROM thread_source_heads WHERE thread=?1", [thread])?;
+    tx.execute(
+        "INSERT INTO thread_source_heads(thread, operation, revision)
+         SELECT o.thread, o.id, o.source_revision FROM operations o
+         WHERE o.thread=?1 AND o.status=1 AND o.facet=?2 AND o.source_revision IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM parents p
+           JOIN operations c ON c.id=p.child
+           WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1 AND c.facet=?2
+         )",
+        params_thread(thread, facet),
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO source_search_queue(operation, thread, revision)
+         SELECT o.id, o.thread, o.source_revision FROM operations o
+         WHERE o.thread=?1 AND o.status=1 AND o.facet=?2 AND o.source_revision IS NOT NULL",
+        params_thread(thread, facet),
+    )?;
+    tx.execute("DELETE FROM source_index_defer WHERE thread=?1", [thread])?;
+    Ok(())
+}
+
+fn params_thread(thread: &[u8], facet: u32) -> (&[u8], u32) {
+    (thread, facet)
+}
+
+pub(super) fn install_deferred_admit_triggers(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<()> {
+    connection
+        .execute_batch("CREATE TABLE IF NOT EXISTS source_index_defer(thread BLOB PRIMARY KEY);")?;
+    connection.execute_batch(SOURCE_INDEX_TRIGGERS)?;
+    connection.execute_batch(super::source_search::SEARCH_ADMIT_TRIGGERS)?;
+    Ok(())
+}
 
 pub(super) fn summary_in(tx: &Transaction<'_>, thread: ContentHash) -> Result<(u64, Vec<StateId>)> {
     let count: i64 = tx.query_row(

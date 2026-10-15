@@ -524,22 +524,28 @@ impl Repository {
         // wal_autocheckpoint=0 keeps commits from rewriting the database every
         // thousand pages. The explicit checkpoint below is the one flush.
         connection.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=-262144;",
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=268435456;",
         )?;
         let first = replica_from_row(&connection, heddle_dir, tips[0].0)?;
         let admit_start = Instant::now();
-        let wrote = (|| -> Result<usize> {
+        let wrote = (|| -> Result<(usize, u128)> {
+            // One transaction for every branch. Per-branch commits were an
+            // fsync each, and the source triggers are replaced for this
+            // transaction so a resumed database picks up deferred indexing.
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::source_index::install_deferred_admit_triggers(&tx)?;
             let mut wrote = 0usize;
             // Branch tips share commits. Keep the decoded states for the next
             // thread instead of reading the object store again.
             let mut states = BTreeMap::new();
             for (name, state_id) in tips {
-                let replica = replica_from_row(&connection, heddle_dir, name)?;
-                let genesis = signed_genesis_on(&connection, replica.thread_id())?.verify()?;
-                let author = import_author_on(&replica, &connection, &publisher)?;
+                let replica = replica_from_row(&tx, heddle_dir, name)?;
+                let genesis = signed_genesis_on(&tx, replica.thread_id())?.verify()?;
+                let author = import_author_on(&replica, &tx, &publisher)?;
                 wrote += self.admit_imported_captures(
                     &replica,
-                    &mut connection,
+                    &tx,
                     &genesis,
                     &signer,
                     publisher,
@@ -548,7 +554,9 @@ impl Repository {
                     &mut states,
                 )?;
             }
-            Ok(wrote)
+            let commit_start = Instant::now();
+            tx.commit()?;
+            Ok((wrote, commit_start.elapsed().as_micros()))
         })();
         let admit_us = admit_start.elapsed().as_micros();
         let checkpoint_start = Instant::now();
@@ -556,15 +564,30 @@ impl Repository {
             connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA wal_checkpoint(TRUNCATE);");
         let checkpoint_us = checkpoint_start.elapsed().as_micros();
         drop(connection);
+        let (wrote, commit_us) = match wrote {
+            Ok(value) => value,
+            Err(error) => {
+                if std::env::var_os("HEDDLE_PROFILE").is_some() {
+                    eprintln!(
+                        "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
+                        tips.len(),
+                        admit_us as f64 / 1000.0,
+                        checkpoint_us as f64 / 1000.0,
+                    );
+                }
+                let _ = restored;
+                return Err(error);
+            }
+        };
         if std::env::var_os("HEDDLE_PROFILE").is_some() {
             eprintln!(
-                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
+                "heddle profile:\n  command: import local admit batch\n  threads: {}\n  admit_batch_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_checkpoint_ms: {:.3}",
                 tips.len(),
                 admit_us as f64 / 1000.0,
+                commit_us as f64 / 1000.0,
                 checkpoint_us as f64 / 1000.0,
             );
         }
-        let wrote = wrote?;
         restored?;
         if wrote > 0 {
             first.notify_committed()?;
@@ -833,7 +856,7 @@ impl Repository {
     fn admit_imported_captures(
         &self,
         replica: &ThreadReplica,
-        connection: &mut rusqlite::Connection,
+        tx: &rusqlite::Transaction<'_>,
         genesis: &ThreadGenesis,
         signer: &Ed25519Signer,
         publisher: [u8; 32],
@@ -842,31 +865,27 @@ impl Repository {
         states: &mut BTreeMap<StateId, State>,
     ) -> Result<usize> {
         let order_start = Instant::now();
-        let fresh = !thread_has_accepted_operation(connection, &replica.thread_id())?;
-        let order =
-            self.import_capture_order(replica, connection, genesis.base, tip, fresh, states)?;
+        let fresh = !thread_has_accepted_operation(tx, &replica.thread_id())?;
+        let order = self.import_capture_order(replica, tx, genesis.base, tip, fresh, states)?;
         let order_us = order_start.elapsed().as_micros();
         // A Git import has no reference seeds, inherited closures, or visibility
         // sidecars. `prepare` then returns the State bytes alone. Building that
         // capture directly keeps the signed payload and skips the per-state
         // catalog queries and installation lock.
-        let bare = self.import_admit_is_bare(connection, &replica.thread_id())?;
-        let fast =
-            bare && bare_import_can_skip_receive_scan(connection, replica, &publisher, genesis)?;
+        let bare = self.import_admit_is_bare(tx, &replica.thread_id())?;
+        let fast = bare && bare_import_can_skip_receive_scan(tx, replica, &publisher, genesis)?;
         let mut clock = AdmitClock::default();
         let mut wrote = 0usize;
         let mut index = 0usize;
-        // Parent ids recorded earlier in this thread, including rows committed
-        // by the previous batch. Avoids a source-revision lookup per parent.
+        // Parent ids recorded earlier in this thread, including rows from the
+        // previous batch. Avoids a source-revision lookup per parent.
         let mut admitted_ops: BTreeMap<StateId, Vec<ContentHash>> = BTreeMap::new();
         while index < order.len() {
             let end = (index + IMPORT_ADMIT_BATCH).min(order.len());
-            let tx =
-                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if fast {
                 self.admit_bare_captures_in(
                     replica,
-                    &tx,
+                    tx,
                     genesis,
                     signer,
                     publisher,
@@ -879,22 +898,20 @@ impl Repository {
             } else {
                 for state in &order[index..end] {
                     self.admit_imported_capture_in(
-                        replica, &tx, genesis, signer, publisher, author, state, bare, &mut clock,
+                        replica, tx, genesis, signer, publisher, author, state, bare, &mut clock,
                     )?;
                     wrote += 1;
                 }
             }
-            let commit_start = Instant::now();
-            tx.commit()?;
-            clock.commit_us += commit_start.elapsed().as_micros();
             index = end;
         }
         if std::env::var_os("HEDDLE_PROFILE").is_some() {
             eprintln!(
-                "heddle profile:\n  command: import local admit\n  thread: {}\n  admit_order_ms: {:.3}\n  admit_capture_ms: {:.3}\n  admit_sign_ms: {:.3}\n  admit_receive_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_states: {wrote}\n  bare_capture: {bare}\n  direct_admit: {fast}",
+                "heddle profile:\n  command: import local admit\n  thread: {}\n  admit_order_ms: {:.3}\n  admit_capture_ms: {:.3}\n  admit_canonical_ms: {:.3}\n  admit_sign_ms: {:.3}\n  admit_receive_ms: {:.3}\n  admit_commit_ms: {:.3}\n  admit_states: {wrote}\n  bare_capture: {bare}\n  direct_admit: {fast}",
                 replica.thread_id(),
                 order_us as f64 / 1000.0,
                 clock.capture_us as f64 / 1000.0,
+                clock.canonical_us as f64 / 1000.0,
                 clock.sign_us as f64 / 1000.0,
                 clock.receive_us as f64 / 1000.0,
                 clock.commit_us as f64 / 1000.0,
@@ -1121,6 +1138,9 @@ impl Repository {
         author
             .validate()
             .map_err(|error| Error::Invalid(error.to_string()))?;
+        if signer.public_key() != publisher.as_slice() {
+            return Err(Error::Invalid("publisher differs from signing key".into()));
+        }
         if let SourceAuthor::Account { spool, .. } = author
             && spool.to_string() != genesis.spool
         {
@@ -1130,18 +1150,14 @@ impl Repository {
         }
         let facet = super::facet_number(ThreadFacet::Source);
         let thread = replica.thread_id();
+        // The source triggers would rewrite heads once per capture. This row
+        // makes them skip the thread; `finish_deferred_source_index` writes
+        // the same revisions, count, heads, and search queue once.
+        super::source_index::begin_deferred_source_index(tx, thread.as_bytes())?;
         let mut parent_query = tx.prepare_cached(
             "SELECT id FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 AND facet=?3 ORDER BY id LIMIT 1024",
         )?;
-        let mut insert_op = tx.prepare_cached(
-            "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision,status) VALUES(?1,?2,?3,?4,?5,?6,1)",
-        )?;
-        let mut insert_parent =
-            tx.prepare_cached("INSERT INTO parents(child,parent) VALUES(?1,?2)")?;
-        let mut possess = tx.prepare_cached(
-            "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
-        )?;
-        let mut bumps = 0i64;
+        let mut prepared = Vec::with_capacity(states.len());
         for state in states {
             if state.parents.is_empty()
                 || state.parents.len() != state.parents.iter().collect::<BTreeSet<_>>().len()
@@ -1174,59 +1190,141 @@ impl Repository {
                 ),
             };
             replica.require_trusted_integration(&operation)?;
-            let sign_start = Instant::now();
-            let signed = SignedOperation::sign(&operation, signer)?;
-            clock.sign_us += sign_start.elapsed().as_micros();
-            let receive_start = Instant::now();
+            // Captures have no collaboration record. `receive_in` indexes
+            // here; the call stays so a capture body that later carries one
+            // still does.
+            super::collaboration::index_operation(tx, &operation)?;
+            let canonical_start = Instant::now();
+            let canonical = operation.encode_locally_prepared_capture()?;
+            clock.canonical_us += canonical_start.elapsed().as_micros();
             let id = ContentHash::compute_typed(
                 objects::object::thread_replication::OPERATION_FORMAT,
-                &signed.canonical,
+                &canonical,
             );
-            // Parent links first: the accepted-insert trigger reads them.
-            for parent in &operation.parents {
-                insert_parent.execute(params![id.as_bytes(), parent.as_bytes()])?;
+            admitted.entry(state.id()).or_default().push(id);
+            prepared.push(PreparedCapture {
+                id,
+                canonical,
+                state_id: state.id(),
+                parents: operation.parents,
+            });
+        }
+        drop(parent_query);
+        let sign_start = Instant::now();
+        let signatures = sign_import_canonicals(signer, &prepared)?;
+        clock.sign_us += sign_start.elapsed().as_micros();
+        let receive_start = Instant::now();
+        let mut insert_op = tx.prepare_cached(
+            "INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision,status) VALUES(?1,?2,?3,?4,?5,?6,1)",
+        )?;
+        let mut insert_parent =
+            tx.prepare_cached("INSERT INTO parents(child,parent) VALUES(?1,?2)")?;
+        let mut possess = tx.prepare_cached(
+            "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
+        )?;
+        let mut bumps = 0i64;
+        for (capture, signature) in prepared.iter().zip(signatures) {
+            // Parent links first so a non-deferred trigger would see them.
+            for parent in &capture.parents {
+                insert_parent.execute(params![capture.id.as_bytes(), parent.as_bytes()])?;
             }
             let inserted = insert_op.execute(params![
-                id.as_bytes(),
+                capture.id.as_bytes(),
                 thread.as_bytes(),
                 facet,
-                &signed.canonical,
-                &signed.signature,
-                state.id().as_bytes(),
+                &capture.canonical,
+                signature,
+                capture.state_id.as_bytes(),
             ])?;
             if inserted != 1 {
                 return Err(Error::Invalid(
                     "imported capture already has an operation".into(),
                 ));
             }
-            // Captures have no collaboration record. Indexing here keeps the
-            // same side effects as `receive_in` if a body ever carries one.
-            super::collaboration::index_operation(tx, &operation)?;
-            let possessed = possess.execute(params![thread.as_bytes(), state.id().as_bytes()])?;
+            let possessed =
+                possess.execute(params![thread.as_bytes(), capture.state_id.as_bytes()])?;
             bumps += 2 + i64::from(possessed != 0);
-            admitted.entry(state.id()).or_default().push(id);
-            clock.receive_us += receive_start.elapsed().as_micros();
         }
-        drop(parent_query);
         drop(insert_op);
         drop(insert_parent);
         drop(possess);
+        super::source_index::finish_deferred_source_index(tx, thread.as_bytes(), facet)?;
         if bumps > 0 {
             tx.execute(
                 "UPDATE threads SET generation=generation+?2 WHERE id=?1",
                 params![thread.as_bytes(), bumps],
             )?;
         }
+        clock.receive_us += receive_start.elapsed().as_micros();
         Ok(())
     }
+}
+
+struct PreparedCapture {
+    id: ContentHash,
+    canonical: Vec<u8>,
+    state_id: StateId,
+    parents: BTreeSet<ContentHash>,
 }
 
 #[derive(Default)]
 struct AdmitClock {
     capture_us: u128,
+    canonical_us: u128,
     sign_us: u128,
     receive_us: u128,
     commit_us: u128,
+}
+
+/// Ed25519 over already-encoded captures. Parent ids depend on earlier
+/// canonical bytes, so encoding stays in order and only the signatures run
+/// together. Each worker gets the same seed; the signature is deterministic.
+fn sign_import_canonicals(
+    signer: &Ed25519Signer,
+    prepared: &[PreparedCapture],
+) -> Result<Vec<Vec<u8>>> {
+    if prepared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, prepared.len())
+        .min(8);
+    if workers == 1 || prepared.len() < 2 {
+        return prepared
+            .iter()
+            .map(|capture| sign_one_canonical(signer, &capture.canonical))
+            .collect();
+    }
+    let seed = signer.to_seed();
+    let chunk = prepared.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for group in prepared.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                let signer = Ed25519Signer::from_seed(&seed)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+                group
+                    .iter()
+                    .map(|capture| sign_one_canonical(&signer, &capture.canonical))
+                    .collect::<Result<Vec<_>>>()
+            }));
+        }
+        let mut signatures = Vec::with_capacity(prepared.len());
+        for handle in handles {
+            let signed = handle
+                .join()
+                .map_err(|_| Error::Invalid("import signature worker failed".into()))??;
+            signatures.extend(signed);
+        }
+        Ok(signatures)
+    })
+}
+
+fn sign_one_canonical(signer: &Ed25519Signer, canonical: &[u8]) -> Result<Vec<u8>> {
+    SignedOperation::sign_canonical(canonical, signer)
+        .map_err(|error| Error::Invalid(error.to_string()))
 }
 
 fn directory_has_import_visibility(path: &std::path::Path) -> Result<bool> {

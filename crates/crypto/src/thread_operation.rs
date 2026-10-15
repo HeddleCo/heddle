@@ -42,6 +42,14 @@ impl SignedOperation {
         })
     }
 
+    /// Sign operation bytes the caller already encoded.
+    ///
+    /// The caller checks that the signer is the operation publisher. The
+    /// prefix matches [`Self::sign`], so verification accepts the result.
+    pub fn sign_canonical(canonical: &[u8], signer: &impl Signer) -> Result<Vec<u8>, Error> {
+        Ok(signer.sign(&signing_bytes(OPERATION_FORMAT, canonical))?)
+    }
+
     pub fn verify(&self) -> Result<ThreadOperation, Error> {
         let operation = ThreadOperation::decode(&self.canonical)?;
         Ed25519Signer::verify_with_public_key(

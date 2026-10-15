@@ -168,8 +168,10 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
     connection.execute_batch(boundary_evidence::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
-    connection.execute_batch(source_search::SCHEMA)?;
-    connection.execute_batch(source_index::SCHEMA)?;
+    connection.execute_batch(source_search::SEARCH_TABLES)?;
+    connection.execute_batch(source_search::SEARCH_ADMIT_TRIGGERS)?;
+    connection.execute_batch(source_index::SOURCE_TABLES)?;
+    connection.execute_batch(source_index::SOURCE_INDEX_TRIGGERS)?;
     connection.execute_batch(hosted_trust::SCHEMA)?;
     import_floor::initialize_schema(connection)?;
     connection.execute_batch(listing::SCHEMA)
