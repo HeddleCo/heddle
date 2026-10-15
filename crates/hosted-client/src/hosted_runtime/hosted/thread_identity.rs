@@ -337,16 +337,96 @@ fn resolved_entity(
             "resource resolution differs from requested selection".into(),
         ));
     }
-    if resolved.coverage != contract::Coverage::Complete as i32 {
-        return Err(ProtocolError::ObjectNotFound(
+    // Clone installs from an ObserveThreads snapshot and skips this lookup.
+    // Pull, and a later pull after a tip-only clone, resolve the name. A
+    // hosted spool can report Partial for one resolved identity; that is
+    // usable. Anything else stays unavailable so a missing or ambiguous
+    // name cannot be treated as found.
+    match contract::Coverage::try_from(resolved.coverage) {
+        Ok(contract::Coverage::Complete) => {
+            resolved.resource.and_then(|r| r.entity).ok_or_else(|| {
+                ProtocolError::InvalidState("complete resource resolution has no identity".into())
+            })
+        }
+        Ok(contract::Coverage::Partial) => {
+            resolved.resource.and_then(|r| r.entity).ok_or_else(|| {
+                ProtocolError::ObjectNotFound("resource is unavailable or ambiguous".into())
+            })
+        }
+        _ => Err(ProtocolError::ObjectNotFound(
             "resource is unavailable or ambiguous".into(),
-        ));
+        )),
     }
-    resolved.resource.and_then(|r| r.entity).ok_or_else(|| {
-        ProtocolError::InvalidState("complete resource resolution has no identity".into())
-    })
 }
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolution(
+        coverage: contract::Coverage,
+        entity: Option<contract::entity_ref::Entity>,
+    ) -> contract::ResolveResourcesResponse {
+        contract::ResolveResourcesResponse {
+            results: vec![contract::ResourceResolution {
+                selection_index: 0,
+                resource: entity.map(|entity| contract::EntityRef {
+                    entity: Some(entity),
+                }),
+                principal_id: String::new(),
+                coverage: coverage as i32,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn thread() -> contract::entity_ref::Entity {
+        contract::entity_ref::Entity::Thread(contract::ThreadRef {
+            spool: Some(contract::SpoolRef {
+                id: "01980000-0000-7000-8000-000000000001".into(),
+            }),
+            id: Some(contract::ThreadId { value: vec![7; 32] }),
+        })
+    }
+
+    #[test]
+    fn partial_resolution_with_one_identity_is_usable() {
+        let entity = resolved_entity(resolution(contract::Coverage::Partial, Some(thread())))
+            .expect("one partial identity");
+        assert!(matches!(entity, contract::entity_ref::Entity::Thread(_)));
+    }
+
+    #[test]
+    fn complete_resolution_with_one_identity_is_usable() {
+        let entity = resolved_entity(resolution(contract::Coverage::Complete, Some(thread())))
+            .expect("one complete identity");
+        assert!(matches!(entity, contract::entity_ref::Entity::Thread(_)));
+    }
+
+    #[test]
+    fn partial_resolution_without_an_identity_stays_unavailable() {
+        let error = resolved_entity(resolution(contract::Coverage::Partial, None))
+            .expect_err("partial without an identity");
+        assert!(matches!(error, ProtocolError::ObjectNotFound(_)));
+    }
+
+    #[test]
+    fn unavailable_or_failed_coverage_is_not_an_identity() {
+        for coverage in [
+            contract::Coverage::Unavailable,
+            contract::Coverage::Failed,
+            contract::Coverage::Pending,
+            contract::Coverage::Stale,
+            contract::Coverage::NotRequested,
+            contract::Coverage::Unspecified,
+        ] {
+            let error = resolved_entity(resolution(coverage, Some(thread())))
+                .expect_err("non-resolved coverage");
+            assert!(matches!(error, ProtocolError::ObjectNotFound(_)));
+        }
+    }
 }
