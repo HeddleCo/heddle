@@ -287,12 +287,17 @@ fn materialized_thread_for_state(
     } else {
         ref_state
     };
-    let base_state = repo.store().get_state(&base)?.ok_or_else(|| {
-        HeddleError::NotFound(format!(
-            "Thread '{thread}' fork base {} is missing",
-            base.to_string_full()
-        ))
-    })?;
+    let base_root = match repo.store().get_state(&base)? {
+        Some(state) => state.tree.to_hex(),
+        // Tip-only clone of a child does not Fetch the fork base; pull hydrates it.
+        None if genesis.parent.is_some() => String::new(),
+        None => {
+            return Err(HeddleError::NotFound(format!(
+                "Thread '{thread}' fork base {} is missing",
+                base.to_string_full()
+            )));
+        }
+    };
     let now = Utc::now();
     Ok(Thread {
         id: stable_id,
@@ -302,7 +307,7 @@ fn materialized_thread_for_state(
         mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: base.to_string_full(),
-        base_root: base_state.tree.to_hex(),
+        base_root,
         current_state: Some(ref_state.to_string_full()),
         merged_state: None,
         task: None,
