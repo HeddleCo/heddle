@@ -15,6 +15,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- Workspace 0.31.4. Dependency contracts moved (rustls 0.23.46, wasm-bindgen 0.2.129, rusqlite 0.40, zstd 0.14, fuser 0.18, syn 3, fastembed 7.1.1), so the publish gate requires a version above 0.31.3. This does not tag a release.
+
 - Unpublished 0.31.2: adopt heddle-api 0.31.0-alpha.48 (#2093). Negotiated endpoint features gate principal/source mentions and discussion tags before signing or transport, with typed hosted refusals (CLI exit 76). Plain discussions remain usable without these features, and received/local collaboration decoding is independent of negotiation. Preserve authored reply mentions through signing and delivery. The daemon keeps incomplete mentions/tags/outline semantics unadvertised and refuses unsupported collaboration delivery forms; local signed-record decoding stays available. Also support the api alpha.47 native collaboration codec (#2087): principal and pinned source mentions in discussions and contexts, opening tags, and tag replacement/clearing. Shared signed vectors remain byte-identical.
 
 - Release 0.31.0: adopt heddle-api 0.31.0-alpha.46 (#2066). Hosted import validates discovery in 512-ref pages up to the API's 1,048,576-ref ceiling, rejects absent selections before Prepare, and preserves deleted frozen pins at Commit. Signed result budgets use a 32x decoded-size forecast capped by the host maximum. Per-call protocol field 11 and the public `thread_api::hybrid::call_protocol` helper are removed; endpoint negotiation still gates mandatory features.
