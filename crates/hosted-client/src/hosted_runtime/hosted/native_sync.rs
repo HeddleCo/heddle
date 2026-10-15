@@ -1721,6 +1721,12 @@ impl HostedClient {
                         .into_iter()
                         .map(|(state, source)| (state, revision_ref(&spool, state), source, false)),
                 );
+            } else if target_state.is_some() && head {
+                pending.extend(
+                    missing_clone_fork_base(repo, &source)?
+                        .into_iter()
+                        .map(|(state, source)| (state, revision_ref(&spool, state), source, false)),
+                );
             }
         }
         // Fetch retained the original signed genesis and admitted source.
@@ -2128,6 +2134,32 @@ impl HostedClient {
                 .flatten()),
         }
     }
+}
+
+/// Tip-only clone of a child Thread still Fetches its fork base so checkout
+/// is not withheld and clone metadata can name the parent tree.
+fn missing_clone_fork_base(
+    repo: &Repository,
+    reference: &ThreadRef,
+) -> Result<Vec<(StateId, ThreadRef)>, ProtocolError> {
+    let replica = ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?)
+        .map_err(replica_err)?;
+    let genesis = replica.genesis().map_err(replica_err)?;
+    let Some(parent) = genesis.parent else {
+        return Ok(Vec::new());
+    };
+    let present = match repo.store().get_state(&genesis.base)? {
+        Some(state) => repo.store().get_tree(&state.tree)?.is_some(),
+        None => false,
+    };
+    if present {
+        return Ok(Vec::new());
+    }
+    let mut source = reference.clone();
+    source.id = Some(contract::ThreadId {
+        value: parent.as_bytes().to_vec(),
+    });
+    Ok(vec![(genesis.base, source)])
 }
 
 /// Content needed to replay this Thread's captures, including its fork base.
@@ -3144,9 +3176,7 @@ mod tests {
                 name: "main".into(),
                 r#ref: Some(ThreadRef {
                     spool: Some(spool.clone()),
-                    id: Some(contract::ThreadId {
-                        value: vec![1; 32],
-                    }),
+                    id: Some(contract::ThreadId { value: vec![1; 32] }),
                 }),
                 source_heads: vec![revision.clone()],
                 ..Default::default()
