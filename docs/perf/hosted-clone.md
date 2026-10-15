@@ -139,12 +139,14 @@ status, deletion, target changes, replacement, and recovery. Populated gitlink
 replacement refuses with an actionable message and preserves the contents;
 empty directory replacement succeeds. The reflink probe lives in metadata.
 
-Native clone Fetches one Thread's advertised tip. Default is the spool's
-configured `default_thread`; `--thread` selects a name instead. Unrelated
-Threads are not listed or installed; older blobs stay on the remote until
-`heddle pull`. If the spool has no default Thread, clone refuses and asks
-for `--thread` instead of guessing `main`/`master`/first-published. Measured
-on this change against the native hosted fixture:
+Native clone Fetches one Thread's advertised source heads (trees and blobs
+for those states, not replay history). Concurrent heads of that Thread stay
+listed for `heddle resolve`. Default is the spool's configured
+`default_thread`; `--thread` selects a name instead. Unrelated Threads are
+not listed or installed; older blobs stay on the remote until `heddle pull`.
+If the spool has no default Thread, clone refuses and asks for `--thread`
+instead of guessing `main`/`master`/first-published. Measured on this change
+against the native hosted fixture:
 
 | RPC | #2067 after, fresh cache | One-thread tip | Configured default (this change) | 64 extra advertised Threads | 8 unique historical blobs dropped from tip |
 | --- | ---: | ---: | ---: | ---: | ---: |

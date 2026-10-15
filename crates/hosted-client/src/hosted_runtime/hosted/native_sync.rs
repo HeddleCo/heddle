@@ -1527,15 +1527,16 @@ impl HostedClient {
         F: FnOnce(&PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
         reject_unsupported_hosted_fetch_modes(depth, materialization)?;
-        // One Thread, its advertised tip. Unrelated refs are not listed or
-        // installed; later `pull --thread` observes current heads. Fetch of
-        // that tip still verifies genesis, signed operations, and the selected
-        // State's trees and blobs.
+        // One Thread, its advertised source heads. Unrelated refs are not
+        // listed or installed; later `pull --thread` hydrates more. Concurrent
+        // heads of this Thread stay local so `heddle resolve` can see them.
+        // Fetch still verifies genesis, signed operations, and those States'
+        // trees and blobs — not replay history.
         let (track, overview) = self
             .select_clone_thread(repo_path, requested_thread)
             .await?;
         let advertised = clone_bootstrap_refs(&overview)?;
-        let tip = overview_state(&overview).ok_or_else(|| {
+        overview_state(&overview).ok_or_else(|| {
             ProtocolError::InvalidState(
                 "Fetch requires a started Thread with a published source revision".into(),
             )
@@ -1546,7 +1547,7 @@ impl HostedClient {
                 &repo,
                 repo_path,
                 &track,
-                Some(tip),
+                None,
                 None,
                 Some(std::slice::from_ref(&overview)),
             )
@@ -1619,6 +1620,9 @@ impl HostedClient {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let observed;
         let resolved;
+        // Clone passes the already-resolved overview. Fetch every advertised
+        // source head of that Thread (the frontier), not replay ancestry.
+        let clone_frontier = snapshot.is_some();
         let overviews = match snapshot {
             // Clone already resolved this identity. Fetch it without another
             // name lookup or a complete Thread listing.
@@ -1671,14 +1675,18 @@ impl HostedClient {
         // State's content. Hydrate replay trees through the fork base before
         // pull advances the checkout; ready must not discover missing trees
         // halfway through a rebase. Each Fetch keeps its own admission budget.
-        let mut pending = fetch_revisions(overview, &spool, target_state)?
-            .into_iter()
-            .map(|(state, revision)| (state, revision, reference.clone(), true))
-            .collect::<std::collections::VecDeque<_>>();
+        let mut pending = fetch_revisions(
+            overview,
+            &spool,
+            if clone_frontier { None } else { target_state },
+        )?
+        .into_iter()
+        .map(|(state, revision)| (state, revision, reference.clone(), true))
+        .collect::<std::collections::VecDeque<_>>();
         let mut fetched = BTreeSet::new();
         let mut installed = BTreeSet::new();
         let mut optional_bases = BTreeSet::new();
-        let mut bases_planned = target_state.is_some();
+        let mut bases_planned = target_state.is_some() && !clone_frontier;
         loop {
             let Some((selected, revision, source, head)) = pending.pop_front() else {
                 if bases_planned {
@@ -1715,13 +1723,13 @@ impl HostedClient {
                 }
                 Err(error) => return Err(error),
             }
-            if target_state.is_none() && (head || !metadata_present) {
+            if !clone_frontier && target_state.is_none() && (head || !metadata_present) {
                 pending.extend(
                     missing_replay_ancestry(repo, selected, &source)?
                         .into_iter()
                         .map(|(state, source)| (state, revision_ref(&spool, state), source, false)),
                 );
-            } else if target_state.is_some() && head {
+            } else if (clone_frontier || target_state.is_some()) && head {
                 pending.extend(
                     missing_clone_fork_base(repo, &source)?
                         .into_iter()
