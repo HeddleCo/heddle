@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows atomic publish retries a replace that fails because another handle still has the destination open.
+
 ## [0.29.0](https://github.com/HeddleCo/heddle/compare/heddle-fs-prims-v0.28.14...heddle-fs-prims-v0.29.0) - 2026-10-09
 
 ### Other

@@ -185,6 +185,23 @@ const EROFS: i32 = 30;
 /// `ErrorKind::CrossesDevices` is the portable variant (stable as of 1.83).
 const EXDEV: i32 = 18;
 
+/// Windows `ERROR_ACCESS_DENIED`. `MoveFileExW` returns this when a scanner
+/// or another publisher still has the destination open.
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// Windows `ERROR_SHARING_VIOLATION`.
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+#[cfg(windows)]
+fn windows_rename_is_contended(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+    )
+}
+
 /// Returns true when an `io::Error` indicates the filesystem is out of
 /// space. Centralised here because it's the same predicate used by
 /// `write_file_atomic` (the inner helper) and by the higher-level
@@ -395,18 +412,30 @@ pub fn durable_rename(source: &Path, destination: &Path) -> io::Result<()> {
         }
         let source = wide(source)?;
         let destination = wide(destination)?;
-        // SAFETY: live NUL-terminated UTF-16 paths; no delayed or cross-volume move.
-        if unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                destination.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
+        // A contended replace leaves the source temp in place. Retry the
+        // same publish; a permanent denial still returns the last error.
+        let mut delay = std::time::Duration::from_millis(15);
+        let mut attempt = 0u32;
+        loop {
+            // SAFETY: live NUL-terminated UTF-16 paths; no delayed or cross-volume move.
+            if unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    destination.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } != 0
+            {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if !windows_rename_is_contended(&error) || attempt == 11 {
+                return Err(error);
+            }
+            std::thread::sleep(delay);
+            delay = (delay * 2).min(std::time::Duration::from_millis(100));
+            attempt += 1;
         }
-        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -987,6 +1016,24 @@ mod tests {
             "missing"
         )));
         assert!(!is_directory_not_empty(&enospc_io_error()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_rename_contention_is_access_denied_or_sharing_violation() {
+        assert!(windows_rename_is_contended(&io::Error::from_raw_os_error(
+            ERROR_ACCESS_DENIED
+        )));
+        assert!(windows_rename_is_contended(&io::Error::from_raw_os_error(
+            ERROR_SHARING_VIOLATION
+        )));
+        assert!(!windows_rename_is_contended(&io::Error::from_raw_os_error(
+            ENOENT
+        )));
+        assert!(!windows_rename_is_contended(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no raw code"
+        )));
     }
 
     #[test]
