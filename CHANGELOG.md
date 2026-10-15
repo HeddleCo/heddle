@@ -67,6 +67,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- Windows `x86_64-pc-windows-msvc` release builds compile again. Thread move and capture-split return an error when a path is a symlink on a non-Unix platform, and they leave that path unchanged. The workspace version is 0.31.3; 0.31.2 is already on crates.io.
+
 - Bind signed context revisions to their own record and target Thread, so a
   context signature cannot be replayed against a different Thread (#1928,
   #1939).

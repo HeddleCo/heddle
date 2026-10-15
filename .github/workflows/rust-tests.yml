@@ -231,3 +231,45 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # Release job `build non-mac x86_64-pc-windows-msvc` (windows-2022) is the
+  # only place heddle-cli was compiled for that target, so a `#[cfg(unix)]`
+  # import reached main and broke the release. This lane compiles the same
+  # crate, features, and target on every PR. GitHub-hosted only: Blacksmith
+  # has no Windows runners, and the workflow-level sccache wrapper is for the
+  # Linux lanes.
+  windows-msvc:
+    name: windows-msvc
+    if: github.event_name == 'pull_request'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: ""
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ws-${{ runner.os }}-${{ runner.arch }}
+          prefix-key: v1-rust-incr
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Build heddle-cli for x86_64-pc-windows-msvc
+        shell: bash
+        run: |
+          unset RUSTC_WRAPPER
+          cargo build --locked -p heddle-cli --features mount,client --target x86_64-pc-windows-msvc
+
+      - name: Test heddle-verbs
+        shell: bash
+        run: |
+          unset RUSTC_WRAPPER
+          git config --global core.autocrlf false
+          cargo test --locked -p heddle-verbs

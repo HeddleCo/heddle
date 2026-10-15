@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Thread move and capture-split return an error when writing a symlink on a non-Unix platform, and they leave that path unchanged.
+
 ## [0.30.0](https://github.com/HeddleCo/heddle/compare/heddle-verbs-v0.29.0...heddle-verbs-v0.30.0) - 2026-10-10
 
 ### Other
