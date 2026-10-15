@@ -1590,6 +1590,21 @@ impl HostedClient {
             if !fetched.insert(selected) {
                 continue;
             }
+            // Clone already admitted this signed revision and its tree. Pull
+            // keeps that provenance and does not transfer the bytes again.
+            // A missing operation, tree, or possession still fetches.
+            if local_revision_ready(repo, &source, selected)? {
+                if target_state.is_none() && head {
+                    pending.extend(
+                        missing_replay_ancestry(repo, selected, &source)?
+                            .into_iter()
+                            .map(|(state, source)| {
+                                (state, revision_ref(&spool, state), source, false)
+                            }),
+                    );
+                }
+                continue;
+            }
             let metadata_present = repo.store().get_state(&selected)?.is_some();
             match self
                 .fetch_and_install_revision(repo, &source, revision, selected)
@@ -2098,6 +2113,36 @@ fn missing_merge_bases(
         }
     }
     Ok(missing)
+}
+
+/// True when this Thread already holds an accepted capture of `state`, the
+/// state and its root tree are in the object store, and source possession was
+/// recorded. Content identity makes a second transfer of the same revision a
+/// copy of bytes the signature already covers.
+fn local_revision_ready(
+    repo: &Repository,
+    reference: &ThreadRef,
+    state: StateId,
+) -> Result<bool, ProtocolError> {
+    let Some(stored) = repo.store().get_state(&state)? else {
+        return Ok(false);
+    };
+    if repo.store().get_tree(&stored.tree)?.is_none() {
+        return Ok(false);
+    }
+    let replica =
+        match ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(reference)?) {
+            Ok(replica) => replica,
+            Err(_) => return Ok(false),
+        };
+    if replica
+        .source_operation_page(state, None, 1)
+        .map_err(replica_err)?
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    replica.has_source_possession(state).map_err(replica_err)
 }
 
 /// The local Thread ref a pull would advance, used to keep the caller's own
@@ -3259,6 +3304,49 @@ mod tests {
         );
         client.close().await;
         server.await.expect("server shutdown");
+    }
+
+    #[test]
+    fn possessed_admitted_revision_does_not_need_another_fetch() {
+        let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
+        repo.store().put_tree(&Tree::new()).expect("empty tree");
+        let state = snapshot(
+            &repo,
+            vec![replica.genesis().expect("genesis").base],
+            "already local",
+        );
+        let reference = ThreadRef {
+            spool: Some(SpoolRef {
+                id: spool.to_string(),
+            }),
+            id: Some(contract::ThreadId {
+                value: replica.thread_id().as_bytes().to_vec(),
+            }),
+        };
+        assert!(
+            !local_revision_ready(&repo, &reference, state.id()).expect("before admit"),
+            "a state with no signed capture still has to be fetched"
+        );
+        admit_hosted_source_ancestry(
+            &repo,
+            &replica,
+            state.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect("admit");
+        replica
+            .record_source_possession(state.id())
+            .expect("possession");
+        assert!(
+            local_revision_ready(&repo, &reference, state.id()).expect("ready"),
+            "pull leaves a possessed admitted revision on disk"
+        );
+        let unseen = snapshot(&repo, vec![state.id()], "not admitted");
+        assert!(!local_revision_ready(&repo, &reference, unseen.id()).expect("missing operation"));
     }
 
     fn snapshot(repo: &Repository, parents: Vec<StateId>, intent: &str) -> State {
