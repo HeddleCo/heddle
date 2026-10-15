@@ -77,6 +77,7 @@ pub(super) async fn lock_repo_install(
 /// Run fetch futures four at a time. Fewer than four in the last batch still
 /// overlap. Callers release `install_gate` during the transfer those futures
 /// perform, and take it again for the repository install.
+#[allow(clippy::type_complexity)]
 async fn join_fetch_batches<'a, T: Send>(
     mut work: Vec<Pin<Box<dyn Future<Output = Result<T, ProtocolError>> + Send + 'a>>>,
 ) -> Result<Vec<T>, ProtocolError> {
@@ -1499,28 +1500,31 @@ impl HostedClient {
             )));
         }
         let repo = initialize(&advertised)?;
-        let complete = self
-            .fetch_hosted_thread(&repo, repo_path, &track, None, None, Some(&overviews))
-            .await?;
         let rest = advertised
             .refs
             .iter()
             .filter(|entry| entry.is_user_thread() && entry.name != track)
             .map(|entry| entry.name.clone())
             .collect::<Vec<_>>();
-        // The checkout thread is installed first. Other user threads share
-        // that repository, so their installs take one gate while their Fetch
-        // transfers overlap.
-        if !rest.is_empty() {
-            let gate = tokio::sync::Mutex::new(());
-            self.fetch_user_threads(&repo, repo_path, &rest, &overviews, &gate)
-                .await?;
-        }
+        // The checkout thread is the first fetch. Its transfer overlaps the
+        // first sibling batch. Every install takes one gate, and checkout
+        // uses this thread's final state after the batches return.
+        let gate = tokio::sync::Mutex::new(());
+        let mut names = Vec::with_capacity(rest.len() + 1);
+        names.push(track);
+        names.extend(rest);
+        let installed = self
+            .fetch_user_threads(&repo, repo_path, &names, &overviews, &gate)
+            .await?;
+        let complete = installed.into_iter().next().ok_or_else(|| {
+            ProtocolError::InvalidState("clone did not fetch the checkout thread".into())
+        })?;
         Ok((complete, repo))
     }
 
-    /// Install the remaining user threads. Up to four Fetches run at once.
-    /// Repository writes take `gate`; the byte transfer does not.
+    /// Fetch these user threads. Up to four transfers run at once, in call
+    /// order, so the checkout thread occupies the first batch. Repository
+    /// writes take `gate`; the byte transfer does not.
     async fn fetch_user_threads(
         &self,
         repo: &Repository,
@@ -1528,7 +1532,7 @@ impl HostedClient {
         names: &[String],
         overviews: &[ThreadOverview],
         gate: &tokio::sync::Mutex<()>,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<Vec<PullComplete>, ProtocolError> {
         let work = names
             .iter()
             .map(|name| {
@@ -1544,8 +1548,7 @@ impl HostedClient {
                     as Pin<Box<dyn Future<Output = Result<PullComplete, ProtocolError>> + Send>>
             })
             .collect();
-        join_fetch_batches(work).await?;
-        Ok(())
+        join_fetch_batches(work).await
     }
 
     pub async fn pull_with_depth(
@@ -1622,6 +1625,7 @@ impl HostedClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_hosted_thread_gated(
         &self,
         repo: &Repository,
@@ -2797,6 +2801,72 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(300),
             "overlapping fetches took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_fetch_batch_keeps_the_checkout_thread_first() {
+        use std::{future::Future, pin::Pin};
+
+        let work = (0..3usize)
+            .map(|index| {
+                Box::pin(async move { Ok(index) })
+                    as Pin<Box<dyn Future<Output = Result<usize, ProtocolError>> + Send>>
+            })
+            .collect();
+        let done = join_fetch_batches(work)
+            .await
+            .expect("checkout thread stays first");
+        assert_eq!(done, vec![0, 1, 2]);
+    }
+
+    /// Checkout plus three siblings is one batch: four transfers overlap and
+    /// the installs stay exclusive. Serial checkout-then-siblings would take
+    /// at least 400ms of transfer.
+    #[tokio::test]
+    async fn tracked_clone_transfer_overlaps_the_first_sibling_batch() {
+        use std::{
+            future::Future,
+            pin::Pin,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+
+        let gate = tokio::sync::Mutex::new(());
+        let transferring = AtomicUsize::new(0);
+        let max_transfer = AtomicUsize::new(0);
+        let installing = AtomicUsize::new(0);
+        let max_install = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let work = (0..4)
+            .map(|_| {
+                Box::pin(async {
+                    let now = transferring.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_transfer.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    transferring.fetch_sub(1, Ordering::SeqCst);
+                    let _install = super::lock_repo_install(Some(&gate)).await;
+                    let now = installing.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_install.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    installing.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                    as Pin<Box<dyn Future<Output = Result<(), ProtocolError>> + Send>>
+            })
+            .collect();
+        join_fetch_batches(work)
+            .await
+            .expect("tracked thread overlaps the first sibling batch");
+        assert_eq!(max_transfer.load(Ordering::SeqCst), 4);
+        assert_eq!(max_install.load(Ordering::SeqCst), 1);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "tracked_plus_siblings_ms: {}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(280),
+            "tracked-plus-siblings took {elapsed:?}; serial checkout-then-siblings would take at least 400ms"
         );
     }
 

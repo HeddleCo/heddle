@@ -125,6 +125,7 @@ impl HostedClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_preferred_source(
         &self,
         repository: &repo::Repository,
