@@ -198,10 +198,6 @@ pub struct RepositoryVerificationState {
     pub default_remote: Option<String>,
     pub clone_verification: String,
     pub machine_contract: String,
-    /// Present for verify and status. `import local` computes the same
-    /// contract, then marks this field omitted so the payload does not carry
-    /// the catalog lists.
-    #[serde(skip_serializing_if = "MachineContractCoverage::is_omitted")]
     pub machine_contract_coverage: MachineContractCoverage,
     pub workflow_status: String,
     pub workflow_summary: String,
@@ -286,19 +282,6 @@ pub struct MachineContractCoverage {
 }
 
 impl MachineContractCoverage {
-    /// Marker for a payload that already used the coverage to choose
-    /// `machine_contract` and `recommended_action`, then left the lists out.
-    pub fn omitted() -> Self {
-        let mut coverage = Self::not_checked();
-        coverage.status = "omitted".to_string();
-        coverage.summary = "Machine-contract coverage is omitted from this payload".to_string();
-        coverage
-    }
-
-    fn is_omitted(coverage: &Self) -> bool {
-        coverage.status == "omitted"
-    }
-
     pub fn not_checked() -> Self {
         Self {
             status: "not_checked".to_string(),

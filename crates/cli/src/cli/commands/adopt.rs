@@ -129,8 +129,6 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
     }
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
     let recommended_action = action_value(&trust);
-    let mut trust = trust;
-    trust.machine_contract_coverage = verbs::MachineContractCoverage::omitted();
     // The .heddle data dir lives inside the repo; render it relative to the
     // repo root so adopt output stays repo-relative and doesn't leak the
     // user's absolute home path (#551).
@@ -352,11 +350,24 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
 
 fn render_adopt(cli: &Cli, output: &AdoptOutput, json: bool) -> Result<()> {
     if json {
-        super::next_action::write_command_json(
-            output,
-            crate::cli::output_is_compact(cli),
-            NextActionValidationContext::without_repo(&["import", "local"]),
-        )?;
+        let context = NextActionValidationContext::without_repo(&["import", "local"]);
+        if crate::cli::output_is_compact(cli) {
+            super::next_action::write_command_json(output, true, context)?;
+        } else {
+            // The coverage catalog is already reflected in `machine_contract`
+            // and `recommended_action`. Leaving the lists out keeps import JSON
+            // small without changing the shared verification schema.
+            let mut value = serde_json::to_value(output)?;
+            if let Some(verification) = value.get_mut("verification")
+                && let Some(object) = verification.as_object_mut()
+            {
+                drop(object.remove("machine_contract_coverage"));
+            }
+            super::next_action::validate_next_actions_in_value(&value, context)?;
+            let mut encoded = serde_json::to_string(&value)?;
+            encoded.push('\n');
+            crate::cli::render::write_stdout(&encoded)?;
+        }
         return Ok(());
     }
 

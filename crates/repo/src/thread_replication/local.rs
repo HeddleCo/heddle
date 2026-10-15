@@ -784,6 +784,7 @@ impl Repository {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admit_imported_captures(
         &self,
         replica: &ThreadReplica,
@@ -888,6 +889,7 @@ impl Repository {
         Ok(order)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admit_imported_capture_in(
         &self,
         replica: &ThreadReplica,
