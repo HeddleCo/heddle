@@ -66,7 +66,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 ed25519-dalek = { version = "3", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
-fastembed = { version = "=5.17.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
+fastembed = { version = "=7.1.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 sley = { version = "0.13.0", default-features = false, features = ["mmap", "fast-sha1"] }
