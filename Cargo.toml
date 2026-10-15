@@ -168,7 +168,7 @@ webpki-roots = "1.0"
 x25519-dalek = { version = "3", features = ["static_secrets"] }
 windows-sys = "0.61"
 zeroize = { version = "1", features = ["zeroize_derive"] }
-zstd = "0.13"
+zstd = "0.14"
 
 # Internal heddle crates. Declared here so a release version bump only edits
 # this table; member crates inherit via `<name>.workspace = true` and keep their
