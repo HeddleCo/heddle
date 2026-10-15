@@ -86,7 +86,7 @@ iroh = { package = "heddleco-iroh", version = "0.1.0", default-features = false,
 iroh-base = "=1.0.3"
 libc = "0.2"
 lru = "0.18"
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 memmap2 = "0.9"
 n0-watcher = "=1.0.0"
 notify = "8"
