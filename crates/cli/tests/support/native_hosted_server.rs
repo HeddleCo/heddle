@@ -89,6 +89,10 @@ pub struct PublicationCapture {
     pub reject_discussions: bool,
     /// Fail a clone's observation or metadata RPC, after source installation.
     pub fail_clone_stage: Option<String>,
+    /// When true, ObserveSpool omits `settings.default_thread`.
+    pub omit_default_thread: bool,
+    /// Override the advertised default Thread. `None` uses the fixture Thread.
+    pub default_thread: Option<v2::ThreadRef>,
     pub clone_observations: Vec<bool>,
     pub clone_metadata_obstruction: Option<std::path::PathBuf>,
     pub clone_sync_barrier: Option<Arc<tokio::sync::Barrier>>,
@@ -476,8 +480,11 @@ async fn serve_call(
         .push(method.clone());
     let (delay, setup) = {
         let mut capture = fixture.captured.lock().expect("clone setup");
-        let setup = if capture.clone_setup_requests < 3
-            && (method.ends_with("/ObserveThreads") || method.ends_with("/ObserveCollaboration"))
+        let setup = if capture.clone_setup_barrier.is_some()
+            && capture.clone_setup_requests < 3
+            && (method.ends_with("/ObserveThread")
+                || method.ends_with("/ObserveThreads")
+                || method.ends_with("/ObserveCollaboration"))
         {
             capture.clone_setup_requests += 1;
             capture.clone_setup_barrier.clone()
@@ -874,29 +881,40 @@ async fn serve_call(
                         .and_then(|thread| thread.r#ref.as_ref())
                         .and_then(|reference| reference.id.as_ref())
                         .map(|id| id.value.clone());
-                    let thread_id = if name == fixture.thread_name {
-                        fixture.thread_id.clone()
-                    } else if let Some(started) = started {
-                        started
+                    // A StartThread publication is the live identity. The
+                    // fixture Thread id is only the bootstrap default before
+                    // that Thread exists.
+                    let thread_id = if let Some(started) = started {
+                        Some(started)
+                    } else if name == fixture.thread_name {
+                        Some(fixture.thread_id.clone())
+                    } else if name == "main" {
+                        Some(vec![24; 32])
                     } else {
-                        assert_eq!(name, "main", "fixture's landing target");
-                        vec![24; 32]
+                        None
                     };
-                    v2::entity_ref::Entity::Thread(v2::ThreadRef {
-                        spool: Some(spool),
-                        id: Some(v2::ThreadId { value: thread_id }),
+                    thread_id.map(|value| {
+                        v2::entity_ref::Entity::Thread(v2::ThreadRef {
+                            spool: Some(spool.clone()),
+                            id: Some(v2::ThreadId { value }),
+                        })
                     })
                 } else {
-                    v2::entity_ref::Entity::Spool(spool)
+                    Some(v2::entity_ref::Entity::Spool(spool))
                 };
+                let found = entity.is_some();
                 write_unary(
                     &mut send,
                     &v2::ResolveResourcesResponse {
                         results: vec![v2::ResourceResolution {
-                            resource: Some(v2::EntityRef {
+                            resource: entity.map(|entity| v2::EntityRef {
                                 entity: Some(entity),
                             }),
-                            coverage: v2::Coverage::Complete as i32,
+                            coverage: if found {
+                                v2::Coverage::Complete as i32
+                            } else {
+                                v2::Coverage::Unavailable as i32
+                            },
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -1142,6 +1160,12 @@ async fn serve_call(
                         hosted_client::hosted_runtime::hosted::test_server::serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
                     } else {
                         let capture = fixture.captured.lock().expect("source view").clone();
+                        let name = capture
+                            .started
+                            .iter()
+                            .find(|thread| thread.r#ref == body.thread)
+                            .map(|thread| thread.name.clone())
+                            .unwrap_or_else(|| fixture.thread_name.clone());
                         for frame in snapshot_frames(server_key) {
                             let payload = matches!(
                                 frame.body,
@@ -1150,7 +1174,7 @@ async fn serve_call(
                             .then(|| {
                                 v2::thread_event::Payload::Overview(v2::ThreadOverview {
                                     r#ref: body.thread.clone(),
-                                    name: fixture.thread_name.clone(),
+                                    name: name.clone(),
                                     source_heads: capture.source_heads_for(body.thread.as_ref()),
                                     ..Default::default()
                                 })
@@ -1167,6 +1191,16 @@ async fn serve_call(
                     }
                 }
                 "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
+                    let capture = fixture.captured.lock().expect("spool settings").clone();
+                    let default_thread = if capture.omit_default_thread {
+                        None
+                    } else {
+                        Some(
+                            capture
+                                .default_thread
+                                .unwrap_or_else(|| thread_ref(&fixture)),
+                        )
+                    };
                     for frame in snapshot_frames(server_key) {
                         let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
                             .then(|| {
@@ -1183,6 +1217,10 @@ async fn serve_call(
                                         .expect("keyring")
                                         .canonical_spool_path_segments
                                         .clone(),
+                                    settings: Some(v2::SpoolSettings {
+                                        default_thread: default_thread.clone(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 })
                             });
@@ -2197,6 +2235,8 @@ async fn serve_publication(
                     });
                     accepted.account_owner = capture.account_owner.clone();
                     accepted.provision_requests = capture.provision_requests.clone();
+                    accepted.omit_default_thread = capture.omit_default_thread;
+                    accepted.default_thread = capture.default_thread.clone();
                     *capture = accepted;
                 }
                 write_message(

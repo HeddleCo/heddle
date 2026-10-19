@@ -621,12 +621,16 @@ fn short_clone_thread_name(name: &str) -> &str {
     name.strip_prefix("refs/heads/").unwrap_or(name)
 }
 
-/// Choose the thread a clone must check out.
+/// Choose the thread a Git-overlay or local clone must check out.
 ///
 /// Priority: explicit `--thread` (must be advertised), then the remote's
 /// advertised HEAD / current thread, then `main`, then the first remaining
 /// short name. `refs/`-prefixed companion names are ignored. Fails closed
 /// when the requested thread is missing or nothing usable was advertised.
+///
+/// Hosted native clone does not use this fallback. It clones the spool's
+/// configured default Thread, or `--thread`, and refuses if the default is
+/// unset.
 pub fn select_clone_checkout_thread<'a>(
     requested: Option<&str>,
     advertised_head: Option<&str>,

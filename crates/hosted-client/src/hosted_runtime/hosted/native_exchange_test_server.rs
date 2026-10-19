@@ -284,24 +284,30 @@ async fn serve_call(
                     id: fixture.spool.to_string(),
                 };
                 let entity = if let Some(name) = thread_name {
-                    assert_eq!(name, fixture.thread_name);
-                    v2::entity_ref::Entity::Thread(v2::ThreadRef {
-                        spool: Some(spool),
-                        id: Some(v2::ThreadId {
-                            value: fixture.thread_id.clone(),
-                        }),
+                    (name == fixture.thread_name).then(|| {
+                        v2::entity_ref::Entity::Thread(v2::ThreadRef {
+                            spool: Some(spool.clone()),
+                            id: Some(v2::ThreadId {
+                                value: fixture.thread_id.clone(),
+                            }),
+                        })
                     })
                 } else {
-                    v2::entity_ref::Entity::Spool(spool)
+                    Some(v2::entity_ref::Entity::Spool(spool))
                 };
+                let found = entity.is_some();
                 write_unary(
                     &mut send,
                     &v2::ResolveResourcesResponse {
                         results: vec![v2::ResourceResolution {
-                            resource: Some(v2::EntityRef {
+                            resource: entity.map(|entity| v2::EntityRef {
                                 entity: Some(entity),
                             }),
-                            coverage: v2::Coverage::Complete as i32,
+                            coverage: if found {
+                                v2::Coverage::Complete as i32
+                            } else {
+                                v2::Coverage::Unavailable as i32
+                            },
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -613,6 +619,10 @@ async fn serve_owner_views(
                             version: vec![1; 32],
                             path_segments: vec!["acme".into(), "widgets".into()],
                             owner_genesis: Some(fixture.owner_genesis.clone()),
+                            settings: Some(v2::SpoolSettings {
+                                default_thread: Some(thread_ref(fixture)),
+                                ..Default::default()
+                            }),
                             ..Default::default()
                         })
                     }),
@@ -639,6 +649,14 @@ async fn serve_owner_views(
                             v2::thread_event::Payload::Overview(v2::ThreadOverview {
                                 r#ref: Some(thread_ref(fixture)),
                                 name: fixture.thread_name.clone(),
+                                source_heads: fixture
+                                    .captured
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner())
+                                    .revision
+                                    .clone()
+                                    .into_iter()
+                                    .collect(),
                                 ..Default::default()
                             })
                         }),
