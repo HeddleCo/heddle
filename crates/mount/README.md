@@ -68,7 +68,7 @@ needs:
    in `/etc/fuse.conf` comes in, paired with explicit
    `MountOption::AllowOther` / `AllowRoot` in
    [`crate::fuse::default_config`]. The default shell does *not*
-   enable `AutoUnmount` for this reason: fuser 0.17 rejects
+   enable `AutoUnmount` for this reason: fuser rejects
    `AutoUnmount` without `AllowOther`/`AllowRoot`, and we'd rather
    require an explicit unmount path than depend on host-level
    policy.

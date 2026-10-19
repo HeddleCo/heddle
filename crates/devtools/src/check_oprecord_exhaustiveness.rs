@@ -209,7 +209,7 @@ impl<'ast> Visit<'ast> for Finder<'_> {
                 // exhaustive on its own, so it is not a silent-swallow: other
                 // arms must still cover the variants. Only an UNGUARDED
                 // catch-all swallows unhandled variants.
-                if arm.guard.is_none() && pat_is_catch_all(&arm.pat) {
+                if !pat_is_guarded(&arm.pat) && pat_is_catch_all(&arm.pat) {
                     let line = arm.pat.span().start().line;
                     let snippet = self
                         .lines
@@ -260,6 +260,16 @@ fn pat_target_enum(pat: &Pat) -> Option<String> {
 /// bare lowercase binding (`other => …`), including inside or-patterns / parens
 /// / references. An uppercase bare ident is treated as a (unit) variant/const,
 /// not a catch-all, so we do not misclassify it.
+/// syn 3 stores a match guard on the pattern (`Pat::Guard`) rather than on the arm.
+fn pat_is_guarded(pat: &Pat) -> bool {
+    match pat {
+        Pat::Guard(_) => true,
+        Pat::Or(or) => or.cases.iter().any(pat_is_guarded),
+        Pat::Paren(inner) => pat_is_guarded(&inner.pat),
+        _ => false,
+    }
+}
+
 fn pat_is_catch_all(pat: &Pat) -> bool {
     match pat {
         Pat::Wild(_) => true,

@@ -277,7 +277,7 @@ jobs:
       # The OpenCode hook regression executes the installed Bun plugin.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.3
 
       - name: Ensure LLVM linker
         run: |
@@ -286,7 +286,7 @@ jobs:
             sudo apt-get install -y lld
           fi
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -375,7 +375,7 @@ jobs:
         with:
           components: clippy
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -508,7 +508,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -556,7 +556,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -652,7 +652,7 @@ jobs:
           # Cargo perform a second network install when stable moves ahead.
           toolchain: "1.98.0"
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       # Enable the ProjFS optional feature. `Client-ProjFS` is the
       # canonical name on Windows 10/11 client SKUs; `Projected-FS`
@@ -738,7 +738,7 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -795,7 +795,7 @@ jobs:
         if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
         env:
           HAVE_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
@@ -810,14 +810,14 @@ jobs:
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload LCOV report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
 
       - name: Upload HTML coverage report
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: target/llvm-cov/html

@@ -72,10 +72,10 @@ issuers. Incoming certificates alone cannot enroll an attachment.
 
 The `run*Fixture` exports are conformance harnesses, not production APIs.
 
-Build with Rust's wasm32-unknown-unknown target and `wasm-bindgen-cli 0.2.127`:
+Build with Rust's wasm32-unknown-unknown target and `wasm-bindgen-cli 0.2.129`:
 
 ```sh
-cargo install wasm-bindgen-cli --version 0.2.127 --locked
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
 rustup target add wasm32-unknown-unknown
 npm run build
 npm run pack:binding

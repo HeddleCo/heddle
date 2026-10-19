@@ -89,21 +89,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
       - name: Install Worker target for the workspace toolchain
         run: rustup target add wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release-verifier-npm
           # Tag runs are rare and large. Do not spend 10 GB cache on them.
           save-if: false
       - name: Install pinned binding generator
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - name: Build, validate release version, and pack
         working-directory: crates/capability-verifier
         env:
@@ -121,7 +121,7 @@ jobs:
           cd npm
           npm pack --dry-run --ignore-scripts
           npm pack --ignore-scripts
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: capability-verifier-npm
           path: crates/capability-verifier/npm/*.tgz
@@ -141,11 +141,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: capability-verifier-npm
           path: package
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           registry-url: https://npm.pkg.github.com
@@ -210,11 +210,11 @@ jobs:
           # points at.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
@@ -265,7 +265,7 @@ jobs:
           "SUM=dist/$stage.zip.sha256"   | Out-File -Encoding ascii -Append $env:GITHUB_ENV
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign artifact (cosign keyless)
         shell: bash
@@ -280,7 +280,7 @@ jobs:
             "${ASSET}"
 
       - name: Upload build outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: heddle-${{ matrix.target }}
           path: |
@@ -306,11 +306,11 @@ jobs:
           # Same SHA pin as the CLI build job — see comment there.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release-macos-cask
           cache-on-failure: true
@@ -419,7 +419,7 @@ jobs:
           done
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign macOS artifacts (cosign keyless)
         shell: bash
@@ -440,7 +440,7 @@ jobs:
           done
 
       - name: Upload macOS cask outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: heddle-macos-artifacts
           path: |
@@ -478,7 +478,7 @@ jobs:
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download all build outputs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: staging
 
@@ -493,7 +493,7 @@ jobs:
           ls -la dist
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag }}
           name: ${{ needs.validate-tag.outputs.tag }}
@@ -536,7 +536,7 @@ jobs:
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download release build outputs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: staging
 
@@ -589,7 +589,7 @@ jobs:
 
       - name: Generate release publisher token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         with:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}

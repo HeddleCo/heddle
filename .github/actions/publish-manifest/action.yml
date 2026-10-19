@@ -29,7 +29,7 @@ runs:
   using: composite
   steps:
     - name: Checkout package repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: ${{ inputs.target-repo }}
         token: ${{ inputs.token }}
@@ -58,7 +58,7 @@ runs:
         fi
 
     - name: Open package update PR
-      uses: peter-evans/create-pull-request@v7
+      uses: peter-evans/create-pull-request@v8
       with:
         path: package-repo
         token: ${{ inputs.token }}

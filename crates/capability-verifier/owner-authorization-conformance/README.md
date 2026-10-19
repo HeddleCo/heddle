@@ -13,7 +13,7 @@ same source. Tapestry can consume the WebAssembly package instead of carrying
 a second authorization implementation, so this gate checks target/binding
 parity without allowing the two implementations to drift.
 
-Install the pinned `wasm-bindgen-cli 0.2.127`, then run one seed with:
+Install the pinned `wasm-bindgen-cli 0.2.129`, then run one seed with:
 
 ```bash
 OWNER_AUTH_CASE_SEED=38322398 \
