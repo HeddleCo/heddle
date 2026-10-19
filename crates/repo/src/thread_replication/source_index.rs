@@ -1,11 +1,13 @@
 //! Durable source summary indexes, maintained exactly once at causal acceptance.
 //! Reading a Thread overview never counts or walks its operation history.
+use std::collections::BTreeSet;
+
 use objects::object::{ContentHash, StateId};
-use rusqlite::Transaction;
+use rusqlite::{Transaction, params};
 
 use super::{Error, Result, hash};
 
-pub(super) const SCHEMA: &str = "
+pub(super) const SOURCE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS thread_source_bases(thread BLOB PRIMARY KEY,revision BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS thread_source_bases_revision ON thread_source_bases(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_revisions(
@@ -37,10 +39,16 @@ CREATE TRIGGER IF NOT EXISTS thread_source_head_delete AFTER DELETE ON thread_so
 BEGIN
  UPDATE thread_source_head_revisions SET references_count=references_count-1 WHERE thread=OLD.thread AND revision=OLD.revision;
  DELETE FROM thread_source_head_revisions WHERE thread=OLD.thread AND revision=OLD.revision AND references_count=0;
-END;
-CREATE TRIGGER IF NOT EXISTS thread_source_admitted
+END;";
+
+/// Per-row source maintenance. A deferred import sets `source_index_defer` and
+/// writes the same rows once for the thread after the batch.
+pub(super) const SOURCE_INDEX_TRIGGERS: &str = "
+DROP TRIGGER IF EXISTS thread_source_admitted;
+CREATE TRIGGER thread_source_admitted
 AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
  INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
@@ -50,8 +58,10 @@ BEGIN
  INSERT INTO thread_source_heads(thread,operation,revision)
  VALUES(NEW.thread,NEW.id,NEW.source_revision);
 END;
-CREATE TRIGGER IF NOT EXISTS thread_source_inserted
+DROP TRIGGER IF EXISTS thread_source_inserted;
+CREATE TRIGGER thread_source_inserted
 AFTER INSERT ON operations WHEN NEW.status=1 AND NEW.facet=1
+ AND NOT EXISTS(SELECT 1 FROM source_index_defer WHERE thread=NEW.thread)
 BEGIN
  INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
  INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
@@ -61,6 +71,96 @@ BEGIN
  INSERT INTO thread_source_heads(thread,operation,revision)
  VALUES(NEW.thread,NEW.id,NEW.source_revision);
 END;";
+
+/// Skip per-row source indexing for one import thread, then write the net index.
+pub(super) fn begin_deferred_source_index(
+    tx: &Transaction<'_>,
+    thread: &[u8],
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO source_index_defer(thread) VALUES(?1)",
+        [thread],
+    )?;
+    Ok(())
+}
+
+/// One accepted capture in a deferred import batch.
+///
+/// `parents` are operation ids, the same links stored in `parents`. A capture
+/// is a head when none of those links name it.
+pub(super) struct DeferredSourceCapture<'a> {
+    pub id: &'a [u8],
+    pub revision: &'a [u8],
+    pub parents: &'a BTreeSet<ContentHash>,
+}
+
+/// Revisions, count, heads, and the search queue for one deferred batch.
+///
+/// The net frontier is the same as the per-row triggers: drop heads that this
+/// batch names as parents, and record captures that nothing in the batch
+/// names. Parents admitted in this same batch were never written as heads.
+/// Clears the deferral in the same transaction so later captures use the triggers.
+pub(super) fn finish_deferred_source_index(
+    tx: &Transaction<'_>,
+    thread: &[u8],
+    captures: &[DeferredSourceCapture<'_>],
+) -> rusqlite::Result<()> {
+    let mut insert_revision = tx.prepare_cached(
+        "INSERT OR IGNORE INTO thread_source_revisions(thread, revision) VALUES(?1, ?2)",
+    )?;
+    for capture in captures {
+        insert_revision.execute(params![thread, capture.revision])?;
+    }
+    drop(insert_revision);
+    tx.execute(
+        "INSERT INTO thread_source_counts(thread, count)
+         SELECT ?1, COUNT(*) FROM thread_source_revisions WHERE thread=?1
+         ON CONFLICT(thread) DO UPDATE SET count=excluded.count",
+        [thread],
+    )?;
+    let mut covered = BTreeSet::new();
+    let mut batch_ids = BTreeSet::new();
+    for capture in captures {
+        batch_ids.insert(capture.id);
+        for parent in capture.parents {
+            covered.insert(parent.as_bytes().as_slice());
+        }
+    }
+    let mut delete_head =
+        tx.prepare_cached("DELETE FROM thread_source_heads WHERE thread=?1 AND operation=?2")?;
+    for parent in &covered {
+        if !batch_ids.contains(parent) {
+            delete_head.execute(params![thread, parent])?;
+        }
+    }
+    drop(delete_head);
+    let mut insert_head = tx.prepare_cached(
+        "INSERT INTO thread_source_heads(thread, operation, revision) VALUES(?1, ?2, ?3)",
+    )?;
+    let mut insert_queue = tx.prepare_cached(
+        "INSERT OR IGNORE INTO source_search_queue(operation, thread, revision) VALUES(?1, ?2, ?3)",
+    )?;
+    for capture in captures {
+        if !covered.contains(capture.id) {
+            insert_head.execute(params![thread, capture.id, capture.revision])?;
+        }
+        insert_queue.execute(params![capture.id, thread, capture.revision])?;
+    }
+    drop(insert_head);
+    drop(insert_queue);
+    tx.execute("DELETE FROM source_index_defer WHERE thread=?1", [thread])?;
+    Ok(())
+}
+
+pub(super) fn install_deferred_admit_triggers(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<()> {
+    connection
+        .execute_batch("CREATE TABLE IF NOT EXISTS source_index_defer(thread BLOB PRIMARY KEY);")?;
+    connection.execute_batch(SOURCE_INDEX_TRIGGERS)?;
+    connection.execute_batch(super::source_search::SEARCH_ADMIT_TRIGGERS)?;
+    Ok(())
+}
 
 pub(super) fn summary_in(tx: &Transaction<'_>, thread: ContentHash) -> Result<(u64, Vec<StateId>)> {
     let count: i64 = tx.query_row(
@@ -570,5 +670,96 @@ mod tests {
                 .to_string()
                 .contains("source frontier exceeds")
         );
+    }
+
+    #[test]
+    fn deferred_batches_keep_one_frontier_and_distinct_revisions() {
+        let (_dir, _repository, replica, _genesis, _signer) = fixture();
+        let mut connection = replica.connect().expect("db");
+        install_deferred_admit_triggers(&connection).expect("triggers");
+        let thread = replica.thread_id();
+        let root = ContentHash::from_bytes([1; 32]);
+        let other = ContentHash::from_bytes([2; 32]);
+        let merged = ContentHash::from_bytes([3; 32]);
+        let root_revision = StateId::from_bytes([4; 32]);
+        let other_revision = StateId::from_bytes([5; 32]);
+        let merged_revision = StateId::from_bytes([6; 32]);
+        let signature = vec![7u8; 64];
+        let tx = connection.transaction().expect("transaction");
+        begin_deferred_source_index(&tx, thread.as_bytes()).expect("defer");
+        for (id, revision) in [(&root, &root_revision), (&other, &other_revision)] {
+            tx.execute(
+                "INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,?3,?4,1,?5)",
+                rusqlite::params![id.as_bytes(), thread.as_bytes(), vec![1u8], &signature, revision.as_bytes()],
+            )
+            .expect("operation");
+        }
+        let no_parents = BTreeSet::new();
+        finish_deferred_source_index(
+            &tx,
+            thread.as_bytes(),
+            &[
+                DeferredSourceCapture {
+                    id: root.as_bytes(),
+                    revision: root_revision.as_bytes(),
+                    parents: &no_parents,
+                },
+                DeferredSourceCapture {
+                    id: other.as_bytes(),
+                    revision: other_revision.as_bytes(),
+                    parents: &no_parents,
+                },
+            ],
+        )
+        .expect("first batch");
+        let (count, heads) = summary_in(&tx, thread).expect("two tips");
+        assert_eq!(count, 2);
+        assert_eq!(heads, vec![root_revision, other_revision]);
+
+        begin_deferred_source_index(&tx, thread.as_bytes()).expect("defer merge");
+        tx.execute(
+            "INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,?3,?4,1,?5)",
+            rusqlite::params![merged.as_bytes(), thread.as_bytes(), vec![1u8], &signature, merged_revision.as_bytes()],
+        )
+        .expect("merge operation");
+        tx.execute(
+            "INSERT INTO parents(child,parent) VALUES(?1,?2)",
+            rusqlite::params![merged.as_bytes(), root.as_bytes()],
+        )
+        .expect("merge parent");
+        tx.execute(
+            "INSERT INTO parents(child,parent) VALUES(?1,?2)",
+            rusqlite::params![merged.as_bytes(), other.as_bytes()],
+        )
+        .expect("merge parent");
+        let merge_parents = BTreeSet::from([root, other]);
+        finish_deferred_source_index(
+            &tx,
+            thread.as_bytes(),
+            &[DeferredSourceCapture {
+                id: merged.as_bytes(),
+                revision: merged_revision.as_bytes(),
+                parents: &merge_parents,
+            }],
+        )
+        .expect("merge batch");
+        let (count, heads) = summary_in(&tx, thread).expect("merged tip");
+        assert_eq!(count, 3, "each revision counts once");
+        assert_eq!(heads, vec![merged_revision]);
+        let queued: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM source_search_queue WHERE thread=?1",
+                [thread.as_bytes()],
+                |row| row.get(0),
+            )
+            .expect("queue");
+        assert_eq!(queued, 3);
+        let deferred: i64 = tx
+            .query_row("SELECT COUNT(*) FROM source_index_defer", [], |row| {
+                row.get(0)
+            })
+            .expect("deferral");
+        assert_eq!(deferred, 0);
+        tx.commit().expect("durable index");
     }
 }

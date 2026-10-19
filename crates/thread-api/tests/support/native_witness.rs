@@ -100,6 +100,28 @@ pub(crate) fn witness_set_for(authority: &str, root_id: &str) -> host::SignedHos
             .expect("root signature"),
     }
 }
+fn import_batch_envelope(record: &wire::SignedRecord) -> bool {
+    record.signatures.first().is_some_and(|signature| {
+        crypto::import_batch::is_import_batch_signature(&signature.signature)
+    })
+}
+
+fn verify_import_envelope(record: &wire::SignedRecord) {
+    if !import_batch_envelope(record) {
+        return;
+    }
+    let signature = record
+        .signatures
+        .first()
+        .expect("import envelope has a signature");
+    if record.signatures.len() != 1 || signature.public_key.len() != 32 {
+        panic!("import batch envelope must be the operation's only signature");
+    }
+    crypto::import_batch::verify_batch_operation(&record.canonical_record, &signature.signature)
+        .expect("import batch envelope")
+        .expect("imported operation is covered by its batch signature");
+}
+
 fn signature_digest(records: &[&wire::SignedRecord]) -> Vec<u8> {
     let signatures = records
         .iter()
@@ -248,6 +270,12 @@ pub(crate) fn bundle(
         .iter()
         .flat_map(|b| &b.operations)
         .collect::<Vec<_>>();
+    // An import envelope is not an authorship signature. Verify it before the
+    // proof is issued, and do not copy it into a dependency that heddle-api
+    // checks with `verify_native` (64-byte signature over the operation).
+    for record in &all {
+        verify_import_envelope(record);
+    }
     for original in all
         .iter()
         .copied()
@@ -298,12 +326,15 @@ pub(crate) fn bundle(
             }
             _ => panic!("fixture does not issue resolution or landing witnesses"),
         };
-        // The carrier references the exact frontier, while the operation batches
-        // transport its complete native causal closure independently of carrier bounds.
+        // The carrier references the frontier operations whose signatures are
+        // authorship signatures. Import envelopes stay on the operation batch:
+        // they were verified above, and heddle-api 0.31.0-alpha.48 rejects them
+        // inside a proof dependency.
         let mut dependencies = all
             .iter()
             .filter(|r| {
                 *r != &original
+                    && !import_batch_envelope(r)
                     && dependency_ids
                         .contains(&ContentHash::compute_typed(&r.format, &r.canonical_record))
             })

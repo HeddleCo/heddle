@@ -102,6 +102,15 @@ mod tests {
     }
 
     #[test]
+    fn hash_is_the_typed_blob_prefix_over_the_bytes() {
+        let bytes = b"hello";
+        assert_eq!(
+            Blob::from_slice(bytes).hash(),
+            ContentHash::compute_typed("blob", bytes)
+        );
+    }
+
+    #[test]
     fn test_blob_hash_differs_for_different_content() {
         let blob1 = Blob::from("hello");
         let blob2 = Blob::from("world");

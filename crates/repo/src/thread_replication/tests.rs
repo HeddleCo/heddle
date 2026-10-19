@@ -2,7 +2,7 @@
 use crypto::{Ed25519Signer, Signer};
 use objects::object::{
     Attribution, CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
-    DiscussionRecordId, DiscussionTurnV1, Principal, Tree, VisibilityTier,
+    DiscussionRecordId, DiscussionTurnV1, Principal, State, Tree, VisibilityTier,
 };
 use tempfile::TempDir;
 
@@ -1395,5 +1395,162 @@ fn explicit_source_resolution_requires_current_candidates_and_retains_all_parent
             )
             .expect("retry"),
         resolved
+    );
+}
+
+#[test]
+fn imported_states_keep_a_verifiable_signed_capture() {
+    let temp = TempDir::new().expect("repo directory");
+    let repo = crate::init_test_repository(temp.path()).expect("repository");
+    let base = repo.head().expect("head").expect("base");
+    repo.store().put_tree(&Tree::new()).expect("empty tree");
+    repo.create_native_thread("main", base, None, "")
+        .expect("thread");
+    let tree = Tree::new().hash();
+    let first = State::new_snapshot(tree, vec![base], author());
+    repo.store().put_state(&first).expect("first state");
+    let second = State::new_snapshot(tree, vec![first.id()], author());
+    repo.store().put_state(&second).expect("second state");
+    let sibling = State::new_snapshot(tree, vec![base], author());
+    repo.store().put_state(&sibling).expect("sibling state");
+    let merged = State::new_snapshot(tree, vec![second.id(), sibling.id()], author());
+    repo.store().put_state(&merged).expect("merged state");
+
+    let replica = repo.native_thread("main").expect("named thread");
+    let prepared = replica
+        .prepare_capture(&repo, &first)
+        .expect("prepare empty capture");
+    assert_eq!(
+        prepared,
+        first.encode_current_msgpack().expect("state bytes").into(),
+        "a thread with no references signs the State bytes alone"
+    );
+    drop(replica);
+
+    repo.record_native_imported_source("main", merged.id())
+        .expect("admit imported ancestry");
+    repo.record_native_imported_source("main", merged.id())
+        .expect("resume is idempotent");
+
+    let replica = repo.native_thread("main").expect("named thread");
+    let mut operation_for = std::collections::BTreeMap::new();
+    for state in [&first, &second, &sibling, &merged] {
+        let page = replica
+            .source_operation_page(state.id(), None, 8)
+            .expect("operation page");
+        assert_eq!(page.len(), 1, "one admitted operation per imported state");
+        let (signed, status) = replica
+            .operation(&page[0])
+            .expect("read operation")
+            .expect("operation present");
+        assert_eq!(status, Admission::Accepted);
+        let operation = signed
+            .verify()
+            .expect("batch signature covers this imported state");
+        assert!(
+            crypto::import_batch::is_import_batch_signature(&signed.signature),
+            "import provenance is one batch attestation, not a per-state authorship signature"
+        );
+        let recorded = operation
+            .source_state()
+            .expect("source body")
+            .expect("captured state");
+        assert_eq!(recorded.id(), state.id());
+        let captured = operation
+            .source_result()
+            .expect("capture body")
+            .expect("authored capture");
+        assert_eq!(
+            captured,
+            state.encode_current_msgpack().expect("state bytes").into(),
+            "imported capture keeps the prepared State bytes"
+        );
+        assert_eq!(operation.thread, replica.thread_id());
+        operation_for.insert(state.id(), page[0]);
+    }
+    let second_operation = replica
+        .operation(&operation_for[&second.id()])
+        .expect("read")
+        .expect("present")
+        .0
+        .verify()
+        .expect("second signature");
+    assert!(
+        second_operation
+            .parents
+            .contains(&operation_for[&first.id()])
+    );
+    let merged_operation = replica
+        .operation(&operation_for[&merged.id()])
+        .expect("read")
+        .expect("present")
+        .0
+        .verify()
+        .expect("merge signature");
+    assert!(
+        merged_operation
+            .parents
+            .contains(&operation_for[&second.id()])
+    );
+    assert!(
+        merged_operation
+            .parents
+            .contains(&operation_for[&sibling.id()])
+    );
+    assert!(
+        replica
+            .source_operation_page(base, None, 1)
+            .expect("base page")
+            .is_empty(),
+        "the genesis base is not itself a signed capture"
+    );
+    assert_eq!(
+        replica.source_head_revisions().expect("source heads"),
+        std::collections::BTreeSet::from([merged.id()]),
+        "the source frontier is the imported tip"
+    );
+    assert_eq!(
+        replica.view().expect("view").generation,
+        13,
+        "creation records the base, and each imported state bumps generation for insert, acceptance, and possession"
+    );
+    let queued: i64 = replica
+        .connect()
+        .expect("metadata")
+        .query_row(
+            "SELECT COUNT(*) FROM source_search_queue WHERE thread=?1",
+            [replica.thread_id().as_bytes()],
+            |row| row.get(0),
+        )
+        .expect("search queue");
+    assert_eq!(queued, 4, "each imported capture is queued for search once");
+    let deferred: i64 = replica
+        .connect()
+        .expect("metadata")
+        .query_row("SELECT COUNT(*) FROM source_index_defer", [], |row| {
+            row.get(0)
+        })
+        .expect("deferral");
+    assert_eq!(deferred, 0, "import clears the source-index deferral");
+    let (first_signed, _) = replica
+        .operation(&operation_for[&first.id()])
+        .expect("read")
+        .expect("present");
+    let (second_signed, _) = replica
+        .operation(&operation_for[&second.id()])
+        .expect("read")
+        .expect("present");
+    assert_eq!(
+        crypto::import_batch::manifest_signature_of(&first_signed.signature),
+        crypto::import_batch::manifest_signature_of(&second_signed.signature),
+        "every imported state carries the same manifest signature"
+    );
+    let forged = crypto::thread_operation::SignedOperation {
+        canonical: second_signed.canonical,
+        signature: first_signed.signature,
+    };
+    assert!(
+        forged.verify().is_err(),
+        "a state is not admitted by another state's inclusion proof"
     );
 }

@@ -37,6 +37,8 @@ struct AdoptImportStats {
     commits_imported: usize,
     states_created: usize,
     state_store_write_ms: u128,
+    object_translate_ms: u128,
+    native_admit_ms: u128,
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
@@ -114,7 +116,9 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
             "import local",
             &[
                 ProfileField::millis("import_ms", import_ms),
+                ProfileField::millis("object_translate_ms", stats.object_translate_ms),
                 ProfileField::millis("state_store_write_ms", stats.state_store_write_ms),
+                ProfileField::millis("native_admit_ms", stats.native_admit_ms),
                 ProfileField::millis("verification_ms", verification_ms),
                 ProfileField::millis(
                     "verification_worktree_status_ms",
@@ -239,13 +243,17 @@ fn import_ingest_for_adopt(
         }
         other => anyhow::Error::from(other),
     })?;
+    let admit_start = std::time::Instant::now();
     if let Some(root_parent) = root_parent {
         register_imported_native_threads(repo, root_parent)?;
     }
+    let native_admit_ms = admit_start.elapsed().as_millis();
     Ok(AdoptImportStats {
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
         state_store_write_ms: stats.state_store_write_ms,
+        object_translate_ms: stats.object_translate_ms,
+        native_admit_ms,
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
@@ -261,10 +269,24 @@ fn seed_hosted_publishable_base(repo: &Repository) -> Result<StateId> {
 }
 
 fn register_imported_native_threads(repo: &Repository, base: StateId) -> Result<()> {
+    let create_start = std::time::Instant::now();
+    let mut created = Vec::new();
     for (name, tip) in repo.refs().list_threads_with_states()? {
         let name = name.to_string();
         repo.create_native_thread(&name, base, None, "")?;
-        repo.record_native_imported_source(&name, tip)?;
+        created.push((name, tip));
+    }
+    let create_ms = create_start.elapsed().as_millis();
+    let tips = created
+        .iter()
+        .map(|(name, tip)| (name.as_str(), *tip))
+        .collect::<Vec<_>>();
+    repo.record_native_imported_sources(&tips)?;
+    if instrumentation_enabled() {
+        eprintln!(
+            "heddle profile:\n  command: import local threads\n  thread_create_ms: {create_ms}\n  threads: {}",
+            created.len(),
+        );
     }
     Ok(())
 }
@@ -345,11 +367,24 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
 
 fn render_adopt(cli: &Cli, output: &AdoptOutput, json: bool) -> Result<()> {
     if json {
-        super::next_action::write_command_json(
-            output,
-            crate::cli::output_is_compact(cli),
-            NextActionValidationContext::without_repo(&["import", "local"]),
-        )?;
+        let context = NextActionValidationContext::without_repo(&["import", "local"]);
+        if crate::cli::output_is_compact(cli) {
+            super::next_action::write_command_json(output, true, context)?;
+        } else {
+            // The coverage catalog is already reflected in `machine_contract`
+            // and `recommended_action`. Leaving the lists out keeps import JSON
+            // small without changing the shared verification schema.
+            let mut value = serde_json::to_value(output)?;
+            if let Some(verification) = value.get_mut("verification")
+                && let Some(object) = verification.as_object_mut()
+            {
+                drop(object.remove("machine_contract_coverage"));
+            }
+            super::next_action::validate_next_actions_in_value(&value, context)?;
+            let mut encoded = serde_json::to_string(&value)?;
+            encoded.push('\n');
+            crate::cli::render::write_stdout(&encoded)?;
+        }
         return Ok(());
     }
 

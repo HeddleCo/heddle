@@ -16,14 +16,14 @@
 //! stubbed behind TODOs so we can land milestones independently.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use objects::{
     object::{
-        AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, TreeEntry,
+        AnnotatedTag, AnnotatedTagMarker, ContentHash, HeddleNote, TreeEntry,
         thread_replication::git_import_graph::{
             ImportRefDisposition, ImportSkipReason, SkippedImportRef, classify_git_import_ref,
         },
@@ -42,7 +42,8 @@ use crate::{
     IngestError,
     git_walk::{
         CommitEntry, GitSource, RefDiscoveryStats, RefHead, RefNamespace, TreeChild, TreeChildKind,
-        git_tree_from_entries, reject_reserved_root_entries, reserved_tree_entry_error,
+        git_tree_from_entries, read_blob_from, reject_reserved_root_entries,
+        reserved_tree_entry_error,
     },
     import_options::{
         ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
@@ -78,6 +79,9 @@ pub struct ImportStats {
     /// Time spent installing the native pack and publishing its authoritative
     /// loose state bodies.
     pub state_store_write_ms: u128,
+    /// Time spent translating Git trees and blobs into pack objects, before
+    /// the pack is installed.
+    pub object_translate_ms: u128,
     /// Distinct trees materialized (after memoization).
     pub trees_imported: usize,
     /// Distinct blobs materialized (after memoization).
@@ -500,6 +504,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             )?;
             let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone())
                 .repair_mapped_objects(repair_mapped_objects);
+            let translate_start = std::time::Instant::now();
             let mut last_log = 0usize;
             for (idx, commit) in commits.iter().enumerate() {
                 // Canonical lossy marker (#567): translating this commit's tree
@@ -539,7 +544,18 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 }
             }
             packed.write_annotated_tags(&heads)?;
+            let object_translate_ms = translate_start.elapsed().as_millis();
+            if packed.profile {
+                eprintln!(
+                    "heddle profile:\n  command: import local translate\n  object_translate_ms: {object_translate_ms}\n  tree_read_ms: {:.3}\n  blob_prepare_ms: {:.3}\n  tree_encode_ms: {:.3}\n  pack_write_ms: {:.3}",
+                    packed.tree_read_us as f64 / 1000.0,
+                    packed.blob_prepare_us as f64 / 1000.0,
+                    packed.tree_encode_us as f64 / 1000.0,
+                    packed.pack_write_us as f64 / 1000.0,
+                );
+            }
             let mut stats = packed.stats;
+            stats.object_translate_ms = object_translate_ms;
             if stats.object_count > 0 {
                 let state_store_write_start = std::time::Instant::now();
                 packed.builder.finish(self.store, &pack_path, &index_path)?;
@@ -617,6 +633,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             states_created: packed_stats.states,
             native_identity_changes: packed_stats.native_identity_changes,
             state_store_write_ms: packed_stats.state_store_write_ms,
+            object_translate_ms: packed_stats.object_translate_ms,
             trees_imported: packed_stats.trees,
             blobs_imported: packed_stats.blobs,
             refs: ref_stats,
@@ -646,6 +663,7 @@ struct PackedImportStats {
     states: usize,
     native_identity_changes: usize,
     state_store_write_ms: u128,
+    object_translate_ms: u128,
     trees: usize,
     blobs: usize,
     lossy_entries: Vec<LossyImportEntry>,
@@ -658,14 +676,14 @@ trait ImportPackSink {
         &mut self,
         hash: ContentHash,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()>;
 
     fn add_id(
         &mut self,
         id: PackObjectId,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()>;
 }
 
@@ -677,16 +695,17 @@ where
         &mut self,
         hash: ContentHash,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
-        StreamingPackBuilder::add(self, hash, obj_type, data).map_err(IngestError::from)
+        StreamingPackBuilder::add_id(self, PackObjectId::Hash(hash), obj_type, data)
+            .map_err(IngestError::from)
     }
 
     fn add_id(
         &mut self,
         id: PackObjectId,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
         StreamingPackBuilder::add_id(self, id, obj_type, data).map_err(IngestError::from)
     }
@@ -697,9 +716,9 @@ impl ImportPackSink for PackBuilder {
         &mut self,
         hash: ContentHash,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
-        PackBuilder::add(self, hash, obj_type, data);
+        PackBuilder::add(self, hash, obj_type, data.to_vec());
         Ok(())
     }
 
@@ -707,15 +726,15 @@ impl ImportPackSink for PackBuilder {
         &mut self,
         id: PackObjectId,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
-        PackBuilder::add_id(self, id, obj_type, data);
+        PackBuilder::add_id(self, id, obj_type, data.to_vec());
         Ok(())
     }
 }
 
 enum ImportPackBuilder {
-    Streaming(StreamingPackBuilder<std::fs::File>),
+    Streaming(Box<StreamingPackBuilder<std::fs::File>>),
     DeltaSearch(PackBuilder),
 }
 
@@ -754,7 +773,7 @@ impl ImportPackBuilder {
             compression,
             bucket_dir.to_path_buf(),
         )?;
-        Ok(Self::Streaming(builder))
+        Ok(Self::Streaming(Box::new(builder)))
     }
 
     fn finish<S: ObjectStore>(
@@ -782,10 +801,10 @@ impl ImportPackSink for ImportPackBuilder {
         &mut self,
         hash: ContentHash,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
         match self {
-            Self::Streaming(builder) => ImportPackSink::add(builder, hash, obj_type, data),
+            Self::Streaming(builder) => ImportPackSink::add(builder.as_mut(), hash, obj_type, data),
             Self::DeltaSearch(builder) => ImportPackSink::add(builder, hash, obj_type, data),
         }
     }
@@ -794,14 +813,21 @@ impl ImportPackSink for ImportPackBuilder {
         &mut self,
         id: PackObjectId,
         obj_type: PackObjectType,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> crate::Result<()> {
         match self {
-            Self::Streaming(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
+            Self::Streaming(builder) => {
+                ImportPackSink::add_id(builder.as_mut(), id, obj_type, data)
+            }
             Self::DeltaSearch(builder) => ImportPackSink::add_id(builder, id, obj_type, data),
         }
     }
 }
+
+/// Cold blobs read and hashed together. The page is the only blob bytes kept
+/// beside the object currently being written into the pack.
+const BLOB_PAGE_BLOBS: usize = 32;
+const BLOB_PAGE_BYTES: usize = 1024 * 1024;
 
 struct PackedImport<'a, B: ImportPackSink> {
     git: &'a GitSource,
@@ -813,6 +839,14 @@ struct PackedImport<'a, B: ImportPackSink> {
     repair_mapped_objects: bool,
     materialized_trees: HashSet<String>,
     materialized_blobs: HashSet<String>,
+    /// Blobs already read for the tree currently being translated.
+    prepared_blobs: HashMap<String, (ContentHash, Vec<u8>)>,
+    blob_workers: usize,
+    profile: bool,
+    tree_read_us: u128,
+    blob_prepare_us: u128,
+    tree_encode_us: u128,
+    pack_write_us: u128,
 }
 
 impl<'a, B: ImportPackSink> PackedImport<'a, B> {
@@ -827,6 +861,16 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             repair_mapped_objects: false,
             materialized_trees: HashSet::new(),
             materialized_blobs: HashSet::new(),
+            prepared_blobs: HashMap::new(),
+            blob_workers: std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(1)
+                .clamp(1, 8),
+            profile: std::env::var_os("HEDDLE_PROFILE").is_some(),
+            tree_read_us: 0,
+            blob_prepare_us: 0,
+            tree_encode_us: 0,
+            pack_write_us: 0,
         }
     }
 
@@ -879,16 +923,48 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             }
             return Ok(hash);
         }
-        self.materialized_trees.insert(git_tree_sha.to_string());
+        if self.repair_mapped_objects {
+            self.materialized_trees.insert(git_tree_sha.to_string());
+        }
 
         let before_lossy = self.stats.lossy_entries.len();
+        let tree_read_start = self.profile.then(std::time::Instant::now);
         let children = self.git.read_tree(git_tree_sha)?;
-        let mut entries = Vec::with_capacity(children.len());
-        for child in children {
-            if let Some(entry) = self.translate_child(git_tree_sha, &child, path_prefix)? {
-                entries.push(entry);
-            }
+        if let Some(start) = tree_read_start {
+            self.tree_read_us += start.elapsed().as_micros();
         }
+        let mut entries = Vec::with_capacity(children.len());
+        let mut index = 0usize;
+        while index < children.len() {
+            if matches!(
+                children[index].kind,
+                TreeChildKind::Tree | TreeChildKind::Gitlink
+            ) {
+                if let Some(entry) =
+                    self.translate_child(git_tree_sha, &children[index], path_prefix)?
+                {
+                    entries.push(entry);
+                }
+                index += 1;
+                continue;
+            }
+            let run_start = index;
+            while index < children.len()
+                && matches!(
+                    children[index].kind,
+                    TreeChildKind::Blob { .. } | TreeChildKind::Symlink
+                )
+            {
+                index += 1;
+            }
+            self.translate_blob_run(
+                git_tree_sha,
+                &children[run_start..index],
+                path_prefix,
+                &mut entries,
+            )?;
+        }
+        self.prepared_blobs.clear();
         let tree_lossy_entries = self.stats.lossy_entries[before_lossy..]
             .iter()
             .map(|entry| entry_relative_to_prefix(path_prefix, entry))
@@ -898,12 +974,15 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         }
 
         let tree = git_tree_from_entries(git_tree_sha, entries)?;
-        let hash = tree.hash();
-        let data = tree
-            .encode_canonical()
+        let encode_start = self.profile.then(std::time::Instant::now);
+        let (hash, data) = tree
+            .encode_canonical_with_id()
             .map_err(|e| IngestError::Other(format!("serialize tree for import pack: {e}")))?;
+        if let Some(start) = encode_start {
+            self.tree_encode_us += start.elapsed().as_micros();
+        }
         if self.emit_objects {
-            self.builder.add(hash, PackObjectType::Tree, data)?;
+            self.add_to_pack(hash, PackObjectType::Tree, &data)?;
             self.stats.object_count += 1;
         }
         self.stats.trees += 1;
@@ -983,27 +1062,212 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
     }
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
+        if let Some((hash, bytes)) = self.prepared_blobs.remove(git_blob_sha) {
+            self.emit_blob(git_blob_sha, hash, &bytes)?;
+            return Ok(hash);
+        }
         if let Some(hash) = self.map.get_blob(git_blob_sha)?
             && (!self.repair_mapped_objects
                 || !self.materialized_blobs.insert(git_blob_sha.to_string()))
         {
             return Ok(hash);
         }
-        self.materialized_blobs.insert(git_blob_sha.to_string());
+        if self.repair_mapped_objects {
+            self.materialized_blobs.insert(git_blob_sha.to_string());
+        }
 
+        let prepare_start = self.profile.then(std::time::Instant::now);
         let bytes = self.git.read_blob(git_blob_sha)?;
-        let blob = Blob::from_slice(&bytes);
-        let hash = blob.hash();
+        let hash = ContentHash::compute_typed("blob", &bytes);
+        if let Some(start) = prepare_start {
+            self.blob_prepare_us += start.elapsed().as_micros();
+        }
+        self.emit_blob(git_blob_sha, hash, &bytes)?;
+        Ok(hash)
+    }
+
+    fn add_to_pack(
+        &mut self,
+        hash: ContentHash,
+        obj_type: PackObjectType,
+        data: &[u8],
+    ) -> crate::Result<()> {
+        let start = self.profile.then(std::time::Instant::now);
+        self.builder.add(hash, obj_type, data)?;
+        if let Some(start) = start {
+            self.pack_write_us += start.elapsed().as_micros();
+        }
+        Ok(())
+    }
+
+    fn add_id_to_pack(
+        &mut self,
+        id: PackObjectId,
+        obj_type: PackObjectType,
+        data: &[u8],
+    ) -> crate::Result<()> {
+        let start = self.profile.then(std::time::Instant::now);
+        self.builder.add_id(id, obj_type, data)?;
+        if let Some(start) = start {
+            self.pack_write_us += start.elapsed().as_micros();
+        }
+        Ok(())
+    }
+
+    fn emit_blob(
+        &mut self,
+        git_blob_sha: &str,
+        hash: ContentHash,
+        bytes: &[u8],
+    ) -> crate::Result<()> {
+        if self.repair_mapped_objects {
+            self.materialized_blobs.insert(git_blob_sha.to_string());
+        }
         if self.emit_objects {
-            self.builder.add(hash, PackObjectType::Blob, bytes)?;
+            self.add_to_pack(hash, PackObjectType::Blob, bytes)?;
             self.stats.object_count += 1;
         }
         self.stats.blobs += 1;
-
         self.map
             .insert_blob(git_blob_sha, hash)
             .map_err(IngestError::from)?;
-        Ok(hash)
+        Ok(())
+    }
+
+    /// Translate one run of blob and symlink children, paging the cold bytes.
+    ///
+    /// A subtree is not part of the run, so a page is never held across the
+    /// recursive walk. Pack writes stay on this thread, in child order.
+    fn translate_blob_run(
+        &mut self,
+        git_tree_sha: &str,
+        children: &[TreeChild],
+        path_prefix: &str,
+        entries: &mut Vec<TreeEntry>,
+    ) -> crate::Result<()> {
+        let mut cursor = 0usize;
+        while cursor < children.len() {
+            if self.prepared_blobs.is_empty() {
+                self.fill_blob_page(&children[cursor..])?;
+            }
+            if let Some(entry) =
+                self.translate_child(git_tree_sha, &children[cursor], path_prefix)?
+            {
+                entries.push(entry);
+            }
+            cursor += 1;
+        }
+        Ok(())
+    }
+
+    fn blob_is_cached(&self, git_blob_sha: &str) -> crate::Result<bool> {
+        if self.map.get_blob(git_blob_sha)?.is_none() {
+            return Ok(false);
+        }
+        if self.repair_mapped_objects && !self.materialized_blobs.contains(git_blob_sha) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Hash the next page of cold blobs in `children`.
+    ///
+    /// Fewer than four new blobs stay on this thread. A larger page is split
+    /// across workers, and those workers stop once the page holds about a
+    /// megabyte. Bytes already in flight are kept; the next call continues
+    /// with the children this page did not cover.
+    fn fill_blob_page(&mut self, children: &[TreeChild]) -> crate::Result<()> {
+        let mut missing = Vec::new();
+        let mut seen = HashSet::new();
+        for child in children {
+            if !seen.insert(child.sha.as_str()) {
+                continue;
+            }
+            if self.blob_is_cached(&child.sha)? {
+                continue;
+            }
+            missing.push(child.sha.clone());
+            if missing.len() == BLOB_PAGE_BLOBS {
+                break;
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let prepare_start = self.profile.then(std::time::Instant::now);
+        let read = if self.blob_workers >= 2 && missing.len() >= 4 {
+            self.read_blobs_parallel(&missing)?
+        } else {
+            self.read_blobs_sequential(&missing)?
+        };
+        if let Some(start) = prepare_start {
+            self.blob_prepare_us += start.elapsed().as_micros();
+        }
+        for (sha, hash, bytes) in read {
+            self.prepared_blobs.insert(sha, (hash, bytes));
+        }
+        Ok(())
+    }
+
+    fn read_blobs_sequential(
+        &self,
+        missing: &[String],
+    ) -> crate::Result<Vec<(String, ContentHash, Vec<u8>)>> {
+        let mut out = Vec::with_capacity(missing.len());
+        let mut held = 0usize;
+        for sha in missing {
+            if held >= BLOB_PAGE_BYTES && !out.is_empty() {
+                break;
+            }
+            let bytes = self.git.read_blob(sha)?;
+            let hash = ContentHash::compute_typed("blob", &bytes);
+            held += bytes.len();
+            out.push((sha.clone(), hash, bytes));
+        }
+        Ok(out)
+    }
+
+    fn read_blobs_parallel(
+        &self,
+        missing: &[String],
+    ) -> crate::Result<Vec<(String, ContentHash, Vec<u8>)>> {
+        let workers = self.blob_workers.min(missing.len());
+        let repo = self.git.thread_reader();
+        let next = AtomicUsize::new(0);
+        let held = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let repo = &repo;
+                let next = &next;
+                let held = &held;
+                handles.push(scope.spawn(move || {
+                    let mut out = Vec::new();
+                    loop {
+                        if held.load(Ordering::Relaxed) >= BLOB_PAGE_BYTES {
+                            break;
+                        }
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(sha) = missing.get(index) else {
+                            break;
+                        };
+                        let bytes = read_blob_from(repo, sha)?;
+                        held.fetch_add(bytes.len(), Ordering::Relaxed);
+                        let hash = ContentHash::compute_typed("blob", &bytes);
+                        out.push((sha.clone(), hash, bytes));
+                    }
+                    Ok::<_, IngestError>(out)
+                }));
+            }
+            let mut out = Vec::with_capacity(missing.len());
+            for handle in handles {
+                let hashed = handle
+                    .join()
+                    .map_err(|_| IngestError::Other("blob translation worker failed".into()))??;
+                out.extend(hashed);
+            }
+            Ok(out)
+        })
     }
 
     fn write_annotated_tags(&mut self, heads: &[RefHead]) -> crate::Result<()> {
@@ -1033,10 +1297,11 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
                     AnnotatedTag::new(self.git.object_format(), entry.body, target_tag, marker)
                         .map_err(|error| IngestError::Git(error.to_string()))?;
                 let hash = tag.hash();
-                self.builder.add_id(
+                let encoded = tag.encode_current_msgpack();
+                self.add_id_to_pack(
                     PackObjectId::AnnotatedTag(hash),
                     PackObjectType::AnnotatedTag,
-                    tag.encode_current_msgpack(),
+                    &encoded,
                 )?;
                 self.stats.object_count += 1;
                 target_tag = Some(hash);
@@ -1108,10 +1373,10 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             .encode_current_msgpack()
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         if self.emit_objects {
-            self.builder.add_id(
+            self.add_id_to_pack(
                 PackObjectId::StateId(state.id()),
                 PackObjectType::State,
-                data,
+                &data,
             )?;
             self.stats.object_count += 1;
         }

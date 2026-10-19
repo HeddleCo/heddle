@@ -168,8 +168,10 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
     connection.execute_batch(boundary_evidence::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
-    connection.execute_batch(source_search::SCHEMA)?;
-    connection.execute_batch(source_index::SCHEMA)?;
+    connection.execute_batch(source_search::SEARCH_TABLES)?;
+    connection.execute_batch(source_search::SEARCH_ADMIT_TRIGGERS)?;
+    connection.execute_batch(source_index::SOURCE_TABLES)?;
+    connection.execute_batch(source_index::SOURCE_INDEX_TRIGGERS)?;
     connection.execute_batch(hosted_trust::SCHEMA)?;
     import_floor::initialize_schema(connection)?;
     connection.execute_batch(listing::SCHEMA)
@@ -1168,7 +1170,7 @@ impl ThreadReplica {
         )?;
         let genesis = ThreadGenesis::decode(&genesis_bytes)?;
         loop {
-            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (o.facet<>3 OR o.authority_admitted=1) AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
+            let ready: Vec<Vec<u8>> = tx.prepare_cached("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (o.facet<>3 OR o.authority_admitted=1) AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
                 .query_map([self.thread.as_bytes()], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
             if ready.is_empty() {
                 break;
@@ -1192,15 +1194,17 @@ impl ThreadReplica {
                     )?;
                     continue;
                 }
-                let mut parents = Vec::new();
-                for parent in &operation.parents {
-                    let bytes: Vec<u8> = tx.query_row(
-                        "SELECT canonical FROM operations WHERE id=?1",
-                        [parent.as_bytes()],
-                        |r| r.get(0),
-                    )?;
-                    parents.push(ThreadOperation::decode(&bytes)?);
-                }
+                let parents = {
+                    let mut parent_canonical =
+                        tx.prepare_cached("SELECT canonical FROM operations WHERE id=?1")?;
+                    let mut parents = Vec::new();
+                    for parent in &operation.parents {
+                        let bytes: Vec<u8> =
+                            parent_canonical.query_row([parent.as_bytes()], |r| r.get(0))?;
+                        parents.push(ThreadOperation::decode(&bytes)?);
+                    }
+                    parents
+                };
                 if let Err(error) = self.validate_source_owner_in(tx, &operation) {
                     tx.execute(
                         "UPDATE operations SET status=2,reason=?2 WHERE id=?1",
@@ -1349,10 +1353,19 @@ impl ThreadReplica {
         after: Option<ContentHash>,
         limit: usize,
     ) -> Result<Vec<ContentHash>> {
+        self.frontier_page_in(&*self.connect()?, facet, after, limit)
+    }
+
+    pub(super) fn frontier_page_in(
+        &self,
+        connection: &Connection,
+        facet: ThreadFacet,
+        after: Option<ContentHash>,
+        limit: usize,
+    ) -> Result<Vec<ContentHash>> {
         if limit == 0 || limit > 1024 {
             return Err(Error::Invalid("page size must be 1..1024".into()));
         }
-        let connection = self.connect()?;
         let mut query = connection.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=?2 AND o.status=1 AND (?3 IS NULL OR o.id>?3) AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1) ORDER BY o.id LIMIT ?4")?;
         query
             .query_map(

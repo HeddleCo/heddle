@@ -238,6 +238,13 @@ fn import_local_json_is_one_final_document_and_creates_native_history() {
     assert_eq!(result["status"], "completed");
     assert_eq!(result["commits_imported"], 1);
     assert_eq!(result["verification"]["repository_mode"], "native-heddle");
+    assert!(
+        result["verification"]
+            .get("machine_contract_coverage")
+            .is_none(),
+        "import local JSON must not embed machine_contract_coverage"
+    );
+    assert!(result["verification"]["machine_contract"].is_string());
     assert!(repo.join(".heddle").is_dir());
 }
 

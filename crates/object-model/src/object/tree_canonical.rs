@@ -130,8 +130,19 @@ impl Tree {
     /// tree, HSR1 for a V4 salted tree. Scheme-total: a V4 tree is NEVER
     /// emitted through the salt-less HTR4 body.
     pub fn encode_canonical(&self) -> Result<Vec<u8>, TreeStreamError> {
+        self.encode_canonical_with_id().map(|(_, bytes)| bytes)
+    }
+
+    /// Canonical bytes and the tree id those bytes commit to.
+    ///
+    /// Callers that need both should use this. [`Self::encode_canonical`]
+    /// already hashes the entries; hashing again before encoding walks the
+    /// tree twice.
+    pub fn encode_canonical_with_id(&self) -> Result<(ContentHash, Vec<u8>), TreeStreamError> {
         if self.scheme() == TreeScheme::V4Salted {
-            return self.encode_salted_v4();
+            let bytes = self.encode_salted_v4()?;
+            let tree_id = self.hash();
+            return Ok((tree_id, bytes));
         }
         self.validate()?;
         let tree_id = self.hash();
@@ -157,7 +168,7 @@ impl Tree {
         out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         out.extend_from_slice(&logical_len.to_le_bytes());
         out.extend_from_slice(&payload);
-        Ok(out)
+        Ok((tree_id, out))
     }
 
     /// Decode a complete canonical body. Dispatches on the body magic: HTR4 →
