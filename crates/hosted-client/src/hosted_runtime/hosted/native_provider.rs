@@ -59,6 +59,20 @@ impl HostedClient {
         limits: Limits,
         scratch: &Path,
     ) -> anyhow::Result<StagedSource> {
+        self.fetch_native_source_gated(repository, open, limits, scratch, None)
+            .await
+    }
+
+    /// `install_gate` is held while staging reads the local repository, and
+    /// released during the Fetch transfer so sibling clone threads can overlap.
+    pub(super) async fn fetch_native_source_gated(
+        &self,
+        repository: &repo::Repository,
+        open: FetchOpen,
+        limits: Limits,
+        scratch: &Path,
+        install_gate: Option<&tokio::sync::Mutex<()>>,
+    ) -> anyhow::Result<StagedSource> {
         // Provider negotiation and authenticated import staging both retain large
         // typed RPC futures. Keep that transfer frame off callers' stacks,
         // including the CLI's current-thread runtime.
@@ -75,6 +89,7 @@ impl HostedClient {
                     open
                 };
                 let download = remote.fetch_content(open, limits).await?;
+                let _install = super::native_sync::lock_repo_install(install_gate).await;
                 return self
                     .stage_native_download(repository, download, scratch)
                     .await;
@@ -82,7 +97,15 @@ impl HostedClient {
 
             let routes = open.routes.clone();
             match self
-                .fetch_preferred_source(repository, &remote, open.clone(), limits, scratch, &routes)
+                .fetch_preferred_source(
+                    repository,
+                    &remote,
+                    open.clone(),
+                    limits,
+                    scratch,
+                    &routes,
+                    install_gate,
+                )
                 .await
             {
                 Ok(staged) => Ok(staged),
@@ -102,6 +125,7 @@ impl HostedClient {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_preferred_source(
         &self,
         repository: &repo::Repository,
@@ -110,16 +134,21 @@ impl HostedClient {
         limits: Limits,
         scratch: &Path,
         routes: &[ProviderDialRoute],
+        install_gate: Option<&tokio::sync::Mutex<()>>,
     ) -> anyhow::Result<StagedSource> {
         match remote.begin_provider_fetch(open, limits).await? {
             ProviderFetch::Direct(download) => {
+                let _install = super::native_sync::lock_repo_install(install_gate).await;
                 self.stage_native_download(repository, *download, scratch)
                     .await
             }
             ProviderFetch::Provider(download) => {
                 let signer = self.provider_consent()?;
                 let mut session = (*download).negotiate(&signer).await?;
-                let carriers = self.import_carriers(repository, session.ready()).await?;
+                let carriers = {
+                    let _install = super::native_sync::lock_repo_install(install_gate).await;
+                    self.import_carriers(repository, session.ready()).await?
+                };
                 session.receive_inline(scratch).await?;
                 let providers = self.native_provider_remotes(session.plan(), routes).await?;
                 session.receive_provider_ranges(&providers).await?;
