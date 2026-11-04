@@ -170,9 +170,11 @@ Typical local repository layout:
   oplog/
   config.toml
   ignore
+  collaboration/
+  metadata.sqlite3
 ```
 
-The `config.toml` shown above is repository-local config, not user config or server config. Worktree runtime state is tracked separately from repository config.
+The `config.toml` shown above is repository-local config, not user config or server config. Worktree runtime state is tracked separately from repository config. The `collaboration/` directory and `metadata.sqlite3` hold mutable local state.
 
 Object lookup order is loose object first, then packfile fallback.
 
@@ -354,7 +356,7 @@ Core state machines are specified in `specs/quint/` and mirrored by Rust propert
 
 ## Related Documentation
 
-- `SPEC.md` in the sibling **weft** repo - formal behavior and storage/protocol truth
+- `SPEC.md` in the sibling **weft** repo - hosted server behavior only; local layout is this file's Storage Layout, and terminology is `docs/glossary.md`
 - `docs/HOSTED_NAMESPACES.md` in the sibling **weft** repo - hosted namespace and grant model
 - `docs/HOSTED_ADMIN.md` in the sibling **weft** repo - hosted admin commands and API usage
 - `docs/ENTERPRISE_BACKEND_ROADMAP.md` in the sibling **weft** repo - hosted platform roadmap

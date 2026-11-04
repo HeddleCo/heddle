@@ -306,8 +306,7 @@ Keep unit tests close to moved modules.
 ## Docs To Update When Implementing
 
 - `README.md`
-- `SPEC.md`
-- `docs/ARCHITECTURE.md`
+- `docs/ARCHITECTURE.md` (this repo has no root `SPEC.md`)
 - command/testing docs under `.agents/`
 - deployment docs and Docker build instructions
 

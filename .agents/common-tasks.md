@@ -18,11 +18,13 @@
 
 ## Modifying the Specification
 
-1. Update `SPEC.md` first
+1. Update `docs/ARCHITECTURE.md` first
 2. Implement the changes to match the spec
 3. Add/update tests
 4. Document breaking changes
 5. If the change touches a state machine (merge, refs, locks, agents, worktrees, repo ops), update the corresponding Quint spec in `specs/quint/` and the Rust property tests in `tests/formal_specs.rs` — see [[.agents/formal-specs]]
+
+For hosted behavior read weft `SPEC.md`; for local layout read this repo's `docs/ARCHITECTURE.md`.
 
 ## Modifying State Machine Logic
 
