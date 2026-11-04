@@ -6,7 +6,7 @@ When reviewing changes, pay attention to:
 
 2. **Edge cases** - Empty inputs, missing files, concurrent access
 
-3. **Spec compliance** - Does the implementation match SPEC.md?
+3. **Spec compliance** - Does the implementation match `docs/ARCHITECTURE.md`?
 
 4. **Testing** - Are there tests for new functionality?
 

@@ -196,3 +196,7 @@ Rust 0.1.1 crate remains blocked as described above.
 - Agent live ingest, hosted query, policy, and intervention remain planned
   until honest producer and adapter implementations pass their conformance
   gates.
+
+## Amendment (2026-11-04)
+
+The `heddle-grpc` crate is retired. The current protobuf surface is `heddle-api` in `HeddleCo/api`.
